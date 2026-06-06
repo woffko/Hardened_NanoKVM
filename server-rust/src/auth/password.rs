@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AppError, Result};
 
+pub const LEGACY_DEFAULT_USERNAME: &str = "admin";
+pub const LEGACY_DEFAULT_PASSWORD: &str = "admin";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub username: String,
@@ -47,9 +50,22 @@ impl AccountStore {
         validate_username(username)?;
         validate_password(password)?;
         let hash = hash_password(password)?;
+        self.write_account(username, &hash)
+    }
+
+    pub fn seed_legacy_default_account(&self) -> Result<bool> {
+        if self.exists() {
+            return Ok(false);
+        }
+        let hash = hash_password_unchecked(LEGACY_DEFAULT_PASSWORD)?;
+        self.write_account(LEGACY_DEFAULT_USERNAME, &hash)?;
+        Ok(true)
+    }
+
+    fn write_account(&self, username: &str, hash: &str) -> Result<()> {
         let account = Account {
             username: username.to_string(),
-            password: hash,
+            password: hash.to_string(),
         };
         let data = serde_json::to_vec(&account)
             .map_err(|err| AppError::Internal(format!("account serialization failed: {err}")))?;
@@ -69,6 +85,10 @@ impl AccountStore {
 
 pub fn hash_password(password: &str) -> Result<String> {
     validate_password(password)?;
+    hash_password_unchecked(password)
+}
+
+fn hash_password_unchecked(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let hash = argon2
@@ -131,5 +151,16 @@ mod tests {
         assert!(verify_password(&hash, "correct horse battery staple").unwrap());
         assert!(!verify_password(&hash, "wrong password").unwrap());
         assert!(hash.starts_with("$argon2"));
+    }
+
+    #[test]
+    fn legacy_default_seed_allows_admin_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("pwd"));
+
+        assert!(store.seed_legacy_default_account().unwrap());
+        assert!(!store.seed_legacy_default_account().unwrap());
+        assert!(store.verify("admin", "admin").unwrap());
+        assert!(!store.verify("admin", "wrong").unwrap());
     }
 }

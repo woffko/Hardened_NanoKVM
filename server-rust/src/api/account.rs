@@ -51,7 +51,7 @@ pub async fn login(
 ) -> Result<impl IntoResponse> {
     if !state.accounts.exists() {
         return Err(AppError::Conflict(
-            "password setup required; default admin/admin is disabled".to_string(),
+            "password setup required; default admin/admin is disabled by config".to_string(),
         ));
     }
 

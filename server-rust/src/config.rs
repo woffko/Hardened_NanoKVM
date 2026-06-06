@@ -92,6 +92,7 @@ pub struct Security {
     pub allow_unsigned_updates: bool,
     pub allow_terminal: bool,
     pub allow_auth_disable: bool,
+    pub allow_default_admin: bool,
     pub allowed_origins: Vec<String>,
 }
 
@@ -185,6 +186,7 @@ impl Default for Security {
             allow_unsigned_updates: false,
             allow_terminal: false,
             allow_auth_disable: false,
+            allow_default_admin: true,
             allowed_origins: Vec::new(),
         }
     }
@@ -250,6 +252,9 @@ impl Config {
         }
         if self.security.allow_unsigned_updates {
             warn!("unsigned updates are allowed");
+        }
+        if self.security.allow_default_admin {
+            warn!("legacy admin/admin bootstrap is enabled");
         }
     }
 

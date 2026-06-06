@@ -60,7 +60,7 @@ make web-app
   - `GET /api/auth/account`
   - `GET /api/auth/password`
   - `POST /api/auth/password`
-- No default `admin/admin`.
+- Legacy `admin/admin` bootstrap is enabled for this alpha unless `security.allow_default_admin=false`.
 - Argon2id password hashing.
 - Opaque session tokens with CSRF token binding.
 - Logout and password-change session revocation.
@@ -97,5 +97,5 @@ ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server.go.bak /kvmapp/server/NanoKVM
 - Static frontend serving is wired through `tower_http::ServeDir`, but not device-tested.
 - HTTPS listener is not implemented; config is parsed for compatibility.
 - Session store is in memory; restart invalidates sessions rather than resurrecting revoked tokens.
-- Existing frontend needs a first-boot setup flow for `/api/auth/setup` and CSRF header propagation.
+- Existing frontend still needs a first-boot setup flow for `/api/auth/setup` and CSRF header propagation before disabling the legacy `admin/admin` bootstrap.
 - This repository does not contain the LicheeRV Nano SDK or Buildroot/rootfs flow needed for a full SD-card image. It can package `kvmapp`; a bootable `.img` must be generated from an SDK checkout or by patching a trusted base image.

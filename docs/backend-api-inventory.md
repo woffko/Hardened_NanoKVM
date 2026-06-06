@@ -25,7 +25,7 @@ The Rust skeleton preserves this envelope through `ApiResponse<T>`.
 
 | Method | Path | Current Handler | Notes |
 |---|---|---|---|
-| POST | `/api/auth/login` | `auth.Login` | Public login. Rust rewrite removes default `admin/admin`. |
+| POST | `/api/auth/login` | `auth.Login` | Public login. Current alpha keeps legacy `admin/admin` bootstrap unless `security.allow_default_admin=false`. |
 | POST | `/api/network/wifi` | `network.ConnectWifiNoAuth` | AP-mode only, guarded by AP key in current code. |
 | POST | `/api/network/wifi/verify` | `network.VerifyApLogin` | AP-mode only, guarded by AP key in current code. |
 

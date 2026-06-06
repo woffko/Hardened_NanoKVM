@@ -20,6 +20,10 @@ pub struct AppState {
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
         let accounts = AccountStore::new(config.paths.account_file.clone());
+        if config.security.allow_default_admin && accounts.seed_legacy_default_account()? {
+            tracing::warn!("seeded legacy default web account admin/admin");
+        }
+
         let sessions = SessionStore::new();
         let login_limiter = LoginRateLimiter::new(
             config.security.login_max_failures,

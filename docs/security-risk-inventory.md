@@ -6,7 +6,7 @@ This inventory drives the Rust rewrite hardening work. It combines the Go backen
 
 | Area | Existing Risk | Rust Rewrite Requirement | Initial Rust Status |
 |---|---|---|---|
-| First boot auth | Missing `/etc/kvm/pwd` falls back to `admin/admin`. | No default credential; require explicit setup or device-unique initial secret. | Implemented: login refuses missing account; `/api/auth/setup` creates first Argon2id account. |
+| First boot auth | Missing `/etc/kvm/pwd` falls back to `admin/admin`. | No default credential; require explicit setup or device-unique initial secret. | Reverted for alpha compatibility: `security.allow_default_admin=true` seeds `admin/admin` into `/etc/kvm/pwd` as an Argon2id hash. Set it false to restore hardened setup-only behavior. |
 | Password storage | Go stores bcrypt or legacy encrypted compatibility values. | Argon2id, unique salt, no plaintext. | Implemented in `auth/password.rs`. |
 | Session revocation | JWT is self-contained; logout rotates secret globally. | Opaque/session-id or JWT with jti revocation; logout revokes active session; password change revokes all user sessions. | Implemented in-memory opaque sessions. Persistence policy still needs device decision. |
 | CSRF | Cookie auth without CSRF token. | CSRF token for state-changing browser endpoints plus Origin/Referer checks. | Middleware enforces `x-csrf-token` on protected POST/PUT/PATCH/DELETE. Origin/Referer HTTP checks still TODO. |
@@ -59,7 +59,7 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 ## Follow-Up For API Porting
 
 1. Port read-only status/info endpoints first.
-2. Port auth frontend flow for `/api/auth/setup` or add a temporary setup token flow that avoids default credentials.
+2. Port auth frontend flow for `/api/auth/setup` and disable `security.allow_default_admin` before production use.
 3. Port HID and storage only after safe path and command wrappers are integrated.
 4. Port WebSockets only after Origin checks and bounded queue design are in place.
 5. Port update last, after signature verifier is implemented.
