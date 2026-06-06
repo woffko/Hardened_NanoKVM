@@ -8,12 +8,17 @@ PWD := $(shell pwd)
 
 # Docker run common parameters
 DOCKER_RUN_BASE := docker run -e UID=$(UID) -e GID=$(GID) -v $(PWD):/home/build/NanoKVM --rm
+RUST_TARGET ?=
+RUST_BUILD_ARGS := --manifest-path server-rust/Cargo.toml --release
+ifneq ($(strip $(RUST_TARGET)),)
+RUST_BUILD_ARGS += --target $(RUST_TARGET)
+endif
 
 # Build commands
 GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build
 SUPPORT_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_system && ./build kvm_system add_to_kvmapp
 
-.PHONY: help check-root builder-image rebuild-image check-image shell app support all clean
+.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image support all clean
 
 # Default target
 all: app support
@@ -29,6 +34,10 @@ help:
 	@echo "  rebuild-image - Force rebuild Docker image"
 	@echo "  shell         - Enter interactive builder environment"
 	@echo "  app           - Build Go application server"
+	@echo "  rust-app      - Build Rust application server skeleton"
+	@echo "  web-app       - Build frontend into web/dist"
+	@echo "  rust-kvmapp   - Package Rust backend into build/kvmapp-rust"
+	@echo "  sd-image      - Explain full SD image SDK requirement"
 	@echo "  support       - Build hardware support libraries"
 	@echo "  all           - Build both app and support (default)"
 	@echo "  clean         - Clean build artifacts"
@@ -78,6 +87,28 @@ app: check-root builder-image
 	@echo "Building app..."
 	@$(DOCKER_RUN_BASE) -it $(IMAGE_NAME) /bin/bash -c '$(GO_BUILD_CMD)'
 
+# Build Rust application skeleton locally
+rust-app:
+	@echo "Building Rust app skeleton..."
+	@cargo build $(RUST_BUILD_ARGS)
+
+# Build frontend assets
+web-app:
+	@echo "Building frontend..."
+	@cd web && corepack pnpm install --frozen-lockfile && corepack pnpm build
+
+# Package Rust backend into the kvmapp deployment layout
+rust-kvmapp: rust-app
+	@echo "Packaging Rust kvmapp..."
+	@RUST_TARGET="$(RUST_TARGET)" scripts/package-rust-kvmapp.sh
+
+# Full SD-card images require the external LicheeRV Nano SDK rootfs/buildroot flow.
+sd-image:
+	@echo "Full NanoKVM SD-card image build is not present in this repository."
+	@echo "This repository can package kvmapp updates; the boot/rootfs image is built with the external LicheeRV Nano SDK."
+	@echo "Provide NANOKVM_BASE_IMAGE or an SDK checkout to generate a complete SD-card image."
+	@exit 2
+
 # Build hardware support libraries
 support: check-root builder-image
 	@echo "Building support..."
@@ -93,5 +124,9 @@ clean:
 	@if [ -d support/sg2002/build ]; then \
 		rm -rf support/sg2002/build; \
 		echo "Removed support/sg2002/build"; \
+	fi
+	@if [ -d build/kvmapp-rust ]; then \
+		rm -rf build/kvmapp-rust; \
+		echo "Removed build/kvmapp-rust"; \
 	fi
 	@echo "Clean completed."

@@ -1,6 +1,8 @@
 *.log
 pnpm-debug.log*
 
+build/
+
 web/node_modules
 web/dist
 web/web
