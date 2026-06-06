@@ -119,7 +119,7 @@ pub async fn logout(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("nano-kvm-token=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"),
+        HeaderValue::from_static("nano-kvm-token=; Path=/; Max-Age=0; SameSite=Lax"),
     );
     Ok((headers, Json(ApiResponse::<()>::ok_empty())))
 }
@@ -165,7 +165,7 @@ pub async fn change_password(
 }
 
 fn secure_cookie(token: &str) -> Result<HeaderValue> {
-    let value = format!("nano-kvm-token={token}; Path=/; Max-Age=900; SameSite=Lax; HttpOnly");
+    let value = format!("nano-kvm-token={token}; Path=/; Max-Age=900; SameSite=Lax");
     HeaderValue::from_str(&value)
         .map_err(|err| AppError::Internal(format!("failed to build cookie: {err}")))
 }

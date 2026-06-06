@@ -63,6 +63,7 @@ make web-app
 - Legacy `admin/admin` bootstrap is enabled for this alpha unless `security.allow_default_admin=false`.
 - Argon2id password hashing.
 - Opaque session tokens with CSRF token binding.
+- Frontend-compatible readable `nano-kvm-token` cookie for the existing React auth guard.
 - Logout and password-change session revocation.
 - Login rate limiting with secure default lockout.
 - Security headers middleware.
