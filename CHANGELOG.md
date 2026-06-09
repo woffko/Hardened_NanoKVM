@@ -201,6 +201,16 @@
 * Disabled remote ISO download in the Rust backend until allowlist and redirect checks are complete.
 * Gated web terminal access behind the existing Terminal menu toggle with a warning.
 
+## 2.4.3 (2026-06-09)
+
+### Features
+
+* Added LT6911D support
+
+### Bug Fixes
+
+* Improved USB network adapter compatibility on Windows
+
 ## 2.4.2 (2026-05-20)
 
 ### Features
