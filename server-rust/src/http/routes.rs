@@ -183,33 +183,18 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/extensions/tailscale/uninstall",
             post(compatibility::not_implemented),
         )
-        .route(
-            "/api/extensions/tailscale/up",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/extensions/tailscale/down",
-            post(compatibility::not_implemented),
-        )
+        .route("/api/extensions/tailscale/up", post(tailscale::up))
+        .route("/api/extensions/tailscale/down", post(tailscale::down))
         .route(
             "/api/extensions/tailscale/login",
             post(compatibility::not_implemented),
         )
-        .route(
-            "/api/extensions/tailscale/logout",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/extensions/tailscale/start",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/extensions/tailscale/stop",
-            post(compatibility::not_implemented),
-        )
+        .route("/api/extensions/tailscale/logout", post(tailscale::logout))
+        .route("/api/extensions/tailscale/start", post(tailscale::start))
+        .route("/api/extensions/tailscale/stop", post(tailscale::stop))
         .route(
             "/api/extensions/tailscale/restart",
-            post(compatibility::not_implemented),
+            post(tailscale::restart),
         )
         .route(
             "/api/picoclaw/model/config",
