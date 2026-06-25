@@ -34,6 +34,7 @@ pub fn build(state: AppState) -> Router {
             "/api/vm/hostname",
             get(vm::get_hostname).post(vm::set_hostname),
         )
+        .route("/api/vm/gpio", get(vm::get_gpio).post(vm::set_gpio))
         .route("/api/vm/screen", post(vm::set_screen))
         .route(
             "/api/vm/web-title",
@@ -150,10 +151,6 @@ fn compatibility_routes() -> Router<AppState> {
         )
         .route(
             "/api/network/dns",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/vm/gpio",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
         .route("/api/vm/terminal", get(compatibility::not_implemented))

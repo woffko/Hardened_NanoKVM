@@ -83,6 +83,20 @@ pub struct SetWebTitleReq {
     pub title: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetGpioReq {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub duration: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GpioRsp {
+    pub pwr: bool,
+    pub hdd: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct EnabledRsp {
     pub enabled: bool,
@@ -185,6 +199,36 @@ pub async fn set_web_title(Json(req): Json<SetWebTitleReq>) -> Result<impl IntoR
         fs::write(WEB_TITLE_FILE, req.title.as_bytes())?;
     }
 
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_gpio() -> Result<impl IntoResponse> {
+    let gpio = hardware_gpio();
+    let pwr = read_gpio(&gpio.power_led)?;
+    let hdd = gpio
+        .hdd_led
+        .as_deref()
+        .map(read_gpio)
+        .transpose()?
+        .unwrap_or(false);
+
+    Ok(Json(ApiResponse::ok(GpioRsp { pwr, hdd })))
+}
+
+pub async fn set_gpio(Json(req): Json<SetGpioReq>) -> Result<impl IntoResponse> {
+    let gpio = hardware_gpio();
+    let device = match req.kind.as_str() {
+        "power" => gpio.power,
+        "reset" => gpio.reset,
+        _ => return Err(AppError::BadRequest("invalid power event".to_string())),
+    };
+    let duration = if req.duration == 0 {
+        Duration::from_millis(800)
+    } else {
+        Duration::from_millis(req.duration.clamp(50, 5_000))
+    };
+
+    write_gpio_pulse(&device, duration).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -453,6 +497,49 @@ fn read_trimmed(path: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[derive(Debug, Clone)]
+struct HardwareGpio {
+    reset: String,
+    power: String,
+    power_led: String,
+    hdd_led: Option<String>,
+}
+
+fn hardware_gpio() -> HardwareGpio {
+    match read_trimmed(HARDWARE_VERSION_FILE).as_deref() {
+        Some("beta") | Some("pcie") => HardwareGpio {
+            reset: "/sys/class/gpio/gpio505/value".to_string(),
+            power: "/sys/class/gpio/gpio503/value".to_string(),
+            power_led: "/sys/class/gpio/gpio504/value".to_string(),
+            hdd_led: None,
+        },
+        _ => HardwareGpio {
+            reset: "/sys/class/gpio/gpio507/value".to_string(),
+            power: "/sys/class/gpio/gpio503/value".to_string(),
+            power_led: "/sys/class/gpio/gpio504/value".to_string(),
+            hdd_led: Some("/sys/class/gpio/gpio505/value".to_string()),
+        },
+    }
+}
+
+fn read_gpio(path: &str) -> Result<bool> {
+    let value = fs::read_to_string(path)?;
+    let value = value.trim().parse::<i32>().map_err(|_| {
+        AppError::Internal(format!(
+            "invalid gpio value in {}",
+            Path::new(path).display()
+        ))
+    })?;
+    Ok(value == 0)
+}
+
+async fn write_gpio_pulse(path: &str, duration: Duration) -> Result<()> {
+    fs::write(path, b"1")?;
+    time::sleep(duration).await;
+    fs::write(path, b"0")?;
+    Ok(())
+}
+
 fn persist_hdmi_enabled() -> Result<()> {
     remove_file_if_exists(HDMI_DISABLE_FILE)
 }
@@ -526,5 +613,17 @@ mod tests {
         assert!(!valid_pid(""));
         assert!(!valid_pid("12x45"));
         assert!(!valid_pid("1;reboot"));
+    }
+
+    #[test]
+    fn beta_gpio_omits_hdd_led() {
+        let gpio = HardwareGpio {
+            reset: "/sys/class/gpio/gpio505/value".to_string(),
+            power: "/sys/class/gpio/gpio503/value".to_string(),
+            power_led: "/sys/class/gpio/gpio504/value".to_string(),
+            hdd_led: None,
+        };
+        assert_eq!(gpio.reset, "/sys/class/gpio/gpio505/value");
+        assert!(gpio.hdd_led.is_none());
     }
 }
