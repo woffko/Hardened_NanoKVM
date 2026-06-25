@@ -7,7 +7,7 @@ use axum::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, application, compatibility, download, network, storage, stream, vm},
+    api::{account, application, compatibility, download, hid, network, storage, stream, vm},
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
@@ -92,6 +92,19 @@ pub fn build(state: AppState) -> Router {
         .route("/api/download/image", post(download::download_image))
         .route("/api/download/image/status", get(download::status_image))
         .route("/api/download/image/enabled", get(download::image_enabled))
+        .route("/api/hid/shortcuts", get(hid::get_shortcuts))
+        .route(
+            "/api/hid/shortcut",
+            post(hid::add_shortcut).delete(hid::delete_shortcut),
+        )
+        .route(
+            "/api/hid/shortcut/leader-key",
+            get(hid::get_leader_key).post(hid::set_leader_key),
+        )
+        .route(
+            "/api/hid/mode",
+            get(hid::get_mode).post(compatibility::not_implemented),
+        )
         .route(
             "/api/download/file",
             post(download::upload_image_file).layer(DefaultBodyLimit::max(
@@ -120,19 +133,6 @@ pub fn build(state: AppState) -> Router {
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
         .route("/api/hid/paste", post(compatibility::not_implemented))
-        .route("/api/hid/shortcuts", get(compatibility::not_implemented))
-        .route(
-            "/api/hid/shortcut",
-            post(compatibility::not_implemented).delete(compatibility::not_implemented),
-        )
-        .route(
-            "/api/hid/shortcut/leader-key",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/hid/mode",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
         .route("/api/hid/reset", post(compatibility::not_implemented))
         .route("/api/stream/h264", get(compatibility::not_implemented))
         .route(
