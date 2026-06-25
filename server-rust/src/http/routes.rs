@@ -8,7 +8,8 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
     api::{
-        account, application, compatibility, download, hid, network, script, storage, stream, vm,
+        account, application, autostart, compatibility, download, hid, network, script, storage,
+        stream, vm,
     },
     http::middleware::protected,
     security::headers::security_headers,
@@ -75,6 +76,14 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/vm/mouse-jiggler/", post(vm::set_mouse_jiggler))
         .route("/api/vm/tls", post(vm::set_tls))
+        .route("/api/vm/autostart", get(autostart::get_autostart))
+        .route(
+            "/api/vm/autostart/{name}",
+            get(autostart::get_autostart_content)
+                .post(autostart::upload_autostart)
+                .delete(autostart::delete_autostart)
+                .layer(DefaultBodyLimit::max(autostart::MAX_AUTOSTART_BYTES + 1024)),
+        )
         .route(
             "/api/vm/script",
             get(script::get_scripts).delete(script::delete_script),
@@ -170,13 +179,6 @@ fn compatibility_routes() -> Router<AppState> {
         .route(
             "/api/network/wifi/disconnect",
             post(compatibility::not_implemented),
-        )
-        .route("/api/vm/autostart", get(compatibility::not_implemented))
-        .route(
-            "/api/vm/autostart/{name}",
-            get(compatibility::not_implemented)
-                .post(compatibility::not_implemented)
-                .delete(compatibility::not_implemented),
         )
         .route(
             "/api/extensions/tailscale/install",
