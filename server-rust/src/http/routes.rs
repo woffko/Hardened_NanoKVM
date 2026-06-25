@@ -1,12 +1,13 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{delete, get, post},
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, application, compatibility, storage, stream, vm},
+    api::{account, application, compatibility, download, storage, stream, vm},
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
@@ -55,6 +56,15 @@ pub fn build(state: AppState) -> Router {
         .route("/api/storage/image/mount", post(storage::mount_image))
         .route("/api/storage/cdrom", get(storage::get_cdrom))
         .route("/api/storage/image/delete", post(storage::delete_image))
+        .route("/api/download/image", post(download::download_image))
+        .route("/api/download/image/status", get(download::status_image))
+        .route("/api/download/image/enabled", get(download::image_enabled))
+        .route(
+            "/api/download/file",
+            post(download::upload_image_file).layer(DefaultBodyLimit::max(
+                download::MAX_UPLOAD_BYTES + 1024 * 1024,
+            )),
+        )
         .merge(compatibility_routes())
         .route_layer(from_fn_with_state(state.clone(), protected));
 
@@ -104,16 +114,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/stream/h264/direct",
             get(compatibility::not_implemented),
         )
-        .route("/api/download/image", post(compatibility::not_implemented))
-        .route(
-            "/api/download/image/status",
-            get(compatibility::not_implemented),
-        )
-        .route(
-            "/api/download/image/enabled",
-            get(compatibility::not_implemented),
-        )
-        .route("/api/download/file", post(compatibility::not_implemented))
         .route("/api/network/wol", post(compatibility::not_implemented))
         .route(
             "/api/network/wol/mac",

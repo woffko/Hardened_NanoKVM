@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 
 import { downloadImage, imageEnabled, statusImage } from '@/api/download.ts';
 import { isKeyboardEnableAtom } from '@/jotai/keyboard.ts';
+import { getCsrfToken } from '@/lib/cookie.ts';
 import { MenuItem } from '@/components/menu-item.tsx';
 
 export const DownloadImage = () => {
@@ -141,8 +142,10 @@ export const DownloadImage = () => {
     const formData = new FormData();
     formData.append("file", file);
 
+    const csrfToken = getCsrfToken();
     fetch("/api/download/file", {
       method: "POST",
+      headers: csrfToken ? { "x-csrf-token": csrfToken } : undefined,
       body: formData,
     }).catch(() => {
         clearInterval(intervalId.current); // Clear the interval when the download is complete or fails
