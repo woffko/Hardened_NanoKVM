@@ -6,7 +6,7 @@ use axum::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, application, compatibility, stream, vm},
+    api::{account, application, compatibility, storage, stream, vm},
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
@@ -47,6 +47,14 @@ pub fn build(state: AppState) -> Router {
             "/api/stream/mjpeg/detect/stop",
             post(stream::stop_frame_detect),
         )
+        .route("/api/storage/image", get(storage::get_images))
+        .route(
+            "/api/storage/image/mounted",
+            get(storage::get_mounted_image),
+        )
+        .route("/api/storage/image/mount", post(storage::mount_image))
+        .route("/api/storage/cdrom", get(storage::get_cdrom))
+        .route("/api/storage/image/delete", post(storage::delete_image))
         .merge(compatibility_routes())
         .route_layer(from_fn_with_state(state.clone(), protected));
 
@@ -74,20 +82,6 @@ fn compatibility_routes() -> Router<AppState> {
         )
         .route(
             "/api/application/update/offline",
-            post(compatibility::not_implemented),
-        )
-        .route("/api/storage/image", get(compatibility::not_implemented))
-        .route(
-            "/api/storage/image/mounted",
-            get(compatibility::not_implemented),
-        )
-        .route(
-            "/api/storage/image/mount",
-            post(compatibility::not_implemented),
-        )
-        .route("/api/storage/cdrom", get(compatibility::not_implemented))
-        .route(
-            "/api/storage/image/delete",
             post(compatibility::not_implemented),
         )
         .route("/api/hid/paste", post(compatibility::not_implemented))
