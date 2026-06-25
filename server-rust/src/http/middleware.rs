@@ -1,12 +1,12 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, Method, Request, header},
+    http::{HeaderMap, Method, Request, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-use crate::{AppError, auth::session::Session, state::AppState};
+use crate::{AppError, auth::session::Session, config::Config, state::AppState};
 
 #[derive(Debug, Clone)]
 pub struct CurrentSession(pub Session);
@@ -37,6 +37,9 @@ pub async fn protected(
             return AppError::Forbidden("missing or invalid CSRF token".to_string())
                 .into_response();
         }
+        if !validate_http_origin(req.headers(), &state.config) {
+            return AppError::Forbidden("invalid request origin".to_string()).into_response();
+        }
     }
 
     req.extensions_mut().insert(CurrentSession(session));
@@ -48,6 +51,57 @@ fn is_state_changing(method: &Method) -> bool {
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     )
+}
+
+fn validate_http_origin(headers: &HeaderMap, config: &Config) -> bool {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return is_allowed_origin(origin, headers, config);
+    }
+
+    if let Some(referer) = headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+    {
+        let Some(origin) = normalize_origin(referer) else {
+            return false;
+        };
+        return is_allowed_origin(&origin, headers, config);
+    }
+
+    true
+}
+
+fn is_allowed_origin(origin: &str, headers: &HeaderMap, config: &Config) -> bool {
+    let Some(origin) = normalize_origin(origin) else {
+        return false;
+    };
+    if config
+        .security
+        .allowed_origins
+        .iter()
+        .filter_map(|item| normalize_origin(item))
+        .any(|item| item == origin)
+    {
+        return true;
+    }
+
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    origin == format!("http://{host}") || origin == format!("https://{host}")
+}
+
+fn normalize_origin(value: &str) -> Option<String> {
+    let uri = value.parse::<Uri>().ok()?;
+    let scheme = uri.scheme_str()?;
+    let authority = uri.authority()?.as_str();
+    Some(format!("{scheme}://{authority}"))
 }
 
 fn bearer_or_cookie(headers: &HeaderMap) -> Option<String> {
@@ -68,4 +122,49 @@ fn bearer_or_cookie(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderValue;
+
+    use super::*;
+
+    #[test]
+    fn validates_same_host_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("kvm.local"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://kvm.local"));
+
+        assert!(validate_http_origin(&headers, &Config::default()));
+    }
+
+    #[test]
+    fn rejects_cross_host_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("kvm.local"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.local"),
+        );
+
+        assert!(!validate_http_origin(&headers, &Config::default()));
+    }
+
+    #[test]
+    fn validates_same_host_referer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("kvm.local"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://kvm.local/settings"),
+        );
+
+        assert!(validate_http_origin(&headers, &Config::default()));
+    }
+
+    #[test]
+    fn allows_non_browser_requests_without_origin_headers() {
+        assert!(validate_http_origin(&HeaderMap::new(), &Config::default()));
+    }
 }
