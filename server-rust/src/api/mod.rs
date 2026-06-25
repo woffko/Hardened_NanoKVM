@@ -4,6 +4,7 @@ pub mod compatibility;
 pub mod download;
 pub mod hid;
 pub mod network;
+pub mod script;
 pub mod storage;
 pub mod stream;
 pub mod vm;

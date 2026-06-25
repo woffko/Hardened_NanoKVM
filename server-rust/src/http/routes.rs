@@ -7,7 +7,9 @@ use axum::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, application, compatibility, download, hid, network, storage, stream, vm},
+    api::{
+        account, application, compatibility, download, hid, network, script, storage, stream, vm,
+    },
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
@@ -73,6 +75,16 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/vm/mouse-jiggler/", post(vm::set_mouse_jiggler))
         .route("/api/vm/tls", post(vm::set_tls))
+        .route(
+            "/api/vm/script",
+            get(script::get_scripts).delete(script::delete_script),
+        )
+        .route(
+            "/api/vm/script/upload",
+            post(script::upload_script)
+                .layer(DefaultBodyLimit::max(script::MAX_SCRIPT_BYTES + 1024)),
+        )
+        .route("/api/vm/script/run", post(script::run_script))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
         .route(
             "/api/stream/mjpeg/detect",
@@ -159,15 +171,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/network/wifi/disconnect",
             post(compatibility::not_implemented),
         )
-        .route(
-            "/api/vm/script",
-            get(compatibility::not_implemented).delete(compatibility::not_implemented),
-        )
-        .route(
-            "/api/vm/script/upload",
-            post(compatibility::not_implemented),
-        )
-        .route("/api/vm/script/run", post(compatibility::not_implemented))
         .route("/api/vm/autostart", get(compatibility::not_implemented))
         .route(
             "/api/vm/autostart/{name}",
