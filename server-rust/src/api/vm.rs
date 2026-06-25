@@ -511,6 +511,13 @@ pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<im
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub async fn set_tls() -> Result<Json<ApiResponse<()>>> {
+    Err(AppError::Unsupported(
+        "TLS toggle is disabled until the Rust backend implements HTTPS listener support"
+            .to_string(),
+    ))
+}
+
 fn get_ips() -> Vec<IpInfo> {
     let mut ips = Vec::new();
     let mut seen = HashSet::new();
