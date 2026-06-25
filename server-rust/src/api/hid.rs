@@ -182,6 +182,23 @@ pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoRespons
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub async fn reset_hid() -> Result<impl IntoResponse> {
+    let output = run_allowed(
+        AllowedCommand::ServiceUsbDev,
+        ["restart_phy"],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if output.status != 0 {
+        return Err(AppError::Internal(command_error(
+            "failed to reset HID",
+            output,
+        )));
+    }
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
 fn load_shortcuts() -> Result<ShortcutStore> {
     let content = match fs::read_to_string(SHORTCUT_FILE) {
         Ok(content) => content,
@@ -320,6 +337,22 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
+    }
+}
+
+fn command_error(message: &str, output: crate::system::command::CommandOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = stderr.trim();
+    if !detail.is_empty() {
+        format!("{message}: {detail}")
+    } else {
+        let detail = stdout.trim();
+        if detail.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message}: {detail}")
+        }
     }
 }
 

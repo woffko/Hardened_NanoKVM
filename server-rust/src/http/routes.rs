@@ -130,6 +130,7 @@ pub fn build(state: AppState) -> Router {
             get(tailscale::get_status),
         )
         .route("/api/hid/shortcuts", get(hid::get_shortcuts))
+        .route("/api/hid/reset", post(hid::reset_hid))
         .route(
             "/api/hid/shortcut",
             post(hid::add_shortcut).delete(hid::delete_shortcut),
@@ -167,7 +168,6 @@ pub fn build(state: AppState) -> Router {
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
         .route("/api/hid/paste", post(compatibility::not_implemented))
-        .route("/api/hid/reset", post(compatibility::not_implemented))
         .route("/api/stream/h264", get(compatibility::not_implemented))
         .route(
             "/api/stream/h264/direct",
