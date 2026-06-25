@@ -71,7 +71,8 @@ make web-app
   - `GET /api/auth/account`
   - `GET /api/auth/password`
   - `POST /api/auth/password`
-- Legacy `admin/admin` bootstrap is enabled for this alpha unless `security.allow_default_admin=false`.
+- Legacy `admin/admin` bootstrap is disabled by default. Set `security.allow_default_admin=true`
+  only for temporary compatibility on isolated test devices.
 - Argon2id password hashing.
 - Opaque session tokens with CSRF token binding.
 - Frontend-compatible readable `nano-kvm-token` cookie for the existing React auth guard.
@@ -124,5 +125,6 @@ ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server.go.bak /kvmapp/server/NanoKVM
 - H.264/WebRTC, storage, update, network, power, TLS, and extension routes are not ported yet.
 - HTTPS listener is not implemented; config is parsed for compatibility.
 - Session store is in memory; restart invalidates sessions rather than resurrecting revoked tokens.
-- Existing frontend still needs a first-boot setup flow for `/api/auth/setup` before disabling the legacy `admin/admin` bootstrap.
+- Existing frontend still needs a first-boot setup flow for `/api/auth/setup`; test devices can opt into
+  `security.allow_default_admin=true` only when temporary compatibility is required.
 - This repository does not contain the LicheeRV Nano SDK or Buildroot/rootfs flow needed for a full SD-card image. It can package `kvmapp`; a bootable `.img` must be generated from an SDK checkout or by patching a trusted base image.

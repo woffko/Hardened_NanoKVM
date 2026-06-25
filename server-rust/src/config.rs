@@ -186,7 +186,7 @@ impl Default for Security {
             allow_unsigned_updates: false,
             allow_terminal: false,
             allow_auth_disable: false,
-            allow_default_admin: true,
+            allow_default_admin: false,
             allowed_origins: Vec::new(),
         }
     }
@@ -305,4 +305,14 @@ fn write_secret_0600(path: &Path, secret: &str) -> Result<()> {
     file.sync_all()?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_disables_legacy_admin_bootstrap() {
+        assert!(!Config::default().security.allow_default_admin);
+    }
 }
