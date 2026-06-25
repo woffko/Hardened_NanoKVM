@@ -3,16 +3,25 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{LazyLock, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::time;
 
-use crate::{AppError, Result, error::ApiResponse};
+use crate::{
+    AppError, Result,
+    error::ApiResponse,
+    system::command::{AllowedCommand, run_allowed},
+};
 
 const SHORTCUT_FILE: &str = "/etc/kvm/shortcuts.json";
 const LEADER_KEY_FILE: &str = "/etc/kvm/leader-key";
 const MODE_FLAG_FILE: &str = "/sys/kernel/config/usb_gadget/g0/bcdDevice";
+const MODE_NORMAL_SCRIPT: &str = "/kvmapp/system/init.d/S03usbdev";
+const MODE_HID_ONLY_SCRIPT: &str = "/kvmapp/system/init.d/S03usbhid";
+const USB_DEV_SCRIPT: &str = "/etc/init.d/S03usbdev";
 const MODE_NORMAL: &str = "normal";
 const MODE_HID_ONLY: &str = "hid-only";
 const MAX_SHORTCUT_KEYS: usize = 6;
@@ -67,6 +76,11 @@ pub struct GetLeaderKeyRsp {
 
 #[derive(Debug, Serialize)]
 pub struct GetHidModeRsp {
+    mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetHidModeReq {
     mode: String,
 }
 
@@ -143,6 +157,29 @@ pub async fn set_leader_key(Json(req): Json<SetLeaderKeyReq>) -> Result<impl Int
 pub async fn get_mode() -> Result<impl IntoResponse> {
     let mode = read_hid_mode()?;
     Ok(Json(ApiResponse::ok(GetHidModeRsp { mode })))
+}
+
+pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoResponse> {
+    let mode = validate_hid_mode(&req.mode)?;
+    if read_hid_mode().ok().as_deref() == Some(mode) {
+        return Ok(Json(ApiResponse::<()>::ok_empty()));
+    }
+
+    copy_hid_mode_file(mode)?;
+    tokio::spawn(async {
+        time::sleep(Duration::from_millis(500)).await;
+        if let Err(err) = run_allowed(
+            AllowedCommand::Reboot,
+            std::iter::empty::<&str>(),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            tracing::error!(error = %err, "failed to reboot after HID mode change");
+        }
+    });
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 fn load_shortcuts() -> Result<ShortcutStore> {
@@ -223,6 +260,30 @@ fn read_hid_mode() -> Result<String> {
     }
 }
 
+fn validate_hid_mode(mode: &str) -> Result<&'static str> {
+    match mode.trim() {
+        MODE_NORMAL => Ok(MODE_NORMAL),
+        MODE_HID_ONLY => Ok(MODE_HID_ONLY),
+        _ => Err(AppError::BadRequest("invalid HID mode".to_string())),
+    }
+}
+
+fn copy_hid_mode_file(mode: &str) -> Result<()> {
+    let source = match validate_hid_mode(mode)? {
+        MODE_NORMAL => MODE_NORMAL_SCRIPT,
+        MODE_HID_ONLY => MODE_HID_ONLY_SCRIPT,
+        _ => unreachable!("validated HID mode"),
+    };
+
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::BadRequest("invalid HID mode script".to_string()));
+    }
+    let data = fs::read(source)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    write_file(Path::new(USB_DEV_SCRIPT), &data, mode)
+}
+
 fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -289,5 +350,12 @@ mod tests {
         let id = new_shortcut_id();
         assert_eq!(id.len(), 32);
         assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn validates_hid_modes() {
+        assert_eq!(validate_hid_mode("normal").unwrap(), MODE_NORMAL);
+        assert_eq!(validate_hid_mode("hid-only").unwrap(), MODE_HID_ONLY);
+        assert!(validate_hid_mode("storage-only").is_err());
     }
 }
