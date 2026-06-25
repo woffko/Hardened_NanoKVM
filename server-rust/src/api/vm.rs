@@ -26,6 +26,10 @@ const SSH_STOP_FLAG: &str = "/etc/kvm/ssh_stop";
 const OLED_EXIST_FILE: &str = "/etc/kvm/oled_exist";
 const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
 const GO_MEM_LIMIT_FILE: &str = "/etc/kvm/GOMEMLIMIT";
+const SWAP_FILE: &str = "/swapfile";
+const INITTAB_PATH: &str = "/etc/inittab";
+const TEMP_INITTAB_PATH: &str = "/etc/.inittab.tmp";
+const SWAP_INITTAB_LINE: &str = "si11::sysinit:/sbin/swapon /swapfile";
 const AVAHI_DAEMON_PID: &str = "/run/avahi-daemon/pid";
 const AVAHI_DAEMON_SCRIPT: &str = "/etc/init.d/S50avahi-daemon";
 const AVAHI_DAEMON_BACKUP_SCRIPT: &str = "/kvmapp/system/init.d/S50avahi-daemon";
@@ -144,6 +148,17 @@ pub struct SetMemoryLimitReq {
     pub enabled: bool,
     #[serde(default)]
     pub limit: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SwapRsp {
+    pub size: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSwapReq {
+    #[serde(default)]
+    pub size: i64,
 }
 
 pub async fn get_info() -> Result<impl IntoResponse> {
@@ -447,6 +462,30 @@ pub async fn set_memory_limit(Json(req): Json<SetMemoryLimitReq>) -> Result<impl
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub async fn get_swap() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(SwapRsp {
+        size: get_swap_size(),
+    })))
+}
+
+pub async fn set_swap(Json(req): Json<SetSwapReq>) -> Result<impl IntoResponse> {
+    validate_swap_size(req.size)?;
+    let current = get_swap_size();
+    if req.size == current {
+        return Ok(Json(ApiResponse::<()>::ok_empty()));
+    }
+
+    if req.size == 0 {
+        disable_swap().await?;
+        disable_swap_inittab()?;
+    } else {
+        enable_swap(req.size).await?;
+        enable_swap_inittab()?;
+    }
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
 fn get_ips() -> Vec<IpInfo> {
     let mut ips = Vec::new();
     let mut seen = HashSet::new();
@@ -562,6 +601,109 @@ fn normalize_memory_limit(limit: i64) -> Result<i64> {
         return Err(AppError::BadRequest("invalid memory limit".to_string()));
     }
     Ok(limit.max(50))
+}
+
+fn get_swap_size() -> i64 {
+    fs::metadata(SWAP_FILE)
+        .map(|metadata| (metadata.len() / 1024 / 1024) as i64)
+        .unwrap_or(0)
+}
+
+fn validate_swap_size(size: i64) -> Result<()> {
+    match size {
+        0 | 64 | 128 | 256 | 512 => Ok(()),
+        _ => Err(AppError::BadRequest("invalid swap size".to_string())),
+    }
+}
+
+async fn enable_swap(size: i64) -> Result<()> {
+    if get_swap_size() > 0 {
+        disable_swap().await?;
+    }
+
+    run_checked(
+        AllowedCommand::Fallocate,
+        vec!["-l".to_string(), format!("{size}M"), SWAP_FILE.to_string()],
+        Duration::from_secs(15),
+        "create swap file failed",
+    )
+    .await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(SWAP_FILE, fs::Permissions::from_mode(0o600))?;
+    }
+    run_checked(
+        AllowedCommand::Mkswap,
+        [SWAP_FILE],
+        Duration::from_secs(10),
+        "format swap failed",
+    )
+    .await?;
+    run_checked(
+        AllowedCommand::Swapon,
+        [SWAP_FILE],
+        Duration::from_secs(10),
+        "enable swap failed",
+    )
+    .await
+}
+
+async fn disable_swap() -> Result<()> {
+    if is_swap_active() {
+        run_checked(
+            AllowedCommand::Swapoff,
+            [SWAP_FILE],
+            Duration::from_secs(10),
+            "disable swap failed",
+        )
+        .await?;
+    }
+    remove_file_if_exists(SWAP_FILE)
+}
+
+fn is_swap_active() -> bool {
+    fs::read_to_string("/proc/swaps")
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_whitespace().next())
+                .any(|path| path == SWAP_FILE)
+        })
+        .unwrap_or(false)
+}
+
+fn enable_swap_inittab() -> Result<()> {
+    let input = fs::read_to_string(INITTAB_PATH)?;
+    let mut output = remove_swap_inittab_lines(&input);
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(SWAP_INITTAB_LINE);
+    output.push('\n');
+    write_inittab(&output)
+}
+
+fn disable_swap_inittab() -> Result<()> {
+    let input = fs::read_to_string(INITTAB_PATH)?;
+    let output = remove_swap_inittab_lines(&input);
+    write_inittab(&output)
+}
+
+fn remove_swap_inittab_lines(input: &str) -> String {
+    input
+        .lines()
+        .filter(|line| !line.trim_end().ends_with(SWAP_FILE))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn write_inittab(content: &str) -> Result<()> {
+    fs::write(TEMP_INITTAB_PATH, content.as_bytes())?;
+    fs::rename(TEMP_INITTAB_PATH, INITTAB_PATH)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -700,5 +842,19 @@ mod tests {
         assert_eq!(normalize_memory_limit(1).unwrap(), 50);
         assert!(normalize_memory_limit(0).is_err());
         assert!(normalize_memory_limit(4097).is_err());
+    }
+
+    #[test]
+    fn validates_swap_sizes() {
+        assert!(validate_swap_size(0).is_ok());
+        assert!(validate_swap_size(64).is_ok());
+        assert!(validate_swap_size(256).is_ok());
+        assert!(validate_swap_size(123).is_err());
+    }
+
+    #[test]
+    fn removes_swap_inittab_lines() {
+        let input = "tty::respawn:/bin/login\nsi11::sysinit:/sbin/swapon /swapfile\n";
+        assert_eq!(remove_swap_inittab_lines(input), "tty::respawn:/bin/login");
     }
 }
