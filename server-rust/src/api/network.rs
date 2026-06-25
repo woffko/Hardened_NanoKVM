@@ -1,4 +1,4 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, http::HeaderMap, response::IntoResponse};
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,6 +22,7 @@ const WIFI_SSID_FILE: &str = "/etc/kvm/wifi.ssid";
 const WIFI_PASSWORD_FILE: &str = "/etc/kvm/wifi.pass";
 const WIFI_CONNECT_FILE: &str = "/kvmapp/kvm/wifi_try_connect";
 const WIFI_STATE_FILE: &str = "/kvmapp/kvm/wifi_state";
+const WIFI_AP_PASS_FILE: &str = "/kvmapp/kvm/ap.pass";
 const MAX_WIFI_SSID_BYTES: usize = 128;
 const MAX_WIFI_PASSWORD_BYTES: usize = 256;
 
@@ -259,9 +260,32 @@ pub async fn connect_wifi(Json(req): Json<ConnectWifiReq>) -> Result<impl IntoRe
     let ssid = validate_wifi_ssid(&req.ssid)?;
     let password = validate_wifi_password(&req.password)?;
 
-    write_file(Path::new(WIFI_SSID_FILE), ssid.as_bytes(), 0o644)?;
-    write_file(Path::new(WIFI_PASSWORD_FILE), password.as_bytes(), 0o600)?;
-    write_file(Path::new(WIFI_CONNECT_FILE), &[], 0o644)?;
+    write_wifi_connect_files(&ssid, &password)?;
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn verify_ap_login(headers: HeaderMap) -> Result<impl IntoResponse> {
+    ensure_wifi_ap_mode()?;
+    if !verify_ap_key(&headers) {
+        return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
+    }
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn connect_wifi_no_auth(
+    headers: HeaderMap,
+    Json(req): Json<ConnectWifiReq>,
+) -> Result<impl IntoResponse> {
+    ensure_wifi_ap_mode()?;
+    if !verify_ap_key(&headers) {
+        return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
+    }
+
+    let ssid = validate_wifi_ssid(&req.ssid)?;
+    let password = validate_wifi_password(&req.password)?;
+    write_wifi_connect_files(&ssid, &password)?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -287,6 +311,24 @@ pub async fn disconnect_wifi() -> Result<impl IntoResponse> {
     remove_file_if_exists(WIFI_SSID_FILE)?;
     remove_file_if_exists(WIFI_PASSWORD_FILE)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+fn ensure_wifi_ap_mode() -> Result<()> {
+    if !path_exists(WIFI_EXIST_FILE) || !path_exists(WIFI_AP_MODE_FILE) {
+        return Err(AppError::BadRequest("invalid mode".to_string()));
+    }
+    Ok(())
+}
+
+fn verify_ap_key(headers: &HeaderMap) -> bool {
+    let provided = headers
+        .get("x-ap-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let expected = fs::read_to_string(WIFI_AP_PASS_FILE)
+        .map(|value| normalize_wifi_secret(&value))
+        .unwrap_or_default();
+    !provided.is_empty() && !expected.is_empty() && constant_time_eq(provided, &expected)
 }
 
 fn parse_mac(value: &str) -> Result<String> {
@@ -348,6 +390,29 @@ fn validate_wifi_password(password: &str) -> Result<String> {
         return Err(AppError::BadRequest("invalid wifi password".to_string()));
     }
     Ok(password.to_string())
+}
+
+fn write_wifi_connect_files(ssid: &str, password: &str) -> Result<()> {
+    write_file(Path::new(WIFI_SSID_FILE), ssid.as_bytes(), 0o644)?;
+    write_file(Path::new(WIFI_PASSWORD_FILE), password.as_bytes(), 0o600)?;
+    write_file(Path::new(WIFI_CONNECT_FILE), &[], 0o644)
+}
+
+fn normalize_wifi_secret(content: &str) -> String {
+    content.replace(['\r', '\n'], "")
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max_len = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for index in 0..max_len {
+        let left = a.get(index).copied().unwrap_or_default();
+        let right = b.get(index).copied().unwrap_or_default();
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
 }
 
 fn save_mac(mac: &str) -> Result<()> {
@@ -977,6 +1042,14 @@ mod tests {
         assert!(validate_wifi_password("secret-password").is_ok());
         assert!(validate_wifi_password("").is_err());
         assert!(validate_wifi_password("bad\npassword").is_err());
+    }
+
+    #[test]
+    fn compares_ap_keys_in_constant_time_style() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(!constant_time_eq("secret", "Secret"));
+        assert!(!constant_time_eq("secret", "secret2"));
+        assert_eq!(normalize_wifi_secret("pass\r\n"), "pass");
     }
 
     #[test]

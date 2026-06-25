@@ -158,11 +158,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/health", get(compatibility::health))
         .route("/api/auth/login", post(account::login))
         .route("/api/auth/setup", post(account::setup_first_account))
-        .route("/api/network/wifi", post(compatibility::not_implemented))
-        .route(
-            "/api/network/wifi/verify",
-            post(compatibility::not_implemented),
-        )
+        .route("/api/network/wifi", post(network::connect_wifi_no_auth))
+        .route("/api/network/wifi/verify", post(network::verify_ap_login))
         .merge(protected_routes)
         .fallback_service(ServeDir::new(state.config.paths.web_root.clone()))
         .with_state(state)
