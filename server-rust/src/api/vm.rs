@@ -1,4 +1,4 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::Path, time::Duration};
@@ -9,6 +9,7 @@ use crate::{
     api::stream,
     error::ApiResponse,
     ffi::kvm,
+    state::AppState,
     system::command::{AllowedCommand, run_allowed},
 };
 
@@ -393,6 +394,16 @@ pub async fn reboot() -> Result<impl IntoResponse> {
     )
     .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn terminal(State(state): State<AppState>) -> Result<Json<ApiResponse<()>>> {
+    if state.config.auth_disabled() || !state.config.security.allow_terminal {
+        return Err(AppError::Forbidden("terminal is disabled".to_string()));
+    }
+
+    Err(AppError::Unsupported(
+        "terminal websocket is not implemented in the Rust backend".to_string(),
+    ))
 }
 
 fn get_ips() -> Vec<IpInfo> {

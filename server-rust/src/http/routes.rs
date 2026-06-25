@@ -56,6 +56,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/vm/mdns/enable", post(vm::enable_mdns))
         .route("/api/vm/mdns/disable", post(vm::disable_mdns))
         .route("/api/vm/system/reboot", post(vm::reboot))
+        .route("/api/vm/terminal", get(vm::terminal))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
         .route(
             "/api/stream/mjpeg/detect",
@@ -153,7 +154,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/network/dns",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
-        .route("/api/vm/terminal", get(compatibility::not_implemented))
         .route(
             "/api/vm/script",
             get(compatibility::not_implemented).delete(compatibility::not_implemented),
