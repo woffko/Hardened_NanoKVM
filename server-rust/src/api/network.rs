@@ -19,7 +19,11 @@ const WOL_MAC_FILE: &str = "/etc/kvm/cache/wol";
 const WIFI_EXIST_FILE: &str = "/etc/kvm/wifi_exist";
 const WIFI_AP_MODE_FILE: &str = "/tmp/wifiap";
 const WIFI_SSID_FILE: &str = "/etc/kvm/wifi.ssid";
+const WIFI_PASSWORD_FILE: &str = "/etc/kvm/wifi.pass";
+const WIFI_CONNECT_FILE: &str = "/kvmapp/kvm/wifi_try_connect";
 const WIFI_STATE_FILE: &str = "/kvmapp/kvm/wifi_state";
+const MAX_WIFI_SSID_BYTES: usize = 128;
+const MAX_WIFI_PASSWORD_BYTES: usize = 256;
 
 const DNS_MODE_MANUAL: &str = "manual";
 const DNS_MODE_DHCP: &str = "dhcp";
@@ -66,6 +70,12 @@ pub struct SetDnsReq {
     pub mode: String,
     #[serde(default)]
     pub servers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConnectWifiReq {
+    pub ssid: String,
+    pub password: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -239,6 +249,46 @@ pub async fn get_wifi() -> Result<impl IntoResponse> {
     })))
 }
 
+pub async fn connect_wifi(Json(req): Json<ConnectWifiReq>) -> Result<impl IntoResponse> {
+    if !path_exists(WIFI_EXIST_FILE) {
+        return Err(AppError::BadRequest("wifi is not supported".to_string()));
+    }
+    if path_exists(WIFI_AP_MODE_FILE) {
+        return Err(AppError::BadRequest("wifi is in AP setup mode".to_string()));
+    }
+    let ssid = validate_wifi_ssid(&req.ssid)?;
+    let password = validate_wifi_password(&req.password)?;
+
+    write_file(Path::new(WIFI_SSID_FILE), ssid.as_bytes(), 0o644)?;
+    write_file(Path::new(WIFI_PASSWORD_FILE), password.as_bytes(), 0o600)?;
+    write_file(Path::new(WIFI_CONNECT_FILE), &[], 0o644)?;
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn disconnect_wifi() -> Result<impl IntoResponse> {
+    if !path_exists(WIFI_EXIST_FILE) {
+        return Err(AppError::BadRequest("wifi is not supported".to_string()));
+    }
+
+    let output = run_allowed(
+        AllowedCommand::ServiceWifi,
+        ["stop"],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if output.status != 0 {
+        return Err(AppError::Internal(command_error(
+            "failed to stop wifi",
+            output,
+        )));
+    }
+
+    remove_file_if_exists(WIFI_SSID_FILE)?;
+    remove_file_if_exists(WIFI_PASSWORD_FILE)?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
 fn parse_mac(value: &str) -> Result<String> {
     let mac = value
         .trim()
@@ -280,6 +330,24 @@ fn read_wifi_ssid() -> String {
 
 fn normalize_wifi_ssid(content: &str) -> String {
     content.replace(['\r', '\n'], "")
+}
+
+fn validate_wifi_ssid(ssid: &str) -> Result<String> {
+    let ssid = ssid.trim();
+    if ssid.is_empty() || ssid.len() > MAX_WIFI_SSID_BYTES || ssid.chars().any(char::is_control) {
+        return Err(AppError::BadRequest("invalid wifi ssid".to_string()));
+    }
+    Ok(ssid.to_string())
+}
+
+fn validate_wifi_password(password: &str) -> Result<String> {
+    if password.is_empty()
+        || password.len() > MAX_WIFI_PASSWORD_BYTES
+        || password.chars().any(char::is_control)
+    {
+        return Err(AppError::BadRequest("invalid wifi password".to_string()));
+    }
+    Ok(password.to_string())
 }
 
 fn save_mac(mac: &str) -> Result<()> {
@@ -896,6 +964,19 @@ mod tests {
         assert!(is_connected_state("1\r\n"));
         assert!(!is_connected_state("0\n"));
         assert_eq!(normalize_wifi_ssid("Office Wi-Fi\r\n"), "Office Wi-Fi");
+    }
+
+    #[test]
+    fn validates_wifi_credentials() {
+        assert_eq!(
+            validate_wifi_ssid(" Office Wi-Fi ").unwrap(),
+            "Office Wi-Fi"
+        );
+        assert!(validate_wifi_ssid("").is_err());
+        assert!(validate_wifi_ssid("bad\nssid").is_err());
+        assert!(validate_wifi_password("secret-password").is_ok());
+        assert!(validate_wifi_password("").is_err());
+        assert!(validate_wifi_password("bad\npassword").is_err());
     }
 
     #[test]
