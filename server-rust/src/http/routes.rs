@@ -24,6 +24,11 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/ws", get(hid_ws::connect))
         .route("/api/application/version", get(application::get_version))
+        .route("/api/application/update", post(application::update))
+        .route(
+            "/api/application/update/offline",
+            post(application::offline_update),
+        )
         .route(
             "/api/application/preview",
             get(application::get_preview).post(application::set_preview),
@@ -104,14 +109,6 @@ pub fn build(state: AppState) -> Router {
 
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/application/update",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/application/update/offline",
-            post(compatibility::not_implemented),
-        )
         .route("/api/hid/paste", post(compatibility::not_implemented))
         .route("/api/hid/shortcuts", get(compatibility::not_implemented))
         .route(

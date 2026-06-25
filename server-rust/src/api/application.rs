@@ -2,7 +2,7 @@ use axum::{Json, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
-use crate::{Result, error::ApiResponse};
+use crate::{AppError, Result, error::ApiResponse};
 
 const APP_VERSION_FILE: &str = "/kvmapp/version";
 const PREVIEW_UPDATES_FLAG: &str = "/etc/kvm/preview_updates";
@@ -53,6 +53,18 @@ pub async fn set_preview(Json(req): Json<SetPreviewReq>) -> Result<impl IntoResp
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn update() -> Result<Json<ApiResponse<()>>> {
+    Err(AppError::Unsupported(
+        "online update is disabled until signed update verification is implemented".to_string(),
+    ))
+}
+
+pub async fn offline_update() -> Result<Json<ApiResponse<()>>> {
+    Err(AppError::Unsupported(
+        "offline update is disabled until signed update verification is implemented".to_string(),
+    ))
 }
 
 fn read_trimmed(path: &str) -> Option<String> {

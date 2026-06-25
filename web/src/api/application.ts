@@ -1,4 +1,5 @@
 import { http } from '@/lib/http.ts';
+import { getCsrfToken } from '@/lib/cookie.ts';
 import { getBaseUrl } from '@/lib/service.ts';
 
 // get application version
@@ -19,8 +20,10 @@ export function update() {
 export function offlineUpdate(data: FormData) {
   const baseUrl = getBaseUrl('http');
   const url = `${baseUrl}/api/application/update/offline`;
+  const csrfToken = getCsrfToken();
   return fetch(url, {
     method: 'POST',
+    headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
     body: data
   });
 }
