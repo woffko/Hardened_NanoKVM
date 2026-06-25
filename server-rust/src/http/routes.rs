@@ -39,6 +39,22 @@ pub fn build(state: AppState) -> Router {
             "/api/vm/web-title",
             get(vm::get_web_title).post(vm::set_web_title),
         )
+        .route(
+            "/api/vm/device/virtual",
+            get(vm::get_virtual_device).post(vm::update_virtual_device),
+        )
+        .route("/api/vm/oled", get(vm::get_oled).post(vm::set_oled))
+        .route("/api/vm/hdmi", get(vm::get_hdmi_state))
+        .route("/api/vm/hdmi/reset", post(vm::reset_hdmi))
+        .route("/api/vm/hdmi/enable", post(vm::enable_hdmi))
+        .route("/api/vm/hdmi/disable", post(vm::disable_hdmi))
+        .route("/api/vm/ssh", get(vm::get_ssh_state))
+        .route("/api/vm/ssh/enable", post(vm::enable_ssh))
+        .route("/api/vm/ssh/disable", post(vm::disable_ssh))
+        .route("/api/vm/mdns", get(vm::get_mdns_state))
+        .route("/api/vm/mdns/enable", post(vm::enable_mdns))
+        .route("/api/vm/mdns/disable", post(vm::disable_mdns))
+        .route("/api/vm/system/reboot", post(vm::reboot))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
         .route(
             "/api/stream/mjpeg/detect",
@@ -151,24 +167,9 @@ fn compatibility_routes() -> Router<AppState> {
         )
         .route("/api/vm/script/run", post(compatibility::not_implemented))
         .route(
-            "/api/vm/device/virtual",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
-        .route(
             "/api/vm/memory/limit",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
-        .route(
-            "/api/vm/oled",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
-        .route("/api/vm/hdmi", get(compatibility::not_implemented))
-        .route("/api/vm/hdmi/reset", post(compatibility::not_implemented))
-        .route("/api/vm/hdmi/enable", post(compatibility::not_implemented))
-        .route("/api/vm/hdmi/disable", post(compatibility::not_implemented))
-        .route("/api/vm/ssh", get(compatibility::not_implemented))
-        .route("/api/vm/ssh/enable", post(compatibility::not_implemented))
-        .route("/api/vm/ssh/disable", post(compatibility::not_implemented))
         .route(
             "/api/vm/swap",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
@@ -178,9 +179,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/vm/mouse-jiggler/",
             post(compatibility::not_implemented),
         )
-        .route("/api/vm/mdns", get(compatibility::not_implemented))
-        .route("/api/vm/mdns/enable", post(compatibility::not_implemented))
-        .route("/api/vm/mdns/disable", post(compatibility::not_implemented))
         .route("/api/vm/tls", post(compatibility::not_implemented))
         .route("/api/vm/autostart", get(compatibility::not_implemented))
         .route(
@@ -188,10 +186,6 @@ fn compatibility_routes() -> Router<AppState> {
             get(compatibility::not_implemented)
                 .post(compatibility::not_implemented)
                 .delete(compatibility::not_implemented),
-        )
-        .route(
-            "/api/vm/system/reboot",
-            post(compatibility::not_implemented),
         )
         .route(
             "/api/extensions/tailscale/install",

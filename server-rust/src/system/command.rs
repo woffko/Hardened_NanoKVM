@@ -11,10 +11,14 @@ pub enum AllowedCommand {
     Reboot,
     Hostname,
     ServiceNanokvmRestart,
+    ServiceSshd,
+    ServiceAvahiDaemon,
+    ServiceUsbDev,
     EtherWake,
     Tailscale,
     Tailscaled,
     Pidof,
+    Kill,
     CustomForTest(PathBuf),
 }
 
@@ -31,10 +35,14 @@ impl AllowedCommand {
             AllowedCommand::Reboot => OsStr::new("reboot"),
             AllowedCommand::Hostname => OsStr::new("hostname"),
             AllowedCommand::ServiceNanokvmRestart => OsStr::new("/etc/init.d/S95nanokvm"),
+            AllowedCommand::ServiceSshd => OsStr::new("/etc/init.d/S50sshd"),
+            AllowedCommand::ServiceAvahiDaemon => OsStr::new("/etc/init.d/S50avahi-daemon"),
+            AllowedCommand::ServiceUsbDev => OsStr::new("/etc/init.d/S03usbdev"),
             AllowedCommand::EtherWake => OsStr::new("ether-wake"),
             AllowedCommand::Tailscale => OsStr::new("/usr/bin/tailscale"),
             AllowedCommand::Tailscaled => OsStr::new("/usr/sbin/tailscaled"),
             AllowedCommand::Pidof => OsStr::new("pidof"),
+            AllowedCommand::Kill => OsStr::new("kill"),
             AllowedCommand::CustomForTest(path) => path.as_os_str(),
         }
     }

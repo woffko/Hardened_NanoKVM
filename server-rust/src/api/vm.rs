@@ -2,11 +2,13 @@ use axum::{Json, response::IntoResponse};
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::Path, time::Duration};
+use tokio::time;
 
 use crate::{
     AppError, Result,
     api::stream,
     error::ApiResponse,
+    ffi::kvm,
     system::command::{AllowedCommand, run_allowed},
 };
 
@@ -18,6 +20,17 @@ const ETC_HOSTNAME_FILE: &str = "/etc/hostname";
 const BOOT_HOSTNAME_FILE: &str = "/boot/hostname";
 const ETC_HOSTS_FILE: &str = "/etc/hosts";
 const WEB_TITLE_FILE: &str = "/etc/kvm/web-title";
+const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
+const SSH_STOP_FLAG: &str = "/etc/kvm/ssh_stop";
+const OLED_EXIST_FILE: &str = "/etc/kvm/oled_exist";
+const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
+const AVAHI_DAEMON_PID: &str = "/run/avahi-daemon/pid";
+const AVAHI_DAEMON_SCRIPT: &str = "/etc/init.d/S50avahi-daemon";
+const AVAHI_DAEMON_BACKUP_SCRIPT: &str = "/kvmapp/system/init.d/S50avahi-daemon";
+const VIRTUAL_NETWORK_FLAG: &str = "/boot/usb.rndis0";
+const VIRTUAL_DISK_FLAG: &str = "/boot/usb.disk0";
+const VIRTUAL_NETWORK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c.1/rndis.usb0";
+const VIRTUAL_DISK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c.1/mass_storage.disk0";
 
 #[derive(Debug, Serialize)]
 pub struct IpInfo {
@@ -68,6 +81,39 @@ pub struct WebTitleRsp {
 #[derive(Debug, Deserialize)]
 pub struct SetWebTitleReq {
     pub title: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnabledRsp {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OledRsp {
+    pub exist: bool,
+    pub sleep: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetOledReq {
+    pub sleep: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VirtualDeviceRsp {
+    pub network: bool,
+    pub media: bool,
+    pub disk: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateVirtualDeviceReq {
+    pub device: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateVirtualDeviceRsp {
+    pub on: bool,
 }
 
 pub async fn get_info() -> Result<impl IntoResponse> {
@@ -139,6 +185,169 @@ pub async fn set_web_title(Json(req): Json<SetWebTitleReq>) -> Result<impl IntoR
         fs::write(WEB_TITLE_FILE, req.title.as_bytes())?;
     }
 
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_hdmi_state() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(EnabledRsp {
+        enabled: !Path::new(HDMI_DISABLE_FILE).exists(),
+    })))
+}
+
+pub async fn enable_hdmi() -> Result<impl IntoResponse> {
+    kvm::set_hdmi(true)?;
+    persist_hdmi_enabled()?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn disable_hdmi() -> Result<impl IntoResponse> {
+    kvm::set_hdmi(false)?;
+    persist_hdmi_disabled()?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn reset_hdmi() -> Result<impl IntoResponse> {
+    kvm::set_hdmi(false)?;
+    time::sleep(Duration::from_secs(1)).await;
+    kvm::set_hdmi(true)?;
+    persist_hdmi_enabled()?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_ssh_state() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(EnabledRsp {
+        enabled: !Path::new(SSH_STOP_FLAG).exists(),
+    })))
+}
+
+pub async fn enable_ssh() -> Result<impl IntoResponse> {
+    run_checked(
+        AllowedCommand::ServiceSshd,
+        ["permanent_on"],
+        Duration::from_secs(5),
+        "enable ssh failed",
+    )
+    .await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn disable_ssh() -> Result<impl IntoResponse> {
+    run_checked(
+        AllowedCommand::ServiceSshd,
+        ["permanent_off"],
+        Duration::from_secs(5),
+        "disable ssh failed",
+    )
+    .await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_mdns_state() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(EnabledRsp {
+        enabled: avahi_daemon_pid().is_some(),
+    })))
+}
+
+pub async fn enable_mdns() -> Result<impl IntoResponse> {
+    if avahi_daemon_pid().is_some() {
+        return Ok(Json(ApiResponse::<()>::ok_empty()));
+    }
+
+    if Path::new(AVAHI_DAEMON_BACKUP_SCRIPT).exists() {
+        fs::copy(AVAHI_DAEMON_BACKUP_SCRIPT, AVAHI_DAEMON_SCRIPT)?;
+    }
+    run_checked(
+        AllowedCommand::ServiceAvahiDaemon,
+        ["start"],
+        Duration::from_secs(5),
+        "enable mdns failed",
+    )
+    .await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn disable_mdns() -> Result<impl IntoResponse> {
+    let Some(pid) = avahi_daemon_pid() else {
+        return Ok(Json(ApiResponse::<()>::ok_empty()));
+    };
+    if !valid_pid(&pid) {
+        return Err(AppError::Internal("invalid avahi pid".to_string()));
+    }
+
+    run_checked(
+        AllowedCommand::Kill,
+        ["-9", pid.as_str()],
+        Duration::from_secs(2),
+        "disable mdns failed",
+    )
+    .await?;
+    remove_file_if_exists(AVAHI_DAEMON_PID)?;
+    remove_file_if_exists(AVAHI_DAEMON_SCRIPT)?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_oled() -> Result<impl IntoResponse> {
+    if !Path::new(OLED_EXIST_FILE).exists() {
+        return Ok(Json(ApiResponse::ok(OledRsp {
+            exist: false,
+            sleep: 0,
+        })));
+    }
+
+    let sleep = read_trimmed(OLED_SLEEP_FILE)
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(0);
+    Ok(Json(ApiResponse::ok(OledRsp { exist: true, sleep })))
+}
+
+pub async fn set_oled(Json(req): Json<SetOledReq>) -> Result<impl IntoResponse> {
+    if req.sleep < 0 || req.sleep > 24 * 60 * 60 {
+        return Err(AppError::BadRequest("invalid OLED sleep".to_string()));
+    }
+    fs::write(OLED_SLEEP_FILE, req.sleep.to_string().as_bytes())?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_virtual_device() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(VirtualDeviceRsp {
+        network: Path::new(VIRTUAL_NETWORK_FLAG).exists(),
+        media: false,
+        disk: Path::new(VIRTUAL_DISK_FLAG).exists(),
+    })))
+}
+
+pub async fn update_virtual_device(
+    Json(req): Json<UpdateVirtualDeviceReq>,
+) -> Result<impl IntoResponse> {
+    let (flag, config_dir) = match req.device.as_str() {
+        "network" => (VIRTUAL_NETWORK_FLAG, VIRTUAL_NETWORK_CONFIG),
+        "disk" => (VIRTUAL_DISK_FLAG, VIRTUAL_DISK_CONFIG),
+        _ => return Err(AppError::BadRequest("invalid virtual device".to_string())),
+    };
+
+    let exists = Path::new(flag).exists();
+    run_usbdev("stop").await?;
+    if exists {
+        remove_dir_if_exists(config_dir)?;
+        remove_file_if_exists(flag)?;
+    } else {
+        fs::write(flag, b"")?;
+    }
+    run_usbdev("start").await?;
+
+    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp {
+        on: Path::new(flag).exists(),
+    })))
+}
+
+pub async fn reboot() -> Result<impl IntoResponse> {
+    run_checked(
+        AllowedCommand::Reboot,
+        std::iter::empty::<&str>(),
+        Duration::from_secs(2),
+        "reboot failed",
+    )
+    .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -242,4 +451,80 @@ fn read_trimmed(path: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn persist_hdmi_enabled() -> Result<()> {
+    remove_file_if_exists(HDMI_DISABLE_FILE)
+}
+
+fn persist_hdmi_disabled() -> Result<()> {
+    fs::write(HDMI_DISABLE_FILE, b"")?;
+    Ok(())
+}
+
+fn avahi_daemon_pid() -> Option<String> {
+    read_trimmed(AVAHI_DAEMON_PID).filter(|pid| valid_pid(pid))
+}
+
+fn valid_pid(pid: &str) -> bool {
+    !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+async fn run_usbdev(action: &'static str) -> Result<()> {
+    run_checked(
+        AllowedCommand::ServiceUsbDev,
+        [action],
+        Duration::from_secs(10),
+        "usb gadget update failed",
+    )
+    .await
+}
+
+async fn run_checked<I, S>(
+    command: AllowedCommand,
+    args: I,
+    timeout: Duration,
+    message: &'static str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = run_allowed(command, args, timeout).await?;
+    if output.status != 0 {
+        return Err(AppError::Internal(format!(
+            "{message}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &str) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn remove_dir_if_exists(path: &str) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_numeric_pids_only() {
+        assert!(valid_pid("12345"));
+        assert!(!valid_pid(""));
+        assert!(!valid_pid("12x45"));
+        assert!(!valid_pid("1;reboot"));
+    }
 }
