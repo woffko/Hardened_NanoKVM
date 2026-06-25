@@ -7,7 +7,7 @@ use axum::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, application, compatibility, download, storage, stream, vm},
+    api::{account, application, compatibility, download, network, storage, stream, vm},
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
@@ -79,6 +79,16 @@ pub fn build(state: AppState) -> Router {
         .route("/api/storage/image/mount", post(storage::mount_image))
         .route("/api/storage/cdrom", get(storage::get_cdrom))
         .route("/api/storage/image/delete", post(storage::delete_image))
+        .route("/api/network/wol", post(network::wake_on_lan))
+        .route(
+            "/api/network/wol/mac",
+            get(network::get_wol_macs).delete(network::delete_wol_mac),
+        )
+        .route("/api/network/wol/mac/name", post(network::set_wol_mac_name))
+        .route(
+            "/api/network/dns",
+            get(network::get_dns).post(network::set_dns),
+        )
         .route("/api/download/image", post(download::download_image))
         .route("/api/download/image/status", get(download::status_image))
         .route("/api/download/image/enabled", get(download::image_enabled))
@@ -129,15 +139,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/stream/h264/direct",
             get(compatibility::not_implemented),
         )
-        .route("/api/network/wol", post(compatibility::not_implemented))
-        .route(
-            "/api/network/wol/mac",
-            get(compatibility::not_implemented).delete(compatibility::not_implemented),
-        )
-        .route(
-            "/api/network/wol/mac/name",
-            post(compatibility::not_implemented),
-        )
         .route("/api/network/wifi", get(compatibility::not_implemented))
         .route(
             "/api/network/wifi/connect",
@@ -146,10 +147,6 @@ fn compatibility_routes() -> Router<AppState> {
         .route(
             "/api/network/wifi/disconnect",
             post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/network/dns",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
         .route(
             "/api/vm/script",
