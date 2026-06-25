@@ -67,6 +67,11 @@ pub fn build(state: AppState) -> Router {
             get(vm::get_memory_limit).post(vm::set_memory_limit),
         )
         .route("/api/vm/swap", get(vm::get_swap).post(vm::set_swap))
+        .route(
+            "/api/vm/mouse-jiggler",
+            get(vm::get_mouse_jiggler).post(vm::set_mouse_jiggler),
+        )
+        .route("/api/vm/mouse-jiggler/", post(vm::set_mouse_jiggler))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
         .route(
             "/api/stream/mjpeg/detect",
@@ -162,11 +167,6 @@ fn compatibility_routes() -> Router<AppState> {
             post(compatibility::not_implemented),
         )
         .route("/api/vm/script/run", post(compatibility::not_implemented))
-        .route("/api/vm/mouse-jiggler", get(compatibility::not_implemented))
-        .route(
-            "/api/vm/mouse-jiggler/",
-            post(compatibility::not_implemented),
-        )
         .route("/api/vm/tls", post(compatibility::not_implemented))
         .route("/api/vm/autostart", get(compatibility::not_implemented))
         .route(

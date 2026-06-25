@@ -7,9 +7,11 @@ use axum::{
     response::IntoResponse,
 };
 use std::{
+    fs,
     fs::{File, OpenOptions},
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
+    path::Path,
     sync::{LazyLock, Mutex},
     thread,
     time::{Duration, Instant},
@@ -23,18 +25,47 @@ const HID_MOUSE_ABSOLUTE: &str = "/dev/hidg2";
 const HID_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 const HID_WRITE_RETRY_DELAY: Duration = Duration::from_millis(1);
 const MAX_WS_MESSAGE_BYTES: usize = 16;
+const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
+const MOUSE_JIGGLER_INTERVAL: Duration = Duration::from_secs(15);
 
 const HEARTBEAT_EVENT: u8 = 0;
 const KEYBOARD_EVENT: u8 = 1;
 const MOUSE_EVENT: u8 = 2;
+const JIGGLER_MODE_RELATIVE: &str = "relative";
+const JIGGLER_MODE_ABSOLUTE: &str = "absolute";
 
 static HID: LazyLock<HidDevices> = LazyLock::new(HidDevices::default);
+static MOUSE_JIGGLER: LazyLock<Mutex<MouseJiggler>> =
+    LazyLock::new(|| Mutex::new(MouseJiggler::from_config()));
 
 #[derive(Default)]
 struct HidDevices {
     keyboard: Mutex<Option<File>>,
     relative_mouse: Mutex<Option<File>>,
     absolute_mouse: Mutex<Option<File>>,
+}
+
+#[derive(Debug)]
+struct MouseJiggler {
+    enabled: bool,
+    running: bool,
+    mode: String,
+    last_updated: Instant,
+}
+
+impl MouseJiggler {
+    fn from_config() -> Self {
+        let mode = fs::read_to_string(MOUSE_JIGGLER_CONFIG)
+            .ok()
+            .map(|value| normalize_jiggler_mode(value.trim()))
+            .unwrap_or_else(|| JIGGLER_MODE_RELATIVE.to_string());
+        Self {
+            enabled: Path::new(MOUSE_JIGGLER_CONFIG).exists(),
+            running: false,
+            mode,
+            last_updated: Instant::now(),
+        }
+    }
 }
 
 impl HidDevices {
@@ -112,16 +143,19 @@ async fn handle_socket(mut socket: WebSocket) {
                 if data.len() != 9 {
                     continue;
                 }
+                touch_mouse_jiggler();
                 let report = data[1..].to_vec();
                 let _ = tokio::task::spawn_blocking(move || HID.write_keyboard(&report)).await;
             }
             MOUSE_EVENT => match data.len() - 1 {
                 4 => {
+                    touch_mouse_jiggler();
                     let report = data[1..].to_vec();
                     let _ = tokio::task::spawn_blocking(move || HID.write_relative_mouse(&report))
                         .await;
                 }
                 6 => {
+                    touch_mouse_jiggler();
                     let report = data[1..].to_vec();
                     absolute_release_report = absolute_mouse_release_report(&report);
                     absolute_buttons_active = report.first().copied().unwrap_or_default() != 0;
@@ -178,4 +212,127 @@ fn absolute_mouse_release_report(position_report: &[u8]) -> [u8; 6] {
         report[1..5].copy_from_slice(&position_report[1..5]);
     }
     report
+}
+
+pub fn mouse_jiggler_snapshot() -> Result<(bool, String)> {
+    let state = MOUSE_JIGGLER
+        .lock()
+        .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
+    Ok((state.enabled, state.mode.clone()))
+}
+
+pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
+    if enabled {
+        let mode = validate_jiggler_mode(mode)?;
+        fs::write(MOUSE_JIGGLER_CONFIG, mode.as_bytes())?;
+
+        let mut should_spawn = false;
+        {
+            let mut state = MOUSE_JIGGLER
+                .lock()
+                .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
+            state.enabled = true;
+            state.mode = mode;
+            state.last_updated = Instant::now();
+            if !state.running {
+                state.running = true;
+                should_spawn = true;
+            }
+        }
+
+        if should_spawn {
+            tokio::spawn(mouse_jiggler_loop());
+        }
+    } else {
+        remove_file_if_exists(MOUSE_JIGGLER_CONFIG)?;
+        let mut state = MOUSE_JIGGLER
+            .lock()
+            .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
+        state.enabled = false;
+        state.mode = JIGGLER_MODE_RELATIVE.to_string();
+        state.last_updated = Instant::now();
+    }
+
+    Ok(())
+}
+
+fn touch_mouse_jiggler() {
+    if let Ok(mut state) = MOUSE_JIGGLER.lock() {
+        if state.running {
+            state.last_updated = Instant::now();
+        }
+    }
+}
+
+async fn mouse_jiggler_loop() {
+    loop {
+        tokio::time::sleep(MOUSE_JIGGLER_INTERVAL).await;
+        let mode = {
+            let Ok(mut state) = MOUSE_JIGGLER.lock() else {
+                return;
+            };
+            if !state.enabled {
+                state.running = false;
+                return;
+            }
+            if state.last_updated.elapsed() <= MOUSE_JIGGLER_INTERVAL {
+                continue;
+            }
+            state.last_updated = Instant::now();
+            state.mode.clone()
+        };
+
+        let _ = tokio::task::spawn_blocking(move || move_mouse_jiggler(&mode)).await;
+    }
+}
+
+fn move_mouse_jiggler(mode: &str) -> io::Result<()> {
+    if mode == JIGGLER_MODE_ABSOLUTE {
+        HID.write_absolute_mouse(&[0x00, 0x00, 0x3f, 0x00, 0x3f, 0x00])?;
+        thread::sleep(Duration::from_millis(100));
+        HID.write_absolute_mouse(&[0x00, 0xff, 0x3f, 0xff, 0x3f, 0x00])
+    } else {
+        HID.write_relative_mouse(&[0x00, 0x0a, 0x0a, 0x00])?;
+        thread::sleep(Duration::from_millis(100));
+        HID.write_relative_mouse(&[0x00, 0xf6, 0xf6, 0x00])
+    }
+}
+
+fn validate_jiggler_mode(mode: &str) -> Result<String> {
+    let mode = normalize_jiggler_mode(mode);
+    if mode == JIGGLER_MODE_RELATIVE || mode == JIGGLER_MODE_ABSOLUTE {
+        Ok(mode)
+    } else {
+        Err(AppError::BadRequest(
+            "invalid mouse jiggler mode".to_string(),
+        ))
+    }
+}
+
+fn normalize_jiggler_mode(mode: &str) -> String {
+    match mode.trim() {
+        JIGGLER_MODE_ABSOLUTE => JIGGLER_MODE_ABSOLUTE.to_string(),
+        JIGGLER_MODE_RELATIVE | "" => JIGGLER_MODE_RELATIVE.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn remove_file_if_exists(path: &str) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_jiggler_modes() {
+        assert_eq!(validate_jiggler_mode("relative").unwrap(), "relative");
+        assert_eq!(validate_jiggler_mode("absolute").unwrap(), "absolute");
+        assert!(validate_jiggler_mode("diagonal").is_err());
+    }
 }

@@ -11,6 +11,7 @@ use crate::{
     ffi::kvm,
     state::AppState,
     system::command::{AllowedCommand, run_allowed},
+    ws::hid as hid_ws,
 };
 
 const BOOT_VERSION_FILE: &str = "/boot/ver";
@@ -159,6 +160,20 @@ pub struct SwapRsp {
 pub struct SetSwapReq {
     #[serde(default)]
     pub size: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MouseJigglerRsp {
+    pub enabled: bool,
+    pub mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetMouseJigglerReq {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: String,
 }
 
 pub async fn get_info() -> Result<impl IntoResponse> {
@@ -483,6 +498,16 @@ pub async fn set_swap(Json(req): Json<SetSwapReq>) -> Result<impl IntoResponse> 
         enable_swap_inittab()?;
     }
 
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_mouse_jiggler() -> Result<impl IntoResponse> {
+    let (enabled, mode) = hid_ws::mouse_jiggler_snapshot()?;
+    Ok(Json(ApiResponse::ok(MouseJigglerRsp { enabled, mode })))
+}
+
+pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<impl IntoResponse> {
+    hid_ws::set_mouse_jiggler(req.enabled, &req.mode)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
