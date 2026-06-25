@@ -9,7 +9,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     api::{
         account, application, autostart, compatibility, download, hid, network, script, storage,
-        stream, vm,
+        stream, tailscale, vm,
     },
     http::middleware::protected,
     security::headers::security_headers,
@@ -124,6 +124,10 @@ pub fn build(state: AppState) -> Router {
         .route("/api/download/image", post(download::download_image))
         .route("/api/download/image/status", get(download::status_image))
         .route("/api/download/image/enabled", get(download::image_enabled))
+        .route(
+            "/api/extensions/tailscale/status",
+            get(tailscale::get_status),
+        )
         .route("/api/hid/shortcuts", get(hid::get_shortcuts))
         .route(
             "/api/hid/shortcut",
@@ -187,10 +191,6 @@ fn compatibility_routes() -> Router<AppState> {
         .route(
             "/api/extensions/tailscale/uninstall",
             post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/extensions/tailscale/status",
-            get(compatibility::not_implemented),
         )
         .route(
             "/api/extensions/tailscale/up",
