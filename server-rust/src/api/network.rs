@@ -16,6 +16,10 @@ use crate::{
 };
 
 const WOL_MAC_FILE: &str = "/etc/kvm/cache/wol";
+const WIFI_EXIST_FILE: &str = "/etc/kvm/wifi_exist";
+const WIFI_AP_MODE_FILE: &str = "/tmp/wifiap";
+const WIFI_SSID_FILE: &str = "/etc/kvm/wifi.ssid";
+const WIFI_STATE_FILE: &str = "/kvmapp/kvm/wifi_state";
 
 const DNS_MODE_MANUAL: &str = "manual";
 const DNS_MODE_DHCP: &str = "dhcp";
@@ -75,6 +79,15 @@ pub struct DnsInfo {
     pub gateway: String,
     #[serde(rename = "searchDomains")]
     pub search_domains: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WifiRsp {
+    pub supported: bool,
+    #[serde(rename = "apMode")]
+    pub ap_mode: bool,
+    pub connected: bool,
+    pub ssid: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -195,6 +208,37 @@ pub async fn set_dns(Json(req): Json<SetDnsReq>) -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub async fn get_wifi() -> Result<impl IntoResponse> {
+    let supported = path_exists(WIFI_EXIST_FILE);
+    if !supported {
+        return Ok(Json(ApiResponse::ok(WifiRsp {
+            supported,
+            ap_mode: false,
+            connected: false,
+            ssid: String::new(),
+        })));
+    }
+
+    let connected = is_wifi_connected();
+    let ssid = if connected {
+        let ssid = read_wifi_ssid();
+        if ssid.is_empty() {
+            "Wi-Fi".to_string()
+        } else {
+            ssid
+        }
+    } else {
+        String::new()
+    };
+
+    Ok(Json(ApiResponse::ok(WifiRsp {
+        supported,
+        ap_mode: path_exists(WIFI_AP_MODE_FILE),
+        connected,
+        ssid,
+    })))
+}
+
 fn parse_mac(value: &str) -> Result<String> {
     let mac = value
         .trim()
@@ -212,6 +256,30 @@ fn parse_mac(value: &str) -> Result<String> {
         out.push_str(&mac[index..index + 2]);
     }
     Ok(out)
+}
+
+fn path_exists(path: &str) -> bool {
+    Path::new(path).exists()
+}
+
+fn is_wifi_connected() -> bool {
+    fs::read_to_string(WIFI_STATE_FILE)
+        .map(|content| is_connected_state(&content))
+        .unwrap_or(false)
+}
+
+fn is_connected_state(content: &str) -> bool {
+    content.trim_end_matches(['\r', '\n']) == "1"
+}
+
+fn read_wifi_ssid() -> String {
+    fs::read_to_string(WIFI_SSID_FILE)
+        .map(|content| normalize_wifi_ssid(&content))
+        .unwrap_or_default()
+}
+
+fn normalize_wifi_ssid(content: &str) -> String {
+    content.replace(['\r', '\n'], "")
 }
 
 fn save_mac(mac: &str) -> Result<()> {
@@ -820,6 +888,14 @@ mod tests {
     fn rejects_invalid_dns_servers() {
         assert!(normalize_dns_servers(["1.1.1.1", "1.1.1.1"]).is_ok());
         assert!(normalize_dns_servers(["999.1.1.1"]).is_err());
+    }
+
+    #[test]
+    fn parses_wifi_state_and_ssid_files() {
+        assert!(is_connected_state("1\n"));
+        assert!(is_connected_state("1\r\n"));
+        assert!(!is_connected_state("0\n"));
+        assert_eq!(normalize_wifi_ssid("Office Wi-Fi\r\n"), "Office Wi-Fi");
     }
 
     #[test]

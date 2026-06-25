@@ -121,6 +121,7 @@ pub fn build(state: AppState) -> Router {
             "/api/network/dns",
             get(network::get_dns).post(network::set_dns),
         )
+        .route("/api/network/wifi", get(network::get_wifi))
         .route("/api/download/image", post(download::download_image))
         .route("/api/download/image/status", get(download::status_image))
         .route("/api/download/image/enabled", get(download::image_enabled))
@@ -175,7 +176,6 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/stream/h264/direct",
             get(compatibility::not_implemented),
         )
-        .route("/api/network/wifi", get(compatibility::not_implemented))
         .route(
             "/api/network/wifi/connect",
             post(compatibility::not_implemented),
