@@ -25,6 +25,7 @@ const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
 const SSH_STOP_FLAG: &str = "/etc/kvm/ssh_stop";
 const OLED_EXIST_FILE: &str = "/etc/kvm/oled_exist";
 const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
+const GO_MEM_LIMIT_FILE: &str = "/etc/kvm/GOMEMLIMIT";
 const AVAHI_DAEMON_PID: &str = "/run/avahi-daemon/pid";
 const AVAHI_DAEMON_SCRIPT: &str = "/etc/init.d/S50avahi-daemon";
 const AVAHI_DAEMON_BACKUP_SCRIPT: &str = "/kvmapp/system/init.d/S50avahi-daemon";
@@ -129,6 +130,20 @@ pub struct UpdateVirtualDeviceReq {
 #[derive(Debug, Serialize)]
 pub struct UpdateVirtualDeviceRsp {
     pub on: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryLimitRsp {
+    pub enabled: bool,
+    pub limit: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetMemoryLimitReq {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub limit: i64,
 }
 
 pub async fn get_info() -> Result<impl IntoResponse> {
@@ -406,6 +421,32 @@ pub async fn terminal(State(state): State<AppState>) -> Result<Json<ApiResponse<
     ))
 }
 
+pub async fn get_memory_limit() -> Result<impl IntoResponse> {
+    if !Path::new(GO_MEM_LIMIT_FILE).exists() {
+        return Ok(Json(ApiResponse::ok(MemoryLimitRsp {
+            enabled: false,
+            limit: 0,
+        })));
+    }
+
+    let limit = read_memory_limit()?;
+    Ok(Json(ApiResponse::ok(MemoryLimitRsp {
+        enabled: true,
+        limit,
+    })))
+}
+
+pub async fn set_memory_limit(Json(req): Json<SetMemoryLimitReq>) -> Result<impl IntoResponse> {
+    if req.enabled {
+        let limit = normalize_memory_limit(req.limit)?;
+        fs::write(GO_MEM_LIMIT_FILE, limit.to_string().as_bytes())?;
+    } else {
+        remove_file_if_exists(GO_MEM_LIMIT_FILE)?;
+    }
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
 fn get_ips() -> Vec<IpInfo> {
     let mut ips = Vec::new();
     let mut seen = HashSet::new();
@@ -506,6 +547,21 @@ fn read_trimmed(path: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn read_memory_limit() -> Result<i64> {
+    let value = read_trimmed(GO_MEM_LIMIT_FILE)
+        .ok_or_else(|| AppError::Internal("memory limit file is empty".to_string()))?;
+    value
+        .parse::<i64>()
+        .map_err(|_| AppError::Internal("invalid memory limit".to_string()))
+}
+
+fn normalize_memory_limit(limit: i64) -> Result<i64> {
+    if !(1..=4096).contains(&limit) {
+        return Err(AppError::BadRequest("invalid memory limit".to_string()));
+    }
+    Ok(limit.max(50))
 }
 
 #[derive(Debug, Clone)]
@@ -636,5 +692,13 @@ mod tests {
         };
         assert_eq!(gpio.reset, "/sys/class/gpio/gpio505/value");
         assert!(gpio.hdd_led.is_none());
+    }
+
+    #[test]
+    fn normalizes_memory_limit() {
+        assert_eq!(normalize_memory_limit(75).unwrap(), 75);
+        assert_eq!(normalize_memory_limit(1).unwrap(), 50);
+        assert!(normalize_memory_limit(0).is_err());
+        assert!(normalize_memory_limit(4097).is_err());
     }
 }
