@@ -6,10 +6,11 @@ use axum::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    api::{account, compatibility},
+    api::{account, application, compatibility, stream, vm},
     http::middleware::protected,
     security::headers::security_headers,
     state::AppState,
+    ws::hid as hid_ws,
 };
 
 pub fn build(state: AppState) -> Router {
@@ -19,6 +20,32 @@ pub fn build(state: AppState) -> Router {
         .route(
             "/api/auth/password",
             get(account::is_password_updated).post(account::change_password),
+        )
+        .route("/api/ws", get(hid_ws::connect))
+        .route("/api/application/version", get(application::get_version))
+        .route(
+            "/api/application/preview",
+            get(application::get_preview).post(application::set_preview),
+        )
+        .route("/api/vm/info", get(vm::get_info))
+        .route("/api/vm/hardware", get(vm::get_hardware))
+        .route(
+            "/api/vm/hostname",
+            get(vm::get_hostname).post(vm::set_hostname),
+        )
+        .route("/api/vm/screen", post(vm::set_screen))
+        .route(
+            "/api/vm/web-title",
+            get(vm::get_web_title).post(vm::set_web_title),
+        )
+        .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
+        .route(
+            "/api/stream/mjpeg/detect",
+            post(stream::update_frame_detect),
+        )
+        .route(
+            "/api/stream/mjpeg/detect/stop",
+            post(stream::stop_frame_detect),
         )
         .merge(compatibility_routes())
         .route_layer(from_fn_with_state(state.clone(), protected));
@@ -41,11 +68,6 @@ pub fn build(state: AppState) -> Router {
 
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/ws", get(compatibility::not_implemented))
-        .route(
-            "/api/application/version",
-            get(compatibility::not_implemented),
-        )
         .route(
             "/api/application/update",
             post(compatibility::not_implemented),
@@ -53,10 +75,6 @@ fn compatibility_routes() -> Router<AppState> {
         .route(
             "/api/application/update/offline",
             post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/application/preview",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
         .route("/api/storage/image", get(compatibility::not_implemented))
         .route(
@@ -87,15 +105,6 @@ fn compatibility_routes() -> Router<AppState> {
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
         .route("/api/hid/reset", post(compatibility::not_implemented))
-        .route("/api/stream/mjpeg", get(compatibility::not_implemented))
-        .route(
-            "/api/stream/mjpeg/detect",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/stream/mjpeg/detect/stop",
-            post(compatibility::not_implemented),
-        )
         .route("/api/stream/h264", get(compatibility::not_implemented))
         .route(
             "/api/stream/h264/direct",
@@ -133,13 +142,10 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/network/dns",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
-        .route("/api/vm/info", get(compatibility::not_implemented))
-        .route("/api/vm/hardware", get(compatibility::not_implemented))
         .route(
             "/api/vm/gpio",
             get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
-        .route("/api/vm/screen", post(compatibility::not_implemented))
         .route("/api/vm/terminal", get(compatibility::not_implemented))
         .route(
             "/api/vm/script",
@@ -177,14 +183,6 @@ fn compatibility_routes() -> Router<AppState> {
         .route(
             "/api/vm/mouse-jiggler/",
             post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/vm/hostname",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/vm/web-title",
-            get(compatibility::not_implemented).post(compatibility::not_implemented),
         )
         .route("/api/vm/mdns", get(compatibility::not_implemented))
         .route("/api/vm/mdns/enable", post(compatibility::not_implemented))

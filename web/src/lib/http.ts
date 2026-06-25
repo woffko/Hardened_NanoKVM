@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 
-import { removeToken } from '@/lib/cookie.ts';
+import { getCsrfToken, removeToken } from '@/lib/cookie.ts';
 import { getBaseUrl } from '@/lib/service.ts';
 
 type Response = {
@@ -29,6 +29,11 @@ class Http {
     this.instance.interceptors.request.use((config) => {
       if (config.headers) {
         config.headers.Accept = 'application/json';
+        const method = config.method?.toLowerCase();
+        const csrfToken = getCsrfToken();
+        if (csrfToken && method && ['post', 'put', 'patch', 'delete'].includes(method)) {
+          config.headers['x-csrf-token'] = csrfToken;
+        }
       }
 
       return config;

@@ -4,15 +4,23 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
+[features]
+default = []
+linked-libkvm = []
+
 [dependencies]
 aes = "0.8"
 argon2 = { version = "0.5", features = ["std"] }
+async-stream = "0.3"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
+bcrypt = "0.16.0"
+bytes = "1"
 cbc = "0.1"
 cipher = "0.4"
 flate2 = "1"
 md-5 = "0.10"
+nix = { version = "0.29.0", features = ["net"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

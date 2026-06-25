@@ -21,7 +21,7 @@ import { Screen } from './screen';
 import { VirtualKeyboard } from './virtual-keyboard';
 
 function getVideoMode() {
-  const defaultVideoMode = window.RTCPeerConnection ? 'h264' : 'mjpeg';
+  const defaultVideoMode = 'mjpeg';
 
   const cookieVideoMode = storage.getVideoMode();
   if (cookieVideoMode) {

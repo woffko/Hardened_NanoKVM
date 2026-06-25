@@ -18,7 +18,18 @@ cd server-rust
 cargo build --release --target riscv64gc-unknown-linux-musl
 ```
 
-The repository `.cargo/config.toml` configures this target to use `rust-lld` with self-contained static linking. The release profile is optimized for small binaries with LTO, one codegen unit, strip, and aborting panics.
+The default RISC-V build is self-contained static musl. It is useful for API work, but it cannot use `dlopen` for `libkvm.so` on the device.
+
+For a video-enabled device binary linked directly against `server/dl_lib/libkvm.so`, copy NanoKVM runtime libraries into `server-rust/sysroot/lib` or point `NANOKVM_SYSROOT_LIB` at a directory containing `libc.so` and `libgcc_s.so.1`, then run:
+
+```sh
+cd server-rust
+./scripts/build-linked-libkvm.sh
+```
+
+That script builds with feature `linked-libkvm`, uses the NanoKVM dynamic loader `/lib/ld-musl-riscv64xthead.so.1`, and sets RPATH to `$ORIGIN/dl_lib`, `/tmp/server/dl_lib`, and `/kvmapp/server/dl_lib`.
+
+The release profile is optimized for small binaries with LTO, one codegen unit, strip, and aborting panics.
 
 From the repository root:
 
@@ -69,10 +80,26 @@ make web-app
 - Security headers middleware.
 - CSRF middleware for protected state-changing routes.
 - Static frontend serving from configured `paths.web_root`.
+- Legacy Go bcrypt password hash verification; new writes remain Argon2id.
+- Basic application endpoints:
+  - `GET /api/application/version`
+  - `GET /api/application/preview`
+  - `POST /api/application/preview`
+- Basic VM endpoints:
+  - `GET /api/vm/info`
+  - `GET /api/vm/hardware`
+  - `GET /api/vm/hostname`
+  - `POST /api/vm/hostname`
+  - `GET /api/vm/web-title`
+  - `POST /api/vm/web-title`
+  - `GET /api/vm/screen`
+  - `POST /api/vm/screen`
+- HID websocket at `GET /api/ws` for keyboard and mouse reports.
+- MJPEG stream at `GET /api/stream/mjpeg` plus frame-detect endpoints. Use the `linked-libkvm` build for real device video.
 - Safe command wrapper with argv-only allowlist and timeout.
 - Safe tar.gz member path validation and symlink-parent rejection.
 
-Most hardware/video/storage/update routes are registered as compatibility stubs. They return an implemented=false payload instead of silently pretending parity exists.
+Most storage/update/network/power routes are still registered as compatibility stubs. They return an implemented=false payload instead of silently pretending parity exists.
 
 ## Install On Test Device
 
@@ -94,9 +121,8 @@ ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server.go.bak /kvmapp/server/NanoKVM
 
 ## Known Limitations
 
-- Hardware/video/HID/storage/update routes are not ported yet.
-- Static frontend serving is wired through `tower_http::ServeDir`, but not device-tested.
+- H.264/WebRTC, storage, update, network, power, TLS, and extension routes are not ported yet.
 - HTTPS listener is not implemented; config is parsed for compatibility.
 - Session store is in memory; restart invalidates sessions rather than resurrecting revoked tokens.
-- Existing frontend still needs a first-boot setup flow for `/api/auth/setup` and CSRF header propagation before disabling the legacy `admin/admin` bootstrap.
+- Existing frontend still needs a first-boot setup flow for `/api/auth/setup` before disabling the legacy `admin/admin` bootstrap.
 - This repository does not contain the LicheeRV Nano SDK or Buildroot/rootfs flow needed for a full SD-card image. It can package `kvmapp`; a bootable `.img` must be generated from an SDK checkout or by patching a trusted base image.

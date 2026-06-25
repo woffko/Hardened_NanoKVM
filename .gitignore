@@ -2,6 +2,7 @@
 pnpm-debug.log*
 
 build/
+server-rust/sysroot/
 
 web/node_modules
 web/dist
