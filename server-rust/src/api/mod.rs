@@ -10,3 +10,4 @@ pub mod storage;
 pub mod stream;
 pub mod tailscale;
 pub mod vm;
+pub mod webrtc_stream;

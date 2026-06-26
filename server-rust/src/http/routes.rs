@@ -9,7 +9,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     api::{
         account, application, autostart, compatibility, download, hid, network, script, storage,
-        stream, tailscale, vm,
+        stream, tailscale, vm, webrtc_stream,
     },
     http::middleware::protected,
     security::headers::security_headers,
@@ -95,6 +95,7 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/vm/script/run", post(script::run_script))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
+        .route("/api/stream/h264", get(webrtc_stream::h264_webrtc_stream))
         .route("/api/stream/h264/direct", get(stream::h264_direct_stream))
         .route(
             "/api/stream/mjpeg/detect",
@@ -171,7 +172,6 @@ pub fn build(state: AppState) -> Router {
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
         .route("/api/hid/paste", post(compatibility::not_implemented))
-        .route("/api/stream/h264", get(compatibility::not_implemented))
         .route(
             "/api/extensions/tailscale/install",
             post(compatibility::not_implemented),

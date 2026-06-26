@@ -55,6 +55,14 @@ enum StreamMode {
     H264,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H264Screen {
+    pub width: u16,
+    pub height: u16,
+    pub fps: u64,
+    pub bit_rate: u16,
+}
+
 impl Default for Screen {
     fn default() -> Self {
         Self {
@@ -297,6 +305,20 @@ fn current_screen() -> Screen {
     let mut screen = SCREEN.lock().expect("screen lock should not be poisoned");
     normalize_screen(&mut screen);
     *screen
+}
+
+pub fn current_h264_screen() -> H264Screen {
+    let screen = current_screen();
+    H264Screen {
+        width: screen.width,
+        height: screen.height,
+        fps: screen.fps.max(1),
+        bit_rate: screen.bit_rate,
+    }
+}
+
+pub fn h264_frame_duration(fps: u64) -> Duration {
+    Duration::from_millis((1000 / fps.max(1)).max(1))
 }
 
 fn normalize_screen(screen: &mut Screen) {
