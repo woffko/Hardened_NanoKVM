@@ -1,12 +1,16 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path as AxumPath, Query},
+    extract::{
+        Path as AxumPath, Query,
+        ws::{CloseFrame as AxumCloseFrame, Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use flate2::read::GzDecoder;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use sha2::{Digest, Sha512};
@@ -22,6 +26,13 @@ use std::{
 };
 use tar::Archive;
 use tokio::{net::TcpStream, task, time};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{
+        Message as TungsteniteMessage, client::IntoClientRequest, http::header as ws_header,
+    },
+};
+use tracing::debug;
 
 use crate::{
     AppError, Result,
@@ -46,6 +57,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_READ_TIMEOUT_MS: i32 = 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS: i32 = 10_000;
 const DEFAULT_PING_INTERVAL_MS: i32 = 30_000;
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -62,6 +74,11 @@ const CODE_RUNTIME_UNAVAILABLE: &str = "RUNTIME_UNAVAILABLE";
 const CODE_RUNTIME_START_FAILED: &str = "RUNTIME_START_FAILED";
 const CODE_SESSION_ID_MISSING: &str = "SESSION_ID_MISSING";
 const CODE_SESSION_ID_INVALID: &str = "SESSION_ID_INVALID";
+
+const CLOSE_NORMAL: u16 = 1000;
+const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
+const CLOSE_PICOCLAW_TAKEN_OVER: u16 = 4004;
+const CLOSE_UPSTREAM_CLOSED: u16 = 4005;
 
 const SESSION_LOCK_DURATION: Duration = Duration::from_secs(30 * 60);
 const CACHED_FRAME_MAX_AGE: Duration = Duration::from_secs(2);
@@ -305,6 +322,45 @@ struct JsonRpcError {
     code: i32,
     message: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct GatewayQuery {
+    session_id: String,
+}
+
+impl Default for GatewayQuery {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GatewayClose {
+    code: u16,
+    reason: String,
+}
+
+impl GatewayClose {
+    fn new(code: u16, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+
+    fn normal(reason: impl Into<String>) -> Self {
+        Self::new(CLOSE_NORMAL, reason)
+    }
+
+    fn upstream(reason: impl Into<String>) -> Self {
+        Self::new(CLOSE_UPSTREAM_CLOSED, reason)
+    }
+}
+
+type GatewayUpstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 impl RuntimeStatus {
     fn checking() -> Self {
@@ -763,6 +819,77 @@ pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
     ))
 }
 
+pub async fn gateway_ws(
+    Query(query): Query<GatewayQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response> {
+    let session_id = gateway_session_id(&query);
+    if let Err(err) = ensure_session_lock(&session_id) {
+        return Ok(picoclaw_error_data_status(StatusCode::CONFLICT, err));
+    }
+
+    if !is_installed() {
+        release_session_lock(&session_id);
+        release_all_hid_state();
+        update_runtime_gateway_state(
+            false,
+            "not_installed",
+            Some("picoclaw is not installed".to_string()),
+            None,
+        );
+        return Ok(picoclaw_error_with_session(
+            CODE_RUNTIME_UNAVAILABLE,
+            "picoclaw is not installed",
+            session_id,
+        ));
+    }
+
+    if let Err(err) = ensure_startup_defaults() {
+        release_session_lock(&session_id);
+        release_all_hid_state();
+        update_runtime_gateway_state(false, "config_error", Some(err.to_string()), None);
+        return Ok(picoclaw_error_with_session(
+            CODE_RUNTIME_UNAVAILABLE,
+            err.to_string(),
+            session_id,
+        ));
+    }
+
+    let settings = match load_gateway_settings() {
+        Ok(settings) => settings,
+        Err(err) => {
+            release_session_lock(&session_id);
+            release_all_hid_state();
+            update_runtime_gateway_state(false, "config_error", Some(err.to_string()), None);
+            return Ok(picoclaw_error_with_session(
+                CODE_RUNTIME_UNAVAILABLE,
+                err.to_string(),
+                session_id,
+            ));
+        }
+    };
+
+    update_runtime_gateway_state(false, "connecting", None, Some(&session_id));
+    let upstream = match connect_gateway_upstream(&settings, &session_id).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            release_session_lock(&session_id);
+            release_all_hid_state();
+            update_runtime_gateway_state(false, "unavailable", Some(err.clone()), None);
+            return Ok(picoclaw_error_with_session(
+                CODE_RUNTIME_UNAVAILABLE,
+                err,
+                session_id,
+            ));
+        }
+    };
+
+    update_runtime_gateway_state(true, "ready", None, Some(&session_id));
+    Ok(ws
+        .on_upgrade(move |socket| handle_gateway_socket(session_id, socket, upstream, settings))
+        .into_response())
+}
+
 pub async fn unsupported_local_route() -> Result<Response> {
     Ok(picoclaw_error(
         CODE_RUNTIME_UNAVAILABLE,
@@ -871,6 +998,269 @@ fn session_lock_owner() -> String {
     };
     lock.clear_expired(Instant::now());
     lock.owner_session_id.clone()
+}
+
+fn gateway_session_id(query: &GatewayQuery) -> String {
+    let session_id = query.session_id.trim();
+    if session_id.is_empty() {
+        format!("rust-{}", random_token(16))
+    } else {
+        session_id.to_string()
+    }
+}
+
+async fn connect_gateway_upstream(
+    settings: &GatewaySettings,
+    session_id: &str,
+) -> std::result::Result<GatewayUpstream, String> {
+    let url = build_gateway_url(settings, session_id);
+    let mut request = url
+        .into_client_request()
+        .map_err(|err| format!("invalid gateway url: {err}"))?;
+
+    if !settings.token.is_empty() {
+        let header_value = format!("Bearer {}", settings.token)
+            .parse()
+            .map_err(|err| format!("invalid gateway token: {err}"))?;
+        request
+            .headers_mut()
+            .insert(ws_header::AUTHORIZATION, header_value);
+    }
+
+    let timeout = Duration::from_millis(settings.connect_timeout_ms);
+    match time::timeout(timeout, connect_async(request)).await {
+        Ok(Ok((upstream, _))) => Ok(upstream),
+        Ok(Err(err)) => Err(format!("gateway is unavailable: {err}")),
+        Err(_) => Err("gateway connection timed out".to_string()),
+    }
+}
+
+fn build_gateway_url(settings: &GatewaySettings, session_id: &str) -> String {
+    let mut query = format!("session_id={}", urlencoding::encode(session_id));
+    if settings.allow_token_query && !settings.token.is_empty() {
+        query.push_str("&token=");
+        query.push_str(&urlencoding::encode(&settings.token));
+    }
+
+    format!(
+        "ws://{}:{}/pico/ws?{}",
+        settings.gateway_host, settings.gateway_port, query
+    )
+}
+
+async fn handle_gateway_socket(
+    session_id: String,
+    socket: WebSocket,
+    upstream: GatewayUpstream,
+    settings: GatewaySettings,
+) {
+    let (mut downstream_tx, mut downstream_rx) = socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    let mut ping = time::interval(Duration::from_millis(settings.ping_interval_ms));
+    let read_timeout = Duration::from_millis(settings.read_timeout_ms.max(1) as u64);
+    let write_timeout = Duration::from_millis(settings.write_timeout_ms.max(1) as u64);
+    let mut read_deadline = Box::pin(time::sleep(read_timeout));
+
+    ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    debug!(session_id, "picoclaw gateway websocket connected");
+
+    let close = loop {
+        tokio::select! {
+            _ = &mut read_deadline => {
+                break GatewayClose::upstream("gateway read timeout");
+            }
+            downstream = downstream_rx.next() => {
+                read_deadline.as_mut().reset(time::Instant::now() + read_timeout);
+                let message = match downstream {
+                    Some(Ok(message)) => message,
+                    Some(Err(err)) => {
+                        break GatewayClose::normal(format!("downstream closed: {err}"));
+                    }
+                    None => break GatewayClose::normal("downstream closed"),
+                };
+
+                if let Err(close) = renew_gateway_session(&session_id) {
+                    break close;
+                }
+                if let Err(close) = validate_gateway_message_size(axum_message_len(&message), settings.max_message_bytes) {
+                    break close;
+                }
+
+                let is_close = matches!(message, AxumWsMessage::Close(_));
+                match time::timeout(write_timeout, upstream_tx.send(axum_to_tungstenite_message(message))).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => break GatewayClose::upstream(format!("upstream write failed: {err}")),
+                    Err(_) => break GatewayClose::upstream("upstream write timed out"),
+                }
+                if is_close {
+                    break GatewayClose::normal("downstream closed");
+                }
+            }
+            upstream = upstream_rx.next() => {
+                read_deadline.as_mut().reset(time::Instant::now() + read_timeout);
+                let message = match upstream {
+                    Some(Ok(message)) => message,
+                    Some(Err(err)) => break GatewayClose::upstream(format!("upstream closed: {err}")),
+                    None => break GatewayClose::upstream("upstream closed"),
+                };
+
+                if let Err(close) = renew_gateway_session(&session_id) {
+                    break close;
+                }
+                if let Err(close) = validate_gateway_message_size(tungstenite_message_len(&message), settings.max_message_bytes) {
+                    break close;
+                }
+
+                let is_close = matches!(message, TungsteniteMessage::Close(_));
+                let Some(message) = tungstenite_to_axum_message(message) else {
+                    break GatewayClose::upstream("upstream sent unsupported binary message");
+                };
+                match time::timeout(write_timeout, downstream_tx.send(message)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => break GatewayClose::normal(format!("downstream write failed: {err}")),
+                    Err(_) => break GatewayClose::normal("downstream write timed out"),
+                }
+                if is_close {
+                    break GatewayClose::upstream("upstream closed");
+                }
+            }
+            _ = ping.tick() => {
+                if let Err(close) = renew_gateway_session(&session_id) {
+                    break close;
+                }
+                match time::timeout(
+                    write_timeout,
+                    upstream_tx.send(TungsteniteMessage::Ping(Bytes::from_static(b"upstream"))),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break GatewayClose::upstream("upstream ping failed"),
+                    Err(_) => break GatewayClose::upstream("upstream ping timed out"),
+                }
+                match time::timeout(
+                    write_timeout,
+                    downstream_tx.send(AxumWsMessage::Ping(Bytes::from_static(b"downstream"))),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break GatewayClose::normal("downstream ping failed"),
+                    Err(_) => break GatewayClose::normal("downstream ping timed out"),
+                }
+            }
+        }
+    };
+
+    if close.code != CLOSE_NORMAL {
+        let _ = downstream_tx
+            .send(AxumWsMessage::Close(Some(AxumCloseFrame {
+                code: close.code,
+                reason: close.reason.clone().into(),
+            })))
+            .await;
+    }
+    let _ = upstream_tx.send(TungsteniteMessage::Close(None)).await;
+
+    release_session_lock(&session_id);
+    release_all_hid_state();
+    update_runtime_gateway_state(false, "closed", Some(close.reason.clone()), None);
+    debug!(
+        session_id,
+        code = close.code,
+        reason = close.reason,
+        "picoclaw gateway websocket closed"
+    );
+}
+
+fn renew_gateway_session(session_id: &str) -> std::result::Result<(), GatewayClose> {
+    ensure_session_lock(session_id)
+        .map_err(|err| GatewayClose::new(CLOSE_PICOCLAW_TAKEN_OVER, err.message))
+}
+
+fn validate_gateway_message_size(
+    len: usize,
+    limit: usize,
+) -> std::result::Result<(), GatewayClose> {
+    if len > limit {
+        Err(GatewayClose::new(
+            CLOSE_MESSAGE_TOO_BIG,
+            "gateway message is too large",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn axum_message_len(message: &AxumWsMessage) -> usize {
+    match message {
+        AxumWsMessage::Text(text) => text.as_str().len(),
+        AxumWsMessage::Binary(data) | AxumWsMessage::Ping(data) | AxumWsMessage::Pong(data) => {
+            data.len()
+        }
+        AxumWsMessage::Close(frame) => frame
+            .as_ref()
+            .map(|frame| frame.reason.as_str().len())
+            .unwrap_or(0),
+    }
+}
+
+fn tungstenite_message_len(message: &TungsteniteMessage) -> usize {
+    match message {
+        TungsteniteMessage::Text(text) => text.as_str().len(),
+        TungsteniteMessage::Binary(data)
+        | TungsteniteMessage::Ping(data)
+        | TungsteniteMessage::Pong(data) => data.len(),
+        TungsteniteMessage::Close(frame) => frame
+            .as_ref()
+            .map(|frame| frame.reason.as_str().len())
+            .unwrap_or(0),
+        TungsteniteMessage::Frame(frame) => frame.payload().len(),
+    }
+}
+
+fn axum_to_tungstenite_message(message: AxumWsMessage) -> TungsteniteMessage {
+    match message {
+        AxumWsMessage::Text(text) => TungsteniteMessage::Text(text.as_str().to_string().into()),
+        AxumWsMessage::Binary(data) => TungsteniteMessage::Binary(data),
+        AxumWsMessage::Ping(data) => TungsteniteMessage::Ping(data),
+        AxumWsMessage::Pong(data) => TungsteniteMessage::Pong(data),
+        AxumWsMessage::Close(_) => TungsteniteMessage::Close(None),
+    }
+}
+
+fn tungstenite_to_axum_message(message: TungsteniteMessage) -> Option<AxumWsMessage> {
+    match message {
+        TungsteniteMessage::Text(text) => Some(AxumWsMessage::Text(text.as_str().into())),
+        TungsteniteMessage::Ping(data) => Some(AxumWsMessage::Ping(data)),
+        TungsteniteMessage::Pong(data) => Some(AxumWsMessage::Pong(data)),
+        TungsteniteMessage::Close(_) => Some(AxumWsMessage::Close(None)),
+        TungsteniteMessage::Binary(_) | TungsteniteMessage::Frame(_) => None,
+    }
+}
+
+fn update_runtime_gateway_state(
+    ready: bool,
+    status: &str,
+    last_error: Option<String>,
+    session_id: Option<&str>,
+) {
+    let Ok(mut current) = RUNTIME_STATUS.write() else {
+        return;
+    };
+    current.ready = ready;
+    current.status = status.to_string();
+    current.config_error = if status == "config_error" {
+        last_error.clone()
+    } else {
+        None
+    };
+    current.last_error = last_error;
+    current.current_session = session_id
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .map(ToOwned::to_owned);
+    current.checked_at = Some(now_string());
 }
 
 fn capture_screenshot_blocking(
@@ -2223,10 +2613,17 @@ fn installed_status(settings: Option<&GatewaySettings>) -> RuntimeStatus {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GatewaySettings {
     gateway_host: String,
     gateway_port: u16,
+    token: String,
+    allow_token_query: bool,
+    connect_timeout_ms: u64,
+    read_timeout_ms: i32,
+    write_timeout_ms: i32,
+    ping_interval_ms: u64,
+    max_message_bytes: usize,
     model_configured: bool,
     model_name: String,
     target_model_name: String,
@@ -2247,6 +2644,34 @@ fn load_gateway_settings() -> Result<GatewaySettings> {
         .and_then(|port| u16::try_from(port).ok())
         .filter(|port| *port > 0)
         .unwrap_or(DEFAULT_GATEWAY_PORT);
+    let pico_settings = doc.raw.pointer("/channel_list/pico/settings");
+    let token = resolved_pico_token(&doc.raw, &doc.security);
+    let allow_token_query = pico_settings
+        .and_then(|settings| settings.get("allow_token_query"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let read_timeout_ms = pico_settings
+        .and_then(|settings| settings.get("read_timeout"))
+        .and_then(JsonValue::as_i64)
+        .and_then(seconds_to_millis_i32)
+        .unwrap_or(DEFAULT_READ_TIMEOUT_MS);
+    let write_timeout_ms = pico_settings
+        .and_then(|settings| settings.get("write_timeout"))
+        .and_then(JsonValue::as_i64)
+        .and_then(seconds_to_millis_i32)
+        .unwrap_or(DEFAULT_WRITE_TIMEOUT_MS);
+    let ping_interval_ms = pico_settings
+        .and_then(|settings| settings.get("ping_interval"))
+        .and_then(JsonValue::as_u64)
+        .map(|seconds| seconds.saturating_mul(1000))
+        .filter(|millis| *millis > 0)
+        .unwrap_or(DEFAULT_PING_INTERVAL_MS as u64);
+    let max_message_bytes = pico_settings
+        .and_then(|settings| settings.get("max_message_bytes"))
+        .and_then(JsonValue::as_u64)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(DEFAULT_MAX_MESSAGE_BYTES);
 
     let target_model_name = doc
         .raw
@@ -2265,10 +2690,24 @@ fn load_gateway_settings() -> Result<GatewaySettings> {
     Ok(GatewaySettings {
         gateway_host,
         gateway_port,
+        token,
+        allow_token_query,
+        connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
+        read_timeout_ms,
+        write_timeout_ms,
+        ping_interval_ms,
+        max_message_bytes,
         model_configured,
         model_name,
         target_model_name,
     })
+}
+
+fn seconds_to_millis_i32(seconds: i64) -> Option<i32> {
+    if seconds <= 0 {
+        return None;
+    }
+    i32::try_from(seconds.saturating_mul(1000)).ok()
 }
 
 struct ConfigDocument {
@@ -2500,6 +2939,110 @@ fn save_json(path: &Path, value: &JsonValue) -> Result<()> {
     Ok(())
 }
 
+fn save_yaml(path: &Path, value: &serde_yaml::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = serde_yaml::to_string(value)
+        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw security: {err}")))?;
+    fs::write(path, data)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> String {
+    let security_token = security
+        .get("channel_list")
+        .and_then(|channels| channels.get("pico"))
+        .and_then(|pico| {
+            pico.get("settings")
+                .and_then(|settings| settings.get("token"))
+                .or_else(|| pico.get("token"))
+        })
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    if let Some(token) = security_token {
+        return token.to_string();
+    }
+
+    config
+        .pointer("/channel_list/pico/settings/token")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn ensure_pico_security_token(doc: &mut ConfigDocument) -> Result<String> {
+    let token = {
+        let current = resolved_pico_token(&doc.raw, &doc.security);
+        if current.is_empty() {
+            random_token(36)
+        } else {
+            current
+        }
+    };
+
+    set_pico_security_token(&mut doc.security, &token);
+    Ok(token)
+}
+
+fn set_pico_security_token(security: &mut serde_yaml::Value, token: &str) {
+    if !security.is_mapping() {
+        *security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let root = security.as_mapping_mut().expect("security mapping");
+    let channel_list_key = serde_yaml::Value::String("channel_list".to_string());
+    root.entry(channel_list_key.clone())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !root[&channel_list_key].is_mapping() {
+        root.insert(
+            channel_list_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+
+    let channel_list = root
+        .get_mut(&channel_list_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("channel_list mapping");
+    let pico_key = serde_yaml::Value::String("pico".to_string());
+    channel_list
+        .entry(pico_key.clone())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !channel_list[&pico_key].is_mapping() {
+        channel_list.insert(
+            pico_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+
+    let pico = channel_list
+        .get_mut(&pico_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("pico mapping");
+    let settings_key = serde_yaml::Value::String("settings".to_string());
+    pico.entry(settings_key.clone())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !pico[&settings_key].is_mapping() {
+        pico.insert(
+            settings_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+
+    let settings = pico
+        .get_mut(&settings_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("pico settings mapping");
+    settings.insert(
+        serde_yaml::Value::String("token".to_string()),
+        serde_yaml::Value::String(token.to_string()),
+    );
+}
+
 fn save_model_secret(
     security: &mut serde_yaml::Value,
     path: &Path,
@@ -2537,15 +3080,12 @@ fn save_model_secret(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let data = serde_yaml::to_string(security)
-        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw security: {err}")))?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    save_yaml(path, security)
 }
 
 fn ensure_startup_defaults() -> Result<()> {
     let mut doc = load_config_document()?;
+    let _ = ensure_pico_security_token(&mut doc)?;
     let raw = doc
         .raw
         .as_object_mut()
@@ -2592,7 +3132,8 @@ fn ensure_startup_defaults() -> Result<()> {
     );
     let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
     headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
-    save_json(&doc.config_path, &doc.raw)
+    save_json(&doc.config_path, &doc.raw)?;
+    save_yaml(&doc.security_path, &doc.security)
 }
 
 fn ensure_object_path<'a>(
@@ -2709,6 +3250,19 @@ fn picoclaw_error(code: &str, message: impl Into<String>) -> Response {
 fn picoclaw_error_data(err: PicoclawErrorData) -> Response {
     (
         StatusCode::OK,
+        Json(PicoclawErrorBody {
+            code: err.code.to_string(),
+            message: err.message,
+            session_id: err.session_id,
+            index: err.index,
+        }),
+    )
+        .into_response()
+}
+
+fn picoclaw_error_data_status(status: StatusCode, err: PicoclawErrorData) -> Response {
+    (
+        status,
         Json(PicoclawErrorBody {
             code: err.code.to_string(),
             message: err.message,
@@ -2893,5 +3447,56 @@ mod tests {
         let instruction = build_load_image_instruction("/tmp/image.png", "");
         assert!(instruction.contains("\"path\":\"/tmp/image.png\""));
         assert!(instruction.contains("Describe the image briefly."));
+    }
+
+    #[test]
+    fn gateway_url_matches_picoclaw_contract() {
+        let settings = GatewaySettings {
+            gateway_host: "127.0.0.1".to_string(),
+            gateway_port: 18790,
+            token: "token value".to_string(),
+            allow_token_query: true,
+            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
+            read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
+            write_timeout_ms: DEFAULT_WRITE_TIMEOUT_MS,
+            ping_interval_ms: DEFAULT_PING_INTERVAL_MS as u64,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            model_configured: true,
+            model_name: "model".to_string(),
+            target_model_name: "model".to_string(),
+        };
+
+        assert_eq!(
+            build_gateway_url(&settings, "session 1"),
+            "ws://127.0.0.1:18790/pico/ws?session_id=session%201&token=token%20value"
+        );
+    }
+
+    #[test]
+    fn resolved_pico_token_prefers_security_config() {
+        let config = json!({
+            "channel_list": {
+                "pico": {
+                    "settings": {
+                        "token": "config-token"
+                    }
+                }
+            }
+        });
+        let security: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+channel_list:
+  pico:
+    settings:
+      token: security-token
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(resolved_pico_token(&config, &security), "security-token");
+        assert_eq!(
+            resolved_pico_token(&config, &serde_yaml::Value::Null),
+            "config-token"
+        );
     }
 }

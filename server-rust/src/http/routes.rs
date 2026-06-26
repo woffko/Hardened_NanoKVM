@@ -222,10 +222,7 @@ fn compatibility_routes() -> Router<AppState> {
         )
         .route("/api/picoclaw/runtime/start", post(picoclaw::start_runtime))
         .route("/api/picoclaw/runtime/stop", post(picoclaw::stop_runtime))
-        .route(
-            "/api/picoclaw/gateway/ws",
-            get(picoclaw::unsupported_local_route),
-        )
+        .route("/api/picoclaw/gateway/ws", get(picoclaw::gateway_ws))
 }
 
 pub fn picoclaw_loopback_routes() -> Router<AppState> {
