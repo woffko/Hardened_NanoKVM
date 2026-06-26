@@ -86,6 +86,11 @@ pub fn set_hdmi(enabled: bool) -> Result<u8> {
     Ok(vision()?.lock().map_err(lock_error)?.set_hdmi(enabled))
 }
 
+pub fn init() -> Result<()> {
+    let _ = vision()?;
+    Ok(())
+}
+
 fn vision() -> Result<&'static Mutex<KvmVision>> {
     VISION
         .as_ref()

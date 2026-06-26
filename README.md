@@ -1,4 +1,4 @@
-# NanoKVM
+# Hardened NanoKVM
 
 <div align="center">
   <br>
@@ -12,6 +12,108 @@
   </h3>
   <br>
 </div>
+
+## Hardened NanoKVM
+
+Hardened NanoKVM is an alpha fork of Sipeed NanoKVM focused on replacing the
+privileged Go web backend with a smaller Rust backend while keeping the existing
+NanoKVM hardware, web UI, native video pipeline, and service layout.
+
+The project goal is not to rewrite the whole firmware. The Rust backend remains
+a drop-in replacement for `NanoKVM-Server` and continues to use the existing
+`kvm_system`, `libkvm.so`, USB gadget setup, Maix multimedia stack, and frontend.
+The original Go backend is still kept as a fallback for comparison and recovery.
+
+The web UI currently brands this fork as **Hardened NanoKVM** and reports
+application version **alfa - 0.1**.
+
+## Current Alpha Status
+
+This fork is usable for active device testing, but it is not a finished firmware
+release. The current development flow is to run the Rust backend on a real
+NanoKVM device, compare behavior against the original Go backend, and port or
+harden one subsystem at a time.
+
+| Area | Status |
+| --- | --- |
+| Rust backend | Runs on the device as a replacement `NanoKVM-Server`. |
+| Go fallback | Preserved and switchable from the web UI. |
+| Web UI | Existing React UI is retained, with Hardened branding and a backend switch. |
+| HTTPS | Implemented in Rust with HTTP-to-HTTPS redirect and existing cert config support. |
+| Authentication | Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. |
+| Video | MJPEG works. H.264 Direct is enabled and verified on hardware. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
+| HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
+| Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
+| Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote image download is intentionally disabled in Rust for now. |
+| Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
+| Updates | Online/offline firmware update routes are intentionally blocked until signed update verification is implemented. |
+| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a full SDK-from-scratch image build is not included. |
+
+## What Changed In This Fork
+
+- Added `server-rust/`, a Rust backend that preserves the existing API envelope
+  and device runtime layout.
+- Added hardened auth/session handling: generated per-device secret, CSRF token
+  binding, Origin checks, login lockout, explicit session revocation, and safer
+  password storage.
+- Added Rust implementations for the main browser workflows: login, static UI,
+  MJPEG, HID, terminal, storage, network, Tailscale, scripts, and many VM
+  settings routes.
+- Added safer file and command handling for script upload/run, autostart files,
+  ISO upload, storage image paths, update archives, and privileged shell calls.
+- Added a web UI switch under **Settings > Device > Advanced**:
+  **Enable Hardened Backend** toggles between Rust/Hardened and the original Go
+  backend.
+- Added persistent backend binaries under `/kvmapp/backends/`:
+  `NanoKVM-Server.rust` and `NanoKVM-Server.go`.
+- Made `S95nanokvm` startup idempotent for testing: stale `S95nanokvm.*`
+  backup scripts are removed from boot autostart, existing runtime processes
+  are stopped before copy/start, and HTTPS port 443 is explicitly allowed.
+- Updated branding: login screen, toolbar, and About page identify the Hardened
+  build, and the toolbar uses a Rust gear icon next to `Hardened`.
+
+## Backend Switching
+
+For test devices, backend switching is handled by scripts installed under
+`/etc/kvm/scripts/`:
+
+```text
+switch-backend-rust.sh
+switch-backend-go.sh
+```
+
+Both scripts copy the selected backend into `/kvmapp/server/NanoKVM-Server` and
+then use the stock `/etc/init.d/S95nanokvm restart` flow. This keeps the upstream
+runtime behavior while avoiding extra backup binaries inside `/kvmapp/server`,
+which would otherwise consume too much `/tmp` space during service startup.
+
+The web UI switch calls these scripts through the existing custom-script API, so
+it works from either backend. When the Rust backend is active,
+`GET /api/health` returns:
+
+```json
+{"code":0,"msg":"success","data":{"backend":"rust","phase":"skeleton","status":"ok"}}
+```
+
+On the Go backend, `/api/health` is expected to return 404.
+
+## Still Not Finished
+
+- Full API parity is not complete. Some routes are implemented for compatibility
+  but still need deeper behavior and edge-case testing against the Go backend.
+- H.264 WebRTC needs more browser/ICE stress testing across reconnects and
+  browser variants. H.264 Direct has been verified against the Rust backend on
+  hardware.
+- Update handling remains disabled until signed update verification is designed
+  and implemented.
+- Remote ISO download is disabled in Rust; local browser ISO upload is the
+  supported path for now.
+- First-boot/account setup UX still needs product-level polish. Existing test
+  devices can keep their current account file; new default `admin/admin`
+  bootstrap is disabled unless explicitly enabled for isolated compatibility
+  testing.
+- The repository does not build a full boot/rootfs image from SDK sources. The
+  current SD-card image flow patches a trusted upstream NanoKVM base image.
 
 ## 🌟 What is NanoKVM?
 
@@ -76,6 +178,9 @@ Choose the NanoKVM model that best fits your deployment:
 │   └── system      # Essential system components
 ├── web             # NanoKVM Front-end (UI)
 ├── server          # NanoKVM Back-end (Service)
+├── server-rust     # Hardened Rust backend replacement
+├── scripts/nanokvm # Device-side helper scripts used while testing this fork
+├── docs            # Backend inventory, security notes, and Rust backend status
 ├── support         # Auxiliary modules (Image subsystem, status, updates, OLED, HID, etc.)
 ├── ...
 ```
@@ -86,6 +191,7 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 
 - **System support modules:** Build and update the low-level hardware support components in [support/sg2002/README.md](support/sg2002/README.md).
 - **Backend service:** Set up, build, and understand the Go service in [server/README.md](server/README.md).
+- **Hardened Rust backend:** Build, package, and test the Rust replacement in [docs/rust-backend.md](docs/rust-backend.md).
 - **Frontend UI:** Develop, lint, and build the React interface in [web/README.md](web/README.md).
 
 > Backend compilation and runtime validation require the target toolchain or a NanoKVM device. See the module-specific guides above for the latest development workflow.

@@ -5,6 +5,7 @@ use axum::{
 };
 use nanokvm_rust_server::{
     config::Config,
+    ffi::kvm,
     http::{
         routes,
         tls::{self, ClientAddr},
@@ -22,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::load()?;
     config.log_runtime_warnings();
+    initialize_kvm();
 
     if config.proto == "https" {
         run_https(config).await?;
@@ -30,6 +32,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn initialize_kvm() {
+    match kvm::init() {
+        Ok(()) => info!("initialized NanoKVM video backend"),
+        Err(err) => warn!(error = ?err, "NanoKVM video backend initialization failed"),
+    }
 }
 
 async fn run_http(config: Config) -> Result<(), Box<dyn std::error::Error>> {

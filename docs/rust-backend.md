@@ -1,130 +1,154 @@
-# Rust Backend Skeleton
+# Rust Backend Status
 
-The Rust backend lives in `server-rust/`. It is intentionally separate from the current Go backend until API parity is reached.
+The Rust backend lives in `server-rust/`. It is an alpha replacement for the
+privileged Go `NanoKVM-Server` process and keeps the existing NanoKVM runtime:
+`kvm_system`, `libkvm.so`, USB gadget scripts, the Maix multimedia stack, and
+the React frontend.
+
+The backend is tested on real NanoKVM hardware at this stage. API parity is not
+complete, but the main browser workflows are now implemented deeply enough for
+interactive device testing.
 
 ## Build
 
-```sh
-cd server-rust
-cargo test
-cargo build --release
-```
-
-For the NanoKVM RISC-V target, install the target/toolchain and build with the target linker from the existing builder environment:
+Run the normal host checks from the repository root:
 
 ```sh
-rustup target add riscv64gc-unknown-linux-musl
-cd server-rust
-cargo build --release --target riscv64gc-unknown-linux-musl
+cargo test --manifest-path server-rust/Cargo.toml
+make web-app
 ```
 
-The default RISC-V build is self-contained static musl. It is useful for API work, but it cannot use `dlopen` for `libkvm.so` on the device.
-
-For a video-enabled device binary linked directly against `server/dl_lib/libkvm.so`, copy NanoKVM runtime libraries into `server-rust/sysroot/lib` or point `NANOKVM_SYSROOT_LIB` at a directory containing `libc.so` and `libgcc_s.so.1`, then run:
-
-```sh
-cd server-rust
-./scripts/build-linked-libkvm.sh
-```
-
-That script builds with feature `linked-libkvm`, uses the NanoKVM dynamic loader `/lib/ld-musl-riscv64xthead.so.1`, and sets RPATH to `$ORIGIN/dl_lib`, `/tmp/server/dl_lib`, and `/kvmapp/server/dl_lib`.
-
-The release profile is optimized for small binaries with LTO, one codegen unit, strip, and aborting panics.
-
-From the repository root:
-
-```sh
-make rust-app
-make rust-kvmapp
-```
-
-For the target device:
+For a video-enabled NanoKVM RISC-V binary, use the linked `libkvm` build. Copy
+the NanoKVM runtime libraries into `server-rust/sysroot/lib` or point
+`NANOKVM_SYSROOT_LIB` at a directory containing `libc.so` and `libgcc_s.so.1`,
+then run:
 
 ```sh
 rustup target add riscv64gc-unknown-linux-musl
-make rust-app RUST_TARGET=riscv64gc-unknown-linux-musl
-make rust-kvmapp RUST_TARGET=riscv64gc-unknown-linux-musl
+server-rust/scripts/build-linked-libkvm.sh
 ```
 
-`make rust-kvmapp` writes a deployable application package to:
+That script builds with feature `linked-libkvm`, uses the NanoKVM dynamic loader
+`/lib/ld-musl-riscv64xthead.so.1`, and sets RPATH to `$ORIGIN/dl_lib`,
+`/tmp/server/dl_lib`, and `/kvmapp/server/dl_lib`.
+
+Package a deployable `kvmapp` layout with:
+
+```sh
+RUST_TARGET=riscv64gc-unknown-linux-musl scripts/package-rust-kvmapp.sh
+```
+
+The package is written to:
 
 ```text
 build/kvmapp-rust/kvmapp/
 build/artifacts/nanokvm-kvmapp-rust.tar.gz
 ```
 
-If `web/dist` exists, it is copied to `kvmapp/server/web`. Build it with:
+## SD Image
+
+The repository still does not build a full boot/rootfs image from SDK sources.
+The `sd-image` target patches a trusted NanoKVM base image with the current
+Rust `kvmapp` package:
 
 ```sh
 make web-app
+server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl scripts/package-rust-kvmapp.sh
+make sd-image
 ```
 
-## Current Implemented Slice
+By default, `make sd-image` uses:
 
-- Config loader compatible with `/etc/kvm/server.yaml` and additional hardening fields.
-- Generated per-device session secret at `/etc/kvm/session_secret` with `0600`.
-- Existing `code/msg/data` response envelope.
-- Auth endpoints:
-  - `POST /api/auth/setup`
-  - `POST /api/auth/login`
-  - `POST /api/auth/logout`
-  - `GET /api/auth/account`
-  - `GET /api/auth/password`
-  - `POST /api/auth/password`
-- Legacy `admin/admin` bootstrap is disabled by default. Set `security.allow_default_admin=true`
-  only for temporary compatibility on isolated test devices.
-- Argon2id password hashing.
-- Opaque session tokens with CSRF token binding.
-- Frontend-compatible readable `nano-kvm-token` cookie for the existing React auth guard.
-- Logout and password-change session revocation.
-- Login rate limiting with secure default lockout.
-- Security headers middleware.
-- CSRF middleware for protected state-changing routes.
+```text
+build/sd-image/20260123_NanoKVM_Rev1_4_2.img
+```
+
+Set `NANOKVM_BASE_IMAGE=/path/to/base.img` to patch a different trusted base
+image. The output is written under `build/sd-image/` as `.img`, `.img.xz`, and
+`.sha256`.
+
+The generated image installs:
+
+- Rust as the active `/kvmapp/server/NanoKVM-Server`.
+- Original Go backend backup at `/kvmapp/backends/NanoKVM-Server.go`.
+- Rust backend backup at `/kvmapp/backends/NanoKVM-Server.rust`.
+- Backend switch scripts under `/etc/kvm/scripts/`.
+- `/etc/kvm/backend` with initial value `rust`.
+
+## Implemented
+
+- Rust HTTP and HTTPS listeners, including HTTP-to-HTTPS redirect.
 - Static frontend serving from configured `paths.web_root`.
-- Legacy Go bcrypt password hash verification; new writes remain Argon2id.
-- Basic application endpoints:
-  - `GET /api/application/version`
-  - `GET /api/application/preview`
-  - `POST /api/application/preview`
-- Basic VM endpoints:
-  - `GET /api/vm/info`
-  - `GET /api/vm/hardware`
-  - `GET /api/vm/hostname`
-  - `POST /api/vm/hostname`
-  - `GET /api/vm/web-title`
-  - `POST /api/vm/web-title`
-  - `GET /api/vm/screen`
-  - `POST /api/vm/screen`
-- HID websocket at `GET /api/ws` for keyboard and mouse reports.
-- MJPEG stream at `GET /api/stream/mjpeg` plus frame-detect endpoints. Use the `linked-libkvm` build for real device video.
-- Safe command wrapper with argv-only allowlist and timeout.
-- Safe tar.gz member path validation and symlink-parent rejection.
+- Existing `code/msg/data` API response envelope.
+- Auth setup, login, logout, account, password check/change.
+- Argon2id password hashing for new writes and legacy Go bcrypt verification.
+- Generated per-device session secret at `/etc/kvm/session_secret`.
+- Session cookies compatible with the current React auth guard.
+- CSRF token binding, Origin checks, security headers, login lockout, and
+  logout/password-change session revocation.
+- VM info, hardware, hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS,
+  swap, memory limit, TLS toggle, reboot, scripts, and autostart routes.
+- MJPEG stream and frame-detect endpoints through `libkvm`.
+- H.264 Direct and H.264 WebRTC routes are enabled. Direct streaming has been
+  verified on hardware after switching from H.264 back to MJPEG. WebRTC
+  websocket signaling is verified; full browser media validation still needs
+  manual browser testing.
+- Device startup uses an idempotent `S95nanokvm`: stale `S95nanokvm.*` backup
+  scripts are moved out of boot autostart, old `kvm_system`/`NanoKVM-Server`
+  processes are stopped before runtime copy/start, and port 443 is explicitly
+  allowed for HTTPS.
+- Keyboard and mouse HID websocket, queued HID writes, paste, shortcuts, HID
+  mode/reset, and mouse jiggler.
+- Storage image listing, browser ISO upload, mount, unmount, delete, and CD-ROM
+  mode with path validation.
+- WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle
+  routes.
+- Terminal websocket.
+- PicoClaw runtime routes and KVM bridge helpers.
+- Safer command execution through argv-only allowlists and timeouts.
+- Safe archive/path handling for script upload, autostart files, ISO upload,
+  storage image paths, and update archives.
+- UI branding for Hardened NanoKVM and version `alfa - 0.1`.
+- Web UI backend switch in Settings > Device > Advanced.
 
-Most storage/update/network/power routes are still registered as compatibility stubs. They return an implemented=false payload instead of silently pretending parity exists.
+## Intentionally Disabled
 
-## Install On Test Device
+- Online firmware update and offline update archive application are blocked
+  until signed update verification is designed and implemented.
+- Remote ISO download is disabled in Rust. Browser ISO upload is the supported
+  path for now.
+- Default `admin/admin` bootstrap is disabled by default in Rust config. It can
+  be enabled only for isolated compatibility test images.
 
-Do not replace the production Go backend until the required module is ported and manually tested.
+## Known Issues And Remaining Work
 
-Manual test deployment once ready:
+- Full API parity against the Go backend still needs route-by-route validation.
+- H.264 WebRTC needs more browser/ICE stress testing across reconnects and
+  browser variants.
+- Video setting changes need more route-by-route stress testing. One reproduced
+  boot-time failure was caused by a stale backup init script starting a second
+  `kvm_system`; the current `S95nanokvm` disables that stale autostart and was
+  verified through reboot, login, and MJPEG streaming on the test device.
+- First-boot/account setup UX needs product-level polishing.
+- The Rust backend still runs with the same root privileges as the original
+  service. Splitting privileged operations into a smaller helper is future work.
+- A full SDK-sourced boot/rootfs build is still not included; current SD images
+  are patched from a trusted upstream NanoKVM base image.
+
+## Device Deployment
+
+Manual deployment to a test device:
 
 ```sh
-scp target/riscv64gc-unknown-linux-musl/release/nanokvm-rust-server root@nanokvm:/kvmapp/server/NanoKVM-Server.rust
-ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server /kvmapp/server/NanoKVM-Server.go.bak'
-ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server.rust /kvmapp/server/NanoKVM-Server && chmod 0755 /kvmapp/server/NanoKVM-Server && /etc/init.d/S95nanokvm restart'
+scp server-rust/target/riscv64gc-unknown-linux-musl/release/nanokvm-rust-server root@nanokvm:/tmp/NanoKVM-Server.rust
+scp scripts/install-rust-backend.sh root@nanokvm:/tmp/install-rust-backend.sh
+ssh root@nanokvm 'sh /tmp/install-rust-backend.sh /tmp/NanoKVM-Server.rust'
 ```
 
-Rollback:
+Backend switching after both binaries are installed:
 
 ```sh
-ssh root@nanokvm 'cp /kvmapp/server/NanoKVM-Server.go.bak /kvmapp/server/NanoKVM-Server && chmod 0755 /kvmapp/server/NanoKVM-Server && /etc/init.d/S95nanokvm restart'
+ssh root@nanokvm 'sh /etc/kvm/scripts/switch-backend-rust.sh'
+ssh root@nanokvm 'sh /etc/kvm/scripts/switch-backend-go.sh'
 ```
-
-## Known Limitations
-
-- H.264/WebRTC, storage, update, network, power, TLS, and extension routes are not ported yet.
-- HTTPS listener is not implemented; config is parsed for compatibility.
-- Session store is in memory; restart invalidates sessions rather than resurrecting revoked tokens.
-- Existing frontend still needs a first-boot setup flow for `/api/auth/setup`; test devices can opt into
-  `security.allow_default_admin=true` only when temporary compatibility is required.
-- This repository does not contain the LicheeRV Nano SDK or Buildroot/rootfs flow needed for a full SD-card image. It can package `kvmapp`; a bootable `.img` must be generated from an SDK checkout or by patching a trusted base image.

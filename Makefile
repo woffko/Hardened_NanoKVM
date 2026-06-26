@@ -37,7 +37,7 @@ help:
 	@echo "  rust-app      - Build Rust application server skeleton"
 	@echo "  web-app       - Build frontend into web/dist"
 	@echo "  rust-kvmapp   - Package Rust backend into build/kvmapp-rust"
-	@echo "  sd-image      - Explain full SD image SDK requirement"
+	@echo "  sd-image      - Build patched Hardened NanoKVM SD image from NANOKVM_BASE_IMAGE"
 	@echo "  support       - Build hardware support libraries"
 	@echo "  all           - Build both app and support (default)"
 	@echo "  clean         - Clean build artifacts"
@@ -102,12 +102,10 @@ rust-kvmapp: rust-app
 	@echo "Packaging Rust kvmapp..."
 	@RUST_TARGET="$(RUST_TARGET)" scripts/package-rust-kvmapp.sh
 
-# Full SD-card images require the external LicheeRV Nano SDK rootfs/buildroot flow.
+# Full boot/rootfs builds still require the external LicheeRV Nano SDK flow.
+# This target patches a trusted NanoKVM base image with the current Rust kvmapp.
 sd-image:
-	@echo "Full NanoKVM SD-card image build is not present in this repository."
-	@echo "This repository can package kvmapp updates; the boot/rootfs image is built with the external LicheeRV Nano SDK."
-	@echo "Provide NANOKVM_BASE_IMAGE or an SDK checkout to generate a complete SD-card image."
-	@exit 2
+	@scripts/build-rust-sd-image.sh
 
 # Build hardware support libraries
 support: check-root builder-image

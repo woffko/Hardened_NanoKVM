@@ -1,8 +1,44 @@
 #!/bin/sh
 # nanokvm Rev3.1
 
+disable_stale_autostarts() {
+    for script in /etc/init.d/S95nanokvm.*; do
+        [ -e "$script" ] || continue
+        mv "$script" "/etc/init.d/disabled-${script##*/}" 2>/dev/null || chmod 0644 "$script" 2>/dev/null
+    done
+}
+
+wait_process_exit() {
+    name="$1"
+    for _ in 1 2 3 4 5; do
+        pidof "$name" >/dev/null 2>&1 || return 0
+        sleep 1
+    done
+    killall -9 "$name" 2>/dev/null
+    sleep 1
+}
+
+stop_runtime() {
+    killall kvm_system 2>/dev/null
+    killall NanoKVM-Server 2>/dev/null
+    wait_process_exit kvm_system
+    wait_process_exit NanoKVM-Server
+    rm -rf /tmp/kvm_system /tmp/server 2>/dev/null
+}
+
+start_runtime() {
+    cp -r /kvmapp/kvm_system /tmp/
+    nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
+
+    cp -r /kvmapp/server /tmp/
+    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+}
+
 case "$1" in
   start)
+    disable_stale_autostarts
+    stop_runtime
+
     echo -n kvm > /boot/hostname.prefix
 
     # Copy sensor config if the file exists
@@ -22,6 +58,12 @@ case "$1" in
 
     iptables -C OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || \
     iptables -A OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT
+
+    iptables -C INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -A INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
+
+    iptables -C OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -A OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT
 
     iptables -C INPUT -i eth0 -p tcp --sport 22 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || \
     iptables -A INPUT -i eth0 -p tcp --sport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
@@ -45,31 +87,17 @@ case "$1" in
     fi
 
     # Start services
-    cp -r /kvmapp/kvm_system /tmp/
-    nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
-
-    cp -r /kvmapp/server /tmp/
-    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+    start_runtime
    ;;
 
   stop)
-    killall kvm_system
-    killall NanoKVM-Server
-    rm -r /tmp/kvm_system /tmp/server
+    stop_runtime
     echo "OK"
    ;;
 
   restart)
-    killall kvm_system
-    killall NanoKVM-Server
-    rm -r /tmp/kvm_system /tmp/server
-
-    cp -r /kvmapp/kvm_system /tmp/
-    nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
-
-    cp -r /kvmapp/server /tmp/
-    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
-
+    stop_runtime
+    start_runtime
     sync
     echo "OK"
    ;;
