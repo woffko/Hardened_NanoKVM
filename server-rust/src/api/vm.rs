@@ -7,8 +7,10 @@ use tokio::time;
 use crate::{
     AppError, Result,
     api::stream,
+    config::Config,
     error::ApiResponse,
     ffi::kvm,
+    http::tls,
     state::AppState,
     system::command::{AllowedCommand, run_allowed},
     ws::hid as hid_ws,
@@ -38,6 +40,8 @@ const VIRTUAL_NETWORK_FLAG: &str = "/boot/usb.rndis0";
 const VIRTUAL_DISK_FLAG: &str = "/boot/usb.disk0";
 const VIRTUAL_NETWORK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c.1/rndis.usb0";
 const VIRTUAL_DISK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c.1/mass_storage.disk0";
+const TLS_CERT_FILE: &str = "/etc/kvm/server.crt";
+const TLS_KEY_FILE: &str = "/etc/kvm/server.key";
 
 #[derive(Debug, Serialize)]
 pub struct IpInfo {
@@ -88,6 +92,11 @@ pub struct WebTitleRsp {
 #[derive(Debug, Deserialize)]
 pub struct SetWebTitleReq {
     pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetTlsReq {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,11 +520,40 @@ pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<im
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn set_tls() -> Result<Json<ApiResponse<()>>> {
-    Err(AppError::Unsupported(
-        "TLS toggle is disabled until the Rust backend implements HTTPS listener support"
-            .to_string(),
-    ))
+pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>> {
+    let mut config = Config::read()?;
+    if req.enabled {
+        tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
+        config.proto = "https".to_string();
+        config.cert.crt = TLS_CERT_FILE.to_string();
+        config.cert.key = TLS_KEY_FILE.to_string();
+    } else {
+        config.proto = "http".to_string();
+    }
+    config.write()?;
+
+    tokio::spawn(async {
+        time::sleep(Duration::from_millis(100)).await;
+        match run_allowed(
+            AllowedCommand::ServiceNanokvmRestart,
+            ["restart"],
+            Duration::from_secs(10),
+        )
+        .await
+        {
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => tracing::warn!(
+                status = output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "NanoKVM service restart after TLS update failed"
+            ),
+            Err(err) => {
+                tracing::warn!(error = ?err, "failed to restart NanoKVM service after TLS update")
+            }
+        }
+    });
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 fn get_ips() -> Vec<IpInfo> {

@@ -206,6 +206,12 @@ impl Default for Paths {
 
 impl Config {
     pub fn load() -> Result<Self> {
+        let mut config = Self::read()?;
+        config.ensure_session_secret()?;
+        Ok(config)
+    }
+
+    pub fn read() -> Result<Self> {
         let path = std::env::var("NANOKVM_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
@@ -218,11 +224,31 @@ impl Config {
             Config::default()
         };
         config.normalize_legacy_fields();
-        config.ensure_session_secret()?;
         Ok(config)
     }
 
+    pub fn write(&self) -> Result<()> {
+        let path = std::env::var("NANOKVM_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_yaml::to_string(self)
+            .map_err(|err| AppError::Config(format!("failed to serialize config: {err}")))?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
     pub fn listen_addr(&self) -> Result<SocketAddr> {
+        self.socket_addr(self.port.http)
+    }
+
+    pub fn https_listen_addr(&self) -> Result<SocketAddr> {
+        self.socket_addr(self.port.https)
+    }
+
+    fn socket_addr(&self, port: u16) -> Result<SocketAddr> {
         let ip: IpAddr = if self.host.is_empty() {
             "0.0.0.0"
         } else {
@@ -230,7 +256,7 @@ impl Config {
         }
         .parse()
         .map_err(|err| AppError::Config(format!("invalid host {}: {err}", self.host)))?;
-        Ok(SocketAddr::new(ip, self.port.http))
+        Ok(SocketAddr::new(ip, port))
     }
 
     pub fn auth_disabled(&self) -> bool {

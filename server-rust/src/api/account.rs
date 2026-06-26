@@ -5,11 +5,13 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 
 use crate::{
-    AppError, Result, auth::compat_crypto::decode_frontend_password, error::ApiResponse,
-    http::middleware::CurrentSession, state::AppState,
+    AppError, Result,
+    auth::compat_crypto::decode_frontend_password,
+    error::ApiResponse,
+    http::{middleware::CurrentSession, tls::ClientAddr},
+    state::AppState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +48,7 @@ pub struct PasswordUpdatedRsp {
 
 pub async fn login(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
     Json(req): Json<LoginReq>,
 ) -> Result<impl IntoResponse> {
     if !state.accounts.exists() {
@@ -55,7 +57,7 @@ pub async fn login(
         ));
     }
 
-    let source_ip = addr.ip().to_string();
+    let source_ip = addr.0.ip().to_string();
     {
         let mut limiter = state.login_limiter.write().await;
         if limiter.check(&source_ip, &req.username) {
