@@ -44,7 +44,7 @@ export const BackendSwitch = () => {
     const script = checked ? SWITCH_TO_RUST_SCRIPT : SWITCH_TO_GO_SCRIPT;
 
     scriptApi
-      .runScript(script, 'foreground')
+      .runScript(script, 'background')
       .then((rsp) => {
         if (rsp.code !== 0) {
           throw new Error(rsp.msg || 'Backend switch failed');

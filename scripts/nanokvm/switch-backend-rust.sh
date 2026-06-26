@@ -8,32 +8,35 @@ RUNTIME="/tmp/server/NanoKVM-Server"
 STATE="/etc/kvm/backend"
 LOG="/tmp/nanokvm-backend-switch.log"
 
+stop_backend() {
+  signal="$1"
+
+  for pid in $(pidof NanoKVM-Server 2>/dev/null || true); do
+    state=$(awk '{print $3}' /proc/$pid/stat 2>/dev/null || true)
+    if [ "$state" = D ]; then
+      echo "skip D-state NanoKVM-Server pid $pid"
+      continue
+    fi
+
+    if [ "$signal" = KILL ]; then
+      kill -9 "$pid" 2>/dev/null || true
+    else
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 restart_backend() {
-  nohup sh -c "
-set -eu
-sleep 1
-for pid in \$(pidof NanoKVM-Server 2>/dev/null || true); do
-  state=\$(awk '{print \$3}' /proc/\$pid/stat 2>/dev/null || true)
-  if [ \"\$state\" = D ]; then
-    echo \"skip D-state NanoKVM-Server pid \$pid\"
-    continue
-  fi
-  kill \"\$pid\" 2>/dev/null || true
-done
-sleep 1
-for pid in \$(pidof NanoKVM-Server 2>/dev/null || true); do
-  state=\$(awk '{print \$3}' /proc/\$pid/stat 2>/dev/null || true)
-  if [ \"\$state\" = D ]; then
-    continue
-  fi
-  kill -9 \"\$pid\" 2>/dev/null || true
-done
-sleep 1
-rm -f '$RUNTIME'
-cp '$SRC' '$RUNTIME'
-chmod 0755 '$RUNTIME'
-nohup '$RUNTIME' >/tmp/nanokvm-server.log 2>&1 &
-" >>"$LOG" 2>&1 &
+  sleep 1
+  stop_backend TERM
+  sleep 1
+  stop_backend KILL
+  sleep 1
+
+  rm -f "$RUNTIME"
+  cp "$SRC" "$RUNTIME"
+  chmod 0755 "$RUNTIME"
+  nohup "$RUNTIME" >/tmp/nanokvm-server.log 2>&1 &
 }
 
 {
