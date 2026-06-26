@@ -252,6 +252,60 @@ struct ActionResult {
     executed_actions: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct LoadImageRequest {
+    path: String,
+    prompt: String,
+    filename: String,
+}
+
+impl Default for LoadImageRequest {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            prompt: String::new(),
+            filename: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    id: JsonValue,
+    method: String,
+    params: Option<JsonValue>,
+}
+
+impl Default for JsonRpcRequest {
+    fn default() -> Self {
+        Self {
+            jsonrpc: String::new(),
+            id: JsonValue::Null,
+            method: String::new(),
+            params: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+}
+
 impl RuntimeStatus {
     fn checking() -> Self {
         Self {
@@ -626,6 +680,87 @@ pub async fn actions(headers: HeaderMap, body: Bytes) -> Result<Response> {
             format!("action task failed: {err}"),
         )),
     }
+}
+
+pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
+    let req = match serde_json::from_slice::<JsonRpcRequest>(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(json_rpc_error(JsonValue::Null, -32700, "parse error")),
+            )
+                .into_response());
+        }
+    };
+
+    if req.jsonrpc != "2.0" {
+        return Ok(Json(json_rpc_error(
+            req.id,
+            -32600,
+            "invalid request: jsonrpc must be 2.0",
+        ))
+        .into_response());
+    }
+
+    let response = match req.method.as_str() {
+        "initialize" => json_rpc_result(
+            req.id,
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "nanokvm", "version": "1.0.0" }
+            }),
+        ),
+        "tools/list" => json_rpc_result(req.id, json!({ "tools": mcp_tool_definitions() })),
+        "tools/call" => mcp_tools_call(&headers, req),
+        "ping" => json_rpc_result(req.id, json!({})),
+        method => json_rpc_error(req.id, -32601, format!("method not found: {method}")),
+    };
+
+    Ok(Json(response).into_response())
+}
+
+pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
+    let req = match serde_json::from_slice::<LoadImageRequest>(&body) {
+        Ok(req) => req,
+        Err(_) => {
+            return Ok(picoclaw_error(
+                CODE_INVALID_ACTION,
+                "invalid load image payload",
+            ));
+        }
+    };
+
+    let source_path = req.path.trim();
+    let _ = req.filename.trim();
+    let _instruction = build_load_image_instruction(source_path, &req.prompt);
+    if source_path.is_empty() {
+        return Ok(picoclaw_error(
+            CODE_INVALID_ACTION,
+            "image path is required",
+        ));
+    }
+
+    let session_id = headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(session_lock_owner);
+    if session_id.is_empty() {
+        return Ok(picoclaw_error(
+            CODE_SESSION_ID_MISSING,
+            "missing X-PicoClaw-Session-ID",
+        ));
+    }
+
+    Ok(picoclaw_error_with_session(
+        CODE_RUNTIME_UNAVAILABLE,
+        "picoclaw session is not connected",
+        session_id,
+    ))
 }
 
 pub async fn unsupported_local_route() -> Result<Response> {
@@ -1445,6 +1580,183 @@ fn key_code(key: &str) -> Option<u8> {
         "MediaRewind" => Some(0xfa),
         "MediaFastForward" => Some(0xfb),
         _ => None,
+    }
+}
+
+fn mcp_tools_call(headers: &HeaderMap, req: JsonRpcRequest) -> JsonRpcResponse {
+    let Some(params) = req.params.as_ref() else {
+        return json_rpc_error(req.id, -32602, "invalid params");
+    };
+    let name = params
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let arguments = params.get("arguments").cloned().unwrap_or(JsonValue::Null);
+
+    match name {
+        "kvm_screenshot" => mcp_screenshot(req.id, arguments),
+        "kvm_actions" => mcp_actions(headers, req.id, arguments),
+        _ => json_rpc_error(req.id, -32602, format!("unknown tool: {name}")),
+    }
+}
+
+fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct ScreenshotArgs {
+        width: u16,
+        height: u16,
+        quality: u16,
+    }
+
+    let args = serde_json::from_value::<ScreenshotArgs>(arguments).unwrap_or_default();
+    let query = ScreenshotQuery {
+        format: "base64".to_string(),
+        width: args.width,
+        height: args.height,
+        quality: args.quality,
+    };
+
+    match capture_screenshot_blocking(query) {
+        Ok((data, meta)) => {
+            let b64 = BASE64_STANDARD.encode(data);
+            json_rpc_result(
+                id,
+                json!({
+                    "content": [
+                        { "type": "text", "text": "screenshot captured" },
+                        { "type": "image", "data": b64, "mimeType": "image/jpeg" }
+                    ],
+                    "meta": {
+                        "source_width": meta.source_width,
+                        "source_height": meta.source_height,
+                        "capture_width": meta.capture_width,
+                        "capture_height": meta.capture_height
+                    }
+                }),
+            )
+        }
+        Err(err) => mcp_tool_error(id, err.message),
+    }
+}
+
+fn mcp_actions(headers: &HeaderMap, id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+    let batch = match serde_json::from_value::<ActionBatch>(arguments) {
+        Ok(batch) if !batch.actions.is_empty() => batch,
+        _ => return mcp_tool_error(id, "invalid actions payload"),
+    };
+
+    let session_id = headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(session_lock_owner);
+
+    match execute_actions_blocking(&session_id, &batch.actions) {
+        Ok(result) => {
+            let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            json_rpc_result(id, json!({ "content": [{ "type": "text", "text": text }] }))
+        }
+        Err(err) => mcp_tool_error(id, err.message),
+    }
+}
+
+fn mcp_tool_definitions() -> JsonValue {
+    json!([
+        {
+            "name": "kvm_screenshot",
+            "description": "Capture the current HDMI frame from the downstream remote host as a base64-encoded JPEG image.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "width": { "type": "integer", "description": "Target width in pixels (optional, default: 960)" },
+                    "height": { "type": "integer", "description": "Target height in pixels (optional)" },
+                    "quality": { "type": "integer", "description": "JPEG quality 1-100 (optional, default: 60)" }
+                }
+            }
+        },
+        {
+            "name": "kvm_actions",
+            "description": "Send one or more HID actions (click, type, hotkey, scroll, drag, move, wait) to the downstream remote host. Use normalized [0,1] coordinates for mouse actions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        "description": "Array of action objects. Each requires an 'action' field (click, move, type, hotkey, scroll, drag, wait).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "x": { "type": "number" },
+                                "y": { "type": "number" },
+                                "button": { "type": "string" },
+                                "text": { "type": "string" },
+                                "keys": { "type": "array", "items": { "type": "string" } },
+                                "direction": { "type": "string" },
+                                "amount": { "type": "integer" },
+                                "duration_ms": { "type": "integer" },
+                                "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
+                                "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } }
+                            },
+                            "required": ["action"]
+                        }
+                    }
+                },
+                "required": ["actions"]
+            }
+        }
+    ])
+}
+
+fn json_rpc_result(id: JsonValue, result: JsonValue) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id,
+        result: Some(result),
+        error: None,
+    }
+}
+
+fn json_rpc_error(id: JsonValue, code: i32, message: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+        }),
+    }
+}
+
+fn mcp_tool_error(id: JsonValue, message: impl Into<String>) -> JsonRpcResponse {
+    json_rpc_result(
+        id,
+        json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": message.into() }]
+        }),
+    )
+}
+
+fn build_load_image_instruction(source_path: &str, prompt: &str) -> String {
+    let args_json = serde_json::to_string(&json!({ "path": source_path }))
+        .unwrap_or_else(|_| "{\"path\":\"\"}".to_string());
+    format!(
+        "Call `load_image` first with this exact argument object:\n```json\n{args_json}\n```\n\nDo not ask the user to re-upload the image. Do not modify the path. Do not use `read_file` or any other tool to inspect this image directly.\n\nAfter `load_image` succeeds, treat the loaded image as the current task input and continue with this request:\n{}",
+        normalize_image_prompt(prompt)
+    )
+}
+
+fn normalize_image_prompt(prompt: &str) -> &str {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        "Describe the image briefly."
+    } else {
+        prompt
     }
 }
 
@@ -2407,6 +2719,23 @@ fn picoclaw_error_data(err: PicoclawErrorData) -> Response {
         .into_response()
 }
 
+fn picoclaw_error_with_session(
+    code: &str,
+    message: impl Into<String>,
+    session_id: String,
+) -> Response {
+    (
+        StatusCode::OK,
+        Json(PicoclawErrorBody {
+            code: code.to_string(),
+            message: message.into(),
+            session_id: Some(session_id),
+            index: None,
+        }),
+    )
+        .into_response()
+}
+
 fn internal_token() -> Result<String> {
     if let Ok(guard) = INTERNAL_TOKEN_CACHE.read() {
         if let Some(token) = guard.as_ref() {
@@ -2542,5 +2871,27 @@ mod tests {
     fn absolute_hid_coords_match_go_formula() {
         assert_eq!(to_absolute_hid_coord(0.0), 1);
         assert_eq!(to_absolute_hid_coord(1.0), 0x8000);
+    }
+
+    #[test]
+    fn mcp_initialize_shape_matches_go_contract() {
+        let response = json_rpc_result(
+            json!(1),
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "nanokvm", "version": "1.0.0" }
+            }),
+        );
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["jsonrpc"], "2.0");
+        assert_eq!(value["result"]["serverInfo"]["name"], "nanokvm");
+    }
+
+    #[test]
+    fn load_image_instruction_preserves_exact_path() {
+        let instruction = build_load_image_instruction("/tmp/image.png", "");
+        assert!(instruction.contains("\"path\":\"/tmp/image.png\""));
+        assert!(instruction.contains("Describe the image briefly."));
     }
 }
