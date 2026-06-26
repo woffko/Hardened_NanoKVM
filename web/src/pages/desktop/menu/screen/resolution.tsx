@@ -32,7 +32,8 @@ export const Resolution = () => {
       setCookie(item);
     } catch (err) {
       console.error(err);
-      message.error('Failed to update resolution');
+      const msg = (err as { response?: { data?: { msg?: string } } }).response?.data?.msg;
+      message.error(msg || 'Failed to update resolution');
     }
   }
 

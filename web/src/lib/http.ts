@@ -50,6 +50,11 @@ class Http {
           removeToken();
           window.location.reload();
         }
+        const msg = error.response?.data?.msg;
+        if (code === 403 && typeof msg === 'string' && msg.toLowerCase().includes('csrf')) {
+          removeToken();
+          window.location.reload();
+        }
         return Promise.reject(error);
       }
     );
