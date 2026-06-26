@@ -147,6 +147,7 @@ pub fn build(state: AppState) -> Router {
             get(hid::get_leader_key).post(hid::set_leader_key),
         )
         .route("/api/hid/mode", get(hid::get_mode).post(hid::set_mode))
+        .route("/api/hid/paste", post(hid::paste))
         .route(
             "/api/download/file",
             post(download::upload_image_file).layer(DefaultBodyLimit::max(
@@ -171,7 +172,6 @@ pub fn build(state: AppState) -> Router {
 
 fn compatibility_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/hid/paste", post(compatibility::not_implemented))
         .route(
             "/api/extensions/tailscale/install",
             post(compatibility::not_implemented),

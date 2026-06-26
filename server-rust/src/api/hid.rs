@@ -6,6 +6,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{LazyLock, RwLock},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time;
@@ -14,6 +15,7 @@ use crate::{
     AppError, Result,
     error::ApiResponse,
     system::command::{AllowedCommand, run_allowed},
+    ws::hid as hid_ws,
 };
 
 const SHORTCUT_FILE: &str = "/etc/kvm/shortcuts.json";
@@ -27,6 +29,8 @@ const MODE_HID_ONLY: &str = "hid-only";
 const MAX_SHORTCUT_KEYS: usize = 6;
 const MAX_KEY_CODE_LEN: usize = 64;
 const MAX_KEY_LABEL_LEN: usize = 64;
+const MAX_PASTE_BYTES: usize = 1024;
+const PASTE_KEY_DELAY: Duration = Duration::from_millis(30);
 
 static SHORTCUT_LOCK: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
@@ -82,6 +86,13 @@ pub struct GetHidModeRsp {
 #[derive(Debug, Deserialize)]
 pub struct SetHidModeReq {
     mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasteReq {
+    content: String,
+    #[serde(default)]
+    langue: String,
 }
 
 pub async fn get_shortcuts() -> Result<impl IntoResponse> {
@@ -197,6 +208,216 @@ pub async fn reset_hid() -> Result<impl IntoResponse> {
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn paste(Json(req): Json<PasteReq>) -> Result<impl IntoResponse> {
+    validate_paste_request(&req)?;
+    let content = req.content;
+    let language = req.langue;
+
+    tokio::task::spawn_blocking(move || paste_blocking(&content, &language))
+        .await
+        .map_err(|err| AppError::Internal(format!("HID paste task failed: {err}")))??;
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+fn validate_paste_request(req: &PasteReq) -> Result<()> {
+    if req.content.is_empty() {
+        return Err(AppError::BadRequest("invalid arguments".to_string()));
+    }
+    if req.content.len() > MAX_PASTE_BYTES {
+        return Err(AppError::Api {
+            code: -2,
+            msg: "content too long".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn paste_blocking(content: &str, language: &str) -> Result<()> {
+    let key_up = [0_u8; 8];
+    for ch in content.chars() {
+        let Some(key) = paste_key(ch, language) else {
+            tracing::debug!(char = %ch, codepoint = ch as u32, "unknown HID paste character");
+            continue;
+        };
+
+        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
+        hid_ws::write_keyboard_report(&key_down)?;
+        hid_ws::write_keyboard_report(&key_up)?;
+        thread::sleep(PASTE_KEY_DELAY);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PasteKey {
+    modifiers: u8,
+    code: u8,
+}
+
+const fn key(modifiers: u8, code: u8) -> PasteKey {
+    PasteKey { modifiers, code }
+}
+
+fn paste_key(ch: char, language: &str) -> Option<PasteKey> {
+    match language {
+        "de" => de_paste_key(ch).or_else(|| base_paste_key(ch)),
+        "fr" => fr_paste_key(ch).or_else(|| base_paste_key(ch)),
+        _ => base_paste_key(ch),
+    }
+}
+
+fn base_paste_key(ch: char) -> Option<PasteKey> {
+    match ch {
+        'a'..='z' => Some(key(0, ch as u8 - b'a' + 4)),
+        'A'..='Z' => Some(key(2, ch as u8 - b'A' + 4)),
+        '1'..='9' => Some(key(0, ch as u8 - b'1' + 30)),
+        '0' => Some(key(0, 39)),
+        '!' => Some(key(2, 30)),
+        '@' => Some(key(2, 31)),
+        '#' => Some(key(2, 32)),
+        '$' => Some(key(2, 33)),
+        '%' => Some(key(2, 34)),
+        '^' => Some(key(2, 35)),
+        '&' => Some(key(2, 36)),
+        '*' => Some(key(2, 37)),
+        '(' => Some(key(2, 38)),
+        ')' => Some(key(2, 39)),
+        '\n' => Some(key(0, 40)),
+        '\t' => Some(key(0, 43)),
+        ' ' => Some(key(0, 44)),
+        '-' => Some(key(0, 45)),
+        '=' => Some(key(0, 46)),
+        '[' => Some(key(0, 47)),
+        ']' => Some(key(0, 48)),
+        '\\' => Some(key(0, 49)),
+        ';' => Some(key(0, 51)),
+        '\'' => Some(key(0, 52)),
+        '`' => Some(key(0, 53)),
+        ',' => Some(key(0, 54)),
+        '.' => Some(key(0, 55)),
+        '/' => Some(key(0, 56)),
+        '_' => Some(key(2, 45)),
+        '+' => Some(key(2, 46)),
+        '{' => Some(key(2, 47)),
+        '}' => Some(key(2, 48)),
+        '|' => Some(key(2, 49)),
+        ':' => Some(key(2, 51)),
+        '"' => Some(key(2, 52)),
+        '~' => Some(key(2, 53)),
+        '<' => Some(key(2, 54)),
+        '>' => Some(key(2, 55)),
+        '?' => Some(key(2, 56)),
+        _ => None,
+    }
+}
+
+fn de_paste_key(ch: char) -> Option<PasteKey> {
+    match ch {
+        'y' => Some(key(0, 29)),
+        'Y' => Some(key(2, 29)),
+        'z' => Some(key(0, 28)),
+        'Z' => Some(key(2, 28)),
+        '\u{00e4}' => Some(key(0, 52)),
+        '\u{00c4}' => Some(key(2, 52)),
+        '\u{00f6}' => Some(key(0, 51)),
+        '\u{00d6}' => Some(key(2, 51)),
+        '\u{00fc}' => Some(key(0, 47)),
+        '\u{00dc}' => Some(key(2, 47)),
+        '\u{00df}' => Some(key(0, 45)),
+        '^' => Some(key(0, 53)),
+        '/' => Some(key(2, 36)),
+        '(' => Some(key(2, 37)),
+        '&' => Some(key(2, 35)),
+        ')' => Some(key(2, 38)),
+        '`' => Some(key(2, 46)),
+        '"' => Some(key(2, 31)),
+        '?' => Some(key(2, 45)),
+        '{' => Some(key(0x40, 36)),
+        '[' => Some(key(0x40, 37)),
+        ']' => Some(key(0x40, 38)),
+        '}' => Some(key(0x40, 39)),
+        '\\' => Some(key(0x40, 45)),
+        '@' => Some(key(0x40, 20)),
+        '+' => Some(key(0, 48)),
+        '*' => Some(key(2, 48)),
+        '~' => Some(key(0x40, 48)),
+        '#' => Some(key(0, 49)),
+        '\'' => Some(key(2, 49)),
+        '<' => Some(key(0, 100)),
+        '>' => Some(key(2, 100)),
+        '|' => Some(key(0x40, 100)),
+        ';' => Some(key(2, 54)),
+        ':' => Some(key(2, 55)),
+        '-' => Some(key(0, 56)),
+        '_' => Some(key(2, 56)),
+        '\u{00b4}' => Some(key(0, 46)),
+        '\u{00b0}' => Some(key(2, 53)),
+        '\u{00a7}' => Some(key(2, 32)),
+        '\u{20ac}' => Some(key(0x40, 8)),
+        '\u{00b2}' => Some(key(0x40, 31)),
+        '\u{00b3}' => Some(key(0x40, 32)),
+        _ => None,
+    }
+}
+
+fn fr_paste_key(ch: char) -> Option<PasteKey> {
+    match ch {
+        'a' => Some(key(0, 20)),
+        'A' => Some(key(2, 20)),
+        'q' => Some(key(0, 4)),
+        'Q' => Some(key(2, 4)),
+        'z' => Some(key(0, 26)),
+        'Z' => Some(key(2, 26)),
+        'w' => Some(key(0, 29)),
+        'W' => Some(key(2, 29)),
+        'm' => Some(key(0, 51)),
+        'M' => Some(key(2, 51)),
+        '1'..='9' => Some(key(2, ch as u8 - b'1' + 30)),
+        '0' => Some(key(2, 39)),
+        '&' => Some(key(0, 30)),
+        '\u{00e9}' => Some(key(0, 31)),
+        '"' => Some(key(0, 32)),
+        '\'' => Some(key(0, 33)),
+        '(' => Some(key(0, 34)),
+        '-' => Some(key(0, 35)),
+        '\u{00e8}' => Some(key(0, 36)),
+        '_' => Some(key(0, 37)),
+        '\u{00e7}' => Some(key(0, 38)),
+        '\u{00e0}' => Some(key(0, 39)),
+        ')' => Some(key(0, 45)),
+        '\u{00b0}' => Some(key(2, 45)),
+        '^' => Some(key(0, 47)),
+        '\u{00a8}' => Some(key(2, 47)),
+        '$' => Some(key(0, 48)),
+        '\u{00a3}' => Some(key(2, 48)),
+        '*' => Some(key(0, 49)),
+        '\u{00b5}' => Some(key(2, 49)),
+        '\u{00f9}' => Some(key(0, 52)),
+        '%' => Some(key(2, 52)),
+        ',' => Some(key(0, 16)),
+        '?' => Some(key(2, 16)),
+        ';' => Some(key(0, 54)),
+        '.' => Some(key(2, 54)),
+        ':' => Some(key(0, 55)),
+        '/' => Some(key(2, 55)),
+        '!' => Some(key(0, 56)),
+        '\u{00a7}' => Some(key(2, 56)),
+        '~' => Some(key(0x40, 31)),
+        '#' => Some(key(0x40, 32)),
+        '{' => Some(key(0x40, 33)),
+        '[' => Some(key(0x40, 34)),
+        '|' => Some(key(0x40, 35)),
+        '`' => Some(key(0x40, 36)),
+        '\\' => Some(key(0x40, 37)),
+        ']' => Some(key(0x40, 45)),
+        '}' => Some(key(0x40, 46)),
+        '@' => Some(key(0x40, 39)),
+        '\u{20ac}' => Some(key(0x40, 8)),
+        _ => None,
+    }
 }
 
 fn load_shortcuts() -> Result<ShortcutStore> {
@@ -390,5 +611,45 @@ mod tests {
         assert_eq!(validate_hid_mode("normal").unwrap(), MODE_NORMAL);
         assert_eq!(validate_hid_mode("hid-only").unwrap(), MODE_HID_ONLY);
         assert!(validate_hid_mode("storage-only").is_err());
+    }
+
+    #[test]
+    fn maps_paste_keys_for_supported_layouts() {
+        assert_eq!(paste_key('A', "").unwrap(), key(2, 4));
+        assert_eq!(paste_key('@', "").unwrap(), key(2, 31));
+
+        assert_eq!(paste_key('y', "de").unwrap(), key(0, 29));
+        assert_eq!(paste_key('z', "de").unwrap(), key(0, 28));
+        assert_eq!(paste_key('@', "de").unwrap(), key(0x40, 20));
+
+        assert_eq!(paste_key('a', "fr").unwrap(), key(0, 20));
+        assert_eq!(paste_key('1', "fr").unwrap(), key(2, 30));
+        assert_eq!(paste_key('@', "fr").unwrap(), key(0x40, 39));
+    }
+
+    #[test]
+    fn validates_paste_request_size() {
+        assert!(
+            validate_paste_request(&PasteReq {
+                content: "abc".to_string(),
+                langue: String::new(),
+            })
+            .is_ok()
+        );
+
+        assert!(
+            validate_paste_request(&PasteReq {
+                content: String::new(),
+                langue: String::new(),
+            })
+            .is_err()
+        );
+
+        let err = validate_paste_request(&PasteReq {
+            content: "a".repeat(MAX_PASTE_BYTES + 1),
+            langue: String::new(),
+        })
+        .unwrap_err();
+        assert!(matches!(err, AppError::Api { code: -2, .. }));
     }
 }

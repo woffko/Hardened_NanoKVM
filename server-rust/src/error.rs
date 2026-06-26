@@ -17,6 +17,8 @@ pub enum AppError {
     Conflict(String),
     #[error("invalid username or password")]
     InvalidCredentials,
+    #[error("api error {code}: {msg}")]
+    Api { code: i32, msg: String },
     #[error("rate limited: {0}")]
     RateLimited(String),
     #[error("unsupported: {0}")]
@@ -76,6 +78,7 @@ impl IntoResponse for AppError {
                 -2,
                 "invalid username or password".to_string(),
             ),
+            AppError::Api { code, msg } => (StatusCode::OK, code, msg),
             AppError::RateLimited(msg) => (StatusCode::OK, -5, msg),
             AppError::Unsupported(msg) => (StatusCode::OK, -501, msg),
             AppError::Io(err) => (StatusCode::OK, -500, err.to_string()),
