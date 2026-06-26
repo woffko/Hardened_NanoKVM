@@ -30,7 +30,6 @@ const SCREEN_FPS_FILE: &str = "/kvmapp/kvm/fps";
 const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
 const SCREEN_RESOLUTION_FILE: &str = "/kvmapp/kvm/res";
 const SCREEN_GOP_FILE: &str = "/kvmapp/kvm/gop";
-const MAX_CONSECUTIVE_CAPTURE_FAILURES: u8 = 1;
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
@@ -130,7 +129,6 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
     let stream = stream! {
         let mut interval = time::interval(frame_interval());
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut consecutive_capture_failures = 0;
 
         loop {
             interval.tick().await;
@@ -175,14 +173,8 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
                         "mjpeg frame unavailable"
                     );
                 }
-                if result < 0
-                    && recover_after_capture_failure("mjpeg", &mut consecutive_capture_failures)
-                {
-                    break;
-                }
                 continue;
             }
-            consecutive_capture_failures = 0;
             if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(result, bytes = data.len(), "read first mjpeg frame");
             }
@@ -226,7 +218,6 @@ async fn handle_h264_direct_socket(mut socket: WebSocket) {
     let start = Instant::now();
     let mut interval = time::interval(frame_interval());
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut consecutive_capture_failures = 0;
 
     loop {
         interval.tick().await;
@@ -265,14 +256,8 @@ async fn handle_h264_direct_socket(mut socket: WebSocket) {
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                 warn!(result, bytes = data.len(), "h264 direct frame unavailable");
             }
-            if result < 0
-                && recover_after_capture_failure("h264 direct", &mut consecutive_capture_failures)
-            {
-                break;
-            }
             continue;
         }
-        consecutive_capture_failures = 0;
 
         if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
             info!(result, bytes = data.len(), "read first h264 direct frame");
@@ -411,16 +396,6 @@ pub fn latest_mjpeg_frame(max_age: Duration) -> Option<LatestMjpegFrame> {
 
 pub fn h264_frame_duration(fps: u64) -> Duration {
     Duration::from_millis((1000 / fps.max(1)).max(1))
-}
-
-pub fn recover_after_capture_failure(label: &str, consecutive_failures: &mut u8) -> bool {
-    *consecutive_failures = consecutive_failures.saturating_add(1);
-    warn!(
-        label,
-        consecutive_failures = *consecutive_failures,
-        "stopping stream after capture failure"
-    );
-    *consecutive_failures >= MAX_CONSECUTIVE_CAPTURE_FAILURES
 }
 
 fn set_latest_mjpeg_frame(data: &[u8], width: u16, height: u16) {
