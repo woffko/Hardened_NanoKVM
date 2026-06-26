@@ -13,6 +13,34 @@ if [ ! -x "$SRC" ] && [ -x "$FALLBACK" ]; then
   SRC="$FALLBACK"
 fi
 
+restart_backend() {
+  nohup sh -c "
+set -eu
+sleep 1
+for pid in \$(pidof NanoKVM-Server 2>/dev/null || true); do
+  state=\$(awk '{print \$3}' /proc/\$pid/stat 2>/dev/null || true)
+  if [ \"\$state\" = D ]; then
+    echo \"skip D-state NanoKVM-Server pid \$pid\"
+    continue
+  fi
+  kill \"\$pid\" 2>/dev/null || true
+done
+sleep 1
+for pid in \$(pidof NanoKVM-Server 2>/dev/null || true); do
+  state=\$(awk '{print \$3}' /proc/\$pid/stat 2>/dev/null || true)
+  if [ \"\$state\" = D ]; then
+    continue
+  fi
+  kill -9 \"\$pid\" 2>/dev/null || true
+done
+sleep 1
+rm -f '$RUNTIME'
+cp '$SRC' '$RUNTIME'
+chmod 0755 '$RUNTIME'
+nohup '$RUNTIME' >/tmp/nanokvm-server.log 2>&1 &
+" >>"$LOG" 2>&1 &
+}
+
 {
   echo "$(date): switching to $TARGET backend"
 
@@ -25,5 +53,5 @@ fi
   chmod 0755 "$DEST"
   echo "$TARGET" > "$STATE"
 
-  nohup sh -c "sleep 1; killall NanoKVM-Server 2>/dev/null || true; sleep 1; rm -f '$RUNTIME'; cp '$SRC' '$RUNTIME'; chmod 0755 '$RUNTIME'; nohup '$RUNTIME' >/tmp/nanokvm-server.log 2>&1 &" >>"$LOG" 2>&1 &
+  restart_backend
 } >>"$LOG" 2>&1
