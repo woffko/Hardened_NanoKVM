@@ -1,6 +1,10 @@
 use std::{ffi::OsStr, path::PathBuf, process::Stdio, time::Duration};
 
-use tokio::{io::AsyncReadExt, process::Command, time};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::Command,
+    time,
+};
 
 use crate::{AppError, Result};
 
@@ -23,6 +27,8 @@ pub enum AllowedCommand {
     Swapoff,
     Tailscale,
     Tailscaled,
+    Curl,
+    Wget,
     Pidof,
     Kill,
     CustomForTest(PathBuf),
@@ -53,6 +59,8 @@ impl AllowedCommand {
             AllowedCommand::Swapoff => OsStr::new("swapoff"),
             AllowedCommand::Tailscale => OsStr::new("/usr/bin/tailscale"),
             AllowedCommand::Tailscaled => OsStr::new("/usr/sbin/tailscaled"),
+            AllowedCommand::Curl => OsStr::new("/usr/bin/curl"),
+            AllowedCommand::Wget => OsStr::new("/usr/bin/wget"),
             AllowedCommand::Pidof => OsStr::new("pidof"),
             AllowedCommand::Kill => OsStr::new("kill"),
             AllowedCommand::CustomForTest(path) => path.as_os_str(),
@@ -98,6 +106,47 @@ where
         stdout,
         stderr,
     })
+}
+
+pub async fn read_allowed_stderr_until<I, S, F>(
+    command: AllowedCommand,
+    args: I,
+    timeout: Duration,
+    mut matcher: F,
+) -> Result<Option<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut child = Command::new(command.program())
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stderr = child.stderr.take().expect("stderr piped");
+    let mut lines = BufReader::new(stderr).lines();
+
+    let matched = time::timeout(timeout, async {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(value) = matcher(&line) {
+                return Ok::<_, std::io::Error>(Some(value));
+            }
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|_| AppError::Internal("command timed out".to_string()))??;
+
+    if matched.is_some() {
+        let _ = child.kill().await;
+    }
+    let _ = time::timeout(Duration::from_secs(1), child.wait()).await;
+
+    Ok(matched)
 }
 
 async fn read_limited<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
