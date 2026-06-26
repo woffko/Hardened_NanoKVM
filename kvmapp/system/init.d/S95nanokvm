@@ -46,10 +46,10 @@ case "$1" in
 
     # Start services
     cp -r /kvmapp/kvm_system /tmp/
-    /tmp/kvm_system/kvm_system &
+    nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
 
     cp -r /kvmapp/server /tmp/
-    /tmp/server/NanoKVM-Server &
+    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
    ;;
 
   stop)
@@ -65,10 +65,10 @@ case "$1" in
     rm -r /tmp/kvm_system /tmp/server
 
     cp -r /kvmapp/kvm_system /tmp/
-    /tmp/kvm_system/kvm_system &
+    nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
 
     cp -r /kvmapp/server /tmp/
-    /tmp/server/NanoKVM-Server &
+    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
 
     sync
     echo "OK"
