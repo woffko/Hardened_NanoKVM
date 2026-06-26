@@ -38,7 +38,7 @@ restart_backend() {
   chmod 0755 "$RUNTIME"
   (
     cd "$(dirname "$RUNTIME")"
-    nohup ./NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+    setsid ./NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 < /dev/null &
   )
 }
 
