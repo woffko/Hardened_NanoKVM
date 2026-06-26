@@ -8,8 +8,8 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
     api::{
-        account, application, autostart, compatibility, download, hid, network, script, storage,
-        stream, tailscale, vm, webrtc_stream,
+        account, application, autostart, compatibility, download, hid, network, picoclaw, script,
+        storage, stream, tailscale, vm, webrtc_stream,
     },
     http::middleware::protected,
     security::headers::security_headers,
@@ -192,46 +192,54 @@ fn compatibility_routes() -> Router<AppState> {
         )
         .route(
             "/api/picoclaw/model/config",
-            post(compatibility::not_implemented),
+            post(picoclaw::update_model_config),
         )
         .route(
             "/api/picoclaw/agent/profile",
-            post(compatibility::not_implemented),
+            post(picoclaw::update_agent_profile),
         )
-        .route(
-            "/api/picoclaw/sessions",
-            get(compatibility::not_implemented),
-        )
+        .route("/api/picoclaw/sessions", get(picoclaw::list_sessions))
         .route(
             "/api/picoclaw/sessions/{id}",
-            get(compatibility::not_implemented).delete(compatibility::not_implemented),
+            get(picoclaw::get_session).delete(picoclaw::delete_session),
         )
         .route(
             "/api/picoclaw/runtime/status",
-            get(compatibility::not_implemented),
+            get(picoclaw::get_runtime_status),
         )
         .route(
             "/api/picoclaw/runtime/session",
-            delete(compatibility::not_implemented),
+            delete(picoclaw::release_runtime_session),
         )
         .route(
             "/api/picoclaw/runtime/install",
-            post(compatibility::not_implemented),
+            post(picoclaw::install_runtime),
         )
         .route(
             "/api/picoclaw/runtime/uninstall",
-            post(compatibility::not_implemented),
+            post(picoclaw::uninstall_runtime),
         )
-        .route(
-            "/api/picoclaw/runtime/start",
-            post(compatibility::not_implemented),
-        )
-        .route(
-            "/api/picoclaw/runtime/stop",
-            post(compatibility::not_implemented),
-        )
+        .route("/api/picoclaw/runtime/start", post(picoclaw::start_runtime))
+        .route("/api/picoclaw/runtime/stop", post(picoclaw::stop_runtime))
         .route(
             "/api/picoclaw/gateway/ws",
-            get(compatibility::not_implemented),
+            get(picoclaw::unsupported_local_route),
+        )
+        .route(
+            "/api/picoclaw/runtime/session",
+            get(picoclaw::get_runtime_session),
+        )
+        .route(
+            "/api/picoclaw/screenshot",
+            get(picoclaw::unsupported_local_route),
+        )
+        .route(
+            "/api/picoclaw/actions",
+            post(picoclaw::unsupported_local_route),
+        )
+        .route("/api/picoclaw/mcp", post(picoclaw::unsupported_local_route))
+        .route(
+            "/api/picoclaw/load-image",
+            post(picoclaw::unsupported_local_route),
         )
 }

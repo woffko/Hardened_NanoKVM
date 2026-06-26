@@ -20,6 +20,8 @@ pub enum AllowedCommand {
     ServiceUsbDev,
     ServiceWifi,
     ServiceTailscaled,
+    ServicePicoclawEtc,
+    ServicePicoclawKvmapp,
     EtherWake,
     Fallocate,
     Mkswap,
@@ -52,6 +54,10 @@ impl AllowedCommand {
             AllowedCommand::ServiceUsbDev => OsStr::new("/etc/init.d/S03usbdev"),
             AllowedCommand::ServiceWifi => OsStr::new("/etc/init.d/S30wifi"),
             AllowedCommand::ServiceTailscaled => OsStr::new("/etc/init.d/S98tailscaled"),
+            AllowedCommand::ServicePicoclawEtc => OsStr::new("/etc/init.d/S96picoclaw"),
+            AllowedCommand::ServicePicoclawKvmapp => {
+                OsStr::new("/kvmapp/system/init.d/S96picoclaw")
+            }
             AllowedCommand::EtherWake => OsStr::new("ether-wake"),
             AllowedCommand::Fallocate => OsStr::new("fallocate"),
             AllowedCommand::Mkswap => OsStr::new("mkswap"),
