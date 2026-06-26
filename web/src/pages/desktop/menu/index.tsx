@@ -92,12 +92,12 @@ export const Menu = () => {
               className="flex h-[30px] select-none items-center gap-1.5 rounded bg-neutral-900/50 px-1.5 text-neutral-200"
               title={HARDENED_NAME}
             >
-              <span className="flex size-[22px] items-center justify-center rounded bg-neutral-100">
+              <span className="flex size-[24px] items-center justify-center overflow-hidden rounded bg-neutral-100">
                 <img
                   src={HARDENED_LOGO_SRC}
                   alt=""
                   aria-hidden="true"
-                  className="size-[16px] object-contain"
+                  className="size-[20px] object-contain"
                 />
               </span>
               <span className="hidden text-xs font-medium sm:inline">{HARDENED_SHORT_NAME}</span>
