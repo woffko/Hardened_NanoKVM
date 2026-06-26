@@ -251,6 +251,25 @@ fn paste_blocking(content: &str, language: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn type_text_blocking(content: &str, language: &str) -> Result<usize> {
+    let key_up = [0_u8; 8];
+    let mut writes = 0;
+    for ch in content.chars() {
+        let Some(key) = paste_key(ch, language) else {
+            return Err(AppError::BadRequest(
+                "unsupported character in type action".to_string(),
+            ));
+        };
+
+        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
+        hid_ws::write_keyboard_report(&key_down)?;
+        hid_ws::write_keyboard_report(&key_up)?;
+        writes += 2;
+        thread::sleep(PASTE_KEY_DELAY);
+    }
+    Ok(writes)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PasteKey {
     modifiers: u8,

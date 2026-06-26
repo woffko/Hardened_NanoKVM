@@ -31,6 +31,8 @@ const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
 const SCREEN_RESOLUTION_FILE: &str = "/kvmapp/kvm/res";
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
+static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
+    LazyLock::new(|| Mutex::new(None));
 static MJPEG_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -61,6 +63,21 @@ pub struct H264Screen {
     pub height: u16,
     pub fps: u64,
     pub bit_rate: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MjpegScreen {
+    pub width: u16,
+    pub height: u16,
+    pub quality: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct LatestMjpegFrame {
+    pub data: Vec<u8>,
+    pub width: u16,
+    pub height: u16,
+    captured_at: Instant,
 }
 
 impl Default for Screen {
@@ -140,6 +157,7 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
             if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(result, bytes = data.len(), "read first mjpeg frame");
             }
+            set_latest_mjpeg_frame(&data, screen.width, screen.height);
 
             let header = format!(
                 "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
@@ -317,8 +335,33 @@ pub fn current_h264_screen() -> H264Screen {
     }
 }
 
+pub fn current_mjpeg_screen() -> MjpegScreen {
+    let screen = current_screen();
+    MjpegScreen {
+        width: screen.width,
+        height: screen.height,
+        quality: screen.quality,
+    }
+}
+
+pub fn latest_mjpeg_frame(max_age: Duration) -> Option<LatestMjpegFrame> {
+    let frame = LATEST_MJPEG_FRAME.lock().ok()?.clone()?;
+    (frame.captured_at.elapsed() <= max_age).then_some(frame)
+}
+
 pub fn h264_frame_duration(fps: u64) -> Duration {
     Duration::from_millis((1000 / fps.max(1)).max(1))
+}
+
+fn set_latest_mjpeg_frame(data: &[u8], width: u16, height: u16) {
+    if let Ok(mut frame) = LATEST_MJPEG_FRAME.lock() {
+        *frame = Some(LatestMjpegFrame {
+            data: data.to_vec(),
+            width,
+            height,
+            captured_at: Instant::now(),
+        });
+    }
 }
 
 fn normalize_screen(screen: &mut Screen) {

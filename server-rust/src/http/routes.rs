@@ -234,14 +234,8 @@ pub fn picoclaw_loopback_routes() -> Router<AppState> {
             "/api/picoclaw/runtime/session",
             get(picoclaw::get_runtime_session),
         )
-        .route(
-            "/api/picoclaw/screenshot",
-            get(picoclaw::unsupported_local_route),
-        )
-        .route(
-            "/api/picoclaw/actions",
-            post(picoclaw::unsupported_local_route),
-        )
+        .route("/api/picoclaw/screenshot", get(picoclaw::screenshot))
+        .route("/api/picoclaw/actions", post(picoclaw::actions))
         .route("/api/picoclaw/mcp", post(picoclaw::unsupported_local_route))
         .route(
             "/api/picoclaw/load-image",

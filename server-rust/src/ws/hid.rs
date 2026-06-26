@@ -107,6 +107,14 @@ pub fn write_keyboard_report(report: &[u8]) -> io::Result<()> {
     HID.write_keyboard(report)
 }
 
+pub fn write_relative_mouse_report(report: &[u8]) -> io::Result<()> {
+    HID.write_relative_mouse(report)
+}
+
+pub fn write_absolute_mouse_report(report: &[u8]) -> io::Result<()> {
+    HID.write_absolute_mouse(report)
+}
+
 pub async fn connect(
     State(state): State<AppState>,
     headers: HeaderMap,

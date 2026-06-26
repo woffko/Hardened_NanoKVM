@@ -1,9 +1,11 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path as AxumPath, Query},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -14,17 +16,20 @@ use std::{
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::{LazyLock, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{LazyLock, Mutex, RwLock},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tar::Archive;
 use tokio::{net::TcpStream, task, time};
 
 use crate::{
     AppError, Result,
+    api::{hid, stream},
     auth::token::random_token,
     error::ApiResponse,
     system::command::{self, AllowedCommand},
+    ws::hid as hid_ws,
 };
 
 const PICOCLAW_BINARY_PATH: &str = "/usr/bin/picoclaw";
@@ -47,14 +52,31 @@ const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(60);
 const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
 const INTERNAL_TOKEN_FILE: &str = "/etc/kvm/.picoclaw_internal_token";
+const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
+const CODE_PICOCLAW_LOCK_HELD: &str = "AI_LOCK_HELD";
 const CODE_INVALID_ACTION: &str = "INVALID_ACTION";
+const CODE_SCREENSHOT_FAILED: &str = "SCREENSHOT_FAILED";
+const CODE_HID_WRITE_FAILED: &str = "HID_WRITE_FAILED";
 const CODE_RUNTIME_UNAVAILABLE: &str = "RUNTIME_UNAVAILABLE";
 const CODE_RUNTIME_START_FAILED: &str = "RUNTIME_START_FAILED";
+const CODE_SESSION_ID_MISSING: &str = "SESSION_ID_MISSING";
+const CODE_SESSION_ID_INVALID: &str = "SESSION_ID_INVALID";
+
+const SESSION_LOCK_DURATION: Duration = Duration::from_secs(30 * 60);
+const CACHED_FRAME_MAX_AGE: Duration = Duration::from_secs(2);
+const DEFAULT_SCREENSHOT_WIDTH: u16 = 960;
+const DEFAULT_SCREENSHOT_HEIGHT: u16 = 540;
+const DEFAULT_SCREENSHOT_QUALITY: u16 = 60;
+const DEFAULT_CLICK_HOLD: Duration = Duration::from_millis(40);
+const DEFAULT_DRAG_STEPS: usize = 10;
+const DEFAULT_SCROLL_STEP: Duration = Duration::from_millis(20);
 
 static RUNTIME_STATUS: LazyLock<RwLock<RuntimeStatus>> =
     LazyLock::new(|| RwLock::new(RuntimeStatus::checking()));
 static INTERNAL_TOKEN_CACHE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+static SESSION_LOCK: LazyLock<Mutex<PicoSessionLock>> =
+    LazyLock::new(|| Mutex::new(PicoSessionLock::default()));
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatus {
@@ -118,6 +140,21 @@ struct PicoclawErrorBody {
     index: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct PicoclawErrorData {
+    code: &'static str,
+    message: String,
+    session_id: Option<String>,
+    index: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct PicoSessionLock {
+    owner_session_id: String,
+    acquired_at: Option<Instant>,
+    expires_at: Option<Instant>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ModelConfigUpdateRequest {
     model: String,
@@ -146,6 +183,75 @@ struct SessionListItem {
     updated: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ScreenshotQuery {
+    format: String,
+    width: u16,
+    height: u16,
+    quality: u16,
+}
+
+impl Default for ScreenshotQuery {
+    fn default() -> Self {
+        Self {
+            format: String::new(),
+            width: 0,
+            height: 0,
+            quality: 0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ScreenshotMeta {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    image_base64: String,
+    source_width: u16,
+    source_height: u16,
+    capture_width: u16,
+    capture_height: u16,
+    format: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct Point {
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct Action {
+    action: String,
+    x: Option<f64>,
+    y: Option<f64>,
+    from: Option<Point>,
+    to: Option<Point>,
+    button: String,
+    text: String,
+    keys: Option<JsonValue>,
+    direction: String,
+    amount: i32,
+    duration_ms: i32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct ActionBatch {
+    actions: Vec<Action>,
+}
+
+#[derive(Debug, Serialize)]
+struct ActionResult {
+    action: String,
+    duration_ms: i64,
+    hid_writes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executed_actions: Option<usize>,
+}
+
 impl RuntimeStatus {
     fn checking() -> Self {
         Self {
@@ -171,6 +277,40 @@ impl RuntimeStatus {
         self.install_path = Some(PICOCLAW_BINARY_PATH.to_string());
         self.agent_profile = Some(detect_agent_profile());
         self
+    }
+}
+
+impl PicoclawErrorData {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            session_id: None,
+            index: None,
+        }
+    }
+
+    fn with_session(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    fn with_index(mut self, index: usize) -> Self {
+        self.index = Some(index);
+        self
+    }
+}
+
+impl PicoSessionLock {
+    fn clear_expired(&mut self, now: Instant) {
+        if self.owner_session_id.is_empty() {
+            return;
+        }
+        if self.expires_at.is_some_and(|expires_at| now >= expires_at) {
+            self.owner_session_id.clear();
+            self.acquired_at = None;
+            self.expires_at = None;
+        }
     }
 }
 
@@ -325,16 +465,24 @@ pub async fn uninstall_runtime() -> Result<Response> {
 
 pub async fn get_runtime_session() -> Result<Response> {
     Ok(Json(ApiResponse::ok(RuntimeSessionRsp {
-        current_session: String::new(),
+        current_session: session_lock_owner(),
         checked_at: now_string(),
     }))
     .into_response())
 }
 
-pub async fn release_runtime_session() -> Result<Response> {
+pub async fn release_runtime_session(headers: HeaderMap) -> Result<Response> {
+    let session_id = match require_session_id(&headers) {
+        Ok(session_id) => session_id,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+
+    release_session_lock(&session_id);
+    release_all_hid_state();
+
     Ok(Json(ApiResponse::ok(json!({
         "released": true,
-        "current_session": ""
+        "current_session": session_lock_owner()
     })))
     .into_response())
 }
@@ -409,6 +557,77 @@ pub async fn delete_session(AxumPath(_id): AxumPath<String>) -> Result<Response>
     Ok(Json(ApiResponse::ok(json!({ "deleted": true }))).into_response())
 }
 
+pub async fn screenshot(
+    headers: HeaderMap,
+    Query(query): Query<ScreenshotQuery>,
+) -> Result<Response> {
+    let session_id = match require_session_id(&headers) {
+        Ok(session_id) => session_id,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+    let release_after = match acquire_session_lock(&session_id) {
+        Ok(release_after) => release_after,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+
+    let wants_base64 = query.format == "base64";
+    let capture = task::spawn_blocking(move || capture_screenshot_blocking(query)).await;
+
+    if release_after {
+        release_session_lock(&session_id);
+    }
+
+    let (data, mut meta) = match capture {
+        Ok(Ok(capture)) => capture,
+        Ok(Err(err)) => return Ok(picoclaw_error_data(err)),
+        Err(err) => {
+            return Ok(picoclaw_error(
+                CODE_SCREENSHOT_FAILED,
+                format!("screenshot task failed: {err}"),
+            ));
+        }
+    };
+
+    if wants_base64 {
+        meta.image_base64 = BASE64_STANDARD.encode(data);
+        return Ok(Json(ApiResponse::ok(meta)).into_response());
+    }
+
+    Ok((StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], data).into_response())
+}
+
+pub async fn actions(headers: HeaderMap, body: Bytes) -> Result<Response> {
+    let session_id = match require_session_id(&headers) {
+        Ok(session_id) => session_id,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+    let actions = match normalize_actions(&body) {
+        Ok(actions) => actions,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+    let release_after = match acquire_session_lock(&session_id) {
+        Ok(release_after) => release_after,
+        Err(err) => return Ok(picoclaw_error_data(err)),
+    };
+
+    let exec_session_id = session_id.clone();
+    let result =
+        task::spawn_blocking(move || execute_actions_blocking(&exec_session_id, &actions)).await;
+
+    if release_after {
+        release_session_lock(&session_id);
+    }
+
+    match result {
+        Ok(Ok(result)) => Ok(Json(ApiResponse::ok(result)).into_response()),
+        Ok(Err(err)) => Ok(picoclaw_error_data(err)),
+        Err(err) => Ok(picoclaw_error(
+            CODE_INVALID_ACTION,
+            format!("action task failed: {err}"),
+        )),
+    }
+}
+
 pub async fn unsupported_local_route() -> Result<Response> {
     Ok(picoclaw_error(
         CODE_RUNTIME_UNAVAILABLE,
@@ -442,6 +661,791 @@ pub fn has_valid_loopback_internal_token(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     constant_time_eq(provided, &token)
+}
+
+fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, PicoclawErrorData> {
+    let session_id = headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    if session_id.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_SESSION_ID_MISSING,
+            "missing X-PicoClaw-Session-ID",
+        ));
+    }
+    Ok(session_id.to_string())
+}
+
+fn acquire_session_lock(session_id: &str) -> std::result::Result<bool, PicoclawErrorData> {
+    if session_id.trim().is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_SESSION_ID_INVALID,
+            "invalid PicoClaw session",
+        ));
+    }
+
+    let mut lock = SESSION_LOCK
+        .lock()
+        .map_err(|_| PicoclawErrorData::new(CODE_RUNTIME_UNAVAILABLE, "session lock poisoned"))?;
+    let now = Instant::now();
+    lock.clear_expired(now);
+
+    if lock.owner_session_id.is_empty() || lock.owner_session_id == session_id {
+        let acquired = lock.owner_session_id.is_empty();
+        lock.owner_session_id = session_id.to_string();
+        if lock.acquired_at.is_none() {
+            lock.acquired_at = Some(now);
+        }
+        lock.expires_at = Some(now + SESSION_LOCK_DURATION);
+        return Ok(acquired);
+    }
+
+    Err(PicoclawErrorData::new(
+        CODE_PICOCLAW_LOCK_HELD,
+        "another PicoClaw session is running",
+    )
+    .with_session(lock.owner_session_id.clone()))
+}
+
+fn ensure_session_lock(session_id: &str) -> std::result::Result<(), PicoclawErrorData> {
+    acquire_session_lock(session_id).map(|_| ())
+}
+
+fn release_session_lock(session_id: &str) -> bool {
+    let Ok(mut lock) = SESSION_LOCK.lock() else {
+        return false;
+    };
+    if lock.owner_session_id.is_empty() {
+        return true;
+    }
+    if !session_id.is_empty() && lock.owner_session_id != session_id {
+        return false;
+    }
+
+    lock.owner_session_id.clear();
+    lock.acquired_at = None;
+    lock.expires_at = None;
+    true
+}
+
+fn session_lock_owner() -> String {
+    let Ok(mut lock) = SESSION_LOCK.lock() else {
+        return String::new();
+    };
+    lock.clear_expired(Instant::now());
+    lock.owner_session_id.clone()
+}
+
+fn capture_screenshot_blocking(
+    query: ScreenshotQuery,
+) -> std::result::Result<(Vec<u8>, ScreenshotMeta), PicoclawErrorData> {
+    let (_width, _height, _quality, source_width, source_height) =
+        resolve_screenshot_request(&query);
+    let Some(frame) = stream::latest_mjpeg_frame(CACHED_FRAME_MAX_AGE) else {
+        return Err(PicoclawErrorData::new(
+            CODE_SCREENSHOT_FAILED,
+            "no cached MJPEG frame available",
+        ));
+    };
+
+    Ok((
+        frame.data,
+        ScreenshotMeta {
+            image_base64: String::new(),
+            source_width,
+            source_height,
+            capture_width: frame.width,
+            capture_height: frame.height,
+            format: "jpeg".to_string(),
+        },
+    ))
+}
+
+fn resolve_screenshot_request(query: &ScreenshotQuery) -> (u16, u16, u16, u16, u16) {
+    let screen = stream::current_mjpeg_screen();
+    let source_width = screen.width;
+    let source_height = screen.height;
+    let mut width = screen.width;
+    let mut height = screen.height;
+    let mut quality = screen.quality;
+
+    if query.format == "base64" {
+        (width, height) = fit_within_bounds(
+            width,
+            height,
+            DEFAULT_SCREENSHOT_WIDTH,
+            DEFAULT_SCREENSHOT_HEIGHT,
+        );
+        if quality == 0 || quality > DEFAULT_SCREENSHOT_QUALITY {
+            quality = DEFAULT_SCREENSHOT_QUALITY;
+        }
+    }
+
+    (width, height) = apply_requested_dimensions(width, height, query.width, query.height);
+    (width, height) = safe_screenshot_capture_dimensions(width, height);
+    if query.quality > 0 {
+        quality = query.quality;
+    }
+
+    (width, height, quality, source_width, source_height)
+}
+
+fn apply_requested_dimensions(
+    default_width: u16,
+    default_height: u16,
+    requested_width: u16,
+    requested_height: u16,
+) -> (u16, u16) {
+    match (requested_width, requested_height) {
+        (width, height) if width > 0 && height > 0 => (width, height),
+        (width, _) if width > 0 => fit_within_bounds(default_width, default_height, width, 0),
+        (_, height) if height > 0 => fit_within_bounds(default_width, default_height, 0, height),
+        _ => (default_width, default_height),
+    }
+}
+
+fn fit_within_bounds(
+    source_width: u16,
+    source_height: u16,
+    max_width: u16,
+    max_height: u16,
+) -> (u16, u16) {
+    if source_width == 0 || source_height == 0 || (max_width == 0 && max_height == 0) {
+        return (source_width, source_height);
+    }
+
+    let width = u32::from(source_width);
+    let height = u32::from(source_height);
+    let mut limited_width = width;
+    let mut limited_height = height;
+
+    if max_width > 0 && limited_width > u32::from(max_width) {
+        limited_width = u32::from(max_width);
+        limited_height = height.saturating_mul(limited_width) / width;
+    }
+    if max_height > 0 && limited_height > u32::from(max_height) {
+        limited_height = u32::from(max_height);
+        limited_width = width.saturating_mul(limited_height) / height;
+    }
+
+    (
+        limited_width.clamp(1, u32::from(u16::MAX)) as u16,
+        limited_height.clamp(1, u32::from(u16::MAX)) as u16,
+    )
+}
+
+fn safe_screenshot_capture_dimensions(width: u16, height: u16) -> (u16, u16) {
+    if is_roughly_4_3(width, height) {
+        if width <= 640 && height <= 480 {
+            return (640, 480);
+        }
+        if width <= 800 && height <= 600 {
+            return (800, 600);
+        }
+    }
+
+    if width <= 1280 && height <= 720 {
+        return (1280, 720);
+    }
+
+    (1920, 1080)
+}
+
+fn is_roughly_4_3(width: u16, height: u16) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let lhs = i32::from(width) * 3;
+    let rhs = i32::from(height) * 4;
+    (lhs - rhs).abs() <= 8
+}
+
+fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErrorData> {
+    if raw.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "empty action payload",
+        ));
+    }
+
+    if let Ok(batch) = serde_json::from_slice::<ActionBatch>(raw) {
+        if !batch.actions.is_empty() {
+            return Ok(batch.actions);
+        }
+    }
+
+    let action = serde_json::from_slice::<Action>(raw)
+        .map_err(|_| PicoclawErrorData::new(CODE_INVALID_ACTION, "invalid action payload"))?;
+    if action.action.trim().is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "invalid action payload",
+        ));
+    }
+    Ok(vec![action])
+}
+
+fn execute_actions_blocking(
+    session_id: &str,
+    actions: &[Action],
+) -> std::result::Result<ActionResult, PicoclawErrorData> {
+    let started_at = Instant::now();
+    if actions.is_empty() {
+        return Err(PicoclawErrorData::new(CODE_INVALID_ACTION, "empty actions"));
+    }
+
+    let mut total_writes = 0;
+    for (idx, action) in actions.iter().enumerate() {
+        if let Err(err) = ensure_session_lock(session_id) {
+            release_all_hid_state();
+            return Err(err.with_index(idx));
+        }
+        match execute_action_blocking(action) {
+            Ok(writes) => total_writes += writes,
+            Err(err) => {
+                release_all_hid_state();
+                return Err(err.with_index(idx));
+            }
+        }
+    }
+
+    Ok(ActionResult {
+        action: if actions.len() > 1 {
+            "batch".to_string()
+        } else {
+            actions[0].action.clone()
+        },
+        duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        hid_writes: total_writes,
+        executed_actions: (actions.len() > 1).then_some(actions.len()),
+    })
+}
+
+fn execute_action_blocking(action: &Action) -> std::result::Result<usize, PicoclawErrorData> {
+    match action.action.trim().to_ascii_lowercase().as_str() {
+        "click" => {
+            let (x, y) = normalized_point(action.x, action.y)?;
+            let button = mouse_button(&action.button)?;
+            let mut writes = 0;
+            writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
+            writes += send_mouse_move_with_button(x, y, button, 0)?;
+            thread::sleep(DEFAULT_CLICK_HOLD);
+            writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
+            Ok(writes)
+        }
+        "move" => {
+            let (x, y) = normalized_point(action.x, action.y)?;
+            send_mouse_move_with_button(x, y, 0x00, 0)
+        }
+        "wait" => {
+            if action.duration_ms < 0 {
+                return Err(PicoclawErrorData::new(
+                    CODE_INVALID_ACTION,
+                    "wait duration must be >= 0",
+                ));
+            }
+            thread::sleep(Duration::from_millis(action.duration_ms as u64));
+            Ok(0)
+        }
+        "drag" => {
+            let (from_x, from_y) = normalized_nested_point(action.from.as_ref())?;
+            let (to_x, to_y) = normalized_nested_point(action.to.as_ref())?;
+            let button = mouse_button(&action.button)?;
+            let mut writes = 0;
+            writes += send_mouse_move_with_button(from_x, from_y, 0x00, 0)?;
+            writes += send_mouse_move_with_button(from_x, from_y, button, 0)?;
+            for step in 1..=DEFAULT_DRAG_STEPS {
+                let ratio = step as f64 / DEFAULT_DRAG_STEPS as f64;
+                let x = from_x + (to_x - from_x) * ratio;
+                let y = from_y + (to_y - from_y) * ratio;
+                writes += send_mouse_move_with_button(x, y, button, 0)?;
+            }
+            writes += send_mouse_move_with_button(to_x, to_y, 0x00, 0)?;
+            Ok(writes)
+        }
+        "scroll" => {
+            let (x, y) = if action.x.is_some() || action.y.is_some() {
+                normalized_point(action.x, action.y)?
+            } else {
+                (0.5, 0.5)
+            };
+            let amount = if action.amount == 0 { 1 } else { action.amount };
+            if amount < 0 {
+                return Err(PicoclawErrorData::new(
+                    CODE_INVALID_ACTION,
+                    "scroll amount must be > 0",
+                ));
+            }
+            let wheel = match action.direction.trim().to_ascii_lowercase().as_str() {
+                "" | "up" => 1,
+                "down" => -1,
+                _ => {
+                    return Err(PicoclawErrorData::new(
+                        CODE_INVALID_ACTION,
+                        "invalid scroll direction",
+                    ));
+                }
+            };
+            let mut writes = 0;
+            for _ in 0..amount {
+                writes += send_mouse_move_with_button(x, y, 0x00, wheel)?;
+                writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
+                thread::sleep(DEFAULT_SCROLL_STEP);
+            }
+            Ok(writes)
+        }
+        "type" => {
+            if action.text.is_empty() {
+                return Err(PicoclawErrorData::new(
+                    CODE_INVALID_ACTION,
+                    "type requires text",
+                ));
+            }
+            hid::type_text_blocking(&action.text, "")
+                .map_err(|err| PicoclawErrorData::new(CODE_INVALID_ACTION, err.to_string()))
+        }
+        "hotkey" => {
+            let keys = normalize_hotkey_keys(action.keys.as_ref())?;
+            let report = build_hotkey_report(&keys)?;
+            let mut writes = 0;
+            writes += send_keyboard_report(&report)?;
+            thread::sleep(DEFAULT_CLICK_HOLD);
+            writes += send_keyboard_report(&[0; 8])?;
+            Ok(writes)
+        }
+        _ => Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "unknown or invalid action",
+        )),
+    }
+}
+
+fn normalized_point(
+    x: Option<f64>,
+    y: Option<f64>,
+) -> std::result::Result<(f64, f64), PicoclawErrorData> {
+    let (Some(x), Some(y)) = (x, y) else {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "action requires x and y",
+        ));
+    };
+    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "coordinates must be within [0,1]",
+        ));
+    }
+    Ok((x, y))
+}
+
+fn normalized_nested_point(
+    point: Option<&Point>,
+) -> std::result::Result<(f64, f64), PicoclawErrorData> {
+    let Some(point) = point else {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "action requires point coordinates",
+        ));
+    };
+    normalized_point(point.x, point.y)
+}
+
+fn mouse_button(button: &str) -> std::result::Result<u8, PicoclawErrorData> {
+    match button.trim().to_ascii_lowercase().as_str() {
+        "" | "left" => Ok(1 << 0),
+        "right" => Ok(1 << 1),
+        "middle" => Ok(1 << 2),
+        "back" => Ok(1 << 3),
+        "forward" => Ok(1 << 4),
+        _ => Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "invalid mouse button",
+        )),
+    }
+}
+
+fn send_mouse_move_with_button(
+    x: f64,
+    y: f64,
+    buttons: u8,
+    wheel: i32,
+) -> std::result::Result<usize, PicoclawErrorData> {
+    let absolute_x = to_absolute_hid_coord(x);
+    let absolute_y = to_absolute_hid_coord(y);
+    let report = [
+        buttons,
+        (absolute_x & 0xff) as u8,
+        (absolute_x >> 8) as u8,
+        (absolute_y & 0xff) as u8,
+        (absolute_y >> 8) as u8,
+        (wheel as i8) as u8,
+    ];
+    hid_ws::write_absolute_mouse_report(&report).map_err(|err| {
+        PicoclawErrorData::new(
+            CODE_HID_WRITE_FAILED,
+            format!("failed to write HID mouse report: {err}"),
+        )
+    })?;
+    Ok(1)
+}
+
+fn send_keyboard_report(report: &[u8; 8]) -> std::result::Result<usize, PicoclawErrorData> {
+    hid_ws::write_keyboard_report(report).map_err(|err| {
+        PicoclawErrorData::new(
+            CODE_HID_WRITE_FAILED,
+            format!("failed to write HID keyboard report: {err}"),
+        )
+    })?;
+    Ok(1)
+}
+
+fn to_absolute_hid_coord(normalized: f64) -> u16 {
+    let normalized = normalized.clamp(0.0, 1.0);
+    (f64::from(0x7fff) * normalized).floor() as u16 + 1
+}
+
+fn release_all_hid_state() {
+    let _ = hid_ws::write_keyboard_report(&[0; 8]);
+    let _ = hid_ws::write_relative_mouse_report(&[0; 4]);
+    let _ = hid_ws::write_absolute_mouse_report(&[0; 6]);
+}
+
+fn normalize_hotkey_keys(
+    value: Option<&JsonValue>,
+) -> std::result::Result<Vec<String>, PicoclawErrorData> {
+    let Some(value) = value else {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "hotkey requires at least one key",
+        ));
+    };
+
+    let keys = match value {
+        JsonValue::Array(items) => items
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+        JsonValue::String(csv) => csv
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+        _ => {
+            return Err(PicoclawErrorData::new(
+                CODE_INVALID_ACTION,
+                "invalid hotkey keys",
+            ));
+        }
+    };
+
+    if keys.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "hotkey requires at least one key",
+        ));
+    }
+    Ok(keys)
+}
+
+fn build_hotkey_report(keys: &[String]) -> std::result::Result<[u8; 8], PicoclawErrorData> {
+    if keys.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_INVALID_ACTION,
+            "hotkey requires at least one key",
+        ));
+    }
+
+    let mut report = [0_u8; 8];
+    let mut next_index = 2;
+    for key in keys {
+        let (code, is_modifier) = resolve_key(key)?;
+        if is_modifier {
+            report[0] |= code;
+            continue;
+        }
+        if next_index >= report.len() {
+            return Err(PicoclawErrorData::new(
+                CODE_INVALID_ACTION,
+                "hotkey supports at most 6 non-modifier keys",
+            ));
+        }
+        report[next_index] = code;
+        next_index += 1;
+    }
+
+    Ok(report)
+}
+
+fn resolve_key(key: &str) -> std::result::Result<(u8, bool), PicoclawErrorData> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err(PicoclawErrorData::new(CODE_INVALID_ACTION, "empty key"));
+    }
+
+    if let Some(modifier) = modifier_code(trimmed) {
+        return Ok((modifier, true));
+    }
+    if let Some(code) = key_code(trimmed) {
+        return Ok((code, false));
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    if let Some(alias) = key_alias(&upper) {
+        if let Some(modifier) = modifier_code(alias) {
+            return Ok((modifier, true));
+        }
+        if let Some(code) = key_code(alias) {
+            return Ok((code, false));
+        }
+    }
+
+    if upper.len() == 1 {
+        let byte = upper.as_bytes()[0];
+        if byte.is_ascii_uppercase() {
+            return Ok((byte - b'A' + 0x04, false));
+        }
+        if byte.is_ascii_digit() {
+            let code = if byte == b'0' {
+                0x27
+            } else {
+                byte - b'1' + 0x1e
+            };
+            return Ok((code, false));
+        }
+    }
+
+    Err(PicoclawErrorData::new(
+        CODE_INVALID_ACTION,
+        format!("unsupported key: {key}"),
+    ))
+}
+
+fn modifier_code(key: &str) -> Option<u8> {
+    match key {
+        "ControlLeft" => Some(1 << 0),
+        "ShiftLeft" => Some(1 << 1),
+        "AltLeft" => Some(1 << 2),
+        "MetaLeft" => Some(1 << 3),
+        "ControlRight" => Some(1 << 4),
+        "ShiftRight" => Some(1 << 5),
+        "AltRight" => Some(1 << 6),
+        "MetaRight" => Some(1 << 7),
+        _ => None,
+    }
+}
+
+fn key_alias(key: &str) -> Option<&'static str> {
+    match key {
+        "CTRL" | "CONTROL" => Some("ControlLeft"),
+        "SHIFT" => Some("ShiftLeft"),
+        "ALT" | "OPTION" => Some("AltLeft"),
+        "META" | "WIN" | "WINDOWS" | "COMMAND" | "CMD" | "SUPER" => Some("MetaLeft"),
+        "ESC" => Some("Escape"),
+        "RETURN" | "ENTER" => Some("Enter"),
+        "DEL" => Some("Delete"),
+        "INS" => Some("Insert"),
+        "UP" => Some("ArrowUp"),
+        "DOWN" => Some("ArrowDown"),
+        "LEFT" => Some("ArrowLeft"),
+        "RIGHT" => Some("ArrowRight"),
+        "SPACEBAR" | "SPACE" => Some("Space"),
+        "TAB" => Some("Tab"),
+        "BACKSPACE" => Some("Backspace"),
+        "PGUP" => Some("PageUp"),
+        "PGDN" => Some("PageDown"),
+        _ => None,
+    }
+}
+
+fn key_code(key: &str) -> Option<u8> {
+    match key {
+        "KeyA" => Some(0x04),
+        "KeyB" => Some(0x05),
+        "KeyC" => Some(0x06),
+        "KeyD" => Some(0x07),
+        "KeyE" => Some(0x08),
+        "KeyF" => Some(0x09),
+        "KeyG" => Some(0x0a),
+        "KeyH" => Some(0x0b),
+        "KeyI" => Some(0x0c),
+        "KeyJ" => Some(0x0d),
+        "KeyK" => Some(0x0e),
+        "KeyL" => Some(0x0f),
+        "KeyM" => Some(0x10),
+        "KeyN" => Some(0x11),
+        "KeyO" => Some(0x12),
+        "KeyP" => Some(0x13),
+        "KeyQ" => Some(0x14),
+        "KeyR" => Some(0x15),
+        "KeyS" => Some(0x16),
+        "KeyT" => Some(0x17),
+        "KeyU" => Some(0x18),
+        "KeyV" => Some(0x19),
+        "KeyW" => Some(0x1a),
+        "KeyX" => Some(0x1b),
+        "KeyY" => Some(0x1c),
+        "KeyZ" => Some(0x1d),
+        "Digit1" => Some(0x1e),
+        "Digit2" => Some(0x1f),
+        "Digit3" => Some(0x20),
+        "Digit4" => Some(0x21),
+        "Digit5" => Some(0x22),
+        "Digit6" => Some(0x23),
+        "Digit7" => Some(0x24),
+        "Digit8" => Some(0x25),
+        "Digit9" => Some(0x26),
+        "Digit0" => Some(0x27),
+        "Enter" => Some(0x28),
+        "Escape" => Some(0x29),
+        "Backspace" => Some(0x2a),
+        "Tab" => Some(0x2b),
+        "Space" => Some(0x2c),
+        "Minus" => Some(0x2d),
+        "Equal" => Some(0x2e),
+        "BracketLeft" => Some(0x2f),
+        "BracketRight" => Some(0x30),
+        "Backslash" => Some(0x31),
+        "IntlHash" => Some(0x32),
+        "Semicolon" => Some(0x33),
+        "Quote" => Some(0x34),
+        "Backquote" => Some(0x35),
+        "Comma" => Some(0x36),
+        "Period" => Some(0x37),
+        "Slash" => Some(0x38),
+        "CapsLock" => Some(0x39),
+        "F1" => Some(0x3a),
+        "F2" => Some(0x3b),
+        "F3" => Some(0x3c),
+        "F4" => Some(0x3d),
+        "F5" => Some(0x3e),
+        "F6" => Some(0x3f),
+        "F7" => Some(0x40),
+        "F8" => Some(0x41),
+        "F9" => Some(0x42),
+        "F10" => Some(0x43),
+        "F11" => Some(0x44),
+        "F12" => Some(0x45),
+        "PrintScreen" => Some(0x46),
+        "ScrollLock" => Some(0x47),
+        "Pause" => Some(0x48),
+        "Insert" => Some(0x49),
+        "Home" => Some(0x4a),
+        "PageUp" => Some(0x4b),
+        "Delete" => Some(0x4c),
+        "End" => Some(0x4d),
+        "PageDown" => Some(0x4e),
+        "ArrowRight" => Some(0x4f),
+        "ArrowLeft" => Some(0x50),
+        "ArrowDown" => Some(0x51),
+        "ArrowUp" => Some(0x52),
+        "NumLock" => Some(0x53),
+        "NumpadDivide" => Some(0x54),
+        "NumpadMultiply" => Some(0x55),
+        "NumpadSubtract" => Some(0x56),
+        "NumpadAdd" => Some(0x57),
+        "NumpadEnter" => Some(0x58),
+        "Numpad1" => Some(0x59),
+        "Numpad2" => Some(0x5a),
+        "Numpad3" => Some(0x5b),
+        "Numpad4" => Some(0x5c),
+        "Numpad5" => Some(0x5d),
+        "Numpad6" => Some(0x5e),
+        "Numpad7" => Some(0x5f),
+        "Numpad8" => Some(0x60),
+        "Numpad9" => Some(0x61),
+        "Numpad0" => Some(0x62),
+        "NumpadDecimal" => Some(0x63),
+        "IntlBackslash" => Some(0x64),
+        "ContextMenu" => Some(0x65),
+        "Power" => Some(0x66),
+        "NumpadEqual" => Some(0x67),
+        "F13" => Some(0x68),
+        "F14" => Some(0x69),
+        "F15" => Some(0x6a),
+        "F16" => Some(0x6b),
+        "F17" => Some(0x6c),
+        "F18" => Some(0x6d),
+        "F19" => Some(0x6e),
+        "F20" => Some(0x6f),
+        "F21" => Some(0x70),
+        "F22" => Some(0x71),
+        "F23" => Some(0x72),
+        "F24" => Some(0x73),
+        "Execute" => Some(0x74),
+        "Help" => Some(0x75),
+        "Props" => Some(0x76),
+        "Select" => Some(0x77),
+        "Stop" => Some(0x78),
+        "Again" => Some(0x79),
+        "Undo" => Some(0x7a),
+        "Cut" => Some(0x7b),
+        "Copy" => Some(0x7c),
+        "Paste" => Some(0x7d),
+        "Find" => Some(0x7e),
+        "AudioVolumeMute" | "VolumeMute" => Some(0x7f),
+        "AudioVolumeUp" | "VolumeUp" => Some(0x80),
+        "AudioVolumeDown" | "VolumeDown" => Some(0x81),
+        "LockingCapsLock" => Some(0x82),
+        "LockingNumLock" => Some(0x83),
+        "LockingScrollLock" => Some(0x84),
+        "NumpadComma" => Some(0x85),
+        "NumpadEqual2" => Some(0x86),
+        "IntlRo" => Some(0x87),
+        "KanaMode" => Some(0x88),
+        "IntlYen" => Some(0x89),
+        "Convert" => Some(0x8a),
+        "NonConvert" => Some(0x8b),
+        "International6" => Some(0x8c),
+        "International7" => Some(0x8d),
+        "International8" => Some(0x8e),
+        "International9" => Some(0x8f),
+        "Lang1" => Some(0x90),
+        "Lang2" => Some(0x91),
+        "Lang3" => Some(0x92),
+        "Lang4" => Some(0x93),
+        "Lang5" => Some(0x94),
+        "Lang6" => Some(0x95),
+        "Lang7" => Some(0x96),
+        "Lang8" => Some(0x97),
+        "Lang9" => Some(0x98),
+        "NumpadParenLeft" => Some(0xb6),
+        "NumpadParenRight" => Some(0xb7),
+        "NumpadBackspace" => Some(0xbb),
+        "NumpadMemoryStore" => Some(0xd0),
+        "NumpadMemoryRecall" => Some(0xd1),
+        "NumpadMemoryClear" => Some(0xd2),
+        "NumpadMemoryAdd" => Some(0xd3),
+        "NumpadMemorySubtract" => Some(0xd4),
+        "NumpadClear" => Some(0xd8),
+        "NumpadClearEntry" => Some(0xd9),
+        "BrowserSearch" | "LaunchApp2" => Some(0xf0),
+        "BrowserHome" => Some(0xf1),
+        "BrowserBack" => Some(0xf2),
+        "BrowserForward" => Some(0xf3),
+        "BrowserStop" => Some(0xf4),
+        "BrowserRefresh" => Some(0xf5),
+        "BrowserFavorites" => Some(0xf6),
+        "MediaPlayPause" => Some(0xe8),
+        "MediaStop" => Some(0xe9),
+        "MediaTrackPrevious" => Some(0xea),
+        "MediaTrackNext" => Some(0xeb),
+        "Eject" => Some(0xec),
+        "MediaSelect" => Some(0xed),
+        "LaunchMail" => Some(0xee),
+        "LaunchApp1" => Some(0xef),
+        "Sleep" => Some(0xf8),
+        "Wake" => Some(0xf9),
+        "MediaRewind" => Some(0xfa),
+        "MediaFastForward" => Some(0xfb),
+        _ => None,
+    }
 }
 
 fn runtime_status() -> RuntimeStatus {
@@ -1390,6 +2394,19 @@ fn picoclaw_error(code: &str, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+fn picoclaw_error_data(err: PicoclawErrorData) -> Response {
+    (
+        StatusCode::OK,
+        Json(PicoclawErrorBody {
+            code: err.code.to_string(),
+            message: err.message,
+            session_id: err.session_id,
+            index: err.index,
+        }),
+    )
+        .into_response()
+}
+
 fn internal_token() -> Result<String> {
     if let Ok(guard) = INTERNAL_TOKEN_CACHE.read() {
         if let Some(token) = guard.as_ref() {
@@ -1478,5 +2495,52 @@ mod tests {
             extract_model_name("gpt-4.1").unwrap(),
             "gpt-4.1".to_string()
         );
+    }
+
+    #[test]
+    fn screenshot_dimensions_preserve_aspect_ratio() {
+        assert_eq!(fit_within_bounds(1920, 1080, 960, 540), (960, 540));
+        assert_eq!(fit_within_bounds(1920, 1080, 320, 0), (320, 180));
+        assert_eq!(fit_within_bounds(1920, 1080, 0, 270), (480, 270));
+    }
+
+    #[test]
+    fn screenshot_capture_dimensions_use_safe_libkvm_sizes() {
+        assert_eq!(safe_screenshot_capture_dimensions(320, 180), (1280, 720));
+        assert_eq!(safe_screenshot_capture_dimensions(960, 540), (1280, 720));
+        assert_eq!(safe_screenshot_capture_dimensions(640, 480), (640, 480));
+        assert_eq!(safe_screenshot_capture_dimensions(800, 600), (800, 600));
+    }
+
+    #[test]
+    fn action_payload_accepts_single_or_batch() {
+        let single = normalize_actions(br#"{"action":"wait","duration_ms":1}"#).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].action, "wait");
+
+        let batch = normalize_actions(
+            br#"{"actions":[{"action":"wait"},{"action":"hotkey","keys":"ctrl,c"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[1].action, "hotkey");
+    }
+
+    #[test]
+    fn hotkey_report_matches_hid_usage_codes() {
+        let report = build_hotkey_report(&[
+            "ctrl".to_string(),
+            "AltLeft".to_string(),
+            "Delete".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(report[0], (1 << 0) | (1 << 2));
+        assert_eq!(report[2], 0x4c);
+    }
+
+    #[test]
+    fn absolute_hid_coords_match_go_formula() {
+        assert_eq!(to_absolute_hid_coord(0.0), 1);
+        assert_eq!(to_absolute_hid_coord(1.0), 0x8000);
     }
 }
