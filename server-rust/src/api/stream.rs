@@ -38,8 +38,8 @@ struct Screen {
 impl Default for Screen {
     fn default() -> Self {
         Self {
-            width: 0,
-            height: 0,
+            width: 1920,
+            height: 1080,
             fps: 30,
             quality: 80,
             bit_rate: 3000,
@@ -157,7 +157,7 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     match kind {
         "resolution" => {
             let height = u16::try_from(value).unwrap_or_default();
-            if let Some(width) = resolution_width(height) {
+            if let Some((width, height)) = capture_resolution(height) {
                 screen.width = width;
                 screen.height = height;
             }
@@ -191,7 +191,10 @@ fn current_screen() -> Screen {
 }
 
 fn normalize_screen(screen: &mut Screen) {
-    if resolution_width(screen.height).is_none() {
+    if let Some((width, height)) = capture_resolution(screen.height) {
+        screen.width = width;
+        screen.height = height;
+    } else {
         screen.width = 1920;
         screen.height = 1080;
     }
@@ -208,17 +211,66 @@ fn frame_interval() -> Duration {
     Duration::from_millis((1000 / fps).max(1))
 }
 
-fn resolution_width(height: u16) -> Option<u16> {
+fn capture_resolution(height: u16) -> Option<(u16, u16)> {
     match height {
-        1080 => Some(1920),
-        720 => Some(1280),
-        600 => Some(800),
-        480 => Some(640),
-        0 => Some(0),
+        // The frontend uses 0 as "auto". The Go backend passes it through to
+        // libkvm, but the Rust linked-libkvm path can hang the native driver on
+        // first capture with 0x0. Capture at the known native default instead;
+        // the browser still auto-scales because its local resolution remains 0.
+        0 | 1080 => Some((1920, 1080)),
+        720 => Some((1280, 720)),
+        600 => Some((800, 600)),
+        480 => Some((640, 480)),
         _ => None,
     }
 }
 
 fn validate_fps(fps: i32) -> u64 {
     fps.clamp(10, 60) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Screen, normalize_screen};
+
+    #[test]
+    fn default_screen_is_safe_for_capture() {
+        let screen = Screen::default();
+
+        assert_eq!(screen.width, 1920);
+        assert_eq!(screen.height, 1080);
+    }
+
+    #[test]
+    fn auto_resolution_maps_to_native_capture_size() {
+        let mut screen = Screen {
+            width: 0,
+            height: 0,
+            fps: 30,
+            quality: 80,
+            bit_rate: 3000,
+            gop: 30,
+        };
+        normalize_screen(&mut screen);
+
+        assert_eq!(screen.width, 1920);
+        assert_eq!(screen.height, 1080);
+    }
+
+    #[test]
+    fn unsupported_resolution_falls_back_to_native_capture_size() {
+        let mut screen = Screen {
+            width: 123,
+            height: 999,
+            fps: 30,
+            quality: 80,
+            bit_rate: 3000,
+            gop: 30,
+        };
+
+        normalize_screen(&mut screen);
+
+        assert_eq!(screen.width, 1920);
+        assert_eq!(screen.height, 1080);
+    }
 }

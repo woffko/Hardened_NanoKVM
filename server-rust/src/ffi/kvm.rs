@@ -186,14 +186,19 @@ impl KvmVision {
         let result =
             unsafe { kvmv_read_img(width, height, kind, quality_or_rate, &mut ptr, &mut len) };
 
-        if result < 0 || ptr.is_null() || len == 0 {
+        if result < 0 {
             return Ok((Vec::new(), result));
         }
 
-        // SAFETY: ptr/len come from libkvm for this call and remain valid until
-        // free_kvmv_data is invoked.
-        let data = unsafe { slice::from_raw_parts(ptr, len as usize).to_vec() };
-        // SAFETY: Releases the buffer allocated by libkvm.
+        let data = if ptr.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: ptr/len come from libkvm for this call and remain valid
+            // until free_kvmv_data is invoked below.
+            unsafe { slice::from_raw_parts(ptr, len as usize).to_vec() }
+        };
+        // SAFETY: Mirrors the Go backend: release libkvm's output buffer for
+        // all non-negative results, including empty/no-change frames.
         unsafe {
             free_kvmv_data(&mut ptr);
         }
@@ -311,14 +316,19 @@ impl KvmVision {
         let result =
             unsafe { (self.read_img)(width, height, kind, quality_or_rate, &mut ptr, &mut len) };
 
-        if result < 0 || ptr.is_null() || len == 0 {
+        if result < 0 {
             return Ok((Vec::new(), result));
         }
 
-        // SAFETY: ptr/len come from libkvm for this call and remain valid until
-        // free_kvmv_data is invoked.
-        let data = unsafe { slice::from_raw_parts(ptr, len as usize).to_vec() };
-        // SAFETY: Releases the buffer allocated by libkvm.
+        let data = if ptr.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: ptr/len come from libkvm for this call and remain valid
+            // until free_kvmv_data is invoked below.
+            unsafe { slice::from_raw_parts(ptr, len as usize).to_vec() }
+        };
+        // SAFETY: Mirrors the Go backend: release libkvm's output buffer for
+        // all non-negative results, including empty/no-change frames.
         unsafe {
             (self.free_data)(&mut ptr);
         }
