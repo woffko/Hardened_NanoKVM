@@ -50,7 +50,7 @@ use webrtc::{
 
 use crate::{
     AppError, Result,
-    api::stream::{current_h264_screen, h264_frame_duration},
+    api::stream::{current_h264_screen, h264_frame_duration, recover_after_capture_failure},
     config::Config,
     ffi::kvm,
     state::AppState,
@@ -296,6 +296,7 @@ impl WebRtcManager {
         let mut duration = h264_frame_duration(screen.fps);
         let mut interval = time::interval(duration);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut consecutive_capture_failures = 0;
         let playout_delay = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
             0, 0,
         ))];
@@ -343,8 +344,17 @@ impl WebRtcManager {
                 if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                     warn!(result, bytes = data.len(), "h264 webrtc frame unavailable");
                 }
+                if result < 0
+                    && recover_after_capture_failure(
+                        "h264 webrtc",
+                        &mut consecutive_capture_failures,
+                    )
+                {
+                    return;
+                }
                 continue;
             }
+            consecutive_capture_failures = 0;
 
             if !H264_WEBRTC_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(result, bytes = data.len(), "read first h264 webrtc frame");

@@ -29,6 +29,8 @@ const SCREEN_TYPE_FILE: &str = "/kvmapp/kvm/type";
 const SCREEN_FPS_FILE: &str = "/kvmapp/kvm/fps";
 const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
 const SCREEN_RESOLUTION_FILE: &str = "/kvmapp/kvm/res";
+const SCREEN_GOP_FILE: &str = "/kvmapp/kvm/gop";
+const MAX_CONSECUTIVE_CAPTURE_FAILURES: u8 = 1;
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
@@ -82,15 +84,35 @@ pub struct LatestMjpegFrame {
 
 impl Default for Screen {
     fn default() -> Self {
-        Self {
+        let mut screen = Self {
             mode: StreamMode::Mjpeg,
-            width: 1920,
-            height: 1080,
+            width: 0,
+            height: 0,
             fps: 30,
             quality: 80,
             bit_rate: 3000,
             gop: 30,
+        };
+
+        if matches!(read_trimmed(SCREEN_TYPE_FILE).as_deref(), Some("h264")) {
+            screen.mode = StreamMode::H264;
         }
+        if let Some(value) = read_i32(SCREEN_RESOLUTION_FILE) {
+            apply_resolution(&mut screen, value);
+        }
+        if let Some(value) = read_i32(SCREEN_QUALITY_FILE) {
+            apply_quality(&mut screen, value);
+        }
+        if let Some(value) = read_i32(SCREEN_FPS_FILE) {
+            screen.fps = validate_fps(value);
+        }
+        if let Some(value) = read_i32(SCREEN_GOP_FILE).and_then(|value| u8::try_from(value).ok()) {
+            if (1..=100).contains(&value) {
+                screen.gop = value;
+            }
+        }
+
+        screen
     }
 }
 
@@ -108,6 +130,7 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
     let stream = stream! {
         let mut interval = time::interval(frame_interval());
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut consecutive_capture_failures = 0;
 
         loop {
             interval.tick().await;
@@ -152,8 +175,14 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
                         "mjpeg frame unavailable"
                     );
                 }
+                if result < 0
+                    && recover_after_capture_failure("mjpeg", &mut consecutive_capture_failures)
+                {
+                    break;
+                }
                 continue;
             }
+            consecutive_capture_failures = 0;
             if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(result, bytes = data.len(), "read first mjpeg frame");
             }
@@ -197,6 +226,7 @@ async fn handle_h264_direct_socket(mut socket: WebSocket) {
     let start = Instant::now();
     let mut interval = time::interval(frame_interval());
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut consecutive_capture_failures = 0;
 
     loop {
         interval.tick().await;
@@ -235,8 +265,14 @@ async fn handle_h264_direct_socket(mut socket: WebSocket) {
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                 warn!(result, bytes = data.len(), "h264 direct frame unavailable");
             }
+            if result < 0
+                && recover_after_capture_failure("h264 direct", &mut consecutive_capture_failures)
+            {
+                break;
+            }
             continue;
         }
+        consecutive_capture_failures = 0;
 
         if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
             info!(result, bytes = data.len(), "read first h264 direct frame");
@@ -284,20 +320,11 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
             };
         }
         "resolution" => {
-            let height = u16::try_from(value).unwrap_or_default();
-            if let Some((width, height)) = capture_resolution(height) {
-                screen.width = width;
-                screen.height = height;
-            }
+            apply_resolution(&mut screen, value);
             write_screen_file(SCREEN_RESOLUTION_FILE, &value.to_string())?;
         }
         "quality" => {
-            let value = u16::try_from(value).unwrap_or_default();
-            if value > 100 {
-                screen.bit_rate = value;
-            } else {
-                screen.quality = value;
-            }
+            apply_quality(&mut screen, value);
             write_screen_file(SCREEN_QUALITY_FILE, &value.to_string())?;
         }
         "fps" => {
@@ -305,18 +332,51 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
             write_screen_file(SCREEN_FPS_FILE, &value.to_string())?;
         }
         "gop" => {
-            let gop = u8::try_from(value).unwrap_or(screen.gop);
+            let gop = u8::try_from(value).unwrap_or(30);
+            let gop = if (1..=100).contains(&gop) { gop } else { 30 };
             screen.gop = gop;
             kvm::set_h264_gop(gop)?;
+            write_screen_file(SCREEN_GOP_FILE, &gop.to_string())?;
         }
-        _ => {}
+        _ => return Err(AppError::BadRequest(format!("invalid screen type {kind}"))),
     }
 
     Ok(())
 }
 
 fn write_screen_file(path: &str, value: &str) -> Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(path, value.as_bytes()).map_err(AppError::from)
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_i32(path: &str) -> Option<i32> {
+    read_trimmed(path)?.parse().ok()
+}
+
+fn apply_resolution(screen: &mut Screen, value: i32) {
+    let height = u16::try_from(value).unwrap_or_default();
+    if let Some((width, height)) = capture_resolution(height) {
+        screen.width = width;
+        screen.height = height;
+    }
+}
+
+fn apply_quality(screen: &mut Screen, value: i32) {
+    let value = u16::try_from(value).unwrap_or_default();
+    if value > 100 {
+        screen.bit_rate = value;
+    } else {
+        screen.quality = value;
+    }
 }
 
 fn current_screen() -> Screen {
@@ -353,6 +413,16 @@ pub fn h264_frame_duration(fps: u64) -> Duration {
     Duration::from_millis((1000 / fps.max(1)).max(1))
 }
 
+pub fn recover_after_capture_failure(label: &str, consecutive_failures: &mut u8) -> bool {
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    warn!(
+        label,
+        consecutive_failures = *consecutive_failures,
+        "stopping stream after capture failure"
+    );
+    *consecutive_failures >= MAX_CONSECUTIVE_CAPTURE_FAILURES
+}
+
 fn set_latest_mjpeg_frame(data: &[u8], width: u16, height: u16) {
     if let Ok(mut frame) = LATEST_MJPEG_FRAME.lock() {
         *frame = Some(LatestMjpegFrame {
@@ -387,11 +457,9 @@ fn frame_interval() -> Duration {
 
 fn capture_resolution(height: u16) -> Option<(u16, u16)> {
     match height {
-        // The frontend uses 0 as "auto". The Go backend passes it through to
-        // libkvm, but the Rust linked-libkvm path can hang the native driver on
-        // first capture with 0x0. Capture at the known native default instead;
-        // the browser still auto-scales because its local resolution remains 0.
-        0 | 1080 => Some((1920, 1080)),
+        // Match the Go backend: 0 means "auto" and is passed through to libkvm.
+        0 => Some((0, 0)),
+        1080 => Some((1920, 1080)),
         720 => Some((1280, 720)),
         600 => Some((800, 600)),
         480 => Some((640, 480)),
@@ -416,15 +484,15 @@ mod tests {
     use super::{Screen, StreamMode, h264_direct_packet, normalize_screen};
 
     #[test]
-    fn default_screen_is_safe_for_capture() {
+    fn default_screen_matches_go_auto_resolution_when_unconfigured() {
         let screen = Screen::default();
 
-        assert_eq!(screen.width, 1920);
-        assert_eq!(screen.height, 1080);
+        assert!(matches!(screen.mode, StreamMode::Mjpeg | StreamMode::H264));
+        assert!(matches!(screen.height, 0 | 480 | 600 | 720 | 1080));
     }
 
     #[test]
-    fn auto_resolution_maps_to_native_capture_size() {
+    fn auto_resolution_is_passed_to_libkvm() {
         let mut screen = Screen {
             mode: StreamMode::Mjpeg,
             width: 0,
@@ -436,8 +504,8 @@ mod tests {
         };
         normalize_screen(&mut screen);
 
-        assert_eq!(screen.width, 1920);
-        assert_eq!(screen.height, 1080);
+        assert_eq!(screen.width, 0);
+        assert_eq!(screen.height, 0);
     }
 
     #[test]
