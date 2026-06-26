@@ -35,6 +35,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_http(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let addr = config.listen_addr()?;
     let state = AppState::new(config).await?;
+
+    if state.config.needs_dedicated_loopback_listener() {
+        spawn_http_listener(
+            state.config.loopback_listen_addr(),
+            routes::build(state.clone()),
+            "starting dedicated loopback HTTP listener",
+        )
+        .await?;
+    }
+
     let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "starting NanoKVM Rust backend");
@@ -48,18 +58,21 @@ async fn run_https(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let tls_config = tls::load_server_config(&config.cert.crt, &config.cert.key)?;
     let state = AppState::new(config).await?;
 
-    let redirect_listener = TcpListener::bind(http_addr).await?;
-    let redirect_state = state.clone();
-    tokio::spawn(async move {
-        let app = routes::picoclaw_loopback_routes()
-            .fallback(redirect_to_https)
-            .with_state(redirect_state)
-            .into_make_service_with_connect_info::<ClientAddr>();
-        info!(addr = %http_addr, "starting HTTP to HTTPS redirect listener");
-        if let Err(err) = axum::serve(redirect_listener, app).await {
-            warn!(error = ?err, "HTTP redirect listener stopped");
-        }
-    });
+    if state.config.needs_dedicated_loopback_listener() {
+        spawn_http_listener(
+            state.config.loopback_listen_addr(),
+            https_redirect_app(state.clone()),
+            "starting dedicated loopback HTTP to HTTPS redirect listener",
+        )
+        .await?;
+    }
+
+    spawn_http_listener(
+        http_addr,
+        https_redirect_app(state.clone()),
+        "starting HTTP to HTTPS redirect listener",
+    )
+    .await?;
 
     let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(https_addr).await?;
@@ -67,6 +80,28 @@ async fn run_https(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     info!(addr = %https_addr, "starting NanoKVM Rust HTTPS backend");
     axum::serve(tls_listener, app).await?;
     Ok(())
+}
+
+async fn spawn_http_listener(
+    addr: std::net::SocketAddr,
+    app: axum::Router,
+    message: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(addr).await?;
+    tokio::spawn(async move {
+        let service = app.into_make_service_with_connect_info::<ClientAddr>();
+        info!(%addr, "{message}");
+        if let Err(err) = axum::serve(listener, service).await {
+            warn!(%addr, error = ?err, "HTTP listener stopped");
+        }
+    });
+    Ok(())
+}
+
+fn https_redirect_app(state: AppState) -> axum::Router {
+    routes::picoclaw_loopback_routes()
+        .fallback(redirect_to_https)
+        .with_state(state)
 }
 
 async fn redirect_to_https(

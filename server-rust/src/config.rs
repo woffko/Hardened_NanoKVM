@@ -248,6 +248,22 @@ impl Config {
         self.socket_addr(self.port.https)
     }
 
+    pub fn loopback_listen_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.port.http))
+    }
+
+    pub fn needs_dedicated_loopback_listener(&self) -> bool {
+        let host = self.host.trim().trim_matches(['[', ']']);
+        if host.is_empty() {
+            return false;
+        }
+
+        match host.parse::<IpAddr>() {
+            Ok(ip) => !ip.is_loopback() && !ip.is_unspecified(),
+            Err(_) => !host.eq_ignore_ascii_case("localhost"),
+        }
+    }
+
     fn socket_addr(&self, port: u16) -> Result<SocketAddr> {
         let ip: IpAddr = if self.host.is_empty() {
             "0.0.0.0"
@@ -340,5 +356,26 @@ mod tests {
     #[test]
     fn default_disables_legacy_admin_bootstrap() {
         assert!(!Config::default().security.allow_default_admin);
+    }
+
+    #[test]
+    fn dedicated_loopback_listener_matches_go_host_rules() {
+        let mut config = Config::default();
+
+        for host in ["", "0.0.0.0", "::", "127.0.0.1", "::1", "localhost"] {
+            config.host = host.to_string();
+            assert!(
+                !config.needs_dedicated_loopback_listener(),
+                "{host} should not need a dedicated loopback listener"
+            );
+        }
+
+        for host in ["10.0.87.133", "192.168.1.10", "kvm-bd3e.local"] {
+            config.host = host.to_string();
+            assert!(
+                config.needs_dedicated_loopback_listener(),
+                "{host} should need a dedicated loopback listener"
+            );
+        }
     }
 }
