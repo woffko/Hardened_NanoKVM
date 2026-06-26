@@ -1,8 +1,35 @@
-use axum::{Json, extract::State, response::IntoResponse};
-use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
+use axum::{
+    Json,
+    extract::{
+        State,
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+    },
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+};
+use futures_util::{SinkExt, StreamExt};
+use nix::{
+    ifaddrs::getifaddrs,
+    net::if_::InterfaceFlags,
+    pty::{ForkptyResult, Winsize, forkpty},
+    sys::{
+        signal::{Signal, kill},
+        wait::waitpid,
+    },
+    unistd::Pid,
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fs, path::Path, time::Duration};
-use tokio::time;
+use std::{
+    collections::HashSet,
+    fs::{self, File},
+    io::{Read, Write},
+    os::fd::AsRawFd,
+    path::Path,
+    ptr,
+    time::Duration,
+};
+use tokio::{sync::mpsc, task, time};
+use tracing::{debug, warn};
 
 use crate::{
     AppError, Result,
@@ -13,7 +40,7 @@ use crate::{
     http::tls,
     state::AppState,
     system::command::{AllowedCommand, run_allowed},
-    ws::hid as hid_ws,
+    ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
 const BOOT_VERSION_FILE: &str = "/boot/ver";
@@ -42,6 +69,9 @@ const VIRTUAL_NETWORK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c
 const VIRTUAL_DISK_CONFIG: &str = "/sys/kernel/config/usb_gadget/g0/configs/c.1/mass_storage.disk0";
 const TLS_CERT_FILE: &str = "/etc/kvm/server.crt";
 const TLS_KEY_FILE: &str = "/etc/kvm/server.key";
+const TERMINAL_MAX_MESSAGE_SIZE: usize = 1024;
+const TERMINAL_DEFAULT_ROWS: u16 = 24;
+const TERMINAL_DEFAULT_COLS: u16 = 80;
 
 #[derive(Debug, Serialize)]
 pub struct IpInfo {
@@ -70,6 +100,17 @@ pub struct HardwareRsp {
 #[derive(Debug, Serialize)]
 pub struct HostnameRsp {
     pub hostname: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalWinSize {
+    rows: u16,
+    cols: u16,
+}
+
+struct TerminalPty {
+    master: File,
+    child: Pid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,14 +491,176 @@ pub async fn reboot() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn terminal(State(state): State<AppState>) -> Result<Json<ApiResponse<()>>> {
+pub async fn terminal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response> {
     if state.config.auth_disabled() || !state.config.security.allow_terminal {
         return Err(AppError::Forbidden("terminal is disabled".to_string()));
     }
+    if !validate_ws_origin(&headers, &state.config) {
+        return Err(AppError::Forbidden("invalid websocket origin".to_string()));
+    }
 
-    Err(AppError::Unsupported(
-        "terminal websocket is not implemented in the Rust backend".to_string(),
-    ))
+    Ok(ws
+        .max_message_size(TERMINAL_MAX_MESSAGE_SIZE)
+        .on_upgrade(handle_terminal_socket)
+        .into_response())
+}
+
+async fn handle_terminal_socket(mut socket: WebSocket) {
+    let terminal = match spawn_terminal_pty() {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            warn!(error = ?err, "failed to start terminal pty");
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: "failed to start terminal".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+
+    let TerminalPty { master, child } = terminal;
+    let mut pty_reader = match master.try_clone() {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(error = ?err, "failed to clone terminal pty");
+            cleanup_terminal_process_blocking(child);
+            return;
+        }
+    };
+    let mut pty_writer = master;
+    let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(16);
+    let reader_task = task::spawn_blocking(move || {
+        let mut buffer = [0_u8; TERMINAL_MAX_MESSAGE_SIZE];
+        loop {
+            match pty_reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if pty_tx.blocking_send(buffer[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    debug!("terminal websocket connected");
+
+    loop {
+        tokio::select! {
+            data = pty_rx.recv() => {
+                let Some(data) = data else {
+                    break;
+                };
+                if ws_tx.send(Message::Binary(data.into())).await.is_err() {
+                    break;
+                }
+            }
+            message = ws_rx.next() => {
+                let message = match message {
+                    Some(Ok(message)) => message,
+                    Some(Err(err)) => {
+                        debug!(error = ?err, "terminal websocket read failed");
+                        break;
+                    }
+                    None => break,
+                };
+
+                match message {
+                    Message::Text(text) => {
+                        if pty_writer.write_all(text.as_bytes()).is_err() {
+                            break;
+                        }
+                    }
+                    Message::Binary(data) => {
+                        if let Some(size) = parse_terminal_winsize(&data) {
+                            set_terminal_winsize(&pty_writer, &size);
+                        }
+                    }
+                    Message::Ping(data) => {
+                        if ws_tx.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(_) => break,
+                }
+            }
+        }
+    }
+
+    drop(pty_writer);
+    let _ = task::spawn_blocking(move || cleanup_terminal_process_blocking(child)).await;
+    let _ = reader_task.await;
+    debug!("terminal websocket disconnected");
+}
+
+fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
+    let winsize = Winsize {
+        ws_row: TERMINAL_DEFAULT_ROWS,
+        ws_col: TERMINAL_DEFAULT_COLS,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    match unsafe { forkpty(Some(&winsize), None) }
+        .map_err(|err| std::io::Error::other(format!("forkpty failed: {err}")))?
+    {
+        ForkptyResult::Child => exec_terminal_shell(),
+        ForkptyResult::Parent { child, master } => Ok(TerminalPty {
+            master: File::from(master),
+            child,
+        }),
+    }
+}
+
+fn exec_terminal_shell() -> ! {
+    let shell = b"/bin/sh\0";
+    unsafe {
+        nix::libc::execl(
+            shell.as_ptr().cast(),
+            shell.as_ptr().cast(),
+            ptr::null::<nix::libc::c_char>(),
+        );
+        nix::libc::_exit(127);
+    }
+}
+
+fn parse_terminal_winsize(data: &[u8]) -> Option<Winsize> {
+    let win_size: TerminalWinSize = serde_json::from_slice(data).ok()?;
+    if win_size.rows == 0 || win_size.cols == 0 {
+        return None;
+    }
+    Some(Winsize {
+        ws_row: win_size.rows,
+        ws_col: win_size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    })
+}
+
+fn set_terminal_winsize(pty: &File, winsize: &Winsize) {
+    let result = unsafe { nix::libc::ioctl(pty.as_raw_fd(), nix::libc::TIOCSWINSZ, winsize) };
+    if result < 0 {
+        debug!(
+            error = ?std::io::Error::last_os_error(),
+            "failed to resize terminal pty"
+        );
+    }
+}
+
+fn cleanup_terminal_process_blocking(child: Pid) {
+    let _ = kill(child, Signal::SIGTERM);
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = kill(child, Signal::SIGKILL);
+    let _ = waitpid(child, None);
 }
 
 pub async fn get_memory_limit() -> Result<impl IntoResponse> {
@@ -920,6 +1123,15 @@ mod tests {
         assert!(validate_swap_size(64).is_ok());
         assert!(validate_swap_size(256).is_ok());
         assert!(validate_swap_size(123).is_err());
+    }
+
+    #[test]
+    fn parses_terminal_resize_messages() {
+        let size = parse_terminal_winsize(br#"{"rows":40,"cols":120}"#).unwrap();
+        assert_eq!(size.ws_row, 40);
+        assert_eq!(size.ws_col, 120);
+        assert!(parse_terminal_winsize(br#"{"rows":0,"cols":120}"#).is_none());
+        assert!(parse_terminal_winsize(b"not json").is_none());
     }
 
     #[test]
