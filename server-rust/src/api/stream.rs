@@ -12,7 +12,7 @@ use axum::{
 use bytes::Bytes;
 use serde::Deserialize;
 use std::{
-    io,
+    fs, io,
     sync::atomic::{AtomicBool, Ordering},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
@@ -25,6 +25,10 @@ use crate::{
 };
 
 const FRAME_DETECT_INTERVAL: u8 = 60;
+const SCREEN_TYPE_FILE: &str = "/kvmapp/kvm/type";
+const SCREEN_FPS_FILE: &str = "/kvmapp/kvm/fps";
+const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
+const SCREEN_RESOLUTION_FILE: &str = "/kvmapp/kvm/res";
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static MJPEG_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -36,6 +40,7 @@ static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 struct Screen {
+    mode: StreamMode,
     width: u16,
     height: u16,
     fps: u64,
@@ -44,9 +49,16 @@ struct Screen {
     gop: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamMode {
+    Mjpeg,
+    H264,
+}
+
 impl Default for Screen {
     fn default() -> Self {
         Self {
+            mode: StreamMode::Mjpeg,
             width: 1920,
             height: 1080,
             fps: 30,
@@ -75,6 +87,10 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
         loop {
             interval.tick().await;
             let screen = current_screen();
+            if screen.mode != StreamMode::Mjpeg {
+                break;
+            }
+
             if !MJPEG_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(
                     width = screen.width,
@@ -233,12 +249,21 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
         .map_err(|_| AppError::Internal("screen lock poisoned".to_string()))?;
 
     match kind {
+        "type" => {
+            write_screen_file(SCREEN_TYPE_FILE, if value == 0 { "mjpeg" } else { "h264" })?;
+            screen.mode = if value == 0 {
+                StreamMode::Mjpeg
+            } else {
+                StreamMode::H264
+            };
+        }
         "resolution" => {
             let height = u16::try_from(value).unwrap_or_default();
             if let Some((width, height)) = capture_resolution(height) {
                 screen.width = width;
                 screen.height = height;
             }
+            write_screen_file(SCREEN_RESOLUTION_FILE, &value.to_string())?;
         }
         "quality" => {
             let value = u16::try_from(value).unwrap_or_default();
@@ -247,9 +272,11 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
             } else {
                 screen.quality = value;
             }
+            write_screen_file(SCREEN_QUALITY_FILE, &value.to_string())?;
         }
         "fps" => {
             screen.fps = validate_fps(value);
+            write_screen_file(SCREEN_FPS_FILE, &value.to_string())?;
         }
         "gop" => {
             let gop = u8::try_from(value).unwrap_or(screen.gop);
@@ -260,6 +287,10 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn write_screen_file(path: &str, value: &str) -> Result<()> {
+    fs::write(path, value.as_bytes()).map_err(AppError::from)
 }
 
 fn current_screen() -> Screen {
@@ -317,7 +348,7 @@ fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Screen, h264_direct_packet, normalize_screen};
+    use super::{Screen, StreamMode, h264_direct_packet, normalize_screen};
 
     #[test]
     fn default_screen_is_safe_for_capture() {
@@ -330,6 +361,7 @@ mod tests {
     #[test]
     fn auto_resolution_maps_to_native_capture_size() {
         let mut screen = Screen {
+            mode: StreamMode::Mjpeg,
             width: 0,
             height: 0,
             fps: 30,
@@ -346,6 +378,7 @@ mod tests {
     #[test]
     fn unsupported_resolution_falls_back_to_native_capture_size() {
         let mut screen = Screen {
+            mode: StreamMode::Mjpeg,
             width: 123,
             height: 999,
             fps: 30,
