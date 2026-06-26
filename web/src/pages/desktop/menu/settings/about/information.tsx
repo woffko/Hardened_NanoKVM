@@ -4,6 +4,7 @@ import { CircleHelpIcon, EthernetPortIcon, WifiIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
+import { HARDENED_VERSION } from '@/lib/hardened.ts';
 
 import { Hostname } from './hostname.tsx';
 
@@ -103,7 +104,7 @@ export const Information = () => {
             </Tooltip>
           </div>
 
-          <span>{information ? information.application : '-'}</span>
+          <span>{information ? HARDENED_VERSION : '-'}</span>
         </div>
 
         <Hostname />

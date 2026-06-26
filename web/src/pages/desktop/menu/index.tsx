@@ -8,6 +8,7 @@ import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 import { menuDisabledItemsAtom } from '@/jotai/settings.ts';
 import { useMenuBounds } from '@/hooks/useMenuBounds.ts';
 import { useMenuVisibility } from '@/hooks/useMenuVisibility.ts';
+import { HARDENED_LOGO_SRC, HARDENED_NAME, HARDENED_SHORT_NAME } from '@/lib/hardened.ts';
 
 import { DownloadImage } from './download.tsx';
 import { Fullscreen } from './fullscreen';
@@ -85,6 +86,22 @@ export const Menu = () => {
                 <GripVerticalIcon size={18} />
               </div>
             </strong>
+            <Divider type="vertical" />
+
+            <div
+              className="flex h-[30px] select-none items-center gap-1.5 rounded bg-neutral-900/50 px-1.5 text-neutral-200"
+              title={HARDENED_NAME}
+            >
+              <span className="flex size-[22px] items-center justify-center rounded bg-neutral-100">
+                <img
+                  src={HARDENED_LOGO_SRC}
+                  alt=""
+                  aria-hidden="true"
+                  className="size-[16px] object-contain"
+                />
+              </span>
+              <span className="hidden text-xs font-medium sm:inline">{HARDENED_SHORT_NAME}</span>
+            </div>
             <Divider type="vertical" />
 
             <Screen />

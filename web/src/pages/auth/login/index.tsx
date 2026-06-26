@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '@/api/auth.ts';
 import { existToken, setCsrfToken, setToken } from '@/lib/cookie.ts';
 import { encrypt } from '@/lib/encrypt.ts';
+import { HARDENED_LOGO_SRC, HARDENED_NAME, HARDENED_VERSION } from '@/lib/hardened.ts';
 import { Head } from '@/components/head.tsx';
 
 import { Tips } from './tips.tsx';
@@ -77,19 +78,26 @@ export const Login = (): ReactElement => {
           initialValues={{ remember: true }}
           onFinish={login}
         >
-          <div className="flex flex-col items-center justify-center pb-4">
-            <img
-              id="logo"
-              src="/sipeed.ico"
-              alt="Sipeed"
+          <div className="flex flex-col items-center justify-center pb-5">
+            <div
+              className="flex size-16 cursor-pointer items-center justify-center rounded-lg bg-neutral-100 shadow-lg"
               onClick={(evt) => {
                 evt.preventDefault();
-                (evt.target as HTMLImageElement).classList.add('animate-spin');
+                (evt.currentTarget as HTMLDivElement).classList.add('animate-spin');
                 setTimeout(() => {
-                  (evt.target as HTMLImageElement).classList.remove('animate-spin');
+                  (evt.currentTarget as HTMLDivElement).classList.remove('animate-spin');
                 }, 1000);
               }}
-            />
+            >
+              <img
+                id="logo"
+                src={HARDENED_LOGO_SRC}
+                alt={HARDENED_NAME}
+                className="size-12 object-contain"
+              />
+            </div>
+            <div className="mt-3 text-lg font-semibold text-neutral-100">{HARDENED_NAME}</div>
+            <div className="mt-1 text-xs text-neutral-500">{HARDENED_VERSION}</div>
           </div>
           <Form.Item
             name="username"
