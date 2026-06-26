@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::sync::RwLock;
 
@@ -15,6 +18,7 @@ pub struct AppState {
     pub accounts: Arc<AccountStore>,
     pub sessions: Arc<SessionStore>,
     pub login_limiter: Arc<RwLock<LoginRateLimiter>>,
+    pub terminal_enabled: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -30,11 +34,22 @@ impl AppState {
             config.security.login_lockout_duration,
         );
 
+        let terminal_enabled = config.security.allow_terminal;
+
         Ok(Self {
             config: Arc::new(config),
             accounts: Arc::new(accounts),
             sessions: Arc::new(sessions),
             login_limiter: Arc::new(RwLock::new(login_limiter)),
+            terminal_enabled: Arc::new(AtomicBool::new(terminal_enabled)),
         })
+    }
+
+    pub fn set_terminal_enabled(&self, enabled: bool) {
+        self.terminal_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn terminal_enabled(&self) -> bool {
+        self.terminal_enabled.load(Ordering::Acquire)
     }
 }

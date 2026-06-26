@@ -141,6 +141,11 @@ pub struct SetTlsReq {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SetTerminalReq {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetGpioReq {
     #[serde(rename = "type")]
     pub kind: String,
@@ -497,7 +502,7 @@ pub async fn terminal(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
-    if state.config.auth_disabled() || !state.config.security.allow_terminal {
+    if state.config.auth_disabled() || !state.terminal_enabled() {
         return Err(AppError::Forbidden("terminal is disabled".to_string()));
     }
     if !validate_ws_origin(&headers, &state.config) {
@@ -601,6 +606,23 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
     let _ = task::spawn_blocking(move || cleanup_terminal_process_blocking(child)).await;
     let _ = reader_task.await;
     debug!("terminal websocket disconnected");
+}
+
+pub async fn get_terminal_enabled(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(EnabledRsp {
+        enabled: state.terminal_enabled(),
+    })))
+}
+
+pub async fn set_terminal_enabled(
+    State(state): State<AppState>,
+    Json(req): Json<SetTerminalReq>,
+) -> Result<impl IntoResponse> {
+    let mut config = Config::read()?;
+    config.security.allow_terminal = req.enabled;
+    config.write()?;
+    state.set_terminal_enabled(req.enabled);
+    Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {

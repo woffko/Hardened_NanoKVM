@@ -304,7 +304,12 @@ const ru = {
           modeAuto: 'Автоматическое скрытие',
           modeAlways: 'Всегда виден',
           icons: 'Значки подменю',
-          iconsDesc: 'Отображение значков подменю в строке меню'
+          iconsDesc: 'Отображение значков подменю в строке меню',
+          terminalWarningTitle: 'Включить веб-терминал?',
+          terminalWarningDesc:
+            'Терминал открывает root shell через браузер. Включайте его только в доверенной сети и выключайте после использования.',
+          terminalWarningConfirm: 'Включить',
+          terminalWarningCancel: 'Отмена'
         }
       },
       device: {

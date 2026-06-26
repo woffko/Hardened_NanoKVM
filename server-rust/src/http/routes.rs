@@ -66,6 +66,10 @@ pub fn build(state: AppState) -> Router {
         .route("/api/vm/system/reboot", post(vm::reboot))
         .route("/api/vm/terminal", get(vm::terminal))
         .route(
+            "/api/vm/terminal/enabled",
+            get(vm::get_terminal_enabled).post(vm::set_terminal_enabled),
+        )
+        .route(
             "/api/vm/memory/limit",
             get(vm::get_memory_limit).post(vm::set_memory_limit),
         )

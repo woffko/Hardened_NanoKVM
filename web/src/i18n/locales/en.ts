@@ -301,7 +301,12 @@ const en = {
           modeAuto: 'Auto hide',
           modeAlways: 'Always visible',
           icons: 'Submenu Icons',
-          iconsDesc: 'Display submenu icons in the menu bar'
+          iconsDesc: 'Display submenu icons in the menu bar',
+          terminalWarningTitle: 'Enable web terminal?',
+          terminalWarningDesc:
+            'The terminal opens a root shell through the browser. Enable it only on a trusted network and turn it off when you are done.',
+          terminalWarningConfirm: 'Enable',
+          terminalWarningCancel: 'Cancel'
         }
       },
       device: {

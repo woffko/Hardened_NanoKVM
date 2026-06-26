@@ -120,6 +120,16 @@ export function setMouseJiggler(enabled: boolean, mode: string) {
   return http.post('/api/vm/mouse-jiggler', { enabled, mode });
 }
 
+// get web terminal state
+export function getTerminalEnabled() {
+  return http.get('/api/vm/terminal/enabled');
+}
+
+// set web terminal state
+export function setTerminalEnabled(enabled: boolean) {
+  return http.post('/api/vm/terminal/enabled', { enabled });
+}
+
 // get Hostname
 export function getHostname() {
   return http.get('/api/vm/hostname');
