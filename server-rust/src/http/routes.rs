@@ -95,6 +95,7 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/vm/script/run", post(script::run_script))
         .route("/api/stream/mjpeg", get(stream::mjpeg_stream))
+        .route("/api/stream/h264/direct", get(stream::h264_direct_stream))
         .route(
             "/api/stream/mjpeg/detect",
             post(stream::update_frame_detect),
@@ -171,10 +172,6 @@ fn compatibility_routes() -> Router<AppState> {
     Router::new()
         .route("/api/hid/paste", post(compatibility::not_implemented))
         .route("/api/stream/h264", get(compatibility::not_implemented))
-        .route(
-            "/api/stream/h264/direct",
-            get(compatibility::not_implemented),
-        )
         .route(
             "/api/extensions/tailscale/install",
             post(compatibility::not_implemented),

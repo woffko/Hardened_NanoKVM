@@ -2,6 +2,10 @@ use async_stream::stream;
 use axum::{
     Json,
     body::Body,
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{Response, header},
     response::IntoResponse,
 };
@@ -11,12 +15,14 @@ use std::{
     io,
     sync::atomic::{AtomicBool, Ordering},
     sync::{LazyLock, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
 
-use crate::{AppError, Result, error::ApiResponse, ffi::kvm};
+use crate::{
+    AppError, Result, error::ApiResponse, ffi::kvm, state::AppState, ws::origin::validate_ws_origin,
+};
 
 const FRAME_DETECT_INTERVAL: u8 = 60;
 
@@ -24,6 +30,9 @@ static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::def
 static MJPEG_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+static H264_DIRECT_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
+static H264_DIRECT_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
+static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 struct Screen {
@@ -130,6 +139,75 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
         .expect("mjpeg response builder")
 }
 
+pub async fn h264_direct_stream(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse> {
+    if !validate_ws_origin(&headers, &state.config) {
+        return Err(AppError::Forbidden("invalid websocket origin".to_string()));
+    }
+
+    Ok(ws.on_upgrade(handle_h264_direct_socket))
+}
+
+async fn handle_h264_direct_socket(mut socket: WebSocket) {
+    let start = Instant::now();
+    let mut interval = time::interval(frame_interval());
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        let screen = current_screen();
+        if !H264_DIRECT_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(
+                width = screen.width,
+                height = screen.height,
+                bit_rate = screen.bit_rate,
+                "reading first h264 direct frame"
+            );
+        }
+
+        let frame = tokio::task::spawn_blocking(move || {
+            kvm::read_h264(screen.width, screen.height, screen.bit_rate)
+        })
+        .await;
+
+        let (data, result) = match frame {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(err)) => {
+                if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                    warn!(error = ?err, "failed to read h264 direct frame");
+                }
+                continue;
+            }
+            Err(err) => {
+                if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                    warn!(error = ?err, "h264 direct frame task failed");
+                }
+                continue;
+            }
+        };
+
+        if result < 0 || data.is_empty() {
+            if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                warn!(result, bytes = data.len(), "h264 direct frame unavailable");
+            }
+            continue;
+        }
+
+        if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(result, bytes = data.len(), "read first h264 direct frame");
+        }
+
+        let timestamp = start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let packet = h264_direct_packet(result == 3, timestamp, &data);
+        if socket.send(Message::Binary(packet.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
 pub async fn update_frame_detect(
     Json(req): Json<UpdateFrameDetectReq>,
 ) -> Result<impl IntoResponse> {
@@ -229,9 +307,17 @@ fn validate_fps(fps: i32) -> u64 {
     fps.clamp(10, 60) as u64
 }
 
+fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(1 + 8 + data.len());
+    packet.push(u8::from(is_keyframe));
+    packet.extend_from_slice(&timestamp_micros.to_le_bytes());
+    packet.extend_from_slice(data);
+    packet
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Screen, normalize_screen};
+    use super::{Screen, h264_direct_packet, normalize_screen};
 
     #[test]
     fn default_screen_is_safe_for_capture() {
@@ -272,5 +358,17 @@ mod tests {
 
         assert_eq!(screen.width, 1920);
         assert_eq!(screen.height, 1080);
+    }
+
+    #[test]
+    fn h264_direct_packet_matches_frontend_format() {
+        let packet = h264_direct_packet(true, 0x0102_0304_0506_0708, &[0xaa, 0xbb]);
+
+        assert_eq!(packet[0], 1);
+        assert_eq!(
+            &packet[1..9],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+        assert_eq!(&packet[9..], &[0xaa, 0xbb]);
     }
 }
