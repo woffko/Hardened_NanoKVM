@@ -74,9 +74,7 @@ pub async fn login(
         if locked {
             tracing::warn!(source_ip, username = %req.username, "login lockout threshold reached");
         }
-        return Err(AppError::BadRequest(
-            "invalid username or password".to_string(),
-        ));
+        return Err(AppError::InvalidCredentials);
     }
 
     state

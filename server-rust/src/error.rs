@@ -15,6 +15,8 @@ pub enum AppError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("invalid username or password")]
+    InvalidCredentials,
     #[error("rate limited: {0}")]
     RateLimited(String),
     #[error("unsupported: {0}")]
@@ -69,6 +71,11 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, -403, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, -404, msg),
             AppError::Conflict(msg) => (StatusCode::OK, -409, msg),
+            AppError::InvalidCredentials => (
+                StatusCode::OK,
+                -2,
+                "invalid username or password".to_string(),
+            ),
             AppError::RateLimited(msg) => (StatusCode::OK, -5, msg),
             AppError::Unsupported(msg) => (StatusCode::OK, -501, msg),
             AppError::Io(err) => (StatusCode::OK, -500, err.to_string()),
@@ -76,5 +83,25 @@ impl IntoResponse for AppError {
             AppError::Internal(msg) => (StatusCode::OK, -500, msg),
         };
         (status, Json(ApiResponse::<()>::err(code, msg))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, http::StatusCode};
+    use serde_json::Value;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_credentials_use_go_compatible_code() {
+        let response = AppError::InvalidCredentials.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], -2);
+        assert_eq!(body["msg"], "invalid username or password");
     }
 }
