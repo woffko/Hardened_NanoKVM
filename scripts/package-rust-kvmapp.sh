@@ -25,11 +25,13 @@ if [ ! -x "$RUST_BINARY" ]; then
 fi
 
 rm -rf "$STAGE_DIR"
-mkdir -p "$KVMAPP_STAGE/server" "$OUT_DIR"
+mkdir -p "$KVMAPP_STAGE/server" "$KVMAPP_STAGE/backends" "$OUT_DIR"
 cp -R "$ROOT_DIR/kvmapp/." "$KVMAPP_STAGE/"
 
 cp "$RUST_BINARY" "$KVMAPP_STAGE/server/NanoKVM-Server"
 chmod 0755 "$KVMAPP_STAGE/server/NanoKVM-Server"
+cp "$RUST_BINARY" "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
+chmod 0755 "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
 
 if [ -d "$ROOT_DIR/server/dl_lib" ]; then
   mkdir -p "$KVMAPP_STAGE/server/dl_lib"

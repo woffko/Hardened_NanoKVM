@@ -90,14 +90,18 @@ The generated image installs:
 - VM info, hardware, hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS,
   swap, memory limit, TLS toggle, reboot, scripts, and autostart routes.
 - MJPEG stream and frame-detect endpoints through `libkvm`.
-- H.264 Direct and H.264 WebRTC routes are enabled. Direct streaming has been
-  verified on hardware after switching from H.264 back to MJPEG. WebRTC
-  websocket signaling is verified; full browser media validation still needs
-  manual browser testing.
+- H.264 Direct and H.264 WebRTC routes are enabled. Direct streaming is the
+  preferred low-CPU mode and has been verified on hardware. WebRTC websocket
+  signaling is verified; full browser media validation still needs manual
+  browser testing.
+- MJPEG and H.264 Direct use shared fanout producers, so multiple viewers do
+  not multiply native capture reads. New browser sessions default to H.264
+  Direct when HTTPS and WebCodecs are available, otherwise to H.264.
 - Device startup uses an idempotent `S95nanokvm`: stale `S95nanokvm.*` backup
   scripts are moved out of boot autostart, old `kvm_system`/`NanoKVM-Server`
-  processes are stopped before runtime copy/start, and port 443 is explicitly
-  allowed for HTTPS.
+  processes are stopped before runtime copy/start, stale web backup directories
+  are removed from `/kvmapp/server`, and port 443 is explicitly allowed for
+  HTTPS.
 - Keyboard and mouse HID websocket, queued HID writes, paste, shortcuts, HID
   mode/reset, and mouse jiggler.
 - Storage image listing, browser ISO upload, mount, unmount, delete, and CD-ROM
@@ -126,10 +130,12 @@ The generated image installs:
 - Full API parity against the Go backend still needs route-by-route validation.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants.
-- Video setting changes need more route-by-route stress testing. One reproduced
-  boot-time failure was caused by a stale backup init script starting a second
-  `kvm_system`; the current `S95nanokvm` disables that stale autostart and was
-  verified through reboot, login, and MJPEG streaming on the test device.
+- Video setting changes need more route-by-route stress testing. Reproduced
+  boot/runtime failures have been tied to stale runtime artifacts: duplicate
+  init scripts and old `web.*` backup directories copied into `/tmp/server`.
+  The current `S95nanokvm` disables stale autostarts, removes known stale web
+  backup directories, and was verified through reboot, login, MJPEG, and H.264
+  Direct streaming on the test device.
 - First-boot/account setup UX needs product-level polishing.
 - The Rust backend still runs with the same root privileges as the original
   service. Splitting privileged operations into a smaller helper is future work.

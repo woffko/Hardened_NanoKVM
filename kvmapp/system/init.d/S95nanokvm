@@ -18,6 +18,16 @@ wait_process_exit() {
     sleep 1
 }
 
+cleanup_server_backups() {
+    rm -rf \
+        /kvmapp/server/web.old \
+        /kvmapp/server/web.prev \
+        /kvmapp/server/web.backup \
+        /kvmapp/server/web.backup-* \
+        /kvmapp/server/web.before-* \
+        /kvmapp/server/web.after-* 2>/dev/null || true
+}
+
 stop_runtime() {
     killall kvm_system 2>/dev/null
     killall NanoKVM-Server 2>/dev/null
@@ -27,6 +37,8 @@ stop_runtime() {
 }
 
 start_runtime() {
+    cleanup_server_backups
+
     cp -r /kvmapp/kvm_system /tmp/
     nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
 

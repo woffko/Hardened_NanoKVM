@@ -41,7 +41,7 @@ harden one subsystem at a time.
 | Web UI | Existing React UI is retained, with Hardened branding and a backend switch. |
 | HTTPS | Implemented in Rust with HTTP-to-HTTPS redirect and existing cert config support. |
 | Authentication | Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. |
-| Video | MJPEG works. H.264 Direct is enabled and verified on hardware. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
+| Video | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
 | HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote image download is intentionally disabled in Rust for now. |
@@ -57,8 +57,11 @@ harden one subsystem at a time.
   binding, Origin checks, login lockout, explicit session revocation, and safer
   password storage.
 - Added Rust implementations for the main browser workflows: login, static UI,
-  MJPEG, HID, terminal, storage, network, Tailscale, scripts, and many VM
-  settings routes.
+  MJPEG, H.264 Direct, H.264 WebRTC signaling, HID, terminal, storage, network,
+  Tailscale, scripts, and many VM settings routes.
+- Added shared video fanout for MJPEG and H.264 Direct, so multiple viewers do
+  not multiply native capture reads. The web UI now defaults new sessions to
+  H.264 Direct when HTTPS and WebCodecs are available, otherwise to H.264.
 - Added safer file and command handling for script upload/run, autostart files,
   ISO upload, storage image paths, update archives, and privileged shell calls.
 - Added a web UI switch under **Settings > Device > Advanced**:
@@ -68,7 +71,8 @@ harden one subsystem at a time.
   `NanoKVM-Server.rust` and `NanoKVM-Server.go`.
 - Made `S95nanokvm` startup idempotent for testing: stale `S95nanokvm.*`
   backup scripts are removed from boot autostart, existing runtime processes
-  are stopped before copy/start, and HTTPS port 443 is explicitly allowed.
+  are stopped before copy/start, stale web backup directories are removed from
+  `/kvmapp/server`, and HTTPS port 443 is explicitly allowed.
 - Updated branding: login screen, toolbar, and About page identify the Hardened
   build, and the toolbar uses a Rust gear icon next to `Hardened`.
 

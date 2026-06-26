@@ -13,11 +13,14 @@ use bytes::Bytes;
 use serde::Deserialize;
 use std::{
     fs, io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
-use tokio::time::{self, MissedTickBehavior};
+use tokio::{
+    sync::broadcast,
+    time::{self, MissedTickBehavior},
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -34,6 +37,9 @@ const SCREEN_GOP_FILE: &str = "/kvmapp/kvm/gop";
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
     LazyLock::new(|| Mutex::new(None));
+static MJPEG_FANOUT: LazyLock<StreamFanout<MjpegFrame>> = LazyLock::new(|| StreamFanout::new(4));
+static H264_DIRECT_FANOUT: LazyLock<StreamFanout<H264DirectFrame>> =
+    LazyLock::new(|| StreamFanout::new(16));
 static MJPEG_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -79,6 +85,63 @@ pub struct LatestMjpegFrame {
     pub width: u16,
     pub height: u16,
     captured_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct MjpegFrame {
+    header: Bytes,
+    data: Bytes,
+}
+
+#[derive(Debug, Clone)]
+struct H264DirectFrame {
+    packet: Bytes,
+}
+
+struct StreamFanout<T> {
+    clients: AtomicUsize,
+    running: AtomicBool,
+    tx: broadcast::Sender<T>,
+}
+
+struct ClientGuard {
+    clients: &'static AtomicUsize,
+}
+
+impl<T: Clone> StreamFanout<T> {
+    fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self {
+            clients: AtomicUsize::new(0),
+            running: AtomicBool::new(false),
+            tx,
+        }
+    }
+
+    fn add_client(&'static self) -> ClientGuard {
+        self.clients.fetch_add(1, Ordering::AcqRel);
+        ClientGuard {
+            clients: &self.clients,
+        }
+    }
+
+    fn client_count(&self) -> usize {
+        self.clients.load(Ordering::Acquire)
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<T> {
+        self.tx.subscribe()
+    }
+
+    fn send(&self, frame: T) {
+        let _ = self.tx.send(frame);
+    }
+}
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        self.clients.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Default for Screen {
@@ -127,69 +190,18 @@ pub struct StopFrameDetectReq {
 
 pub async fn mjpeg_stream() -> impl IntoResponse {
     let stream = stream! {
-        let mut fps = current_screen().fps;
-        let mut interval = frame_interval(fps);
+        let _guard = MJPEG_FANOUT.add_client();
+        let mut rx = MJPEG_FANOUT.subscribe();
+        start_mjpeg_producer();
 
         loop {
-            interval.tick().await;
-            let screen = current_screen();
-            if screen.fps != fps {
-                fps = screen.fps;
-                interval = frame_interval(fps);
-            }
-            if screen.mode != StreamMode::Mjpeg {
-                break;
-            }
-
-            if !MJPEG_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(
-                    width = screen.width,
-                    height = screen.height,
-                    quality = screen.quality,
-                    "reading first mjpeg frame"
-                );
-            }
-            let frame = tokio::task::spawn_blocking(move || {
-                kvm::read_mjpeg(screen.width, screen.height, screen.quality)
-            })
-            .await;
-
-            let (data, result) = match frame {
-                Ok(Ok(frame)) => frame,
-                Ok(Err(err)) => {
-                    if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?err, "failed to read mjpeg frame");
-                    }
-                    continue;
-                }
-                Err(err) => {
-                    if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?err, "mjpeg frame task failed");
-                    }
-                    continue;
-                }
+            let frame = match rx.recv().await {
+                Ok(frame) => frame,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             };
-            if result < 0 || result == 5 || data.is_empty() {
-                if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!(
-                        result,
-                        bytes = data.len(),
-                        "mjpeg frame unavailable"
-                    );
-                }
-                continue;
-            }
-            if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(result, bytes = data.len(), "read first mjpeg frame");
-            }
-            set_latest_mjpeg_frame(&data, screen.width, screen.height);
-
-            let header = format!(
-                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                data.len()
-            );
-            yield Ok::<Bytes, io::Error>(Bytes::from(header));
-            yield Ok::<Bytes, io::Error>(Bytes::from(data));
+            yield Ok::<Bytes, io::Error>(frame.header);
+            yield Ok::<Bytes, io::Error>(frame.data);
             yield Ok::<Bytes, io::Error>(Bytes::from_static(b"\r\n"));
         }
     };
@@ -219,12 +231,138 @@ pub async fn h264_direct_stream(
 }
 
 async fn handle_h264_direct_socket(mut socket: WebSocket) {
+    let _guard = H264_DIRECT_FANOUT.add_client();
+    let mut rx = H264_DIRECT_FANOUT.subscribe();
+    start_h264_direct_producer();
+
+    loop {
+        let frame = match rx.recv().await {
+            Ok(frame) => frame,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+        if socket.send(Message::Binary(frame.packet)).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn start_mjpeg_producer() {
+    if MJPEG_FANOUT
+        .running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        tokio::spawn(run_mjpeg_producer());
+    }
+}
+
+fn start_h264_direct_producer() {
+    if H264_DIRECT_FANOUT
+        .running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        tokio::spawn(run_h264_direct_producer());
+    }
+}
+
+async fn run_mjpeg_producer() {
+    struct RunningGuard(&'static AtomicBool);
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _guard = RunningGuard(&MJPEG_FANOUT.running);
+
+    let mut fps = current_screen().fps;
+    let mut interval = frame_interval(fps);
+
+    loop {
+        interval.tick().await;
+        if MJPEG_FANOUT.client_count() == 0 {
+            return;
+        }
+
+        let screen = current_screen();
+        if screen.fps != fps {
+            fps = screen.fps;
+            interval = frame_interval(fps);
+        }
+        if screen.mode != StreamMode::Mjpeg {
+            continue;
+        }
+
+        if !MJPEG_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(
+                width = screen.width,
+                height = screen.height,
+                quality = screen.quality,
+                "reading first mjpeg frame"
+            );
+        }
+        let frame = tokio::task::spawn_blocking(move || {
+            kvm::read_mjpeg(screen.width, screen.height, screen.quality)
+        })
+        .await;
+
+        let (data, result) = match frame {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(err)) => {
+                if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                    warn!(error = ?err, "failed to read mjpeg frame");
+                }
+                continue;
+            }
+            Err(err) => {
+                if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                    warn!(error = ?err, "mjpeg frame task failed");
+                }
+                continue;
+            }
+        };
+        if result < 0 || result == 5 || data.is_empty() {
+            if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                warn!(result, bytes = data.len(), "mjpeg frame unavailable");
+            }
+            continue;
+        }
+        if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(result, bytes = data.len(), "read first mjpeg frame");
+        }
+        set_latest_mjpeg_frame(&data, screen.width, screen.height);
+
+        let header = Bytes::from(format!(
+            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+            data.len()
+        ));
+        MJPEG_FANOUT.send(MjpegFrame {
+            header,
+            data: Bytes::from(data),
+        });
+    }
+}
+
+async fn run_h264_direct_producer() {
+    struct RunningGuard(&'static AtomicBool);
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _guard = RunningGuard(&H264_DIRECT_FANOUT.running);
+
     let start = Instant::now();
     let mut fps = current_screen().fps;
     let mut interval = frame_interval(fps);
 
     loop {
         interval.tick().await;
+        if H264_DIRECT_FANOUT.client_count() == 0 {
+            return;
+        }
+
         let screen = current_screen();
         if screen.fps != fps {
             fps = screen.fps;
@@ -273,9 +411,9 @@ async fn handle_h264_direct_socket(mut socket: WebSocket) {
 
         let timestamp = start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         let packet = h264_direct_packet(result == 3, timestamp, &data);
-        if socket.send(Message::Binary(packet.into())).await.is_err() {
-            break;
-        }
+        H264_DIRECT_FANOUT.send(H264DirectFrame {
+            packet: Bytes::from(packet),
+        });
     }
 }
 
