@@ -16,6 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc;
 
 use crate::{AppError, Result, state::AppState, ws::origin::validate_ws_origin};
 
@@ -24,6 +25,7 @@ const HID_MOUSE_RELATIVE: &str = "/dev/hidg1";
 const HID_MOUSE_ABSOLUTE: &str = "/dev/hidg2";
 const HID_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 const HID_WRITE_RETRY_DELAY: Duration = Duration::from_millis(1);
+const HID_EVENT_QUEUE_CAPACITY: usize = 200;
 const MAX_WS_MESSAGE_BYTES: usize = 16;
 const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
 const MOUSE_JIGGLER_INTERVAL: Duration = Duration::from_secs(15);
@@ -130,8 +132,10 @@ pub async fn connect(
 }
 
 async fn handle_socket(mut socket: WebSocket) {
-    let mut absolute_buttons_active = false;
-    let mut absolute_release_report = [0_u8; 6];
+    let (keyboard_tx, keyboard_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
+    let (mouse_tx, mouse_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
+    let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx));
+    let mouse_worker = tokio::spawn(mouse_worker(mouse_rx));
 
     while let Some(message) = socket.recv().await {
         let Ok(message) = message else {
@@ -157,22 +161,24 @@ async fn handle_socket(mut socket: WebSocket) {
                 }
                 touch_mouse_jiggler();
                 let report = data[1..].to_vec();
-                let _ = tokio::task::spawn_blocking(move || HID.write_keyboard(&report)).await;
+                if keyboard_tx.send(report).await.is_err() {
+                    break;
+                }
             }
             MOUSE_EVENT => match data.len() - 1 {
                 4 => {
                     touch_mouse_jiggler();
                     let report = data[1..].to_vec();
-                    let _ = tokio::task::spawn_blocking(move || HID.write_relative_mouse(&report))
-                        .await;
+                    if mouse_tx.send(report).await.is_err() {
+                        break;
+                    }
                 }
                 6 => {
                     touch_mouse_jiggler();
                     let report = data[1..].to_vec();
-                    absolute_release_report = absolute_mouse_release_report(&report);
-                    absolute_buttons_active = report.first().copied().unwrap_or_default() != 0;
-                    let _ = tokio::task::spawn_blocking(move || HID.write_absolute_mouse(&report))
-                        .await;
+                    if mouse_tx.send(report).await.is_err() {
+                        break;
+                    }
                 }
                 _ => {}
             },
@@ -180,14 +186,82 @@ async fn handle_socket(mut socket: WebSocket) {
         }
     }
 
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = HID.write_keyboard(&[0; 8]);
-        let _ = HID.write_relative_mouse(&[0; 4]);
-        if absolute_buttons_active {
-            let _ = HID.write_absolute_mouse(&absolute_release_report);
+    drop(keyboard_tx);
+    drop(mouse_tx);
+    let _ = keyboard_worker.await;
+    let _ = mouse_worker.await;
+}
+
+async fn keyboard_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
+    while let Some(report) = queue.recv().await {
+        if report.len() != 8 {
+            continue;
         }
-    })
-    .await;
+
+        if !write_hid_blocking(move || HID.write_keyboard(&report)).await {
+            drain_hid_queue(&mut queue);
+        }
+    }
+
+    let _ = write_hid_blocking(|| HID.write_keyboard(&[0; 8])).await;
+}
+
+async fn mouse_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
+    let mut absolute_buttons_active = false;
+    let mut absolute_release_report = [0_u8; 6];
+
+    while let Some(report) = queue.recv().await {
+        match report.len() {
+            4 => {
+                if !write_hid_blocking(move || HID.write_relative_mouse(&report)).await {
+                    drain_hid_queue(&mut queue);
+                    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
+                }
+            }
+            6 => {
+                let release_report = absolute_mouse_release_report(&report);
+                let buttons_active = report.first().copied().unwrap_or_default() != 0;
+                if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
+                    absolute_release_report = release_report;
+                    absolute_buttons_active = buttons_active;
+                } else {
+                    drain_hid_queue(&mut queue);
+                    if absolute_buttons_active {
+                        let report = absolute_release_report;
+                        if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
+                            absolute_buttons_active = false;
+                        }
+                    } else if buttons_active {
+                        let _ =
+                            write_hid_blocking(move || HID.write_absolute_mouse(&release_report))
+                                .await;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
+    if absolute_buttons_active {
+        let report = absolute_release_report;
+        let _ = write_hid_blocking(move || HID.write_absolute_mouse(&report)).await;
+    }
+}
+
+async fn write_hid_blocking<F>(write: F) -> bool
+where
+    F: FnOnce() -> io::Result<()> + Send + 'static,
+{
+    matches!(tokio::task::spawn_blocking(write).await, Ok(Ok(())))
+}
+
+fn drain_hid_queue(queue: &mut mpsc::Receiver<Vec<u8>>) -> usize {
+    let mut dropped = 0;
+    while queue.try_recv().is_ok() {
+        dropped += 1;
+    }
+    dropped
 }
 
 fn open_hid(path: &'static str) -> io::Result<File> {

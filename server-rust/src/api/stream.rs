@@ -127,12 +127,16 @@ pub struct StopFrameDetectReq {
 
 pub async fn mjpeg_stream() -> impl IntoResponse {
     let stream = stream! {
-        let mut interval = time::interval(frame_interval());
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut fps = current_screen().fps;
+        let mut interval = frame_interval(fps);
 
         loop {
             interval.tick().await;
             let screen = current_screen();
+            if screen.fps != fps {
+                fps = screen.fps;
+                interval = frame_interval(fps);
+            }
             if screen.mode != StreamMode::Mjpeg {
                 break;
             }
@@ -216,12 +220,16 @@ pub async fn h264_direct_stream(
 
 async fn handle_h264_direct_socket(mut socket: WebSocket) {
     let start = Instant::now();
-    let mut interval = time::interval(frame_interval());
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut fps = current_screen().fps;
+    let mut interval = frame_interval(fps);
 
     loop {
         interval.tick().await;
         let screen = current_screen();
+        if screen.fps != fps {
+            fps = screen.fps;
+            interval = frame_interval(fps);
+        }
         if !H264_DIRECT_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
             info!(
                 width = screen.width,
@@ -425,9 +433,10 @@ fn normalize_screen(screen: &mut Screen) {
     }
 }
 
-fn frame_interval() -> Duration {
-    let fps = SCREEN.lock().map(|screen| screen.fps.max(1)).unwrap_or(30);
-    Duration::from_millis((1000 / fps).max(1))
+fn frame_interval(fps: u64) -> time::Interval {
+    let mut interval = time::interval(h264_frame_duration(fps));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval
 }
 
 fn capture_resolution(height: u16) -> Option<(u16, u16)> {
