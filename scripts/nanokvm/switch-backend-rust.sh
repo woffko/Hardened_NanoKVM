@@ -3,7 +3,8 @@ set -eu
 
 TARGET="rust"
 DEST="/kvmapp/server/NanoKVM-Server"
-SRC="/kvmapp/server/NanoKVM-Server.rust"
+SRC="/kvmapp/backends/NanoKVM-Server.rust"
+RUNTIME="/tmp/server/NanoKVM-Server"
 STATE="/etc/kvm/backend"
 LOG="/tmp/nanokvm-backend-switch.log"
 
@@ -19,8 +20,5 @@ LOG="/tmp/nanokvm-backend-switch.log"
   chmod 0755 "$DEST"
   echo "$TARGET" > "$STATE"
 
-  rm -rf /tmp/server
-  cp -r /kvmapp/server /tmp/
-
-  nohup sh -c 'sleep 1; killall NanoKVM-Server 2>/dev/null || true; sleep 1; nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &' >>"$LOG" 2>&1 &
+  nohup sh -c "sleep 1; killall NanoKVM-Server 2>/dev/null || true; sleep 1; rm -f '$RUNTIME'; cp '$SRC' '$RUNTIME'; chmod 0755 '$RUNTIME'; nohup '$RUNTIME' >/tmp/nanokvm-server.log 2>&1 &" >>"$LOG" 2>&1 &
 } >>"$LOG" 2>&1
