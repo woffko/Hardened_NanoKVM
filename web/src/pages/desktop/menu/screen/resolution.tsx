@@ -1,4 +1,4 @@
-import { Popover, Tooltip } from 'antd';
+import { message, Popover, Tooltip } from 'antd';
 import { useAtom } from 'jotai';
 import { CheckIcon, CircleHelpIcon, RatioIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -21,13 +21,19 @@ export const Resolution = () => {
   const [resolution, setResolution] = useAtom(resolutionAtom);
 
   async function update(item: TypeResolution) {
-    const rsp = await updateScreen('resolution', item.height);
-    if (rsp.code !== 0) {
-      return;
-    }
+    try {
+      const rsp = await updateScreen('resolution', item.height);
+      if (rsp.code !== 0) {
+        message.error(rsp.msg || 'Failed to update resolution');
+        return;
+      }
 
-    setResolution(item);
-    setCookie(item);
+      setResolution(item);
+      setCookie(item);
+    } catch (err) {
+      console.error(err);
+      message.error('Failed to update resolution');
+    }
   }
 
   const content = (

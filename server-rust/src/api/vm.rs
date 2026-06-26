@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::mpsc, task, time};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
@@ -272,6 +272,7 @@ pub async fn set_hostname(Json(req): Json<SetHostnameReq>) -> Result<impl IntoRe
 
 pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
     stream::set_screen_value(&req.kind, req.value)?;
+    info!(kind = %req.kind, value = req.value, "updated screen setting");
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
