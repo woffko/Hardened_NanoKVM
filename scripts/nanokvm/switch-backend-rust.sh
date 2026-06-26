@@ -36,7 +36,10 @@ restart_backend() {
   rm -f "$RUNTIME"
   cp "$SRC" "$RUNTIME"
   chmod 0755 "$RUNTIME"
-  nohup "$RUNTIME" >/tmp/nanokvm-server.log 2>&1 &
+  (
+    cd "$(dirname "$RUNTIME")"
+    nohup ./NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+  )
 }
 
 {
