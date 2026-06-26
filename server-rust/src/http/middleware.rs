@@ -1,12 +1,15 @@
 use axum::{
     body::Body,
     extract::State,
+    extract::connect_info::ConnectInfo,
     http::{HeaderMap, Method, Request, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-use crate::{AppError, auth::session::Session, config::Config, state::AppState};
+use crate::{
+    AppError, auth::session::Session, config::Config, http::tls::ClientAddr, state::AppState,
+};
 
 #[derive(Debug, Clone)]
 pub struct CurrentSession(pub Session);
@@ -44,6 +47,17 @@ pub async fn protected(
 
     req.extensions_mut().insert(CurrentSession(session));
     next.run(req).await
+}
+
+pub async fn picoclaw_internal(req: Request<Body>, next: Next) -> Response {
+    let remote = req
+        .extensions()
+        .get::<ConnectInfo<ClientAddr>>()
+        .map(|ConnectInfo(ClientAddr(addr))| *addr);
+    if crate::api::picoclaw::has_valid_loopback_internal_token(req.headers(), remote) {
+        return next.run(req).await;
+    }
+    AppError::Unauthorized.into_response()
 }
 
 fn is_state_changing(method: &Method) -> bool {

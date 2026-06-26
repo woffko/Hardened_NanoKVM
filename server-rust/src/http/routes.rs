@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    middleware::from_fn_with_state,
+    middleware::{from_fn, from_fn_with_state},
     routing::{delete, get, post},
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -11,7 +11,7 @@ use crate::{
         account, application, autostart, compatibility, download, hid, network, picoclaw, script,
         storage, stream, tailscale, vm, webrtc_stream,
     },
-    http::middleware::protected,
+    http::middleware::{picoclaw_internal, protected},
     security::headers::security_headers,
     state::AppState,
     ws::hid as hid_ws,
@@ -163,6 +163,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/auth/setup", post(account::setup_first_account))
         .route("/api/network/wifi", post(network::connect_wifi_no_auth))
         .route("/api/network/wifi/verify", post(network::verify_ap_login))
+        .merge(picoclaw_loopback_routes())
         .merge(protected_routes)
         .fallback_service(ServeDir::new(state.config.paths.web_root.clone()))
         .with_state(state)
@@ -225,6 +226,10 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/picoclaw/gateway/ws",
             get(picoclaw::unsupported_local_route),
         )
+}
+
+pub fn picoclaw_loopback_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/api/picoclaw/runtime/session",
             get(picoclaw::get_runtime_session),
@@ -242,4 +247,5 @@ fn compatibility_routes() -> Router<AppState> {
             "/api/picoclaw/load-image",
             post(picoclaw::unsupported_local_route),
         )
+        .route_layer(from_fn(picoclaw_internal))
 }

@@ -1,5 +1,4 @@
 use axum::{
-    Router,
     extract::State,
     http::{HeaderMap, Uri, header},
     response::Redirect,
@@ -47,20 +46,21 @@ async fn run_https(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let http_addr = config.listen_addr()?;
     let https_addr = config.https_listen_addr()?;
     let tls_config = tls::load_server_config(&config.cert.crt, &config.cert.key)?;
+    let state = AppState::new(config).await?;
 
     let redirect_listener = TcpListener::bind(http_addr).await?;
-    let https_port = config.port.https;
+    let redirect_state = state.clone();
     tokio::spawn(async move {
-        let app = Router::new()
+        let app = routes::picoclaw_loopback_routes()
             .fallback(redirect_to_https)
-            .with_state(https_port);
+            .with_state(redirect_state)
+            .into_make_service_with_connect_info::<ClientAddr>();
         info!(addr = %http_addr, "starting HTTP to HTTPS redirect listener");
         if let Err(err) = axum::serve(redirect_listener, app).await {
             warn!(error = ?err, "HTTP redirect listener stopped");
         }
     });
 
-    let state = AppState::new(config).await?;
     let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(https_addr).await?;
     let tls_listener = tls::TlsListener::new(listener, tls_config);
@@ -70,10 +70,11 @@ async fn run_https(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn redirect_to_https(
-    State(https_port): State<u16>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Redirect {
+    let https_port = state.config.port.https;
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
