@@ -83,7 +83,8 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
   }
 
   function validateFilename(filename: string) {
-    const regex: RegExp = /^nanokvm_\d+\.\d+\.\d+\.tar\.gz$/;
+    const regex: RegExp =
+      /^(nanokvm_\d+\.\d+\.\d+|hardened-nanokvm-kvmapp-\d+\.\d+\.\d+)\.tar\.gz$/;
     return regex.test(filename);
   }
 
@@ -96,7 +97,7 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
 
             <a
               className="flex items-center text-neutral-500 hover:text-blue-500"
-              href="https://github.com/sipeed/NanoKVM/releases"
+              href="https://github.com/woffko/Hardened_NanoKVM/releases"
               target="_blank"
             >
               <ExternalLinkIcon size={15} />

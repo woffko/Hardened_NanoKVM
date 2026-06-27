@@ -30,7 +30,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/application/update", post(application::update))
         .route(
             "/api/application/update/offline",
-            post(application::offline_update),
+            post(application::offline_update).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
         )
         .route(
             "/api/application/preview",

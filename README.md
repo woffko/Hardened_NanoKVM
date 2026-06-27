@@ -46,7 +46,7 @@ harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote image download is intentionally disabled in Rust for now. |
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Online/offline firmware update routes are intentionally blocked until signed update verification is implemented. |
+| Updates | Alpha online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a full SDK-from-scratch image build is not included. |
 
 ## What Changed In This Fork
@@ -63,7 +63,8 @@ harden one subsystem at a time.
   not multiply native capture reads. The web UI now defaults new sessions to
   H.264 Direct when HTTPS and WebCodecs are available, otherwise to H.264.
 - Added safer file and command handling for script upload/run, autostart files,
-  ISO upload, storage image paths, update archives, and privileged shell calls.
+  ISO upload, storage image paths, GitHub update archives, and privileged shell
+  calls.
 - Added a web UI switch under **Settings > Device > Advanced**:
   **Enable Hardened Backend** toggles between Rust/Hardened and the original Go
   backend.
@@ -108,8 +109,9 @@ On the Go backend, `/api/health` is expected to return 404.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants. H.264 Direct has been verified against the Rust backend on
   hardware.
-- Update handling remains disabled until signed update verification is designed
-  and implemented.
+- Online update checks read Hardened release metadata from
+  `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
+  after sha512 verification. Full signed release verification is still pending.
 - Remote ISO download is disabled in Rust; local browser ISO upload is the
   supported path for now.
 - First-boot/account setup UX still needs product-level polish. Existing test

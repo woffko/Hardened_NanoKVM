@@ -113,13 +113,18 @@ The generated image installs:
 - Safer command execution through argv-only allowlists and timeouts.
 - Safe archive/path handling for script upload, autostart files, ISO upload,
   storage image paths, and update archives.
+- Online and offline `kvmapp` updates through Hardened GitHub Releases:
+  `/api/application/version` reads `latest.json`, `/api/application/update`
+  downloads the release archive, verifies sha512, installs it under `/kvmapp`,
+  and restarts `S95nanokvm`.
 - UI branding for Hardened NanoKVM and version `alfa - 0.1`.
 - Web UI backend switch in Settings > Device > Advanced.
 
 ## Intentionally Disabled
 
-- Online firmware update and offline update archive application are blocked
-  until signed update verification is designed and implemented.
+- Signed update verification is not finished yet. Current alpha updates trust
+  the Hardened GitHub release metadata over HTTPS plus sha512 verification of
+  the downloaded `kvmapp` archive.
 - Remote ISO download is disabled in Rust. Browser ISO upload is the supported
   path for now.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. It can

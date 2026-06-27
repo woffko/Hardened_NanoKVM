@@ -37,10 +37,10 @@ The Rust skeleton preserves this envelope through `ApiResponse<T>`.
 | GET | `/api/auth/account` | `auth.GetAccount` | Implemented in Rust skeleton. |
 | POST | `/api/auth/password` | `auth.ChangePassword` | Implemented in Rust skeleton with Argon2id and session revocation. |
 | POST | `/api/auth/logout` | `auth.Logout` | Implemented in Rust skeleton with active-session revocation. |
-| GET | `/api/application/version` | `application.GetVersion` | Stubbed. |
-| POST | `/api/application/update` | `application.Update` | Stubbed; must use signed updates. |
-| POST | `/api/application/update/offline` | `application.OfflineUpdate` | Stubbed; safe archive helper added. |
-| GET/POST | `/api/application/preview` | preview get/set | Stubbed. |
+| GET | `/api/application/version` | `application.GetVersion` | Implemented; reads current `/kvmapp/version` and Hardened GitHub release `latest.json`. |
+| POST | `/api/application/update` | `application.Update` | Implemented alpha path; downloads Hardened GitHub release archive, verifies sha512, installs `/kvmapp`, restarts service. Signed metadata still TODO. |
+| POST | `/api/application/update/offline` | `application.OfflineUpdate` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
+| GET/POST | `/api/application/preview` | preview get/set | Implemented; selects stable latest asset or preview tag metadata. |
 | GET | `/api/storage/image` | `storage.GetImages` | Stubbed. |
 | GET | `/api/storage/image/mounted` | `storage.GetMountedImage` | Stubbed. |
 | POST | `/api/storage/image/mount` | `storage.MountImage` | Stubbed; must enforce `/data` allowlist. |

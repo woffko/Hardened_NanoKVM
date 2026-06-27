@@ -13,7 +13,7 @@ This inventory drives the Rust rewrite hardening work. It combines the Go backen
 | WebSocket Origin | Existing upgraders return true for every Origin. | Reject unexpected Origins for every WebSocket. | Helper implemented in `ws/origin.rs`; route handlers still stubs. |
 | Login brute force | Lockout exists but defaults to disabled. | Safe default lockout enabled per IP and username. | Implemented in `security/rate_limit.rs`; default 5 failures, 10 min lockout. |
 | Offline update extraction | Tar member traversal writes outside cache. | Safe temp extraction, no traversal, no symlink overwrite. | Safe path helper and safe tar.gz extraction added in `update/archive.rs`. |
-| Update integrity | Same-origin checksum and legacy content-type-only updater. | Signed update metadata/artifacts; reject unsigned by default. | Config default `allow_unsigned_updates=false`; full verifier TODO. |
+| Update integrity | Same-origin checksum and legacy content-type-only updater. | Signed update metadata/artifacts. | Alpha GitHub release updater verifies sha512 from Hardened `latest.json`; full signed metadata verifier TODO. |
 | Shell commands | Many `sh -c` command strings. | Central allowlisted argv-only wrapper with timeout and bounded output. | Implemented in `system/command.rs`; API migration TODO. |
 | Storage paths | Image mount/delete accept unsafe paths. | Enforce resolved `/data` containment and known image inventory. | API stubbed; helper patterns documented. |
 | SSRF | Image downloader fetches arbitrary URLs. | Destination allowlist/denylist, redirect checks, content validation. | API stubbed; TODO. |

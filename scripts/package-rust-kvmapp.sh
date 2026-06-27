@@ -9,6 +9,8 @@ OUT_DIR="${OUT_DIR:-$BUILD_DIR/artifacts}"
 RUST_TARGET="${RUST_TARGET:-}"
 RUST_BINARY="${RUST_BINARY:-}"
 WEB_DIST="${WEB_DIST:-$ROOT_DIR/web/dist}"
+APP_VERSION="${APP_VERSION:-}"
+ARTIFACT_NAME="${ARTIFACT_NAME:-nanokvm-kvmapp-rust.tar.gz}"
 
 if [ -z "$RUST_BINARY" ]; then
   if [ -n "$RUST_TARGET" ]; then
@@ -27,6 +29,12 @@ fi
 rm -rf "$STAGE_DIR"
 mkdir -p "$KVMAPP_STAGE/server" "$KVMAPP_STAGE/backends" "$OUT_DIR"
 cp -R "$ROOT_DIR/kvmapp/." "$KVMAPP_STAGE/"
+
+if [ -n "$APP_VERSION" ]; then
+  printf '%s\n' "$APP_VERSION" > "$KVMAPP_STAGE/version"
+elif [ ! -f "$KVMAPP_STAGE/version" ]; then
+  printf '0.1.0\n' > "$KVMAPP_STAGE/version"
+fi
 
 cp "$RUST_BINARY" "$KVMAPP_STAGE/server/NanoKVM-Server"
 chmod 0755 "$KVMAPP_STAGE/server/NanoKVM-Server"
@@ -51,9 +59,10 @@ fi
   printf 'rust_binary: %s\n' "$RUST_BINARY"
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"
   printf 'web_dist: %s\n' "$WEB_DIST"
+  printf 'app_version: %s\n' "$(cat "$KVMAPP_STAGE/version")"
 } > "$STAGE_DIR/MANIFEST.txt"
 
-ARCHIVE="$OUT_DIR/nanokvm-kvmapp-rust.tar.gz"
+ARCHIVE="$OUT_DIR/$ARTIFACT_NAME"
 tar -C "$STAGE_DIR" -czf "$ARCHIVE" kvmapp MANIFEST.txt
 sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
