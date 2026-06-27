@@ -1,3 +1,67 @@
+## Hardened NanoKVM 0.1.3 (2026-06-27)
+
+### Release Notes
+
+* Added Hardened-specific changelog entries and kept the Check for Updates changelog link pointed at `woffko/Hardened_NanoKVM`.
+* No backend behavior changes from `0.1.2`; this release exists to validate the GitHub-backed update flow after changelog cleanup.
+
+## Hardened NanoKVM 0.1.2 (2026-06-27)
+
+### Features
+
+* Added GitHub Releases-backed online update checks for `woffko/Hardened_NanoKVM`.
+* Added GUI-installable `hardened-nanokvm-kvmapp-*.tar.gz` update archives with `latest.json` metadata.
+* Added release packaging support for semver `/kvmapp/version` values and generated release metadata.
+* Published SD-card image artifacts alongside GUI update archives.
+
+### Bug Fixes
+
+* Fixed update checks when the Preview Updates toggle is enabled but no preview metadata release exists by falling back to stable release metadata.
+
+### Security
+
+* Restricted online update downloads to Hardened NanoKVM GitHub release URLs.
+* Verified downloaded update archives with sha512 from `latest.json` before installation.
+* Kept safe tar extraction for online and offline application updates.
+
+### UI
+
+* Updated Check for Updates links to the Hardened repository changelog and releases.
+* Accepted Hardened update archive names in the offline update picker.
+
+## Hardened NanoKVM 0.1.1 (2026-06-27)
+
+### Release Notes
+
+* First public test release for GitHub-backed application updates.
+* Superseded by `0.1.2` because preview-update mode needed a stable metadata fallback.
+
+## Hardened NanoKVM 0.1.0 (2026-06-27)
+
+### Features
+
+* Added the Rust backend as a drop-in `NanoKVM-Server` replacement while keeping the original Go backend as a switchable fallback.
+* Added Hardened branding on the login screen, toolbar, and About page.
+* Added the Settings > Device > Advanced backend switch for Rust/Go testing.
+* Added HTTPS support, Rust auth/session hardening, CSRF protection, Origin checks, H.264 Direct, H.264 WebRTC signaling, MJPEG, HID, storage, network, Tailscale, terminal gating, scripts, autostart, and core VM settings routes.
+
+### Performance
+
+* Added MJPEG and H.264 Direct fanout so multiple viewers do not multiply native capture reads.
+* Defaulted new browser sessions to H.264 Direct when HTTPS and WebCodecs are available.
+
+### Bug Fixes
+
+* Hardened HID writes against stale USB gadget handles and transient `ENXIO` errors.
+* Fixed Rust resolution changes, FPS changes, 0x0 capture fallback handling, and backend startup cleanup issues found during device testing.
+* Fixed invalid-login responses to use the expected wrong-password message instead of a generic unexpected error.
+
+### Security
+
+* Added safer path handling for scripts, autostart files, ISO upload, storage paths, and update archive extraction.
+* Disabled remote ISO download in the Rust backend until allowlist and redirect checks are complete.
+* Gated web terminal access behind the existing Terminal menu toggle with a warning.
+
 ## 2.4.2 (2026-05-20)
 
 ### Features
