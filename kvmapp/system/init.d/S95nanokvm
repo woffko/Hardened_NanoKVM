@@ -28,6 +28,19 @@ cleanup_server_backups() {
         /kvmapp/server/web.after-* 2>/dev/null || true
 }
 
+ensure_kvm_state_files() {
+    mkdir -p /kvmapp/kvm
+    [ -f /kvmapp/kvm/now_fps ] || printf '0\n' > /kvmapp/kvm/now_fps
+    [ -f /kvmapp/kvm/fps ] || printf '30\n' > /kvmapp/kvm/fps
+    [ -f /kvmapp/kvm/qlty ] || printf '2000\n' > /kvmapp/kvm/qlty
+    [ -f /kvmapp/kvm/res ] || printf '0\n' > /kvmapp/kvm/res
+    [ -f /kvmapp/kvm/type ] || printf 'h264\n' > /kvmapp/kvm/type
+    [ -f /kvmapp/kvm/gop ] || printf '50\n' > /kvmapp/kvm/gop
+    [ -f /kvmapp/kvm/state ] || printf '0\n' > /kvmapp/kvm/state
+    [ -f /kvmapp/kvm/width ] || printf '1920\n' > /kvmapp/kvm/width
+    [ -f /kvmapp/kvm/height ] || printf '1080\n' > /kvmapp/kvm/height
+}
+
 stop_runtime() {
     killall kvm_system 2>/dev/null
     killall NanoKVM-Server 2>/dev/null
@@ -38,6 +51,7 @@ stop_runtime() {
 
 start_runtime() {
     cleanup_server_backups
+    ensure_kvm_state_files
 
     cp -r /kvmapp/kvm_system /tmp/
     nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
