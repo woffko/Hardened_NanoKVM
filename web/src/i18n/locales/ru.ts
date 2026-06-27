@@ -252,7 +252,9 @@ const ru = {
       disabled: 'Невозможно скачать образ, раздел /data находится в режиме только для чтения',
       uploadbox: 'Перетащите сюда файл или нажмите, чтобы выбрать',
       inputfile: 'Пожалуйста, введите файл изображения',
-      NoISO: 'Нет ISO'
+      NoISO: 'Нет ISO',
+      remoteDisabled: 'Удаленное скачивание ISO отключено в Настройки > Внешний вид.',
+      remoteFailed: 'Не удалось скачать удаленный ISO'
     },
     power: {
       title: 'Питание',
@@ -309,7 +311,13 @@ const ru = {
           terminalWarningDesc:
             'Терминал открывает root shell через браузер. Включайте его только в доверенной сети и выключайте после использования.',
           terminalWarningConfirm: 'Включить',
-          terminalWarningCancel: 'Отмена'
+          terminalWarningCancel: 'Отмена',
+          remoteDownload: 'Удаленное скачивание ISO',
+          remoteDownloadWarningTitle: 'Включить удаленное скачивание ISO?',
+          remoteDownloadWarningDesc:
+            'NanoKVM скачает ISO по URL и запишет его в /data. Включайте это только для доверенных ссылок и выключайте после использования.',
+          remoteDownloadWarningConfirm: 'Включить',
+          remoteDownloadWarningCancel: 'Отмена'
         }
       },
       device: {

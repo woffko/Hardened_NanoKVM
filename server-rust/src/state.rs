@@ -19,6 +19,7 @@ pub struct AppState {
     pub sessions: Arc<SessionStore>,
     pub login_limiter: Arc<RwLock<LoginRateLimiter>>,
     pub terminal_enabled: Arc<AtomicBool>,
+    pub remote_image_download_enabled: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -35,6 +36,7 @@ impl AppState {
         );
 
         let terminal_enabled = config.security.allow_terminal;
+        let remote_image_download_enabled = config.security.allow_remote_image_download;
 
         Ok(Self {
             config: Arc::new(config),
@@ -42,6 +44,7 @@ impl AppState {
             sessions: Arc::new(sessions),
             login_limiter: Arc::new(RwLock::new(login_limiter)),
             terminal_enabled: Arc::new(AtomicBool::new(terminal_enabled)),
+            remote_image_download_enabled: Arc::new(AtomicBool::new(remote_image_download_enabled)),
         })
     }
 
@@ -51,5 +54,14 @@ impl AppState {
 
     pub fn terminal_enabled(&self) -> bool {
         self.terminal_enabled.load(Ordering::Acquire)
+    }
+
+    pub fn set_remote_image_download_enabled(&self, enabled: bool) {
+        self.remote_image_download_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub fn remote_image_download_enabled(&self) -> bool {
+        self.remote_image_download_enabled.load(Ordering::Acquire)
     }
 }

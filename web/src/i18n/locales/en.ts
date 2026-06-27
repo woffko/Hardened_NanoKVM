@@ -250,7 +250,9 @@ const en = {
       disabled: '/data partition is RO, so we cannot download the image',
       uploadbox: 'Drop file here or click to select',
       inputfile: 'Please enter the image File',
-      NoISO: 'No ISO'
+      NoISO: 'No ISO',
+      remoteDisabled: 'Remote ISO download is disabled in Settings > Appearance.',
+      remoteFailed: 'Remote ISO download failed'
     },
     power: {
       title: 'Power',
@@ -306,7 +308,13 @@ const en = {
           terminalWarningDesc:
             'The terminal opens a root shell through the browser. Enable it only on a trusted network and turn it off when you are done.',
           terminalWarningConfirm: 'Enable',
-          terminalWarningCancel: 'Cancel'
+          terminalWarningCancel: 'Cancel',
+          remoteDownload: 'Remote ISO Download',
+          remoteDownloadWarningTitle: 'Enable remote ISO download?',
+          remoteDownloadWarningDesc:
+            'NanoKVM will fetch an ISO from a URL and write it to /data. Enable it only for trusted URLs and turn it off when you are done.',
+          remoteDownloadWarningConfirm: 'Enable',
+          remoteDownloadWarningCancel: 'Cancel'
         }
       },
       device: {

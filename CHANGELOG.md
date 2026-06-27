@@ -1,9 +1,19 @@
-## Unreleased
+## Hardened NanoKVM 0.1.5 (2026-06-27)
+
+### Features
+
+* Added a disabled-by-default Remote ISO Download security toggle in Settings > Appearance.
+* Restored guarded remote ISO download by URL in the Rust backend with safe filename validation, protocol restrictions, size limits, and ISO9660 validation.
 
 ### Bug Fixes
 
 * Restored Go-compatible HDMI capture status websocket events for MJPEG, H.264 Direct, and H.264 WebRTC in the Rust backend.
 * Restored the old Go behavior where setting or changing the web account password also updates the system `root` password.
+
+### Security
+
+* Kept remote ISO download disabled until explicitly enabled from the GUI.
+* Downloaded remote ISO files are written only under the configured image directory and reject unsafe paths, symlink destinations, and non-ISO files.
 
 ## Hardened NanoKVM 0.1.4 (2026-06-27)
 

@@ -15,3 +15,11 @@ export function statusImage() {
 export function imageEnabled() {
   return http.get('/api/download/image/enabled');
 }
+
+export function getRemoteImageDownloadEnabled() {
+  return http.get('/api/download/image/remote/enabled');
+}
+
+export function setRemoteImageDownloadEnabled(enabled: boolean) {
+  return http.post('/api/download/image/remote/enabled', { enabled });
+}

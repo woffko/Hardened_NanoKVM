@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import * as downloadApi from '@/api/download.ts';
 import * as vmApi from '@/api/vm.ts';
 import * as ls from '@/lib/localstorage.ts';
 import { menuDisabledItemsAtom } from '@/jotai/settings.ts';
@@ -23,11 +24,19 @@ export const MenuIcons = () => {
 
   const [menuDisabledItems, setMenuDisabledItems] = useAtom(menuDisabledItemsAtom);
   const [isTerminalWarningOpen, setIsTerminalWarningOpen] = useState(false);
+  const [isRemoteDownloadWarningOpen, setIsRemoteDownloadWarningOpen] = useState(false);
   const [isTerminalLoading, setIsTerminalLoading] = useState(false);
+  const [isRemoteDownloadEnabled, setIsRemoteDownloadEnabled] = useState(false);
+  const [isRemoteDownloadLoading, setIsRemoteDownloadLoading] = useState(false);
 
   const items = [
     { key: 'image', icon: <DiscIcon size={16} /> },
     { key: 'download', icon: <DownloadIcon size={16} /> },
+    {
+      key: 'remoteDownload',
+      icon: <DownloadIcon size={16} />,
+      label: 'settings.appearance.menuBar.remoteDownload'
+    },
     { key: 'terminal', icon: <TerminalSquareIcon size={16} /> },
     { key: 'script', icon: <FileJsonIcon size={16} /> },
     { key: 'wol', icon: <NetworkIcon size={16} /> },
@@ -41,6 +50,10 @@ export const MenuIcons = () => {
     vmApi.getTerminalEnabled().then((rsp) => {
       if (rsp.code !== 0 || typeof rsp.data?.enabled !== 'boolean') return;
       setItemVisible('terminal', rsp.data.enabled);
+    });
+    downloadApi.getRemoteImageDownloadEnabled().then((rsp) => {
+      if (rsp.code !== 0 || typeof rsp.data?.remoteEnabled !== 'boolean') return;
+      setIsRemoteDownloadEnabled(rsp.data.remoteEnabled);
     });
   }, []);
 
@@ -70,6 +83,15 @@ export const MenuIcons = () => {
       return;
     }
 
+    if (key === 'remoteDownload') {
+      if (!isRemoteDownloadEnabled) {
+        setIsRemoteDownloadWarningOpen(true);
+      } else {
+        updateRemoteDownload(false);
+      }
+      return;
+    }
+
     setItemVisible(key, nextEnabled);
   }
 
@@ -85,6 +107,37 @@ export const MenuIcons = () => {
         setIsTerminalWarningOpen(false);
       })
       .finally(() => setIsTerminalLoading(false));
+  }
+
+  function updateRemoteDownload(enabled: boolean) {
+    if (isRemoteDownloadLoading) return;
+    setIsRemoteDownloadLoading(true);
+
+    downloadApi
+      .setRemoteImageDownloadEnabled(enabled)
+      .then((rsp) => {
+        if (rsp.code !== 0) return;
+        setIsRemoteDownloadEnabled(enabled);
+        setIsRemoteDownloadWarningOpen(false);
+      })
+      .finally(() => setIsRemoteDownloadLoading(false));
+  }
+
+  function itemChecked(key: string) {
+    if (key === 'remoteDownload') {
+      return isRemoteDownloadEnabled;
+    }
+    return !menuDisabledItems.includes(key);
+  }
+
+  function itemLoading(key: string) {
+    if (key === 'terminal') {
+      return isTerminalLoading;
+    }
+    if (key === 'remoteDownload') {
+      return isRemoteDownloadLoading;
+    }
+    return false;
   }
 
   return (
@@ -108,8 +161,8 @@ export const MenuIcons = () => {
               </div>
 
               <Switch
-                checked={!menuDisabledItems.includes(item.key)}
-                loading={item.key === 'terminal' && isTerminalLoading}
+                checked={itemChecked(item.key)}
+                loading={itemLoading(item.key)}
                 onChange={() => updateItems(item.key)}
               />
             </div>
@@ -130,6 +183,22 @@ export const MenuIcons = () => {
       >
         <div className="py-4 text-neutral-300">
           {t('settings.appearance.menuBar.terminalWarningDesc')}
+        </div>
+      </Modal>
+
+      <Modal
+        title={t('settings.appearance.menuBar.remoteDownloadWarningTitle')}
+        open={isRemoteDownloadWarningOpen}
+        centered={true}
+        okType="danger"
+        okText={t('settings.appearance.menuBar.remoteDownloadWarningConfirm')}
+        cancelText={t('settings.appearance.menuBar.remoteDownloadWarningCancel')}
+        onOk={() => updateRemoteDownload(true)}
+        onCancel={() => setIsRemoteDownloadWarningOpen(false)}
+        confirmLoading={isRemoteDownloadLoading}
+      >
+        <div className="py-4 text-neutral-300">
+          {t('settings.appearance.menuBar.remoteDownloadWarningDesc')}
         </div>
       </Modal>
     </>

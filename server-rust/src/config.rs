@@ -91,6 +91,7 @@ pub struct Security {
     pub revoke_tokens_on_password_change: bool,
     pub allow_unsigned_updates: bool,
     pub allow_terminal: bool,
+    pub allow_remote_image_download: bool,
     pub allow_auth_disable: bool,
     pub allow_default_admin: bool,
     pub allowed_origins: Vec<String>,
@@ -185,6 +186,7 @@ impl Default for Security {
             revoke_tokens_on_password_change: true,
             allow_unsigned_updates: false,
             allow_terminal: false,
+            allow_remote_image_download: false,
             allow_auth_disable: false,
             allow_default_admin: false,
             allowed_origins: Vec::new(),
@@ -291,6 +293,9 @@ impl Config {
         }
         if self.security.allow_terminal {
             warn!("web terminal is enabled");
+        }
+        if self.security.allow_remote_image_download {
+            warn!("remote ISO download is enabled");
         }
         if self.security.allow_unsigned_updates {
             warn!("unsigned updates are allowed");

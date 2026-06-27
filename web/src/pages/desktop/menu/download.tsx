@@ -19,6 +19,7 @@ export const DownloadImage = () => {
   const [status, setStatus] = useState('');
   const [log, setLog] = useState('');
   const [diskEnabled, setDiskEnabled] = useState(false);
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
   const [popoverKey, setPopoverKey] = useState(0);
 
   const inputRef = useRef<InputRef>(null);
@@ -35,9 +36,11 @@ export const DownloadImage = () => {
     imageEnabled()
       .then((res) => {
         setDiskEnabled(res.data.enabled);
+        setRemoteEnabled(res.data.remoteEnabled === true);
       })
       .catch(() => {
         setDiskEnabled(false);
+        setRemoteEnabled(false);
       });
   }
 
@@ -93,13 +96,23 @@ export const DownloadImage = () => {
 
   function download(url?: string) {
     if (!url) return;
+    if (!remoteEnabled) {
+      setStatus('failed');
+      setLog(t('download.remoteDisabled'));
+      return;
+    }
 
     setStatus('in_progress');
     setLog('Downloading: ' + url);
     // start the getDownloadStatus to tick every 5 seconds
 
     downloadImage(url)
-      .then(() => {
+      .then((rsp) => {
+        if (rsp.code !== 0) {
+          setStatus('failed');
+          setLog(rsp.msg || t('download.remoteFailed'));
+          return;
+        }
         getDownloadStatus();
         // Start the interval to check the download status
         if (!intervalId.current) {
@@ -186,16 +199,19 @@ export const DownloadImage = () => {
                 ref={inputRef}
                 value={input}
                 onChange={handleChange}
-                disabled={status === 'in_progress'}
+                disabled={status === 'in_progress' || !remoteEnabled}
               />
               <Button
                 type="primary"
                 onClick={() => download(input)}
-                disabled={status === 'in_progress'}
+                disabled={status === 'in_progress' || !remoteEnabled}
               >
                 {t('download.ok')}
               </Button>
             </div>
+            {!remoteEnabled && (
+              <div className="pt-1 text-xs text-neutral-500">{t('download.remoteDisabled')}</div>
+            )}
           </div>
           <div>
             <div className="pb-1 text-neutral-500">{t('download.inputfile')}</div>
