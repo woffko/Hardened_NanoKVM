@@ -89,18 +89,14 @@ export const Menu = () => {
             <Divider type="vertical" />
 
             <div
-              className="flex h-[30px] select-none items-center gap-1.5 rounded bg-neutral-900/50 px-1.5 text-neutral-200"
+              className="flex h-[30px] w-[32px] select-none items-center justify-center overflow-hidden rounded bg-white px-0.5 sm:w-[98px]"
               title={HARDENED_NAME}
             >
-              <span className="flex size-[24px] items-center justify-center overflow-hidden rounded bg-neutral-100">
-                <img
-                  src={HARDENED_LOGO_SRC}
-                  alt=""
-                  aria-hidden="true"
-                  className="size-[20px] object-contain"
-                />
-              </span>
-              <span className="hidden text-xs font-medium sm:inline">{HARDENED_SHORT_NAME}</span>
+              <img
+                src={HARDENED_LOGO_SRC}
+                alt={HARDENED_SHORT_NAME}
+                className="h-full w-full object-cover object-left sm:object-contain sm:object-center"
+              />
             </div>
             <Divider type="vertical" />
 

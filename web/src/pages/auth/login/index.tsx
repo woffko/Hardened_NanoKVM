@@ -80,7 +80,7 @@ export const Login = (): ReactElement => {
         >
           <div className="flex flex-col items-center justify-center pb-5">
             <div
-              className="flex size-16 cursor-pointer items-center justify-center rounded-lg bg-neutral-100 shadow-lg"
+              className="flex h-[96px] w-[260px] cursor-pointer items-center justify-center overflow-hidden rounded bg-white shadow-lg"
               onClick={(evt) => {
                 evt.preventDefault();
                 (evt.currentTarget as HTMLDivElement).classList.add('animate-spin');
@@ -93,7 +93,7 @@ export const Login = (): ReactElement => {
                 id="logo"
                 src={HARDENED_LOGO_SRC}
                 alt={HARDENED_NAME}
-                className="size-12 object-contain"
+                className="h-full w-full object-contain"
               />
             </div>
             <div className="mt-3 text-lg font-semibold text-neutral-100">{HARDENED_NAME}</div>

@@ -1,5 +1,9 @@
 # Hardened NanoKVM
 
+<p align="center">
+  <img src="web/public/hardened-logo.png" alt="Hardened NanoKVM logo" width="720">
+</p>
+
 <div align="center">
   <br>
   <img src="https://wiki.sipeed.com/hardware/assets/NanoKVM/introduce/NanoKVM_3.png" alt="NanoKVM" style="margin: 20px 0;">
@@ -25,7 +29,7 @@ a drop-in replacement for `NanoKVM-Server` and continues to use the existing
 The original Go backend is still kept as a fallback for comparison and recovery.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **alfa - 0.1**.
+application version **alfa - 0.1.8**.
 
 ## Current Alpha Status
 
@@ -75,7 +79,7 @@ harden one subsystem at a time.
   are stopped before copy/start, stale web backup directories are removed from
   `/kvmapp/server`, and HTTPS port 443 is explicitly allowed.
 - Updated branding: login screen, toolbar, and About page identify the Hardened
-  build, and the toolbar uses a Rust gear icon next to `Hardened`.
+  build, and the login screen and toolbar use the Hardened NanoKVM wordmark.
 
 ## Backend Switching
 

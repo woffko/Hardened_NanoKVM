@@ -1,3 +1,12 @@
+## Hardened NanoKVM 0.1.8 (2026-06-27)
+
+### UI
+
+* Replaced the temporary Rust gear branding with the Hardened NanoKVM wordmark
+  in the web UI.
+* Added the Hardened NanoKVM logo to the top of the project README.
+* Updated the login screen fallback version label to `alfa - 0.1.8`.
+
 ## Hardened NanoKVM 0.1.7 (2026-06-27)
 
 ### Features
