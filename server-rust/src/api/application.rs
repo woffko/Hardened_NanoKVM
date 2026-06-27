@@ -151,11 +151,22 @@ pub async fn offline_update(
 }
 
 async fn get_latest(preview: bool) -> Result<LatestRelease> {
-    let url = if preview {
-        GITHUB_PREVIEW_LATEST_JSON
-    } else {
-        GITHUB_RELEASE_LATEST_JSON
-    };
+    if preview {
+        match fetch_latest(GITHUB_PREVIEW_LATEST_JSON).await {
+            Ok(latest) => return Ok(latest),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to query preview release metadata, falling back to stable"
+                );
+            }
+        }
+    }
+
+    fetch_latest(GITHUB_RELEASE_LATEST_JSON).await
+}
+
+async fn fetch_latest(url: &str) -> Result<LatestRelease> {
     let output = run_allowed(
         AllowedCommand::Curl,
         [
