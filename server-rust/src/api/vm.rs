@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::{
         State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -37,7 +37,7 @@ use crate::{
     config::Config,
     error::ApiResponse,
     ffi::kvm,
-    http::tls,
+    http::{middleware::CurrentSession, tls},
     state::{AppState, is_allowed_session_lock_duration},
     system::command::{AllowedCommand, run_allowed},
     ws::{hid as hid_ws, origin::validate_ws_origin},
@@ -150,6 +150,8 @@ pub struct SetTerminalReq {
 #[derive(Debug, Serialize)]
 pub struct SessionLockRsp {
     pub duration: u64,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -641,11 +643,13 @@ pub async fn set_terminal_enabled(
 pub async fn get_session_lock(State(state): State<AppState>) -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(SessionLockRsp {
         duration: state.session_lock_duration(),
+        expires_at: None,
     })))
 }
 
 pub async fn set_session_lock(
     State(state): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
     Json(req): Json<SetSessionLockReq>,
 ) -> Result<impl IntoResponse> {
     if !is_allowed_session_lock_duration(req.duration) {
@@ -658,9 +662,11 @@ pub async fn set_session_lock(
     config.security.access_token_duration = req.duration;
     config.write()?;
     state.set_session_lock_duration(req.duration);
+    let session = state.sessions.retime(&session.token, req.duration).await;
 
     Ok(Json(ApiResponse::ok(SessionLockRsp {
         duration: req.duration,
+        expires_at: session.map(|session| session.expires_at_unix),
     })))
 }
 

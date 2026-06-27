@@ -3,6 +3,7 @@ import { Select } from 'antd';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
+import { getCsrfToken, getToken, setCsrfToken, setToken } from '@/lib/cookie.ts';
 
 const DEFAULT_DURATION = '900';
 
@@ -55,6 +56,15 @@ export const SessionLock = () => {
         }
 
         setDuration(value);
+        const expiresAt = rsp.data?.expiresAt;
+        const token = getToken();
+        const csrfToken = getCsrfToken();
+        if (expiresAt && token) {
+          setToken(token, expiresAt);
+        }
+        if (expiresAt && csrfToken) {
+          setCsrfToken(csrfToken, expiresAt);
+        }
       })
       .catch((err) => {
         console.log(err);

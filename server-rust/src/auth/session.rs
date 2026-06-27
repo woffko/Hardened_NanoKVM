@@ -57,6 +57,21 @@ impl SessionStore {
         Some(session)
     }
 
+    pub async fn retime(&self, token: &str, ttl_secs: u64) -> Option<Session> {
+        let ttl = Duration::from_secs(ttl_secs);
+        let expires_at = Instant::now() + ttl;
+        let expires_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .saturating_add(ttl)
+            .as_secs();
+        let mut sessions = self.sessions.write().await;
+        let session = sessions.get_mut(token)?;
+        session.expires_at = expires_at;
+        session.expires_at_unix = expires_at_unix;
+        Some(session.clone())
+    }
+
     pub async fn revoke(&self, token: &str) {
         self.sessions.write().await.remove(token);
     }
