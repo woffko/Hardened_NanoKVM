@@ -1,3 +1,10 @@
+## Hardened NanoKVM 0.1.6 (2026-06-27)
+
+### Bug Fixes
+
+* Fixed the GUI update package so it includes the original `/kvmapp/kvm_system/kvm_system` helper from the base NanoKVM image.
+* Prevented future release packaging from producing an update archive that would remove `kvm_system` and leave the web UI showing `No HDMI signal detected` after updating.
+
 ## Hardened NanoKVM 0.1.5 (2026-06-27)
 
 ### Features

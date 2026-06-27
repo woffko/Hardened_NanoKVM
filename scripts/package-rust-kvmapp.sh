@@ -11,6 +11,39 @@ RUST_BINARY="${RUST_BINARY:-}"
 WEB_DIST="${WEB_DIST:-$ROOT_DIR/web/dist}"
 APP_VERSION="${APP_VERSION:-}"
 ARTIFACT_NAME="${ARTIFACT_NAME:-nanokvm-kvmapp-rust.tar.gz}"
+BASE_ROOTFS_IMAGE="${BASE_ROOTFS_IMAGE:-$BUILD_DIR/sd-image/rootfs.ext}"
+KVM_SYSTEM_SOURCE="${KVM_SYSTEM_SOURCE:-}"
+
+restore_kvm_system_helper() {
+  dest="$KVMAPP_STAGE/kvm_system/kvm_system"
+  tmp="$STAGE_DIR/kvm_system.orig"
+
+  if [ -s "$dest" ]; then
+    chmod 0755 "$dest"
+    return
+  fi
+
+  mkdir -p "$KVMAPP_STAGE/kvm_system"
+
+  if [ -n "$KVM_SYSTEM_SOURCE" ] && [ -s "$KVM_SYSTEM_SOURCE" ]; then
+    cp "$KVM_SYSTEM_SOURCE" "$dest"
+    chmod 0755 "$dest"
+    return
+  fi
+
+  if [ -f "$BASE_ROOTFS_IMAGE" ] && command -v debugfs >/dev/null 2>&1; then
+    rm -f "$tmp"
+    if debugfs -R "dump /kvmapp/kvm_system/kvm_system $tmp" "$BASE_ROOTFS_IMAGE" >/dev/null 2>&1 && [ -s "$tmp" ]; then
+      cp "$tmp" "$dest"
+      chmod 0755 "$dest"
+      return
+    fi
+  fi
+
+  echo "missing required NanoKVM helper: /kvmapp/kvm_system/kvm_system" >&2
+  echo "set KVM_SYSTEM_SOURCE=<path> or BASE_ROOTFS_IMAGE=<rootfs.ext>" >&2
+  exit 1
+}
 
 if [ -z "$RUST_BINARY" ]; then
   if [ -n "$RUST_TARGET" ]; then
@@ -29,6 +62,7 @@ fi
 rm -rf "$STAGE_DIR"
 mkdir -p "$KVMAPP_STAGE/server" "$KVMAPP_STAGE/backends" "$OUT_DIR"
 cp -R "$ROOT_DIR/kvmapp/." "$KVMAPP_STAGE/"
+restore_kvm_system_helper
 
 if [ -n "$APP_VERSION" ]; then
   printf '%s\n' "$APP_VERSION" > "$KVMAPP_STAGE/version"
@@ -60,6 +94,7 @@ fi
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"
   printf 'web_dist: %s\n' "$WEB_DIST"
   printf 'app_version: %s\n' "$(cat "$KVMAPP_STAGE/version")"
+  printf 'kvm_system_helper: %s\n' "$(wc -c < "$KVMAPP_STAGE/kvm_system/kvm_system" | tr -d ' ') bytes"
 } > "$STAGE_DIR/MANIFEST.txt"
 
 ARCHIVE="$OUT_DIR/$ARTIFACT_NAME"
