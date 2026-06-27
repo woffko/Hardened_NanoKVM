@@ -86,13 +86,17 @@ pub async fn login(
         .write()
         .await
         .record_success(&source_ip, &req.username);
+    let session_lock_duration = state.session_lock_duration();
     let session = state
         .sessions
-        .issue(&req.username, state.config.security.access_token_duration)
+        .issue(&req.username, session_lock_duration)
         .await;
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, secure_cookie(&session.token)?);
+    headers.insert(
+        header::SET_COOKIE,
+        secure_cookie(&session.token, session_lock_duration)?,
+    );
     let body = Json(ApiResponse::ok(LoginRsp {
         token: session.token,
         csrf_token: session.csrf_token,
@@ -172,8 +176,8 @@ pub async fn change_password(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-fn secure_cookie(token: &str) -> Result<HeaderValue> {
-    let value = format!("nano-kvm-token={token}; Path=/; Max-Age=900; SameSite=Lax");
+fn secure_cookie(token: &str, max_age_secs: u64) -> Result<HeaderValue> {
+    let value = format!("nano-kvm-token={token}; Path=/; Max-Age={max_age_secs}; SameSite=Lax");
     HeaderValue::from_str(&value)
         .map_err(|err| AppError::Internal(format!("failed to build cookie: {err}")))
 }

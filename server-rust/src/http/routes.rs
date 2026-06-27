@@ -70,6 +70,10 @@ pub fn build(state: AppState) -> Router {
             get(vm::get_terminal_enabled).post(vm::set_terminal_enabled),
         )
         .route(
+            "/api/vm/session-lock",
+            get(vm::get_session_lock).post(vm::set_session_lock),
+        )
+        .route(
             "/api/vm/memory/limit",
             get(vm::get_memory_limit).post(vm::set_memory_limit),
         )

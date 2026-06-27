@@ -278,6 +278,7 @@ const en = {
         applicationTip: 'NanoKVM web application version',
         image: 'Image Version',
         imageTip: 'NanoKVM system image version',
+        uptime: 'Uptime',
         deviceKey: 'Device Key',
         community: 'Community',
         hostname: 'Hostname',
@@ -349,6 +350,14 @@ const en = {
           disable: 'Disable',
           absolute: 'Absolute Mode',
           relative: 'Relative Mode'
+        },
+        sessionLock: {
+          title: 'Session lock after',
+          description: 'Require login again after this time',
+          5: '5 min',
+          15: '15 min',
+          30: '30 min',
+          60: '60 min'
         },
         mdns: {
           description: 'Enable mDNS discovery service',

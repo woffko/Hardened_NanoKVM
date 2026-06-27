@@ -4,7 +4,7 @@ import { CircleHelpIcon, EthernetPortIcon, WifiIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
-import { HARDENED_VERSION } from '@/lib/hardened.ts';
+import { formatHardenedVersion } from '@/lib/hardened.ts';
 
 import { Hostname } from './hostname.tsx';
 
@@ -20,8 +20,21 @@ type Info = {
   mdns: string;
   image: string;
   application: string;
+  uptime?: number;
   deviceKey: string;
 };
+
+function formatUptime(seconds?: number) {
+  if (!seconds || seconds < 0) return '-';
+
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
 
 export const Information = () => {
   const { t } = useTranslation();
@@ -104,7 +117,13 @@ export const Information = () => {
             </Tooltip>
           </div>
 
-          <span>{information ? HARDENED_VERSION : '-'}</span>
+          <span>{information ? formatHardenedVersion(information.application) : '-'}</span>
+        </div>
+
+        {/* uptime */}
+        <div className="flex w-full items-center justify-between">
+          <span>{t('settings.about.uptime')}</span>
+          <span>{formatUptime(information?.uptime)}</span>
         </div>
 
         <Hostname />

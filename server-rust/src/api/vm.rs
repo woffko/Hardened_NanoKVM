@@ -38,7 +38,7 @@ use crate::{
     error::ApiResponse,
     ffi::kvm,
     http::tls,
-    state::AppState,
+    state::{AppState, is_allowed_session_lock_duration},
     system::command::{AllowedCommand, run_allowed},
     ws::{hid as hid_ws, origin::validate_ws_origin},
 };
@@ -46,6 +46,7 @@ use crate::{
 const BOOT_VERSION_FILE: &str = "/boot/ver";
 const APP_VERSION_FILE: &str = "/kvmapp/version";
 const DEVICE_KEY_FILE: &str = "/device_key";
+const PROC_UPTIME_FILE: &str = "/proc/uptime";
 const HARDWARE_VERSION_FILE: &str = "/etc/kvm/hw";
 const ETC_HOSTNAME_FILE: &str = "/etc/hostname";
 const BOOT_HOSTNAME_FILE: &str = "/boot/hostname";
@@ -88,6 +89,7 @@ pub struct InfoRsp {
     pub mdns: String,
     pub image: String,
     pub application: String,
+    pub uptime: u64,
     #[serde(rename = "deviceKey")]
     pub device_key: String,
 }
@@ -143,6 +145,16 @@ pub struct SetTlsReq {
 #[derive(Debug, Deserialize)]
 pub struct SetTerminalReq {
     pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionLockRsp {
+    pub duration: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSessionLockReq {
+    pub duration: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +249,7 @@ pub async fn get_info() -> Result<impl IntoResponse> {
         mdns: get_mdns(),
         image: get_image_version(),
         application: read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| "1.0.0".to_string()),
+        uptime: get_uptime_seconds(),
         device_key: read_trimmed(DEVICE_KEY_FILE).unwrap_or_default(),
     })))
 }
@@ -625,6 +638,32 @@ pub async fn set_terminal_enabled(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub async fn get_session_lock(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(SessionLockRsp {
+        duration: state.session_lock_duration(),
+    })))
+}
+
+pub async fn set_session_lock(
+    State(state): State<AppState>,
+    Json(req): Json<SetSessionLockReq>,
+) -> Result<impl IntoResponse> {
+    if !is_allowed_session_lock_duration(req.duration) {
+        return Err(AppError::BadRequest(
+            "unsupported session lock duration".to_string(),
+        ));
+    }
+
+    let mut config = Config::read()?;
+    config.security.access_token_duration = req.duration;
+    config.write()?;
+    state.set_session_lock_duration(req.duration);
+
+    Ok(Json(ApiResponse::ok(SessionLockRsp {
+        duration: req.duration,
+    })))
+}
+
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
     let winsize = Winsize {
         ws_row: TERMINAL_DEFAULT_ROWS,
@@ -846,6 +885,18 @@ fn get_image_version() -> String {
         "2026-01-05-1_4_1.img" => "v1.4.2".to_string(),
         _ => image,
     }
+}
+
+fn get_uptime_seconds() -> u64 {
+    read_trimmed(PROC_UPTIME_FILE)
+        .and_then(|uptime| {
+            uptime
+                .split_whitespace()
+                .next()
+                .and_then(|seconds| seconds.split('.').next())
+                .and_then(|seconds| seconds.parse::<u64>().ok())
+        })
+        .unwrap_or_default()
 }
 
 fn get_hardware_version() -> String {

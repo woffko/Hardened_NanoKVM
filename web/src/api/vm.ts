@@ -130,6 +130,16 @@ export function setTerminalEnabled(enabled: boolean) {
   return http.post('/api/vm/terminal/enabled', { enabled });
 }
 
+// get session lock duration
+export function getSessionLock() {
+  return http.get('/api/vm/session-lock');
+}
+
+// set session lock duration
+export function setSessionLock(duration: number) {
+  return http.post('/api/vm/session-lock', { duration });
+}
+
 // get Hostname
 export function getHostname() {
   return http.get('/api/vm/hostname');

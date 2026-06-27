@@ -52,9 +52,9 @@ export const Login = (): ReactElement => {
         }
 
         setMsg('');
-        setToken(rsp.data.token);
+        setToken(rsp.data.token, rsp.data.expiresAt);
         if (rsp.data.csrfToken) {
-          setCsrfToken(rsp.data.csrfToken);
+          setCsrfToken(rsp.data.csrfToken, rsp.data.expiresAt);
         }
 
         navigate('/', { replace: true });

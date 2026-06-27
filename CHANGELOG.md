@@ -1,3 +1,15 @@
+## Hardened NanoKVM 0.1.7 (2026-06-27)
+
+### Features
+
+* Added device uptime to the About page.
+* Added a Settings > Device session lock duration selector with 5, 15, 30, and 60 minute options.
+
+### Bug Fixes
+
+* Fixed the About page application version display to show the actual Hardened app version from `/kvmapp/version`.
+* Matched frontend auth cookie expiry to the Rust backend session expiry when the backend returns `expiresAt`.
+
 ## Hardened NanoKVM 0.1.6 (2026-06-27)
 
 ### Bug Fixes

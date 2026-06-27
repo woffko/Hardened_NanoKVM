@@ -268,6 +268,7 @@ const zh = {
         applicationTip: 'NanoKVM 网页应用版本',
         image: '镜像版本',
         imageTip: 'NanoKVM 系统镜像版本',
+        uptime: '运行时间',
         deviceKey: '设备码',
         community: '社区',
         hostname: '主机名',
@@ -328,6 +329,14 @@ const zh = {
           disable: '关闭',
           absolute: '绝对模式',
           relative: '相对模式'
+        },
+        sessionLock: {
+          title: '会话锁定时间',
+          description: '超过该时间后需要重新登录',
+          5: '5分钟',
+          15: '15分钟',
+          30: '30分钟',
+          60: '60分钟'
         },
         mdns: {
           description: '启用 mDNS 发现服务',

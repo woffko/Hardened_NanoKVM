@@ -7,6 +7,7 @@ import { Mdns } from './mdns.tsx';
 import { MouseJiggler } from './mouse-jiggler.tsx';
 import { Oled } from './oled.tsx';
 import { Reboot } from './reboot.tsx';
+import { SessionLock } from './session-lock.tsx';
 import { Ssh } from './ssh.tsx';
 import { VirtualDevices } from './virtual-devices.tsx';
 
@@ -29,6 +30,7 @@ export const Device = () => {
 
         <Oled />
         <MouseJiggler />
+        <SessionLock />
         <Divider className="opacity-50" />
 
         <Advanced />
