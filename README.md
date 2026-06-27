@@ -29,10 +29,10 @@ a drop-in replacement for `NanoKVM-Server` and continues to use the existing
 The original Go backend is still kept as a fallback for comparison and recovery.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **alfa - 0.1.8**.
+application version **alfa - 0.1.9**.
 
 The current public alpha release is published from the `woffko` fork at
-[`hardened-rust-alpha-0.1.8`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-alpha-0.1.8).
+[`hardened-rust-alpha-0.1.9`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-alpha-0.1.9).
 
 ## Current Alpha Status
 

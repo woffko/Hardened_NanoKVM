@@ -9,7 +9,7 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current public alpha release metadata points to `0.1.8` from
+Current public alpha release metadata points to `0.1.9` from
 `woffko/Hardened_NanoKVM` GitHub Releases.
 
 ## Build
@@ -127,7 +127,7 @@ The generated image installs:
   `/api/application/version` reads `latest.json`, `/api/application/update`
   downloads the release archive, verifies sha512, installs it under `/kvmapp`,
   and restarts `S95nanokvm`.
-- UI branding for Hardened NanoKVM and version `alfa - 0.1.8`.
+- UI branding for Hardened NanoKVM and version `alfa - 0.1.9`.
 - Web UI backend switch in Settings > Device > Advanced.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
   update archives.

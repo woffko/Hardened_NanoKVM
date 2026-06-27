@@ -1,3 +1,15 @@
+## Hardened NanoKVM 0.1.9 (2026-06-27)
+
+### Bug Fixes
+
+* Added default `/kvmapp/kvm` state files to the update package so clean
+  updates keep `kvm_system` from crashing when it reads HDMI width/height
+  before the native video stack has refreshed them.
+* Hardened `S95nanokvm` startup to recreate missing stream state files before
+  launching `kvm_system` and `NanoKVM-Server`.
+* Verified five consecutive device reboots on hardware with Rust backend,
+  `kvm_system`, HDMI capture, and H.264 Direct streaming alive after each boot.
+
 ## Hardened NanoKVM 0.1.8 (2026-06-27)
 
 ### UI
