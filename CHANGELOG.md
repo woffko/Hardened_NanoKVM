@@ -1,3 +1,10 @@
+## Hardened NanoKVM 0.1.4 (2026-06-27)
+
+### Bug Fixes
+
+* Fixed a Rust H.264 Direct crash after updating when the saved resolution is `Automatic`.
+* Stopped passing `0x0` capture dimensions into libkvm from the Rust streaming path; automatic resolution now uses a safe native capture size before calling the native camera layer.
+
 ## Hardened NanoKVM 0.1.3 (2026-06-27)
 
 ### Release Notes

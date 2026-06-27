@@ -579,8 +579,9 @@ fn frame_interval(fps: u64) -> time::Interval {
 
 fn capture_resolution(height: u16) -> Option<(u16, u16)> {
     match height {
-        // Match the Go backend: 0 means "auto" and is passed through to libkvm.
-        0 => Some((0, 0)),
+        // Avoid passing 0x0 to libkvm. The Go backend lets the native layer
+        // resolve "auto", but H.264 capture can abort the Rust process on 0x0.
+        0 => Some((1920, 1080)),
         1080 => Some((1920, 1080)),
         720 => Some((1280, 720)),
         600 => Some((800, 600)),
@@ -614,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_resolution_is_passed_to_libkvm() {
+    fn auto_resolution_uses_safe_native_capture_size() {
         let mut screen = Screen {
             mode: StreamMode::Mjpeg,
             width: 0,
@@ -626,8 +627,8 @@ mod tests {
         };
         normalize_screen(&mut screen);
 
-        assert_eq!(screen.width, 0);
-        assert_eq!(screen.height, 0);
+        assert_eq!(screen.width, 1920);
+        assert_eq!(screen.height, 1080);
     }
 
     #[test]
