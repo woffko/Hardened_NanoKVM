@@ -9,6 +9,9 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
+Current public alpha release metadata points to `0.1.8` from
+`woffko/Hardened_NanoKVM` GitHub Releases.
+
 ## Build
 
 Run the normal host checks from the repository root:
@@ -88,7 +91,8 @@ The generated image installs:
 - CSRF token binding, Origin checks, security headers, login lockout, and
   logout/password-change session revocation.
 - VM info, hardware, hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS,
-  swap, memory limit, TLS toggle, reboot, scripts, and autostart routes.
+  swap, memory limit, TLS toggle, reboot, scripts, autostart, uptime, and
+  session-lock routes.
 - MJPEG stream and frame-detect endpoints through `libkvm`.
 - H.264 Direct and H.264 WebRTC routes are enabled. Direct streaming is the
   preferred low-CPU mode and has been verified on hardware. WebRTC websocket
@@ -106,10 +110,16 @@ The generated image installs:
   mode/reset, and mouse jiggler.
 - Storage image listing, browser ISO upload, mount, unmount, delete, and CD-ROM
   mode with path validation.
+- Guarded remote ISO download by URL. It is disabled by default, controlled by
+  Settings > Appearance, validates URL shape, filename, size, destination, and
+  ISO9660 signature, and writes only under the configured image directory.
 - WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle
   routes.
-- Terminal websocket.
-- PicoClaw runtime routes and KVM bridge helpers.
+- Terminal websocket, disabled by default and controlled by the existing
+  Terminal menu toggle.
+- PicoClaw runtime routes, gateway WebSocket relay, screenshot, HID actions,
+  MCP, load-image bridge, and session-list compatibility routes. Real
+  runtime/session/history validation is still ongoing.
 - Safer command execution through argv-only allowlists and timeouts.
 - Safe archive/path handling for script upload, autostart files, ISO upload,
   storage image paths, and update archives.
@@ -117,16 +127,18 @@ The generated image installs:
   `/api/application/version` reads `latest.json`, `/api/application/update`
   downloads the release archive, verifies sha512, installs it under `/kvmapp`,
   and restarts `S95nanokvm`.
-- UI branding for Hardened NanoKVM and version `alfa - 0.1`.
+- UI branding for Hardened NanoKVM and version `alfa - 0.1.8`.
 - Web UI backend switch in Settings > Device > Advanced.
+- SD-card release artifacts are published alongside GUI-installable `kvmapp`
+  update archives.
 
 ## Intentionally Disabled
 
 - Signed update verification is not finished yet. Current alpha updates trust
   the Hardened GitHub release metadata over HTTPS plus sha512 verification of
   the downloaded `kvmapp` archive.
-- Remote ISO download is disabled in Rust. Browser ISO upload is the supported
-  path for now.
+- GUI system updates for kernel, dtb, modules, boot files, or rootfs files are
+  not implemented yet. See `docs/system-update-plan.md`.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. It can
   be enabled only for isolated compatibility test images.
 
@@ -142,6 +154,12 @@ The generated image installs:
   backup directories, and was verified through reboot, login, MJPEG, and H.264
   Direct streaming on the test device.
 - First-boot/account setup UX needs product-level polishing.
+- `kvmapp` update signature verification is still missing; current releases
+  use trusted GitHub URLs plus sha512 verification.
+- Remote ISO download needs a final production policy before it should be
+  treated as broadly enabled functionality.
+- PicoClaw needs end-to-end runtime/session/history validation against the real
+  runtime.
 - The Rust backend still runs with the same root privileges as the original
   service. Splitting privileged operations into a smaller helper is future work.
 - A full SDK-sourced boot/rootfs build is still not included; current SD images

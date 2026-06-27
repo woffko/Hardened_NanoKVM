@@ -12,7 +12,7 @@
      |
     <a href="https://cn.dl.sipeed.com/shareURL/KVM/nanoKVM">🛠️ Hardware Details</a>
      |
-    <a href="https://github.com/sipeed/NanoKVM/releases/latest">💾 Firmware Releases</a>
+    <a href="https://github.com/woffko/Hardened_NanoKVM/releases/latest">💾 Hardened Releases</a>
   </h3>
   <br>
 </div>
@@ -31,6 +31,9 @@ The original Go backend is still kept as a fallback for comparison and recovery.
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
 application version **alfa - 0.1.8**.
 
+The current public alpha release is published from the `woffko` fork at
+[`hardened-rust-alpha-0.1.8`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-alpha-0.1.8).
+
 ## Current Alpha Status
 
 This fork is usable for active device testing, but it is not a finished firmware
@@ -48,10 +51,11 @@ harden one subsystem at a time.
 | Video | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
 | HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
-| Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote image download is intentionally disabled in Rust for now. |
+| Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
 | Updates | Alpha online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
-| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a full SDK-from-scratch image build is not included. |
+| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a reproducible full vendor-SDK image build is planned but not established yet. |
+| System updates | Planned as a separate GUI updater for vendor-kernel security backports. It is not implemented yet and will require signed manifests, staging, rollback, and boot health checks. |
 
 ## What Changed In This Fork
 
@@ -69,9 +73,13 @@ harden one subsystem at a time.
 - Added safer file and command handling for script upload/run, autostart files,
   ISO upload, storage image paths, GitHub update archives, and privileged shell
   calls.
+- Added guarded remote ISO download by URL, disabled by default and controlled
+  from Settings > Appearance.
 - Added a web UI switch under **Settings > Device > Advanced**:
   **Enable Hardened Backend** toggles between Rust/Hardened and the original Go
   backend.
+- Added device uptime to About and a Settings > Device session lock selector
+  for 5, 15, 30, and 60 minute sessions.
 - Added persistent backend binaries under `/kvmapp/backends/`:
   `NanoKVM-Server.rust` and `NanoKVM-Server.go`.
 - Made `S95nanokvm` startup idempotent for testing: stale `S95nanokvm.*`
@@ -116,14 +124,19 @@ On the Go backend, `/api/health` is expected to return 404.
 - Online update checks read Hardened release metadata from
   `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
   after sha512 verification. Full signed release verification is still pending.
-- Remote ISO download is disabled in Rust; local browser ISO upload is the
-  supported path for now.
+- GUI system updates for kernel/rootfs security backports are planned but not
+  implemented. Current GUI updates replace only the `kvmapp` application
+  payload.
+- Remote ISO download remains disabled by default and needs a final production
+  policy before it should be treated as generally safe.
 - First-boot/account setup UX still needs product-level polish. Existing test
   devices can keep their current account file; new default `admin/admin`
   bootstrap is disabled unless explicitly enabled for isolated compatibility
   testing.
 - The repository does not build a full boot/rootfs image from SDK sources. The
   current SD-card image flow patches a trusted upstream NanoKVM base image.
+- API inventory, recovery docs, rollback docs, and long-run test reports still
+  need to be kept in sync with active device testing.
 
 ## 🌟 What is NanoKVM?
 
@@ -202,6 +215,8 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 - **System support modules:** Build and update the low-level hardware support components in [support/sg2002/README.md](support/sg2002/README.md).
 - **Backend service:** Set up, build, and understand the Go service in [server/README.md](server/README.md).
 - **Hardened Rust backend:** Build, package, and test the Rust replacement in [docs/rust-backend.md](docs/rust-backend.md).
+- **System update plan:** Track planned GUI system updates for vendor-kernel security backports in [docs/system-update-plan.md](docs/system-update-plan.md).
+- **Security status:** Review hardening scope and remaining risk in [docs/security-risk-inventory.md](docs/security-risk-inventory.md).
 - **Frontend UI:** Develop, lint, and build the React interface in [web/README.md](web/README.md).
 
 > Backend compilation and runtime validation require the target toolchain or a NanoKVM device. See the module-specific guides above for the latest development workflow.

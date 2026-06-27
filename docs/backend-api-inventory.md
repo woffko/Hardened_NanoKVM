@@ -1,111 +1,187 @@
 # NanoKVM Backend API Inventory
 
-Source inventory for the Rust backend rewrite. This document maps the current Go backend surface that `server-rust/` must preserve or intentionally replace with a documented security change.
+This document maps the current Rust backend surface in `server-rust/`. It is
+intended as a living parity checklist against the original Go `NanoKVM-Server`.
 
 ## Runtime And Serving Model
 
-- Current backend binary: `server/NanoKVM-Server`, deployed under `/kvmapp/server/`.
-- Static frontend path: current Go server serves `web/` from the executable directory.
+- Active backend binary on device: `/kvmapp/server/NanoKVM-Server`.
+- Rust backend source: `server-rust/`.
+- Static frontend path: configured `paths.web_root`, normally
+  `/kvmapp/server/web`.
 - Config file: `/etc/kvm/server.yaml`.
 - Default HTTP bind: `host: ""`, port `80`, effectively all interfaces.
-- Optional HTTPS: `proto: https`, cert/key from config.
-- Loopback HTTP behavior: HTTPS mode may still expose selected loopback paths for internal APIs.
+- Optional HTTPS: `proto: https`, `port.https`, and configured cert/key.
+- HTTPS mode keeps a restricted loopback HTTP surface for PicoClaw internal
+  routes and redirects normal HTTP clients to HTTPS.
 
 ## Response Envelope
 
-All current API handlers return HTTP 200 for application-level success and most application-level errors:
+Most REST handlers preserve the existing NanoKVM envelope:
 
 ```json
 { "code": 0, "msg": "success", "data": {} }
 ```
 
-The Rust skeleton preserves this envelope through `ApiResponse<T>`.
+The Rust backend may use HTTP status codes for transport/security failures such
+as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 ## Public Routes
 
-| Method | Path | Current Handler | Notes |
-|---|---|---|---|
-| POST | `/api/auth/login` | `auth.Login` | Public login. Legacy `admin/admin` bootstrap is disabled by default and must be explicitly enabled with `security.allow_default_admin=true`. |
-| POST | `/api/network/wifi` | `network.ConnectWifiNoAuth` | AP-mode only, guarded by AP key in current code. |
-| POST | `/api/network/wifi/verify` | `network.VerifyApLogin` | AP-mode only, guarded by AP key in current code. |
-
-## Authenticated Routes
-
-| Method | Path | Current Handler | Migration Status |
-|---|---|---|---|
-| GET | `/api/auth/password` | `auth.IsPasswordUpdated` | Implemented in Rust skeleton. |
-| GET | `/api/auth/account` | `auth.GetAccount` | Implemented in Rust skeleton. |
-| POST | `/api/auth/password` | `auth.ChangePassword` | Implemented in Rust skeleton with Argon2id and session revocation. |
-| POST | `/api/auth/logout` | `auth.Logout` | Implemented in Rust skeleton with active-session revocation. |
-| GET | `/api/application/version` | `application.GetVersion` | Implemented; reads current `/kvmapp/version` and Hardened GitHub release `latest.json`. |
-| POST | `/api/application/update` | `application.Update` | Implemented alpha path; downloads Hardened GitHub release archive, verifies sha512, installs `/kvmapp`, restarts service. Signed metadata still TODO. |
-| POST | `/api/application/update/offline` | `application.OfflineUpdate` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
-| GET/POST | `/api/application/preview` | preview get/set | Implemented; selects stable latest asset or preview tag metadata. |
-| GET | `/api/storage/image` | `storage.GetImages` | Stubbed. |
-| GET | `/api/storage/image/mounted` | `storage.GetMountedImage` | Stubbed. |
-| POST | `/api/storage/image/mount` | `storage.MountImage` | Stubbed; must enforce `/data` allowlist. |
-| GET | `/api/storage/cdrom` | `storage.GetCdRom` | Stubbed. |
-| POST | `/api/storage/image/delete` | `storage.DeleteImage` | Stubbed; must enforce resolved containment. |
-| POST | `/api/hid/paste` | `hid.Paste` | Stubbed. |
-| GET/POST/DELETE | `/api/hid/shortcut*` | shortcut handlers | Stubbed. |
-| GET/POST | `/api/hid/mode` | HID mode handlers | Stubbed. |
-| POST | `/api/hid/reset` | `hid.ResetHid` | Stubbed. |
-| GET | `/api/stream/mjpeg` | `mjpeg.Connect` | Stubbed. |
-| POST | `/api/stream/mjpeg/detect` | `mjpeg.UpdateFrameDetect` | Stubbed. |
-| POST | `/api/stream/mjpeg/detect/stop` | `mjpeg.StopFrameDetect` | Stubbed. |
-| GET | `/api/stream/h264` | `webrtc.Connect` | Stubbed. |
-| GET | `/api/stream/h264/direct` | `direct.Connect` | Stubbed. |
-| POST | `/api/download/image` | `download.DownloadImage` | Stubbed; must add SSRF controls. |
-| GET | `/api/download/image/status` | `download.StatusImage` | Stubbed. |
-| GET | `/api/download/image/enabled` | `download.ImageEnabled` | Stubbed. |
-| POST | `/api/download/file` | `download.DownloadImageFile` | Stubbed. |
-| POST | `/api/network/wol` | `network.WakeOnLAN` | Stubbed. |
-| GET/DELETE | `/api/network/wol/mac` | MAC list/delete | Stubbed. |
-| POST | `/api/network/wol/mac/name` | `network.SetMacName` | Stubbed. |
-| GET | `/api/network/wifi` | `network.GetWifi` | Stubbed. |
-| POST | `/api/network/wifi/connect` | `network.ConnectWifi` | Stubbed. |
-| POST | `/api/network/wifi/disconnect` | `network.DisconnectWifi` | Stubbed. |
-| GET/POST | `/api/network/dns` | DNS get/set | Stubbed. |
-| GET | `/api/vm/info` | `vm.GetInfo` | Stubbed. |
-| GET | `/api/vm/hardware` | `vm.GetHardware` | Stubbed. |
-| GET/POST | `/api/vm/gpio` | GPIO get/set | Stubbed. |
-| POST | `/api/vm/screen` | `vm.SetScreen` | Stubbed. |
-| GET | `/api/vm/terminal` | `vm.Terminal` | Stubbed; must remain disabled by default. |
-| GET/POST/DELETE | `/api/vm/script*` | script handlers | Stubbed; must use safe command/path wrappers. |
-| GET/POST | `/api/vm/device/virtual` | virtual media toggle | Stubbed. |
-| GET/POST | `/api/vm/memory/limit` | memory limit | Stubbed. |
-| GET/POST | `/api/vm/oled` | OLED sleep | Stubbed. |
-| GET/POST | `/api/vm/hdmi/*` | HDMI state/reset/enable/disable | Stubbed. |
-| GET/POST | `/api/vm/ssh*` | SSH state/enable/disable | Stubbed. |
-| GET/POST | `/api/vm/swap` | swap get/set | Stubbed. |
-| GET/POST | `/api/vm/mouse-jiggler*` | mouse jiggler | Stubbed. |
-| GET/POST | `/api/vm/hostname` | hostname get/set | Stubbed. |
-| GET/POST | `/api/vm/web-title` | web title get/set | Stubbed. |
-| GET/POST | `/api/vm/mdns*` | mDNS state/enable/disable | Stubbed. |
-| POST | `/api/vm/tls` | TLS enable/disable | Stubbed. |
-| GET/POST/DELETE | `/api/vm/autostart*` | autostart handlers | Stubbed; must validate path names. |
-| POST | `/api/vm/system/reboot` | `vm.Reboot` | Stubbed. |
-| POST/GET | `/api/extensions/tailscale/*` | Tailscale handlers | Stubbed; must use command wrapper. |
-
-## WebSocket Endpoints
-
-| Path | Current Purpose | Required Rust Control |
+| Method | Path | Rust Status |
 |---|---|---|
-| `/api/ws` | HID keyboard/mouse control and capture status | Authenticated session, Origin validation, bounded message size, bounded queues. |
-| `/api/vm/terminal` | PTY shell | Disabled by default, fresh auth, Origin validation, optional re-auth, audit logs. |
+| GET | `/api/health` | Implemented; returns Rust backend health. |
+| POST | `/api/auth/login` | Implemented with opaque session token, CSRF token, login lockout, and configurable session duration. |
+| POST | `/api/auth/setup` | Implemented for first-account setup flow. |
+| POST | `/api/network/wifi` | Implemented for AP-mode no-auth Wi-Fi flow with AP key verification. |
+| POST | `/api/network/wifi/verify` | Implemented for AP-mode verification. |
+
+## Authenticated REST Routes
+
+### Auth And Account
+
+| Method | Path | Rust Status |
+|---|---|---|
+| POST | `/api/auth/logout` | Implemented; revokes current session. |
+| GET | `/api/auth/account` | Implemented. |
+| GET/POST | `/api/auth/password` | Implemented; Argon2id writes, legacy verification, password-change session revocation, and root password sync. |
+
+### Application Updates
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and Hardened GitHub release `latest.json`. |
+| POST | `/api/application/update` | Implemented alpha path; downloads Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, installs `/kvmapp`, and restarts service. Signed release metadata is still TODO. |
+| POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
+| GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
+
+### VM, Device, And Settings
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/vm/info` | Implemented; includes image version, application version, hostname, IP, mDNS, and uptime. |
+| GET | `/api/vm/hardware` | Implemented. |
+| GET/POST | `/api/vm/hostname` | Implemented. |
+| GET/POST | `/api/vm/web-title` | Implemented. |
+| GET/POST | `/api/vm/gpio` | Implemented. |
+| POST | `/api/vm/screen` | Implemented; writes Go-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
+| GET/POST | `/api/vm/device/virtual` | Implemented. |
+| GET/POST | `/api/vm/oled` | Implemented. |
+| GET | `/api/vm/hdmi` | Implemented. |
+| POST | `/api/vm/hdmi/reset` | Implemented. |
+| POST | `/api/vm/hdmi/enable` | Implemented. |
+| POST | `/api/vm/hdmi/disable` | Implemented. |
+| GET | `/api/vm/ssh` | Implemented. |
+| POST | `/api/vm/ssh/enable` | Implemented. |
+| POST | `/api/vm/ssh/disable` | Implemented. |
+| GET | `/api/vm/mdns` | Implemented. |
+| POST | `/api/vm/mdns/enable` | Implemented. |
+| POST | `/api/vm/mdns/disable` | Implemented. |
+| POST | `/api/vm/system/reboot` | Implemented. |
+| GET/POST | `/api/vm/terminal/enabled` | Implemented; also controls whether the terminal WebSocket is available. |
+| GET/POST | `/api/vm/session-lock` | Implemented; supports 5, 15, 30, and 60 minute durations and retimes current session. |
+| GET/POST | `/api/vm/memory/limit` | Implemented. |
+| GET/POST | `/api/vm/swap` | Implemented. |
+| GET/POST | `/api/vm/mouse-jiggler` | Implemented. |
+| POST | `/api/vm/tls` | Implemented; generates self-signed certs when needed and restarts service. |
+| GET/POST/DELETE | `/api/vm/autostart*` | Implemented with basename/path validation and size limits. |
+| GET/POST/DELETE | `/api/vm/script*` | Implemented with basename/path validation and allowlisted execution. |
+
+### Video And HID
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/ws` | Implemented HID keyboard/mouse WebSocket plus capture-status events. |
+| GET | `/api/stream/mjpeg` | Implemented through `libkvm` with shared fanout. |
+| POST | `/api/stream/mjpeg/detect` | Implemented. |
+| POST | `/api/stream/mjpeg/detect/stop` | Implemented. |
+| GET | `/api/stream/h264/direct` | Implemented Go-compatible direct H.264 binary frame WebSocket. |
+| GET | `/api/stream/h264` | Implemented H.264 WebRTC signaling and RTP sample streaming; needs more browser/ICE soak testing. |
+| GET | `/api/hid/shortcuts` | Implemented. |
+| POST/DELETE | `/api/hid/shortcut` | Implemented. |
+| GET/POST | `/api/hid/shortcut/leader-key` | Implemented. |
+| GET/POST | `/api/hid/mode` | Implemented. |
+| POST | `/api/hid/reset` | Implemented. |
+| POST | `/api/hid/paste` | Implemented. |
+
+### Storage And Image Download
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/storage/image` | Implemented. |
+| GET | `/api/storage/image/mounted` | Implemented. |
+| POST | `/api/storage/image/mount` | Implemented with `/data` path validation. |
+| GET | `/api/storage/cdrom` | Implemented. |
+| POST | `/api/storage/image/delete` | Implemented with containment checks. |
+| GET | `/api/download/image/enabled` | Implemented. |
+| GET | `/api/download/image/status` | Implemented. |
+| POST | `/api/download/file` | Implemented browser ISO upload with size and path validation. |
+| GET/POST | `/api/download/image/remote/enabled` | Implemented disabled-by-default remote ISO toggle. |
+| POST | `/api/download/image` | Implemented guarded remote ISO download with protocol, filename, destination, size, redirect, and ISO signature checks. |
+
+### Network And Tailscale
+
+| Method | Path | Rust Status |
+|---|---|---|
+| POST | `/api/network/wol` | Implemented. |
+| GET/DELETE | `/api/network/wol/mac` | Implemented. |
+| POST | `/api/network/wol/mac/name` | Implemented. |
+| GET/POST | `/api/network/dns` | Implemented. |
+| GET | `/api/network/wifi` | Implemented. |
+| POST | `/api/network/wifi/connect` | Implemented. |
+| POST | `/api/network/wifi/disconnect` | Implemented. |
+| GET/POST | `/api/extensions/tailscale/*` | Implemented lifecycle/status/login/install flow with safer command execution. |
+
+### PicoClaw
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET/POST | `/api/picoclaw/model/config` | Implemented compatibility route. |
+| POST | `/api/picoclaw/agent/profile` | Implemented compatibility route. |
+| GET | `/api/picoclaw/sessions` | Implemented session list compatibility; full real-history validation remains. |
+| GET/DELETE | `/api/picoclaw/sessions/{id}` | Implemented compatibility shape; real session history behavior needs validation. |
+| GET/POST/DELETE | `/api/picoclaw/runtime/*` | Implemented runtime status/session/install/uninstall/start/stop flows. |
+| GET | `/api/picoclaw/gateway/ws` | Implemented gateway WebSocket relay. |
+| GET | `/api/picoclaw/screenshot` | Implemented loopback-only internal route. |
+| POST | `/api/picoclaw/actions` | Implemented loopback-only HID action route. |
+| POST | `/api/picoclaw/mcp` | Implemented loopback-only MCP bridge. |
+| POST | `/api/picoclaw/load-image` | Implemented loopback-only load-image bridge. |
+
+## WebSocket Controls
+
+| Path | Purpose | Rust Control |
+|---|---|---|
+| `/api/ws` | HID keyboard/mouse control and capture status | Authenticated session, Origin validation, bounded message size, queued HID writes. |
+| `/api/vm/terminal` | PTY shell | Disabled by default, controlled by Terminal menu toggle, authenticated session, Origin validation. |
 | `/api/stream/h264` | WebRTC H.264 signaling | Authenticated session, Origin validation, slow-client handling. |
-| `/api/stream/h264/direct` | Direct H.264 stream | Authenticated session, Origin validation, bounded/drop-old frame handling. |
-| `/api/picoclaw/gateway/ws` | Picoclaw runtime gateway | Authenticated session, Origin validation, session nonce binding. |
+| `/api/stream/h264/direct` | Direct H.264 stream | Authenticated session, Origin validation, shared producer/fanout. |
+| `/api/picoclaw/gateway/ws` | PicoClaw runtime gateway | Authenticated session, session lock, upstream timeout/message limits. |
 
 ## Config Fields
 
-Current fields preserved: `proto`, `host`, `port.http`, `port.https`, `cert.crt`, `cert.key`, `logger.level`, `logger.file`, `authentication`, `jwt.secretKey`, `jwt.refreshTokenDuration`, `jwt.revokeTokensOnLogout`, `stun`, `turn.turnAddr`, `turn.turnUser`, `turn.turnCred`, `security.loginLockoutDuration`, and `security.loginMaxFailures`.
+Preserved fields include `proto`, `host`, `port.http`, `port.https`,
+`cert.crt`, `cert.key`, `logger.level`, `logger.file`, `authentication`,
+`jwt.secretKey`, `jwt.refreshTokenDuration`, `jwt.revokeTokensOnLogout`, `stun`,
+and `turn.*`.
 
-Rust-only hardening fields introduced under `security`: `require_csrf`, `websocket_origin_check`, `access_token_duration`, `refresh_token_duration`, `revoke_tokens_on_password_change`, `allow_unsigned_updates`, `allow_terminal`, `allow_auth_disable`, and `allowed_origins`.
+Rust hardening fields under `security` include `require_csrf`,
+`websocket_origin_check`, `access_token_duration`, `refresh_token_duration`,
+`revoke_tokens_on_password_change`, `allow_unsigned_updates`, `allow_terminal`,
+`allow_remote_image_download`, `allow_auth_disable`, `allow_default_admin`, and
+`allowed_origins`.
 
 ## External Components To Preserve
 
 - `kvm_system` and `kvm_vision` remain external components.
 - `libkvm.so` and `libkvm_mmf.so` remain the native hardware/video boundary.
-- Init scripts under `/etc/init.d/` remain service-control boundaries until privileged helper work is split out.
+- Init scripts under `/etc/init.d/` remain service-control boundaries until
+  privileged helper work is split out.
 - Video capture/encoder pipeline is not rewritten in Rust.
+
+## Current Gaps
+
+- Full route-by-route parity against the Go backend still needs systematic
+  regression testing, especially uncommon settings and exact error semantics.
+- H.264 WebRTC needs longer browser/ICE validation.
+- `kvmapp` updates need signed release metadata.
+- GUI system updates for vendor-kernel/security backports are not implemented.
