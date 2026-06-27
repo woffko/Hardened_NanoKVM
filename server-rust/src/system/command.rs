@@ -1,7 +1,7 @@
 use std::{ffi::OsStr, path::PathBuf, process::Stdio, time::Duration};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
     time,
 };
@@ -14,6 +14,7 @@ const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 pub enum AllowedCommand {
     Reboot,
     Hostname,
+    Passwd,
     ServiceNanokvmRestart,
     ServiceSshd,
     ServiceAvahiDaemon,
@@ -48,6 +49,7 @@ impl AllowedCommand {
         match self {
             AllowedCommand::Reboot => OsStr::new("reboot"),
             AllowedCommand::Hostname => OsStr::new("hostname"),
+            AllowedCommand::Passwd => OsStr::new("passwd"),
             AllowedCommand::ServiceNanokvmRestart => OsStr::new("/etc/init.d/S95nanokvm"),
             AllowedCommand::ServiceSshd => OsStr::new("/etc/init.d/S50sshd"),
             AllowedCommand::ServiceAvahiDaemon => OsStr::new("/etc/init.d/S50avahi-daemon"),
@@ -72,6 +74,60 @@ impl AllowedCommand {
             AllowedCommand::CustomForTest(path) => path.as_os_str(),
         }
     }
+}
+
+pub async fn run_allowed_with_stdin<I, S>(
+    command: AllowedCommand,
+    args: I,
+    stdin: &[u8],
+    timeout: Duration,
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut child = Command::new(command.program())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let mut child_stdin = child.stdin.take().expect("stdin piped");
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let input = stdin.to_vec();
+
+    let stdin_task = tokio::spawn(async move {
+        child_stdin.write_all(&input).await?;
+        child_stdin.shutdown().await
+    });
+    let stdout_task = tokio::spawn(async move { read_limited(&mut stdout).await });
+    let stderr_task = tokio::spawn(async move { read_limited(&mut stderr).await });
+    let status = time::timeout(timeout, child.wait())
+        .await
+        .map_err(|_| AppError::Internal("command timed out".to_string()))??;
+
+    let stdin_result = stdin_task
+        .await
+        .map_err(|err| AppError::Internal(format!("stdin task failed: {err}")))?;
+    let stdout = stdout_task
+        .await
+        .map_err(|err| AppError::Internal(format!("stdout task failed: {err}")))??;
+    let stderr = stderr_task
+        .await
+        .map_err(|err| AppError::Internal(format!("stderr task failed: {err}")))??;
+
+    if status.success() {
+        stdin_result?;
+    }
+
+    Ok(CommandOutput {
+        status: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+    })
 }
 
 pub async fn run_allowed<I, S>(
@@ -184,6 +240,20 @@ mod tests {
         let out = run_allowed(
             AllowedCommand::CustomForTest(PathBuf::from("/bin/echo")),
             ["hello"],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn runs_allowlisted_command_with_stdin() {
+        let out = run_allowed_with_stdin(
+            AllowedCommand::CustomForTest(PathBuf::from("/bin/cat")),
+            std::iter::empty::<&str>(),
+            b"hello\n",
             Duration::from_secs(2),
         )
         .await

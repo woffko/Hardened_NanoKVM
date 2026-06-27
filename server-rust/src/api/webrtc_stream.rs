@@ -50,7 +50,9 @@ use webrtc::{
 
 use crate::{
     AppError, Result,
-    api::stream::{current_h264_screen, h264_frame_duration},
+    api::stream::{
+        CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, update_capture_status,
+    },
     config::Config,
     ffi::kvm,
     state::AppState,
@@ -326,18 +328,21 @@ impl WebRtcManager {
             let (data, result) = match frame {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(err)) => {
+                    update_capture_status(CAPTURE_MODE_H264, -1);
                     if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                         warn!(error = ?err, "failed to read h264 webrtc frame");
                     }
                     continue;
                 }
                 Err(err) => {
+                    update_capture_status(CAPTURE_MODE_H264, -1);
                     if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                         warn!(error = ?err, "h264 webrtc frame task failed");
                     }
                     continue;
                 }
             };
+            update_capture_status(CAPTURE_MODE_H264, result);
 
             if result < 0 || data.is_empty() {
                 if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {

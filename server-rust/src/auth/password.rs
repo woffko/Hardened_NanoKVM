@@ -88,6 +88,11 @@ pub fn hash_password(password: &str) -> Result<String> {
     hash_password_unchecked(password)
 }
 
+pub fn validate_account_credentials(username: &str, password: &str) -> Result<()> {
+    validate_username(username)?;
+    validate_password(password)
+}
+
 fn hash_password_unchecked(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

@@ -5,14 +5,18 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::{
     AppError, Result,
-    auth::compat_crypto::decode_frontend_password,
+    auth::{compat_crypto::decode_frontend_password, password::validate_account_credentials},
     error::ApiResponse,
     http::{middleware::CurrentSession, tls::ClientAddr},
     state::AppState,
+    system::command::{AllowedCommand, CommandOutput, run_allowed_with_stdin},
 };
+
+const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 pub struct LoginReq {
@@ -107,6 +111,8 @@ pub async fn setup_first_account(
         ));
     }
     let password = decode_frontend_password(&req.password)?;
+    validate_account_credentials(&req.username, &password)?;
+    change_root_password(&password).await?;
     state.accounts.set_account(&req.username, &password)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -157,6 +163,8 @@ pub async fn change_password(
         ));
     }
     let password = decode_frontend_password(&req.password)?;
+    validate_account_credentials(&req.username, &password)?;
+    change_root_password(&password).await?;
     state.accounts.set_account(&req.username, &password)?;
     if state.config.security.revoke_tokens_on_password_change {
         state.sessions.revoke_user(&req.username).await;
@@ -168,4 +176,39 @@ fn secure_cookie(token: &str) -> Result<HeaderValue> {
     let value = format!("nano-kvm-token={token}; Path=/; Max-Age=900; SameSite=Lax");
     HeaderValue::from_str(&value)
         .map_err(|err| AppError::Internal(format!("failed to build cookie: {err}")))
+}
+
+async fn change_root_password(password: &str) -> Result<()> {
+    let input = format!("{password}\n{password}\n");
+    let output = run_allowed_with_stdin(
+        AllowedCommand::Passwd,
+        ["root"],
+        input.as_bytes(),
+        ROOT_PASSWORD_TIMEOUT,
+    )
+    .await?;
+    if output.status == 0 {
+        Ok(())
+    } else {
+        Err(AppError::Internal(command_error(
+            "failed to change root password",
+            output,
+        )))
+    }
+}
+
+fn command_error(message: &str, output: CommandOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = stderr.trim();
+    if !detail.is_empty() {
+        format!("{message}: {detail}")
+    } else {
+        let detail = stdout.trim();
+        if detail.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message}: {detail}")
+        }
+    }
 }

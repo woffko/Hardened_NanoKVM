@@ -1,3 +1,10 @@
+## Unreleased
+
+### Bug Fixes
+
+* Restored Go-compatible HDMI capture status websocket events for MJPEG, H.264 Direct, and H.264 WebRTC in the Rust backend.
+* Restored the old Go behavior where setting or changing the web account password also updates the system `root` password.
+
 ## Hardened NanoKVM 0.1.4 (2026-06-27)
 
 ### Bug Fixes

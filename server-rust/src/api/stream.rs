@@ -1,3 +1,4 @@
+use ::time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use async_stream::stream;
 use axum::{
     Json,
@@ -10,8 +11,9 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs, io,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{LazyLock, Mutex},
@@ -24,10 +26,20 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    AppError, Result, error::ApiResponse, ffi::kvm, state::AppState, ws::origin::validate_ws_origin,
+    AppError, Result,
+    error::ApiResponse,
+    ffi::kvm,
+    state::AppState,
+    ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
 const FRAME_DETECT_INTERVAL: u8 = 60;
+pub const CAPTURE_STATUS_EVENT: &str = "capture-status";
+pub const CAPTURE_MODE_DIRECT: &str = "direct";
+pub const CAPTURE_MODE_H264: &str = "h264";
+pub const CAPTURE_MODE_MJPEG: &str = "mjpeg";
+const CAPTURE_SEVERITY_ERROR: &str = "error";
+const CAPTURE_SEVERITY_WARNING: &str = "warning";
 const SCREEN_TYPE_FILE: &str = "/kvmapp/kvm/type";
 const SCREEN_FPS_FILE: &str = "/kvmapp/kvm/fps";
 const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
@@ -46,6 +58,8 @@ static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_STATUS: LazyLock<Mutex<CaptureStatusStore>> =
+    LazyLock::new(|| Mutex::new(CaptureStatusStore::default()));
 
 #[derive(Debug, Clone, Copy)]
 struct Screen {
@@ -98,6 +112,22 @@ struct H264DirectFrame {
     packet: Bytes,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStatus {
+    ok: bool,
+    result: i32,
+    message: &'static str,
+    mode: &'static str,
+    severity: &'static str,
+    updated_at: String,
+}
+
+#[derive(Default)]
+struct CaptureStatusStore {
+    latest_by_mode: HashMap<&'static str, CaptureStatus>,
+}
+
 struct StreamFanout<T> {
     clients: AtomicUsize,
     running: AtomicBool,
@@ -142,6 +172,94 @@ impl Drop for ClientGuard {
     fn drop(&mut self) {
         self.clients.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+impl CaptureStatus {
+    fn new(mode: &'static str, result: i32) -> Self {
+        let (message, severity) = capture_result_message(result);
+        Self {
+            ok: result >= 0,
+            result,
+            message,
+            mode,
+            severity,
+            updated_at: now_rfc3339(),
+        }
+    }
+}
+
+pub fn capture_status_snapshot() -> Vec<CaptureStatus> {
+    let Ok(store) = CAPTURE_STATUS.lock() else {
+        return Vec::new();
+    };
+
+    let mut modes: Vec<_> = store.latest_by_mode.keys().copied().collect();
+    modes.sort_unstable();
+
+    modes
+        .into_iter()
+        .filter_map(|mode| store.latest_by_mode.get(mode).cloned())
+        .collect()
+}
+
+pub fn update_capture_status(mode: &'static str, result: i32) {
+    let next = CaptureStatus::new(mode, result);
+
+    let should_broadcast = {
+        let Ok(mut store) = CAPTURE_STATUS.lock() else {
+            return;
+        };
+
+        if store
+            .latest_by_mode
+            .get(mode)
+            .is_some_and(|last| same_public_status(last, &next))
+        {
+            false
+        } else {
+            store.latest_by_mode.insert(mode, next.clone());
+            true
+        }
+    };
+
+    if should_broadcast {
+        broadcast_capture_status(&next);
+    }
+}
+
+pub fn broadcast_capture_status(status: &CaptureStatus) {
+    match serde_json::to_string(status) {
+        Ok(data) => hid_ws::broadcast_event(CAPTURE_STATUS_EVENT, &data),
+        Err(err) => warn!(error = ?err, "failed to serialize capture status"),
+    }
+}
+
+fn same_public_status(a: &CaptureStatus, b: &CaptureStatus) -> bool {
+    if a.ok && b.ok {
+        return true;
+    }
+
+    a.ok == b.ok && a.result == b.result && a.mode == b.mode
+}
+
+fn capture_result_message(result: i32) -> (&'static str, &'static str) {
+    match result {
+        -7 => ("HDMI input resolution error", CAPTURE_SEVERITY_ERROR),
+        -6 => ("Unsupported HDMI resolution", CAPTURE_SEVERITY_ERROR),
+        -5 => ("Retrieving image", CAPTURE_SEVERITY_WARNING),
+        -4 => ("Changing image resolution", CAPTURE_SEVERITY_WARNING),
+        -3 => ("Image buffer full", CAPTURE_SEVERITY_ERROR),
+        -2 => ("Encoder error", CAPTURE_SEVERITY_ERROR),
+        -1 => ("No image captured", CAPTURE_SEVERITY_ERROR),
+        value if value < 0 => ("Capture failed", CAPTURE_SEVERITY_ERROR),
+        _ => ("", ""),
+    }
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 impl Default for Screen {
@@ -310,18 +428,21 @@ async fn run_mjpeg_producer() {
         let (data, result) = match frame {
             Ok(Ok(frame)) => frame,
             Ok(Err(err)) => {
+                update_capture_status(CAPTURE_MODE_MJPEG, -1);
                 if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                     warn!(error = ?err, "failed to read mjpeg frame");
                 }
                 continue;
             }
             Err(err) => {
+                update_capture_status(CAPTURE_MODE_MJPEG, -1);
                 if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                     warn!(error = ?err, "mjpeg frame task failed");
                 }
                 continue;
             }
         };
+        update_capture_status(CAPTURE_MODE_MJPEG, result);
         if result < 0 || result == 5 || data.is_empty() {
             if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                 warn!(result, bytes = data.len(), "mjpeg frame unavailable");
@@ -385,18 +506,21 @@ async fn run_h264_direct_producer() {
         let (data, result) = match frame {
             Ok(Ok(frame)) => frame,
             Ok(Err(err)) => {
+                update_capture_status(CAPTURE_MODE_DIRECT, -1);
                 if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                     warn!(error = ?err, "failed to read h264 direct frame");
                 }
                 continue;
             }
             Err(err) => {
+                update_capture_status(CAPTURE_MODE_DIRECT, -1);
                 if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                     warn!(error = ?err, "h264 direct frame task failed");
                 }
                 continue;
             }
         };
+        update_capture_status(CAPTURE_MODE_DIRECT, result);
 
         if result < 0 || data.is_empty() {
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {

@@ -6,6 +6,8 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use std::{
     fs,
     fs::{File, OpenOptions},
@@ -16,7 +18,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::{AppError, Result, state::AppState, ws::origin::validate_ws_origin};
 
@@ -41,6 +43,17 @@ const JIGGLER_MODE_ABSOLUTE: &str = "absolute";
 static HID: LazyLock<HidDevices> = LazyLock::new(HidDevices::default);
 static MOUSE_JIGGLER: LazyLock<Mutex<MouseJiggler>> =
     LazyLock::new(|| Mutex::new(MouseJiggler::from_config()));
+static WS_EVENTS: LazyLock<broadcast::Sender<String>> = LazyLock::new(|| {
+    let (tx, _) = broadcast::channel(64);
+    tx
+});
+
+#[derive(Serialize)]
+struct WsEnvelope<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    data: &'a str,
+}
 
 #[derive(Default)]
 struct HidDevices {
@@ -150,6 +163,12 @@ pub fn write_absolute_mouse_report(report: &[u8]) -> io::Result<()> {
     HID.write_absolute_mouse(report)
 }
 
+pub fn broadcast_event(kind: &str, data: &str) {
+    if let Some(message) = ws_event_message(kind, data) {
+        let _ = WS_EVENTS.send(message);
+    }
+}
+
 pub async fn connect(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -164,13 +183,30 @@ pub async fn connect(
         .on_upgrade(handle_socket))
 }
 
-async fn handle_socket(mut socket: WebSocket) {
+async fn handle_socket(socket: WebSocket) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
     let (keyboard_tx, keyboard_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
     let (mouse_tx, mouse_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
     let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx));
     let mouse_worker = tokio::spawn(mouse_worker(mouse_rx));
+    send_capture_status_snapshot(&mut ws_tx).await;
 
-    while let Some(message) = socket.recv().await {
+    let mut event_rx = WS_EVENTS.subscribe();
+    let event_writer = tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(message) => {
+                    if ws_tx.send(Message::Text(message.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    while let Some(message) = ws_rx.next().await {
         let Ok(message) = message else {
             break;
         };
@@ -221,8 +257,30 @@ async fn handle_socket(mut socket: WebSocket) {
 
     drop(keyboard_tx);
     drop(mouse_tx);
+    event_writer.abort();
     let _ = keyboard_worker.await;
     let _ = mouse_worker.await;
+}
+
+async fn send_capture_status_snapshot(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) {
+    for status in crate::api::stream::capture_status_snapshot() {
+        let Ok(data) = serde_json::to_string(&status) else {
+            continue;
+        };
+        let Some(message) = ws_event_message(crate::api::stream::CAPTURE_STATUS_EVENT, &data)
+        else {
+            continue;
+        };
+        if ws_tx.send(Message::Text(message.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn ws_event_message(kind: &str, data: &str) -> Option<String> {
+    serde_json::to_string(&WsEnvelope { kind, data }).ok()
 }
 
 async fn keyboard_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
