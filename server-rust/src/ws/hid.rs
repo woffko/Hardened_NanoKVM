@@ -10,7 +10,7 @@ use std::{
     fs,
     fs::{File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{FileTypeExt, OpenOptionsExt},
     path::Path,
     sync::{LazyLock, Mutex},
     thread,
@@ -25,6 +25,8 @@ const HID_MOUSE_RELATIVE: &str = "/dev/hidg1";
 const HID_MOUSE_ABSOLUTE: &str = "/dev/hidg2";
 const HID_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 const HID_WRITE_RETRY_DELAY: Duration = Duration::from_millis(1);
+const HID_REOPEN_TIMEOUT: Duration = Duration::from_secs(2);
+const HID_REOPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
 const HID_EVENT_QUEUE_CAPACITY: usize = 200;
 const MAX_WS_MESSAGE_BYTES: usize = 16;
 const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
@@ -89,19 +91,50 @@ impl HidDevices {
         path: &'static str,
         report: &[u8],
     ) -> io::Result<()> {
-        let mut guard = slot
-            .lock()
-            .map_err(|_| io::Error::other("hid device lock poisoned"))?;
+        let deadline = Instant::now() + HID_REOPEN_TIMEOUT;
 
-        if guard.is_none() {
-            *guard = Some(open_hid(path)?);
-        }
+        loop {
+            let result = {
+                let mut guard = slot
+                    .lock()
+                    .map_err(|_| io::Error::other("hid device lock poisoned"))?;
 
-        let result = write_with_timeout(guard.as_mut().expect("hid file is open"), report);
-        if result.is_err() {
-            *guard = None;
+                let open_result = if guard.is_none() {
+                    open_hid(path).map(|file| *guard = Some(file))
+                } else {
+                    Ok(())
+                };
+
+                match open_result {
+                    Ok(()) => {
+                        let result =
+                            write_with_timeout(guard.as_mut().expect("hid file is open"), report);
+                        if result.is_err() {
+                            *guard = None;
+                        }
+                        result
+                    }
+                    Err(err) => Err(err),
+                }
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if !is_reopen_retryable_hid_error(&err) || Instant::now() >= deadline {
+                        return Err(hid_unavailable_error(path, err));
+                    }
+
+                    let delay = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(HID_REOPEN_RETRY_DELAY);
+                    if delay.is_zero() {
+                        return Err(hid_unavailable_error(path, err));
+                    }
+                    thread::sleep(delay);
+                }
+            }
         }
-        result
     }
 }
 
@@ -264,11 +297,41 @@ fn drain_hid_queue(queue: &mut mpsc::Receiver<Vec<u8>>) -> usize {
     dropped
 }
 
-fn open_hid(path: &'static str) -> io::Result<File> {
+fn open_hid(path: &str) -> io::Result<File> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.file_type().is_char_device() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{path} is not a HID character device"),
+        ));
+    }
+
     OpenOptions::new()
         .write(true)
         .custom_flags(nix::libc::O_NONBLOCK)
         .open(path)
+}
+
+fn is_reopen_retryable_hid_error(err: &io::Error) -> bool {
+    match err.kind() {
+        io::ErrorKind::Interrupted
+        | io::ErrorKind::NotFound
+        | io::ErrorKind::TimedOut
+        | io::ErrorKind::WouldBlock => true,
+        _ => matches!(
+            err.raw_os_error(),
+            Some(nix::libc::EAGAIN) | Some(nix::libc::ENODEV) | Some(nix::libc::ENXIO)
+        ),
+    }
+}
+
+fn hid_unavailable_error(path: &str, err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!(
+            "{path}: HID device is unavailable; reconnect USB or reset HID and try again: {err}"
+        ),
+    )
 }
 
 fn write_with_timeout(file: &mut File, report: &[u8]) -> io::Result<()> {
