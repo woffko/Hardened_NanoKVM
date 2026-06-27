@@ -1,31 +1,16 @@
-import { DiscordOutlined, GithubOutlined, XOutlined } from '@ant-design/icons';
-import { BookOpenIcon, MessageCircleQuestionIcon } from 'lucide-react';
+import { GithubOutlined } from '@ant-design/icons';
+import { BookOpenIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 export const Community = () => {
   const { t } = useTranslation();
 
   const communities = [
-    { name: 'Document', icon: <BookOpenIcon size={24} />, url: 'https://wiki.sipeed.com/nanokvm' },
+    { name: 'Wiki', icon: <BookOpenIcon size={24} />, url: 'https://wiki.sipeed.com/nanokvm' },
     {
       name: 'GitHub',
       icon: <GithubOutlined style={{ fontSize: '20px' }} width={24} height={24} />,
-      url: 'https://github.com/sipeed/NanoKVM'
-    },
-    {
-      name: 'X',
-      icon: <XOutlined style={{ fontSize: '20px' }} width={24} height={24} />,
-      url: 'https://twitter.com/SipeedIO'
-    },
-    {
-      name: 'Discord',
-      icon: <DiscordOutlined style={{ fontSize: '20px' }} width={24} height={24} />,
-      url: 'https://discord.gg/V4sAZ9XWpN'
-    },
-    {
-      name: 'FAQ',
-      icon: <MessageCircleQuestionIcon size={24} />,
-      url: 'https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/faq.html'
+      url: 'https://github.com/woffko/Hardened_NanoKVM'
     }
   ];
 
