@@ -18,6 +18,10 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `woffko/Hardened_NanoKVM` GitHub Releases.
 - Application update metadata is served as `latest.json` and the downloaded
   archive is verified with sha512 before installation.
+- System updates will use a separate GitHub release channel metadata file,
+  `system-latest.json`, attached to fixed channel tags such as
+  `hardened-system-stable`. They must not use GitHub `/releases/latest` while
+  application updates still depend on that endpoint.
 - SD-card images are currently produced by patching a trusted upstream NanoKVM
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
@@ -82,6 +86,24 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - separate `Application Update` and `System Update` sections;
    - explicit warning for kernel/base updates;
    - progress, verification state, reboot prompt, and rollback status.
+
+## GitHub Release Contract
+
+The initial release contract is documented in
+[system-update-github-releases.md](system-update-github-releases.md).
+
+Versioned system-update releases carry immutable archives named
+`hardened-nanokvm-system-<version>.tar.gz`. Fixed channel releases carry
+`system-latest.json`, which points to the versioned archive and includes sha256,
+sha512, target hardware, size, and release notes URL.
+
+The current helper scripts are:
+
+- `scripts/create-system-update-bundle.sh`
+- `scripts/create-system-update-metadata.sh`
+
+The Rust backend installer is not implemented yet. These scripts only define and
+validate the release artifact format.
 
 ## Required Test Sequence
 

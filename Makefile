@@ -18,7 +18,13 @@ endif
 GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build
 SUPPORT_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_system && ./build kvm_system add_to_kvmapp
 
-.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image support all clean
+SYSTEM_UPDATE_VERSION ?= 0.0.0-dev
+SYSTEM_UPDATE_TARGET ?= sg2002-licheervnano-sd
+SYSTEM_UPDATE_PAYLOAD ?= build/system-update-payload
+SYSTEM_UPDATE_OUT ?= build/system-updates
+SYSTEM_UPDATE_TAG ?= hardened-system-$(SYSTEM_UPDATE_VERSION)
+
+.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image system-update-bundle system-update-metadata support all clean
 
 # Default target
 all: app support
@@ -38,6 +44,8 @@ help:
 	@echo "  web-app       - Build frontend into web/dist"
 	@echo "  rust-kvmapp   - Package Rust backend into build/kvmapp-rust"
 	@echo "  sd-image      - Build patched Hardened NanoKVM SD image from NANOKVM_BASE_IMAGE"
+	@echo "  system-update-bundle   - Package a staged system-update payload"
+	@echo "  system-update-metadata - Generate GitHub latest JSON for the system bundle"
 	@echo "  support       - Build hardware support libraries"
 	@echo "  all           - Build both app and support (default)"
 	@echo "  clean         - Clean build artifacts"
@@ -106,6 +114,16 @@ rust-kvmapp: rust-app
 # This target patches a trusted NanoKVM base image with the current Rust kvmapp.
 sd-image:
 	@scripts/build-rust-sd-image.sh
+
+# Package a staged system-update payload.
+# Expected payload layout:
+#   $(SYSTEM_UPDATE_PAYLOAD)/boot/<file>    -> /boot/<file>
+#   $(SYSTEM_UPDATE_PAYLOAD)/rootfs/<path>  -> /<path>
+system-update-bundle:
+	@scripts/create-system-update-bundle.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TARGET)" "$(SYSTEM_UPDATE_PAYLOAD)" "$(SYSTEM_UPDATE_OUT)"
+
+system-update-metadata:
+	@scripts/create-system-update-metadata.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TAG)" "$(SYSTEM_UPDATE_OUT)/hardened-nanokvm-system-$(SYSTEM_UPDATE_VERSION).tar.gz" "$(SYSTEM_UPDATE_OUT)/system-latest.json"
 
 # Build hardware support libraries
 support: check-root builder-image

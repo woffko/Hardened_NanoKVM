@@ -17,7 +17,7 @@ This inventory drives the Rust rewrite hardening work. It combines the Go backen
 | Shell commands | Many `sh -c` command strings. | Central allowlisted argv-only wrapper with timeout and bounded output. | Implemented in `system/command.rs` and used by migrated routes; continued audit required for new routes. |
 | Storage paths | Image mount/delete accept unsafe paths. | Enforce resolved `/data` containment and known image inventory. | Implemented for Rust storage and upload/delete/mount routes. |
 | SSRF | Image downloader fetches arbitrary URLs. | Destination allowlist/denylist, redirect checks, content validation. | Remote ISO download is disabled by default and guarded by URL, protocol, filename, size, redirect, destination, and ISO signature checks. Final production policy still needed. |
-| System updates | Kernel/rootfs updates can brick the device without rollback. | Separate signed system-update bundles with staging, backup, rollback, and boot health confirmation. | Planned only. Current GUI updater replaces `kvmapp`, not kernel/rootfs. |
+| System updates | Kernel/rootfs updates can brick the device without rollback. | Separate signed system-update bundles with staging, backup, rollback, and boot health confirmation. | Artifact contract and GitHub channel metadata tooling are defined. The Rust installer, signature verification, rollback, and boot health checks are still TODO. Current GUI updater replaces `kvmapp`, not kernel/rootfs. |
 | Privilege model | Backend effectively root for all operations. | Prefer unprivileged backend plus helper; otherwise mark root-required operations. | First phase keeps root-compatible model; docs list root-required operations. |
 
 ## Root-Required Operations
@@ -55,7 +55,8 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 - Update cache: `/root/.kvmcache`, extracts into temp dir and promotes only
   after validation; signed metadata is still pending.
 - Future system update cache: planned under `/data/update-cache`, with backups
-  under `/data/system-backups`.
+  under `/data/system-backups`. System-update archives are constrained to
+  `payload/boot/*` and `payload/rootfs/*` by the packaging contract.
 - Image directory: `/data`, must use resolved containment and reject symlinks.
 - Script directory: `/etc/kvm/scripts`, must use basename inventory and argv execution only.
 - Autostart directory: `/etc/kvm/autostart`, must reject slash-bearing names and traversal.
@@ -69,7 +70,8 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 3. Finish systematic Go API parity and error-semantics audit.
 4. Keep remote ISO download disabled by default until final allowlist/content
    policy is accepted.
-5. Design system updates separately from `kvmapp` updates with signed manifests,
-   staging, rollback, and boot health checks.
+5. Implement the Rust system-update installer for the existing GitHub release
+   contract, including signed manifests, staging, rollback, and boot health
+   checks.
 6. Split root-required operations into a smaller privileged helper when the
    Rust backend behavior is stable enough.
