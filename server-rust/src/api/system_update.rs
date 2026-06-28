@@ -79,8 +79,11 @@ pub struct SystemLatest {
     pub sha512: String,
     pub size: u64,
     pub url: String,
+    #[serde(alias = "release_notes_url")]
     pub release_notes_url: String,
+    #[serde(alias = "signature_algorithm")]
     pub signature_algorithm: String,
+    #[serde(alias = "signature_key_id")]
     pub signature_key_id: String,
 }
 
@@ -1945,6 +1948,28 @@ mod tests {
             metadata_signature_url(url).unwrap(),
             "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json.sig"
         );
+    }
+
+    #[test]
+    fn parses_script_generated_system_latest_metadata() {
+        let raw = r#"{
+  "kind": "hardened-nanokvm-system-update",
+  "format": 1,
+  "channel": "stable",
+  "version": "0.1.0",
+  "target": "sg2002-licheervnano-sd",
+  "name": "hardened-nanokvm-system-0.1.0.tar.gz",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sha512": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==",
+  "size": 1024,
+  "url": "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.0/hardened-nanokvm-system-0.1.0.tar.gz",
+  "release_notes_url": "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0",
+  "signature_algorithm": "sha256-rsa-pkcs1-v1_5",
+  "signature_key_id": "hardened-system-test"
+}"#;
+
+        let latest: SystemLatest = serde_json::from_str(raw).unwrap();
+        validate_latest_system(&latest).unwrap();
     }
 
     #[test]
