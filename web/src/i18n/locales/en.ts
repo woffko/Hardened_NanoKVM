@@ -511,15 +511,24 @@ const en = {
         system: {
           title: 'System Update',
           queryFailed: 'Get system version failed',
+          downloadFailed: 'Download or verification failed',
           isLatest: 'The base system is up to date.',
           available: 'A base-system update is available.',
+          downloading: 'Downloading and verifying system update...',
+          downloadVerify: 'Download and Verify',
+          staged: 'staged',
+          stagedDesc: 'The system update archive was downloaded and verified. Installation is not enabled yet.',
           refresh: 'Refresh',
           releaseNotes: 'Release Notes',
           base: 'Base',
           kernel: 'Kernel',
           rootfs: 'Rootfs',
           target: 'Target',
-          latestTarget: 'Latest target'
+          latestTarget: 'Latest target',
+          stagedVersion: 'Staged version',
+          archive: 'Archive',
+          requiredFree: 'Required free space',
+          fileCount: 'Files'
         },
         offline: {
           title: 'Offline Updates',

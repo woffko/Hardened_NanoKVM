@@ -27,6 +27,21 @@ export type SystemLatest = {
   releaseNotesUrl: string;
 };
 
+export type SystemStagedUpdate = {
+  version: string;
+  target: string;
+  channel: string;
+  archiveName: string;
+  size: number;
+  sha256: string;
+  stagedAt: number;
+  baseVersion: string;
+  kernelVersion: string;
+  requiredFreeBytes: number;
+  requiresReboot: boolean;
+  fileCount: number;
+};
+
 // get application version
 export function getVersion() {
   return http.get('/api/application/version');
@@ -40,6 +55,20 @@ export function getSystemVersion() {
 // check for base-system updates
 export function checkSystemUpdate() {
   return http.get('/api/system-update/check');
+}
+
+// get staged base-system update status
+export function getSystemUpdateStatus() {
+  return http.get('/api/system-update/status');
+}
+
+// download and verify a base-system update into staging
+export function downloadSystemUpdate() {
+  return http.request({
+    method: 'post',
+    url: '/api/system-update/download',
+    timeout: 15 * 60 * 1000
+  });
 }
 
 // update application to latest version

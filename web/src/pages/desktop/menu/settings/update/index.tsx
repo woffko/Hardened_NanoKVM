@@ -10,7 +10,7 @@ import { useTranslation } from 'react-i18next';
 import semver from 'semver';
 
 import * as api from '@/api/application.ts';
-import type { SystemLatest, SystemVersion } from '@/api/application.ts';
+import type { SystemLatest, SystemStagedUpdate, SystemVersion } from '@/api/application.ts';
 
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
@@ -29,6 +29,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemStatus, setSystemStatus] = useState('');
   const [systemCurrent, setSystemCurrent] = useState<SystemVersion | null>(null);
   const [systemLatest, setSystemLatest] = useState<SystemLatest | null>(null);
+  const [systemStaged, setSystemStaged] = useState<SystemStagedUpdate | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
 
   useEffect(() => {
@@ -106,6 +107,52 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       .catch(() => {
         setSystemStatus('failed');
         setSystemErrMsg(t('settings.update.system.queryFailed'));
+      })
+      .finally(() => {
+        refreshSystemUpdateStatus();
+      });
+  }
+
+  function refreshSystemUpdateStatus() {
+    api
+      .getSystemUpdateStatus()
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data) return;
+        setSystemCurrent(rsp.data.current);
+        setSystemStaged(rsp.data.staged || null);
+      })
+      .catch(() => {
+        setSystemStaged(null);
+      });
+  }
+
+  function downloadSystemUpdate() {
+    if (!systemLatest || systemStatus === 'downloading') return;
+
+    setIsLocked(true);
+    setSystemStatus('downloading');
+    setSystemErrMsg('');
+
+    api
+      .downloadSystemUpdate()
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data) {
+          setSystemStatus('failed');
+          setSystemErrMsg(t('settings.update.system.downloadFailed'));
+          return;
+        }
+
+        setSystemCurrent(rsp.data.current);
+        setSystemLatest(rsp.data.latest);
+        setSystemStaged(rsp.data.staged);
+        setSystemStatus('staged');
+      })
+      .catch(() => {
+        setSystemStatus('failed');
+        setSystemErrMsg(t('settings.update.system.downloadFailed'));
+      })
+      .finally(() => {
+        setIsLocked(false);
       });
   }
 
@@ -142,6 +189,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         <span className="max-w-[60%] break-words text-right text-neutral-300">{value}</span>
       </div>
     );
+  }
+
+  function formatBytes(value?: number) {
+    if (!value) return '';
+    if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
+    return `${value} B`;
   }
 
   return (
@@ -213,6 +267,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             </div>
           )}
 
+          {systemStatus === 'downloading' && (
+            <div className="flex flex-col items-center justify-center space-y-6 py-10">
+              <Spin indicator={<LoadingOutlined spin />} />
+              <span className="text-neutral-500">{t('settings.update.system.downloading')}</span>
+            </div>
+          )}
+
           {systemStatus === 'latest' && systemCurrent && (
             <Result
               status="success"
@@ -220,6 +281,30 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               title={systemCurrent.version}
               subTitle={t('settings.update.system.isLatest')}
               extra={[
+                <Button key="refresh" onClick={checkSystemUpdates}>
+                  {t('settings.update.system.refresh')}
+                </Button>
+              ]}
+            />
+          )}
+
+          {systemStatus === 'staged' && systemStaged && (
+            <Result
+              status="success"
+              icon={<CloudSyncOutlined />}
+              title={`${systemStaged.version} ${t('settings.update.system.staged')}`}
+              subTitle={t('settings.update.system.stagedDesc')}
+              extra={[
+                systemLatest?.releaseNotesUrl ? (
+                  <Button
+                    key="release"
+                    href={systemLatest.releaseNotesUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('settings.update.system.releaseNotes')}
+                  </Button>
+                ) : null,
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>
@@ -241,6 +326,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   rel="noreferrer"
                 >
                   {t('settings.update.system.releaseNotes')}
+                </Button>,
+                <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                  {t('settings.update.system.downloadVerify')}
                 </Button>,
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
@@ -271,6 +359,20 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               {versionLine(t('settings.update.system.target'), systemCurrent.target)}
               {systemLatest &&
                 versionLine(t('settings.update.system.latestTarget'), systemLatest.target)}
+              {systemStaged &&
+                versionLine(t('settings.update.system.stagedVersion'), systemStaged.version)}
+              {systemStaged &&
+                versionLine(t('settings.update.system.archive'), systemStaged.archiveName)}
+              {systemStaged &&
+                versionLine(
+                  t('settings.update.system.requiredFree'),
+                  formatBytes(systemStaged.requiredFreeBytes)
+                )}
+              {systemStaged &&
+                versionLine(
+                  t('settings.update.system.fileCount'),
+                  systemStaged.fileCount.toString()
+                )}
             </div>
           )}
         </div>

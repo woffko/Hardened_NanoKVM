@@ -26,10 +26,12 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
   vendor SDK is not yet established.
-- Read-only system-update version/check is implemented in the Rust backend and
-  GUI. It displays the current system baseline and validates GitHub
-  `system-latest.json` metadata. Download, install, rollback, and boot health
-  checks are not implemented yet.
+- System-update version/check/status/download is implemented in the Rust
+  backend and GUI through the staging phase. It displays the current system
+  baseline, validates GitHub `system-latest.json`, downloads the archive,
+  verifies archive sha256/sha512, safely extracts it, validates `manifest.json`,
+  verifies every payload file hash/size/path, and records a staged bundle.
+  Install, rollback, and boot health checks are not implemented yet.
 
 ## Implementation Order
 
@@ -63,14 +65,16 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 5. Add Rust backend API:
    - `GET /api/system-update/version` (implemented read-only);
    - `GET /api/system-update/check` (implemented read-only);
-   - `POST /api/system-update/download`;
+   - `GET /api/system-update/status` (implemented read-only);
+   - `POST /api/system-update/download` (implemented staging-only);
    - `POST /api/system-update/install`;
-   - `GET /api/system-update/status`;
    - `POST /api/system-update/rollback`.
 
 6. Implement staging, backup, install, and rollback:
-   - download to `/data/update-cache`;
-   - unpack into a staging directory;
+   - download to the configured update cache, currently
+     `/root/.kvmcache/system-update`;
+   - unpack into a staging directory and verify manifest/payload files
+     (implemented);
    - back up kernel, dtb, modules, and config files to `/data/system-backups`;
    - write a pending-update marker;
    - install only after all checks pass;
@@ -104,16 +108,17 @@ The current helper scripts are:
 - `scripts/create-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
 
-The Rust backend installer is not implemented yet. These scripts only define and
-validate the release artifact format.
+The Rust backend can download and verify these archives into staging. The
+installer is not implemented yet.
 
 ## Required Test Sequence
 
 1. Manual system bundle install over SSH.
 2. Manual rollback.
-3. Backend API download/install/status flow.
-4. GUI flow.
-5. Long video, HID, network, reboot, and backend-switching soak after update.
+3. Backend API download/status flow.
+4. Backend API install/rollback flow.
+5. GUI flow.
+6. Long video, HID, network, reboot, and backend-switching soak after update.
 
 ## Non-Goals For The First Version
 
