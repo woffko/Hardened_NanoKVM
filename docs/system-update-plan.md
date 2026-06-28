@@ -139,6 +139,8 @@ The current helper scripts are:
 
 The pinned vendor SDK bootstrap and stock-image validation sequence are
 documented in [vendor-sdk-build.md](vendor-sdk-build.md).
+Live device layout observations are recorded in
+[system-update-live-inventory.md](system-update-live-inventory.md).
 
 The Rust backend can download, verify, install, manually confirm boot-good, and
 manually roll back these archives. It enforces signed channel metadata by
