@@ -8,6 +8,9 @@ disable_stale_autostarts() {
     done
 }
 
+WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
+H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
+
 wait_process_exit() {
     name="$1"
     for _ in 1 2 3 4 5; do
@@ -16,6 +19,14 @@ wait_process_exit() {
     done
     killall -9 "$name" 2>/dev/null
     sleep 1
+}
+
+stop_watchdog() {
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        pid="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)"
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+        rm -f "$WATCHDOG_PID_FILE"
+    fi
 }
 
 cleanup_server_backups() {
@@ -34,14 +45,79 @@ ensure_kvm_state_files() {
     [ -f /kvmapp/kvm/fps ] || printf '30\n' > /kvmapp/kvm/fps
     [ -f /kvmapp/kvm/qlty ] || printf '2000\n' > /kvmapp/kvm/qlty
     [ -f /kvmapp/kvm/res ] || printf '0\n' > /kvmapp/kvm/res
-    [ -f /kvmapp/kvm/type ] || printf 'h264\n' > /kvmapp/kvm/type
+    # H.264 can wedge the vendor encoder badly enough that the web backend
+    # keeps listening on TCP but stops answering HTTP. Always boot into MJPEG;
+    # users can still select H.264 explicitly after the UI is reachable.
+    printf 'mjpeg\n' > /kvmapp/kvm/type
     [ -f /kvmapp/kvm/gop ] || printf '50\n' > /kvmapp/kvm/gop
     [ -f /kvmapp/kvm/state ] || printf '0\n' > /kvmapp/kvm/state
     [ -f /kvmapp/kvm/width ] || printf '1920\n' > /kvmapp/kvm/width
     [ -f /kvmapp/kvm/height ] || printf '1080\n' > /kvmapp/kvm/height
 }
 
+start_server_runtime() {
+    rm -rf /tmp/server 2>/dev/null
+    cp -r /kvmapp/server /tmp/
+    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+}
+
+health_check() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 3 http://127.0.0.1/api/health >/dev/null 2>&1 && return 0
+        curl -kfsS --max-time 3 https://127.0.0.1/api/health >/dev/null 2>&1 && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -T 3 -O - http://127.0.0.1/api/health >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+restart_server_safe() {
+    mkdir -p /etc/kvm /kvmapp/kvm
+    printf 'mjpeg\n' > /kvmapp/kvm/type
+    printf 'H.264 encoder health check failed; restarted in MJPEG safe mode\n' > "$H264_SAFE_MODE_FILE"
+    killall NanoKVM-Server 2>/dev/null
+    wait_process_exit NanoKVM-Server
+    start_server_runtime
+}
+
+start_watchdog() {
+    [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+
+    (
+        failures=0
+        sleep 20
+        while true; do
+            if ! pidof NanoKVM-Server >/dev/null 2>&1; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') NanoKVM-Server is not running; restarting in MJPEG safe mode" >> /tmp/nanokvm-watchdog.log
+                restart_server_safe
+                failures=0
+                sleep 10
+                continue
+            fi
+
+            if health_check; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                echo "$(date '+%Y-%m-%d %H:%M:%S') NanoKVM-Server health check failed ($failures/3)" >> /tmp/nanokvm-watchdog.log
+            fi
+
+            if [ "$failures" -ge 3 ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') restarting NanoKVM-Server in MJPEG safe mode" >> /tmp/nanokvm-watchdog.log
+                restart_server_safe
+                failures=0
+                sleep 10
+            fi
+
+            sleep 10
+        done
+    ) &
+    echo $! > "$WATCHDOG_PID_FILE"
+}
+
 stop_runtime() {
+    stop_watchdog
     killall kvm_system 2>/dev/null
     killall NanoKVM-Server 2>/dev/null
     wait_process_exit kvm_system
@@ -56,8 +132,8 @@ start_runtime() {
     cp -r /kvmapp/kvm_system /tmp/
     nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &
 
-    cp -r /kvmapp/server /tmp/
-    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+    start_server_runtime
+    start_watchdog
 }
 
 case "$1" in

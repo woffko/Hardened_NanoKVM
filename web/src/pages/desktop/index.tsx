@@ -22,12 +22,16 @@ import { VirtualKeyboard } from './virtual-keyboard';
 
 function getVideoMode() {
   const isH264DirectSupported = window.location.protocol === 'https:' && !!window.VideoDecoder;
-  const defaultVideoMode = isH264DirectSupported ? 'direct' : 'h264';
+  const defaultVideoMode = 'mjpeg';
 
   const cookieVideoMode = storage.getVideoMode();
   if (cookieVideoMode) {
     if (cookieVideoMode === 'direct' && !isH264DirectSupported) {
+      storage.setVideoMode(defaultVideoMode);
       return defaultVideoMode;
+    }
+    if (cookieVideoMode !== defaultVideoMode) {
+      storage.setVideoMode(defaultVideoMode);
     }
     return cookieVideoMode;
   }
