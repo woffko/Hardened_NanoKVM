@@ -1,3 +1,24 @@
+## Hardened NanoKVM 1.0.1 Beta (2026-06-28)
+
+### Features
+
+* Added password unlock for terminal sessions. Opening the web terminal now
+  requires the current account password and uses a one-time ticket bound to the
+  active web session.
+
+### Bug Fixes
+
+* Added automatic USB HID gadget recovery when keyboard, mouse, or paste writes
+  hit a timeout while the USB controller is not configured. The backend now
+  performs a soft gadget restart, waits for `configured`, reopens HID devices,
+  and retries the write once.
+
+### Security
+
+* Terminal websocket access no longer opens a root shell from the web session
+  alone; the terminal session must be unlocked with the account password and
+  expires with the web session.
+
 ## Hardened NanoKVM 1.0.0 Beta (2026-06-28)
 
 ### Features
