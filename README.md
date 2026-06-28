@@ -54,8 +54,8 @@ harden one subsystem at a time.
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
 | Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
-| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a reproducible full vendor-SDK image build is planned but not established yet. |
-| System updates | Separate GitHub channel metadata, staging download/verify, guarded install, manual boot-good confirmation, and manual rollback are implemented. Signature enforcement and automatic rollback after a bad boot are still pending. |
+| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
+| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Real kernel/rootfs payloads are still pending. |
 
 ## What Changed In This Fork
 
@@ -129,16 +129,19 @@ On the Go backend, `/api/health` is expected to return 404.
   `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
   after sha512 verification. Full signed release verification is still pending.
 - GUI system updates for kernel/rootfs security backports can stage, verify,
-  install, confirm boot-good, and manually roll back system bundles. Signature
-  enforcement and automatic rollback after a bad boot are still pending.
+  install, confirm boot-good, manually roll back system bundles, and
+  automatically roll back a pending update after a bad boot. Real kernel/rootfs
+  payloads are still pending.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
 - First-boot/account setup is implemented for Rust/Hardened images. Existing
   test devices can keep their current account file; new default `admin/admin`
   bootstrap is disabled unless explicitly enabled for isolated compatibility
   testing.
-- The repository does not build a full boot/rootfs image from SDK sources. The
-  current SD-card image flow patches a trusted upstream NanoKVM base image.
+- The repository does not yet ship a verified full boot/rootfs image from SDK
+  sources. `make vendor-sdk` bootstraps the pinned Sipeed/LicheeRV Nano SDK
+  checkout for stock-image work, while the current SD-card image flow patches a
+  trusted upstream NanoKVM base image.
 - API inventory, recovery docs, rollback docs, and long-run test reports still
   need to be kept in sync with active device testing.
 
@@ -221,6 +224,7 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 - **Hardened Rust backend:** Build, package, and test the Rust replacement in [docs/rust-backend.md](docs/rust-backend.md).
 - **System update plan:** Track planned GUI system updates for vendor-kernel security backports in [docs/system-update-plan.md](docs/system-update-plan.md).
 - **System update releases:** Package future kernel/rootfs update bundles for GitHub-hosted channels with [docs/system-update-github-releases.md](docs/system-update-github-releases.md).
+- **Vendor SDK build path:** Bootstrap and validate the Sipeed/LicheeRV Nano SDK for future full base-system images in [docs/vendor-sdk-build.md](docs/vendor-sdk-build.md).
 - **Security status:** Review hardening scope and remaining risk in [docs/security-risk-inventory.md](docs/security-risk-inventory.md).
 - **Frontend UI:** Develop, lint, and build the React interface in [web/README.md](web/README.md).
 

@@ -54,9 +54,10 @@ build/artifacts/nanokvm-kvmapp-rust.tar.gz
 
 ## SD Image
 
-The repository still does not build a full boot/rootfs image from SDK sources.
-The `sd-image` target patches a trusted NanoKVM base image with the current
-Rust `kvmapp` package:
+The repository still does not ship a verified full boot/rootfs image from SDK
+sources. `make vendor-sdk` bootstraps the pinned Sipeed/LicheeRV Nano SDK for
+stock-image reproduction work, while the `sd-image` target patches a trusted
+NanoKVM base image with the current Rust `kvmapp` package:
 
 ```sh
 make web-app

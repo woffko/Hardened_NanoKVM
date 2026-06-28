@@ -197,7 +197,8 @@ Data: /dev/mmcblk0p3 exfat
 This baseline is old enough that kernel and rootfs updates should be treated as
 high-risk. The first real system-update release should be a small rootfs-only
 hardening bundle, followed by a kernel bundle only after a reproducible vendor
-SDK image build is established.
+SDK image build is established. The selected SDK bootstrap path is documented in
+[vendor-sdk-build.md](vendor-sdk-build.md).
 
 ## Device-Side Flow
 

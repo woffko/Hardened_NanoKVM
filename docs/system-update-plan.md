@@ -24,8 +24,10 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   application updates still depend on that endpoint.
 - SD-card images are currently produced by patching a trusted upstream NanoKVM
   Rev1.4.2 base image with the current Hardened `kvmapp`.
-- A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
-  vendor SDK is not yet established.
+- The Sipeed/LicheeRV Nano vendor SDK source and `host-tools` refs have been
+  selected and can be bootstrapped with `make vendor-sdk`. The pinned checkout
+  and `defconfig sg2002_licheervnano_sd` have been verified locally. A
+  reproducible, hardware-validated stock SDK image is not yet established.
 - System-update version/check/status/download/install/rollback is implemented
   in the Rust backend and GUI through manual rollback. It displays the current
   system baseline, validates GitHub `system-latest.json`, downloads the archive,
@@ -54,6 +56,7 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
      reserved-memory layout.
 
 2. Reproduce a clean stock build from the Sipeed/LicheeRV Nano vendor SDK:
+   - bootstrap the pinned SDK checkout with `make vendor-sdk`;
    - build a stock image first, without Hardened changes;
    - boot it on test hardware;
    - verify video, HID, storage, network, SSH, web UI, and backend switching;
@@ -125,9 +128,13 @@ signature key id. Signed channel releases must also carry
 
 The current helper scripts are:
 
+- `scripts/bootstrap-vendor-sdk.sh`
 - `scripts/create-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
 - `scripts/verify-system-update-metadata.sh`
+
+The pinned vendor SDK bootstrap and stock-image validation sequence are
+documented in [vendor-sdk-build.md](vendor-sdk-build.md).
 
 The Rust backend can download, verify, install, manually confirm boot-good, and
 manually roll back these archives. It enforces signed channel metadata by
