@@ -14,6 +14,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::{FileTypeExt, OpenOptionsExt},
     path::Path,
+    process::{Command, Stdio},
     sync::{LazyLock, Mutex},
     thread,
     time::{Duration, Instant},
@@ -29,10 +30,14 @@ const HID_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 const HID_WRITE_RETRY_DELAY: Duration = Duration::from_millis(1);
 const HID_REOPEN_TIMEOUT: Duration = Duration::from_secs(2);
 const HID_REOPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
+const HID_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const HID_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(100);
 const HID_EVENT_QUEUE_CAPACITY: usize = 200;
 const MAX_WS_MESSAGE_BYTES: usize = 16;
 const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
 const MOUSE_JIGGLER_INTERVAL: Duration = Duration::from_secs(15);
+const USB_DEV_SCRIPT: &str = "/etc/init.d/S03usbdev";
+const USB_UDC_CLASS: &str = "/sys/class/udc";
 
 const HEARTBEAT_EVENT: u8 = 0;
 const KEYBOARD_EVENT: u8 = 1;
@@ -60,6 +65,7 @@ struct HidDevices {
     keyboard: Mutex<Option<File>>,
     relative_mouse: Mutex<Option<File>>,
     absolute_mouse: Mutex<Option<File>>,
+    recovery: Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -104,7 +110,8 @@ impl HidDevices {
         path: &'static str,
         report: &[u8],
     ) -> io::Result<()> {
-        let deadline = Instant::now() + HID_REOPEN_TIMEOUT;
+        let mut deadline = Instant::now() + HID_REOPEN_TIMEOUT;
+        let mut recovered = false;
 
         loop {
             let result = {
@@ -135,6 +142,23 @@ impl HidDevices {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     if !is_reopen_retryable_hid_error(&err) || Instant::now() >= deadline {
+                        if !recovered && should_try_hid_recovery(&err) {
+                            match self.recover_usb_device(path) {
+                                Ok(()) => {
+                                    recovered = true;
+                                    deadline = Instant::now() + HID_REOPEN_TIMEOUT;
+                                    continue;
+                                }
+                                Err(recovery_err) => {
+                                    tracing::warn!(
+                                        path,
+                                        error = %err,
+                                        recovery_error = %recovery_err,
+                                        "failed to recover HID device after write failure"
+                                    );
+                                }
+                            }
+                        }
                         return Err(hid_unavailable_error(path, err));
                     }
 
@@ -148,6 +172,31 @@ impl HidDevices {
                 }
             }
         }
+    }
+
+    fn close_all(&self) -> io::Result<()> {
+        close_hid_slot(&self.keyboard)?;
+        close_hid_slot(&self.relative_mouse)?;
+        close_hid_slot(&self.absolute_mouse)
+    }
+
+    fn recover_usb_device(&self, path: &str) -> io::Result<()> {
+        let _guard = self
+            .recovery
+            .lock()
+            .map_err(|_| io::Error::other("hid recovery lock poisoned"))?;
+
+        if usb_udc_is_configured().unwrap_or(false) {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            path,
+            "HID write failed while USB gadget is not configured; resetting USB gadget"
+        );
+        self.close_all()?;
+        run_usb_dev_restart()?;
+        wait_for_usb_udc_configured(HID_RECOVERY_TIMEOUT)
     }
 }
 
@@ -380,6 +429,90 @@ fn is_reopen_retryable_hid_error(err: &io::Error) -> bool {
             err.raw_os_error(),
             Some(nix::libc::EAGAIN) | Some(nix::libc::ENODEV) | Some(nix::libc::ENXIO)
         ),
+    }
+}
+
+fn should_try_hid_recovery(err: &io::Error) -> bool {
+    is_reopen_retryable_hid_error(err) && !usb_udc_is_configured().unwrap_or(true)
+}
+
+fn close_hid_slot(slot: &Mutex<Option<File>>) -> io::Result<()> {
+    let mut guard = slot
+        .lock()
+        .map_err(|_| io::Error::other("hid device lock poisoned"))?;
+    if let Some(file) = guard.take() {
+        drop(file);
+    }
+    Ok(())
+}
+
+fn usb_udc_is_configured() -> io::Result<bool> {
+    Ok(read_usb_udc_state()?.as_deref() == Some("configured"))
+}
+
+fn read_usb_udc_state() -> io::Result<Option<String>> {
+    let entries = match fs::read_dir(USB_UDC_CLASS) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let state_path = entry.path().join("state");
+        match fs::read_to_string(&state_path) {
+            Ok(state) => return Ok(Some(state.trim().to_string())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(None)
+}
+
+fn run_usb_dev_restart() -> io::Result<()> {
+    let output = Command::new(USB_DEV_SCRIPT)
+        .arg("restart")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(io::Error::other(format!(
+        "{USB_DEV_SCRIPT} restart failed with status {}: {}{}",
+        output.status.code().unwrap_or(-1),
+        stdout.trim(),
+        stderr.trim()
+    )))
+}
+
+fn wait_for_usb_udc_configured(timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let last_state = match read_usb_udc_state()? {
+            Some(state) if state == "configured" => return Ok(()),
+            Some(state) => state,
+            None => String::from("unknown"),
+        };
+
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "USB gadget did not reach configured state after restart; last state: {}",
+                    last_state
+                ),
+            ));
+        }
+
+        thread::sleep(HID_RECOVERY_RETRY_DELAY);
     }
 }
 
