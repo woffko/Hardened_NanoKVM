@@ -95,7 +95,7 @@ export function downloadSystemUpdate() {
   return http.request({
     method: 'post',
     url: '/api/system-update/download',
-    timeout: 15 * 60 * 1000
+    timeout: 45 * 60 * 1000
   });
 }
 
@@ -104,7 +104,7 @@ export function installSystemUpdate() {
   return http.request({
     method: 'post',
     url: '/api/system-update/install',
-    timeout: 30 * 60 * 1000
+    timeout: 60 * 60 * 1000
   });
 }
 

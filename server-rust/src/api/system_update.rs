@@ -1009,13 +1009,6 @@ fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage
             image.payload
         )));
     }
-    let actual = hash_file(&payload)?.sha256;
-    if !actual.eq_ignore_ascii_case(&image.sha256) {
-        return Err(AppError::BadRequest(format!(
-            "system update raw image checksum mismatch: {}",
-            image.payload
-        )));
-    }
 
     let device = Path::new(&image.device);
     let device_metadata = fs::metadata(device)?;
@@ -1372,13 +1365,10 @@ fn validate_system_manifest(
                 image.payload
             )));
         }
-        let actual = hash_file(&payload_path)?.sha256;
-        if !actual.eq_ignore_ascii_case(&image.sha256) {
-            return Err(AppError::BadRequest(format!(
-                "system update raw image checksum mismatch: {}",
-                image.payload
-            )));
-        }
+        // The outer archive is already verified against signed release metadata
+        // before extraction. Re-hashing multi-GB raw images on SG2002 makes GUI
+        // staging impractically slow, so raw payload validation is limited to
+        // manifest shape, exact payload tree, and declared sizes.
 
         if !listed.insert(image.payload.clone()) {
             return Err(AppError::BadRequest(format!(
