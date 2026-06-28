@@ -9,10 +9,14 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current public beta release metadata points to `1.0.1` from
+Current public beta release metadata points to `1.0.2` from
 `woffko/Hardened_NanoKVM` GitHub Releases.
 
 ## Build
+
+Operational release and manual device deployment notes live in
+[`docs/build-notes.md`](build-notes.md). Use those notes for real hardware
+builds; in particular, deploy only the `linked-libkvm` RISC-V binary.
 
 Run the normal host checks from the repository root:
 
@@ -141,7 +145,7 @@ The generated image installs:
   pending/backup markers. `/api/system-update/confirm` writes a boot-good
   marker after basic health checks. `/api/system-update/rollback` restores the
   latest backup manually. These routes do not reboot automatically.
-- UI branding for Hardened NanoKVM and version `beta - 1.0.1`.
+- UI branding for Hardened NanoKVM and version `beta - 1.0.2`.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Web UI backend switch in Settings > Device > Advanced.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`

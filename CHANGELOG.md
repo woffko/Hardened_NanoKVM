@@ -1,3 +1,18 @@
+## Hardened NanoKVM 1.0.2 Beta (2026-06-28)
+
+### Bug Fixes
+
+* Added H.264 capture safe mode and a startup health watchdog. Devices now boot
+  into MJPEG by default, can opt into H.264 from the UI, and recover to MJPEG if
+  H.264/VENC leaves the Rust backend unhealthy.
+* Prevented saved browser H.264 mode from repeatedly re-triggering a bad H.264
+  startup loop after a page reload.
+
+### Documentation
+
+* Added build notes for real hardware releases, including the required
+  `linked-libkvm` build path and BusyBox-compatible manual install steps.
+
 ## Hardened NanoKVM 1.0.1 Beta (2026-06-28)
 
 ### Features
