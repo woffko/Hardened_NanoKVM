@@ -45,6 +45,9 @@ const SCREEN_FPS_FILE: &str = "/kvmapp/kvm/fps";
 const SCREEN_QUALITY_FILE: &str = "/kvmapp/kvm/qlty";
 const SCREEN_RESOLUTION_FILE: &str = "/kvmapp/kvm/res";
 const SCREEN_GOP_FILE: &str = "/kvmapp/kvm/gop";
+const H264_SAFE_MODE_FILE: &str = "/etc/kvm/h264_safe_mode";
+const H264_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const H264_FAILURE_LIMIT: usize = 3;
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
@@ -58,6 +61,8 @@ static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+static H264_CAPTURE_DISABLED: AtomicBool = AtomicBool::new(false);
+static H264_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_STATUS: LazyLock<Mutex<CaptureStatusStore>> =
     LazyLock::new(|| Mutex::new(CaptureStatusStore::default()));
 
@@ -251,6 +256,10 @@ fn capture_result_message(result: i32) -> (&'static str, &'static str) {
         -3 => ("Image buffer full", CAPTURE_SEVERITY_ERROR),
         -2 => ("Encoder error", CAPTURE_SEVERITY_ERROR),
         -1 => ("No image captured", CAPTURE_SEVERITY_ERROR),
+        -8 => (
+            "H.264 disabled after encoder failure",
+            CAPTURE_SEVERITY_ERROR,
+        ),
         value if value < 0 => ("Capture failed", CAPTURE_SEVERITY_ERROR),
         _ => ("", ""),
     }
@@ -489,6 +498,12 @@ async fn run_h264_direct_producer() {
             fps = screen.fps;
             interval = frame_interval(fps);
         }
+        if screen.mode != StreamMode::H264 || h264_capture_disabled() {
+            if h264_capture_disabled() {
+                update_capture_status(CAPTURE_MODE_DIRECT, -8);
+            }
+            return;
+        }
         if !H264_DIRECT_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
             info!(
                 width = screen.width,
@@ -498,36 +513,22 @@ async fn run_h264_direct_producer() {
             );
         }
 
-        let frame = tokio::task::spawn_blocking(move || {
-            kvm::read_h264(screen.width, screen.height, screen.bit_rate)
-        })
-        .await;
-
-        let (data, result) = match frame {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(err)) => {
-                update_capture_status(CAPTURE_MODE_DIRECT, -1);
-                if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!(error = ?err, "failed to read h264 direct frame");
-                }
-                continue;
-            }
-            Err(err) => {
-                update_capture_status(CAPTURE_MODE_DIRECT, -1);
-                if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!(error = ?err, "h264 direct frame task failed");
-                }
-                continue;
-            }
-        };
-        update_capture_status(CAPTURE_MODE_DIRECT, result);
-
-        if result < 0 || data.is_empty() {
+        let Some((data, result)) = read_h264_capture_frame(
+            CAPTURE_MODE_DIRECT,
+            H264Screen {
+                width: screen.width,
+                height: screen.height,
+                fps: screen.fps.max(1),
+                bit_rate: screen.bit_rate,
+            },
+        )
+        .await
+        else {
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                warn!(result, bytes = data.len(), "h264 direct frame unavailable");
+                warn!("h264 direct frame unavailable");
             }
             continue;
-        }
+        };
 
         if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
             info!(result, bytes = data.len(), "read first h264 direct frame");
@@ -567,12 +568,14 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
 
     match kind {
         "type" => {
-            write_screen_file(SCREEN_TYPE_FILE, if value == 0 { "mjpeg" } else { "h264" })?;
-            screen.mode = if value == 0 {
-                StreamMode::Mjpeg
+            if value == 0 {
+                write_screen_file(SCREEN_TYPE_FILE, "mjpeg")?;
+                screen.mode = StreamMode::Mjpeg;
             } else {
-                StreamMode::H264
-            };
+                clear_h264_safe_mode();
+                write_screen_file(SCREEN_TYPE_FILE, "h264")?;
+                screen.mode = StreamMode::H264;
+            }
         }
         "resolution" => {
             apply_resolution(&mut screen, value);
@@ -650,6 +653,66 @@ pub fn current_h264_screen() -> H264Screen {
     }
 }
 
+pub fn is_h264_capture_active() -> bool {
+    let screen = current_screen();
+    screen.mode == StreamMode::H264 && !h264_capture_disabled()
+}
+
+pub fn h264_capture_disabled() -> bool {
+    H264_CAPTURE_DISABLED.load(Ordering::Acquire)
+        || std::path::Path::new(H264_SAFE_MODE_FILE).exists()
+}
+
+pub async fn read_h264_capture_frame(
+    mode: &'static str,
+    screen: H264Screen,
+) -> Option<(Vec<u8>, i32)> {
+    if h264_capture_disabled() {
+        update_capture_status(mode, -8);
+        return None;
+    }
+
+    let task = tokio::task::spawn_blocking(move || {
+        kvm::read_h264(screen.width, screen.height, screen.bit_rate)
+    });
+
+    let frame = match time::timeout(H264_READ_TIMEOUT, task).await {
+        Ok(Ok(Ok(frame))) => frame,
+        Ok(Ok(Err(err))) => {
+            record_h264_failure(
+                mode,
+                "failed to read h264 frame",
+                Some(err.to_string()),
+                true,
+            );
+            return None;
+        }
+        Ok(Err(err)) => {
+            record_h264_failure(mode, "h264 frame task failed", Some(err.to_string()), true);
+            return None;
+        }
+        Err(_) => {
+            disable_h264_capture(mode, "h264 frame read timed out", true);
+            return None;
+        }
+    };
+
+    let (data, result) = frame;
+    update_capture_status(mode, result);
+    if result < 0 || data.is_empty() {
+        record_h264_failure(
+            mode,
+            "h264 frame unavailable",
+            Some(format!("result={result} bytes={}", data.len())),
+            false,
+        );
+        return None;
+    }
+
+    H264_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+    Some((data, result))
+}
+
 pub fn current_mjpeg_screen() -> MjpegScreen {
     let screen = current_screen();
     MjpegScreen {
@@ -657,6 +720,51 @@ pub fn current_mjpeg_screen() -> MjpegScreen {
         height: screen.height,
         quality: screen.quality,
     }
+}
+
+fn record_h264_failure(
+    mode: &'static str,
+    reason: &'static str,
+    detail: Option<String>,
+    restart: bool,
+) {
+    update_capture_status(mode, -1);
+    let failures = H264_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::AcqRel) + 1;
+    warn!(mode, failures, detail = ?detail, reason, "h264 capture failure");
+
+    if failures >= H264_FAILURE_LIMIT {
+        disable_h264_capture(mode, reason, restart);
+    }
+}
+
+fn disable_h264_capture(mode: &'static str, reason: &'static str, restart: bool) {
+    H264_CAPTURE_DISABLED.store(true, Ordering::Release);
+    H264_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+    update_capture_status(mode, -8);
+
+    let _ = write_screen_file(SCREEN_TYPE_FILE, "mjpeg");
+    if let Ok(mut screen) = SCREEN.lock() {
+        screen.mode = StreamMode::Mjpeg;
+    }
+    if let Some(parent) = std::path::Path::new(H264_SAFE_MODE_FILE).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(H264_SAFE_MODE_FILE, format!("{reason}\n"));
+
+    warn!(mode, reason, "disabled h264 capture and switched to mjpeg");
+
+    if restart {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(250));
+            std::process::exit(75);
+        });
+    }
+}
+
+fn clear_h264_safe_mode() {
+    H264_CAPTURE_DISABLED.store(false, Ordering::Release);
+    H264_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+    let _ = fs::remove_file(H264_SAFE_MODE_FILE);
 }
 
 pub fn latest_mjpeg_frame(max_age: Duration) -> Option<LatestMjpegFrame> {

@@ -51,10 +51,10 @@ use webrtc::{
 use crate::{
     AppError, Result,
     api::stream::{
-        CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, update_capture_status,
+        CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, is_h264_capture_active,
+        read_h264_capture_frame, update_capture_status,
     },
     config::Config,
-    ffi::kvm,
     state::AppState,
     ws::origin::validate_ws_origin,
 };
@@ -312,6 +312,11 @@ impl WebRtcManager {
             }
 
             screen = current_h264_screen();
+            if !is_h264_capture_active() {
+                update_capture_status(CAPTURE_MODE_H264, -8);
+                debug!("stop sending h264 webrtc stream because h264 capture is disabled");
+                return;
+            }
             if !H264_WEBRTC_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(
                     width = screen.width,
@@ -321,35 +326,13 @@ impl WebRtcManager {
                 );
             }
 
-            let frame = tokio::task::spawn_blocking(move || {
-                kvm::read_h264(screen.width, screen.height, screen.bit_rate)
-            })
-            .await;
-            let (data, result) = match frame {
-                Ok(Ok(frame)) => frame,
-                Ok(Err(err)) => {
-                    update_capture_status(CAPTURE_MODE_H264, -1);
-                    if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?err, "failed to read h264 webrtc frame");
-                    }
-                    continue;
-                }
-                Err(err) => {
-                    update_capture_status(CAPTURE_MODE_H264, -1);
-                    if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?err, "h264 webrtc frame task failed");
-                    }
-                    continue;
-                }
-            };
-            update_capture_status(CAPTURE_MODE_H264, result);
-
-            if result < 0 || data.is_empty() {
+            let Some((data, result)) = read_h264_capture_frame(CAPTURE_MODE_H264, screen).await
+            else {
                 if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!(result, bytes = data.len(), "h264 webrtc frame unavailable");
+                    warn!("h264 webrtc frame unavailable");
                 }
                 continue;
-            }
+            };
 
             if !H264_WEBRTC_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
                 info!(result, bytes = data.len(), "read first h264 webrtc frame");
