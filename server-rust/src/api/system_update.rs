@@ -11,6 +11,7 @@ use std::{
     sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::task;
 
 use crate::{
     AppError, Result,
@@ -373,31 +374,48 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     }
 
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    prepare_stage_dir(&stage_dir)?;
+    let prepare_dir = stage_dir.clone();
+    run_blocking_system_update("prepare system update staging", move || {
+        prepare_stage_dir(&prepare_dir)
+    })
+    .await?;
 
     let archive = stage_dir.join(&latest.name);
     download_system_asset(&latest, &archive).await?;
-    verify_system_archive(&archive, &latest)?;
 
-    let manifest = extract_and_verify_system_bundle(&archive, &stage_dir, &latest)?;
-    let record = SystemStageRecord {
-        staged_at: now_unix_seconds(),
-        latest: latest.clone(),
-        manifest,
-    };
-    write_stage_record(&stage_dir, &record)?;
+    let stage_dir_for_verify = stage_dir.clone();
+    let latest_for_verify = latest.clone();
+    let staged = run_blocking_system_update("verify and stage system update", move || {
+        let archive = stage_dir_for_verify.join(&latest_for_verify.name);
+        verify_system_archive(&archive, &latest_for_verify)?;
+
+        let manifest =
+            extract_and_verify_system_bundle(&archive, &stage_dir_for_verify, &latest_for_verify)?;
+        let record = SystemStageRecord {
+            staged_at: now_unix_seconds(),
+            latest: latest_for_verify,
+            manifest,
+        };
+        write_stage_record(&stage_dir_for_verify, &record)?;
+        Ok(staged_summary(&record))
+    })
+    .await?;
 
     Ok(Json(ApiResponse::ok(SystemDownloadRsp {
         current,
         latest,
-        staged: staged_summary(&record),
+        staged,
     })))
 }
 
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let installed = install_staged_update(&stage_dir, &state.config)?;
+    let config = (*state.config).clone();
+    let installed = run_blocking_system_update("install staged system update", move || {
+        install_staged_update(&stage_dir, &config)
+    })
+    .await?;
 
     Ok(Json(ApiResponse::ok(SystemInstallRsp {
         current: read_current_system_version(),
@@ -409,7 +427,10 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
 pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let restored = rollback_last_system_update(&stage_dir)?;
+    let restored = run_blocking_system_update("rollback system update", move || {
+        rollback_last_system_update(&stage_dir)
+    })
+    .await?;
 
     Ok(Json(ApiResponse::ok(SystemRollbackRsp {
         reboot_required: restored.requires_reboot,
@@ -1467,6 +1488,16 @@ fn acquire_update_lock() -> Result<UpdateGuard> {
     }
     *is_updating = true;
     Ok(UpdateGuard)
+}
+
+async fn run_blocking_system_update<T, F>(operation: &'static str, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    task::spawn_blocking(f)
+        .await
+        .map_err(|err| AppError::Internal(format!("{operation} task failed: {err}")))?
 }
 
 fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
