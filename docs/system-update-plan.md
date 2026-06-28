@@ -38,6 +38,11 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   pending/backup markers, generates an init-time rollback script, supports
   manual boot-good confirmation after basic health checks, and can
   automatically roll back a pending update when boot health fails.
+- Experimental raw boot/rootfs partition bundles are implemented behind
+  `security.allow_raw_system_updates`. They can be staged through the same GUI,
+  write only `images/boot.vfat` to `/dev/mmcblk0p1` and
+  `rawimages/rootfs.sd` to `/dev/mmcblk0p2`, sync, and reboot. This is for lab
+  devices with SD-card recovery only and has no automatic rollback.
 - The first signed rootfs-only smoke release is published:
   `hardened-system-0.1.0-dev.1`, with channel metadata on
   `hardened-system-stable`. It was validated on `10.0.87.132` for
@@ -70,6 +75,8 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - `manifest.json` with version, target hardware revision, base/kernel
      version, required free space, file hashes, backup paths, and reboot flag;
    - payload for kernel, dtb, modules, and known system files;
+   - optional experimental raw `boot.vfat`/`rootfs.sd` image entries gated by
+     device config for lab-only partition flashing;
    - fixed installer operations controlled by the backend, not arbitrary scripts
      from the archive.
 
@@ -92,11 +99,11 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 
 6. Implement staging, backup, install, and rollback:
    - download to the configured update cache, currently
-     `/root/.kvmcache/system-update`;
+     `/data/.hardened-kvmcache/system-update`;
    - unpack into a staging directory and verify manifest/payload files
      (implemented);
    - back up touched files under
-     `/root/.kvmcache/system-update/backups/<id>` (implemented);
+     `/data/.hardened-kvmcache/system-update/backups/<id>` (implemented);
    - write a pending-update marker under `/etc/kvm` (implemented);
    - generate `/etc/kvm/system-update-rollback.sh` for boot-time recovery
      (implemented);
@@ -134,6 +141,7 @@ The current helper scripts are:
 
 - `scripts/bootstrap-vendor-sdk.sh`
 - `scripts/create-system-update-bundle.sh`
+- `scripts/create-raw-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
 - `scripts/verify-system-update-metadata.sh`
 
@@ -164,5 +172,6 @@ the previous files.
 
 - Mainline kernel migration.
 - Live rootfs overwrite without staging and rollback.
+- Raw partition updates outside explicit lab mode with SD-card recovery ready.
 - Arbitrary post-install scripts from update archives.
 - Automatic system update installation without explicit user confirmation.

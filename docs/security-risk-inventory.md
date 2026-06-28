@@ -52,13 +52,14 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 
 - Account file: `/etc/kvm/pwd`, now must be `0600`.
 - Session secret: `/etc/kvm/session_secret`, now generated and written `0600`.
-- Update cache: `/root/.kvmcache`, extracts into temp dir and promotes only
-  after validation; signed metadata is still pending.
-- Future system update cache: planned under `/data/update-cache`, with backups
-  under `/data/system-backups`. System-update archives are constrained to
-  `payload/boot/*` and `payload/rootfs/*` by the packaging contract, and
-  runtime/device/cache roots such as `/dev`, `/proc`, `/sys`, `/run`, `/tmp`,
-  `/data`, `/kvmapp`, and `/root/.kvmcache` are rejected.
+- Update cache: `/data/.hardened-kvmcache`. Application updates use
+  `/data/.hardened-kvmcache/application-update`; system updates use
+  `/data/.hardened-kvmcache/system-update` with backups below that directory.
+  The legacy `/root/.kvmcache` path is migrated in memory when old configs are
+  loaded. System-update archives are constrained to `payload/boot/*` and
+  `payload/rootfs/*` by the packaging contract, and runtime/device/cache roots
+  such as `/dev`, `/proc`, `/sys`, `/run`, `/tmp`, `/data`, `/kvmapp`, and
+  `/root/.kvmcache` are rejected.
 - Image directory: `/data`, must use resolved containment and reject symlinks.
 - Script directory: `/etc/kvm/scripts`, must use basename inventory and argv execution only.
 - Autostart directory: `/etc/kvm/autostart`, must reject slash-bearing names and traversal.

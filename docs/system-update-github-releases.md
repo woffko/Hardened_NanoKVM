@@ -95,6 +95,9 @@ payload/
   rootfs/
     etc/
       ...
+  images/
+    boot.vfat
+    rootfs.sd
 ```
 
 The backend must install only known paths:
@@ -104,10 +107,18 @@ The backend must install only known paths:
 - The packager and backend reject installs to runtime, device, cache, and
   application roots: `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`,
   `/kvmapp`, and `/root/.kvmcache`.
+- Experimental raw partition bundles may instead list `raw_images` for exactly
+  `payload/images/boot.vfat -> /dev/mmcblk0p1` and
+  `payload/images/rootfs.sd -> /dev/mmcblk0p2`. This path is disabled unless
+  `security.allow_raw_system_updates: true` is set on the device.
 
 The archive must not contain arbitrary scripts. Installer behavior is fixed in
 the Rust backend: verify, stage, back up, install known paths, mark pending,
 reboot, health-check, then mark boot-good or roll back.
+
+Raw partition bundles are different: they write verified block images directly
+to the SD-card boot/rootfs partitions, sync, and reboot. They do not have
+automatic rollback; failed boots require manual SD-card recovery.
 
 ## Manifest Contract
 
@@ -123,6 +134,8 @@ contains:
 - `requires_reboot`: whether the update must reboot.
 - `operations`: fixed backend operation list.
 - `files`: payload path, install path, size, and sha256 for every file.
+- `raw_images`: optional experimental list of raw partition image payloads,
+  target block devices, labels, sizes, and sha256 values.
 
 ## Build Commands
 
@@ -140,6 +153,21 @@ BASE_VERSION=2025-02-17-19-08-3649fe.img \
 KERNEL_VERSION=5.10.4-tag-hardened.1 \
 make system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0
 ```
+
+Create an experimental raw boot/rootfs bundle from vendor SDK artifacts:
+
+```sh
+make raw-system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0-raw.1
+```
+
+The default raw inputs are:
+
+```text
+build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/boot.vfat
+build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/rawimages/rootfs.sd
+```
+
+Override them with `RAW_SYSTEM_UPDATE_BOOT` and `RAW_SYSTEM_UPDATE_ROOTFS`.
 
 Create channel metadata:
 
@@ -207,6 +235,11 @@ SDK image build is established. The selected SDK bootstrap path is documented in
 
 The Rust backend currently supports manual download, verification, install,
 rollback, and boot-watchdog rollback:
+
+The default update cache root is `/data/.hardened-kvmcache`. Application
+updates use the `application-update` subdirectory; system updates use the
+`system-update` subdirectory so large rootfs images and rollback backups do not
+consume the root filesystem.
 
 - `GET /api/system-update/check` validates `system-latest.json`, rejects
   unsigned metadata by default, downloads `system-latest.json.sig` for signed

@@ -38,6 +38,7 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str =
 const MAX_UPDATE_BYTES: u64 = 128 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
+const APPLICATION_UPDATE_CACHE_DIR_NAME: &str = "application-update";
 
 static UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
@@ -118,7 +119,7 @@ pub async fn set_preview(Json(req): Json<SetPreviewReq>) -> Result<impl IntoResp
 
 pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()>>> {
     let _guard = acquire_update_lock()?;
-    let cache_dir = state.config.paths.update_cache_dir.clone();
+    let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
 
     prepare_cache_dir(&cache_dir)?;
     let latest = get_latest(is_preview_enabled()).await?;
@@ -138,7 +139,7 @@ pub async fn offline_update(
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<()>>> {
     let _guard = acquire_update_lock()?;
-    let cache_dir = state.config.paths.update_cache_dir.clone();
+    let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
 
     prepare_cache_dir(&cache_dir)?;
     let archive = save_uploaded_update(&cache_dir, &mut multipart).await?;
@@ -447,6 +448,10 @@ fn prepare_cache_dir(cache_dir: &Path) -> Result<()> {
     remove_dir_if_exists(cache_dir)?;
     fs::create_dir_all(cache_dir)?;
     Ok(())
+}
+
+fn application_update_cache_dir(cache_root: &Path) -> PathBuf {
+    cache_root.join(APPLICATION_UPDATE_CACHE_DIR_NAME)
 }
 
 fn acquire_update_lock() -> Result<UpdateGuard> {

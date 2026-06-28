@@ -522,6 +522,10 @@ const en = {
           installConfirmTitle: 'Install system update?',
           installConfirmDesc:
             'This will replace base-system files from the verified bundle. Reboot will be required.',
+          rawInstallConfirmDesc:
+            'This verified bundle will write raw boot/rootfs images to the SD-card partitions and reboot automatically.',
+          rawInstallWarning:
+            'There is no automatic rollback for raw partition updates. If boot fails, recover the SD card manually.',
           installed: 'installed',
           rebootRequired: 'Reboot is required to activate this system state.',
           confirming: 'Confirming system update boot...',
@@ -549,6 +553,7 @@ const en = {
           archive: 'Archive',
           requiredFree: 'Required free space',
           fileCount: 'Files',
+          rawImages: 'Raw images',
           pendingVersion: 'Pending version',
           bootHealth: 'Boot health',
           healthy: 'Healthy',

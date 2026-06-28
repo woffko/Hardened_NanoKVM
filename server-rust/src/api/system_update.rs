@@ -6,7 +6,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -37,7 +37,8 @@ const GITHUB_SYSTEM_CHANNEL_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-";
 const SYSTEM_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const SYSTEM_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
-const MAX_SYSTEM_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SYSTEM_UPDATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_SYSTEM_UPDATE_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SYSTEM_STAGE_DIR_NAME: &str = "system-update";
@@ -50,6 +51,9 @@ const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
 const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
 const SYSTEM_ROLLBACK_SCRIPT_FILE: &str = "/etc/kvm/system-update-rollback.sh";
 const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-attempted";
+const SYSTEM_RAW_INSTALL_MARKER: &str = "/data/hardened-system-raw-update-pending.json";
+const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
+const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
 
 static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
@@ -117,6 +121,8 @@ pub struct SystemStagedUpdate {
     pub required_free_bytes: u64,
     pub requires_reboot: bool,
     pub file_count: usize,
+    pub image_count: usize,
+    pub destructive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,12 +228,23 @@ struct SystemManifest {
     requires_reboot: bool,
     operations: Vec<String>,
     files: Vec<SystemManifestFile>,
+    #[serde(default)]
+    raw_images: Vec<SystemManifestRawImage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SystemManifestFile {
     payload: String,
     install: String,
+    size: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SystemManifestRawImage {
+    payload: String,
+    device: String,
+    label: String,
     size: u64,
     sha256: String,
 }
@@ -380,7 +397,7 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let installed = install_staged_update(&stage_dir)?;
+    let installed = install_staged_update(&stage_dir, &state.config)?;
 
     Ok(Json(ApiResponse::ok(SystemInstallRsp {
         current: read_current_system_version(),
@@ -824,7 +841,7 @@ fn extract_and_verify_system_bundle(
     Ok(manifest)
 }
 
-fn install_staged_update(stage_dir: &Path) -> Result<SystemPendingUpdate> {
+fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPendingUpdate> {
     let record = read_stage_record(stage_dir)?
         .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
     validate_latest_system(&record.latest)?;
@@ -838,6 +855,10 @@ fn install_staged_update(stage_dir: &Path) -> Result<SystemPendingUpdate> {
     verify_system_archive(&archive, &record.latest)?;
     let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
+
+    if !manifest.raw_images.is_empty() {
+        return install_raw_image_update(&manifest, &payload_dir, config);
+    }
 
     let backup_id = format!("{}-{}", manifest.version, now_unix_seconds());
     validate_filename(&backup_id)?;
@@ -895,6 +916,181 @@ fn install_staged_update(stage_dir: &Path) -> Result<SystemPendingUpdate> {
     }
 
     Ok(pending_update(&install_record))
+}
+
+fn install_raw_image_update(
+    manifest: &SystemManifest,
+    payload_dir: &Path,
+    config: &Config,
+) -> Result<SystemPendingUpdate> {
+    if !config.security.allow_raw_system_updates {
+        return Err(AppError::Forbidden(
+            "raw partition system updates are disabled".to_string(),
+        ));
+    }
+    if !manifest.files.is_empty() {
+        return Err(AppError::BadRequest(
+            "raw partition system updates cannot mix file installs".to_string(),
+        ));
+    }
+
+    let installed_at = now_unix_seconds();
+    let pending = SystemPendingUpdate {
+        version: manifest.version.clone(),
+        target: manifest.target.clone(),
+        backup_id: format!("raw-{}", installed_at),
+        installed_at,
+        requires_reboot: true,
+        file_count: manifest.raw_images.len(),
+    };
+
+    for image in &manifest.raw_images {
+        validate_raw_image_payload(payload_dir, image)?;
+    }
+    write_raw_install_marker(manifest, &pending)?;
+
+    sync_filesystems();
+    if manifest
+        .raw_images
+        .iter()
+        .any(|image| image.device == RAW_ROOTFS_DEVICE)
+    {
+        remount_root_readonly()?;
+    }
+
+    for image in raw_images_install_order(&manifest.raw_images) {
+        write_raw_image_to_device(payload_dir, image)?;
+    }
+
+    sync_filesystems();
+    schedule_reboot_syscall();
+
+    Ok(pending)
+}
+
+fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemManifestRawImage> {
+    let mut ordered: Vec<_> = images.iter().collect();
+    ordered.sort_by_key(|image| match image.device.as_str() {
+        RAW_ROOTFS_DEVICE => 0,
+        RAW_BOOT_DEVICE => 1,
+        _ => 2,
+    });
+    ordered
+}
+
+fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
+    validate_raw_image_manifest(image)?;
+    let payload = safe_payload_join(payload_dir, &image.payload)?;
+    let metadata = fs::metadata(&payload)?;
+    if metadata.len() != image.size {
+        return Err(AppError::BadRequest(format!(
+            "system update raw image size mismatch: {}",
+            image.payload
+        )));
+    }
+    let actual = hash_file(&payload)?.sha256;
+    if !actual.eq_ignore_ascii_case(&image.sha256) {
+        return Err(AppError::BadRequest(format!(
+            "system update raw image checksum mismatch: {}",
+            image.payload
+        )));
+    }
+
+    let device = Path::new(&image.device);
+    let device_metadata = fs::metadata(device)?;
+    if !device_metadata.file_type().is_block_device() {
+        return Err(AppError::BadRequest(format!(
+            "raw system update target is not a block device: {}",
+            image.device
+        )));
+    }
+    if let Some(device_size) = block_device_size(device) {
+        if image.size > device_size {
+            return Err(AppError::BadRequest(format!(
+                "raw system update image {} is larger than {}",
+                image.payload, image.device
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn write_raw_image_to_device(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
+    let payload = safe_payload_join(payload_dir, &image.payload)?;
+    let device = Path::new(&image.device);
+    let mut source = fs::File::open(&payload)?;
+    let mut target = OpenOptions::new().write(true).open(device)?;
+    let written = io::copy(&mut source, &mut target)?;
+    if written != image.size {
+        return Err(AppError::Internal(format!(
+            "raw system update wrote {written} bytes to {}, expected {}",
+            image.device, image.size
+        )));
+    }
+    target.sync_all()?;
+    Ok(())
+}
+
+fn block_device_size(device: &Path) -> Option<u64> {
+    let name = device.file_name()?.to_str()?;
+    let sectors = read_trimmed(&format!("/sys/class/block/{name}/size"))?;
+    sectors.parse::<u64>().ok()?.checked_mul(512)
+}
+
+fn write_raw_install_marker(
+    manifest: &SystemManifest,
+    pending: &SystemPendingUpdate,
+) -> Result<()> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawInstallMarker<'a> {
+        pending: &'a SystemPendingUpdate,
+        source_commit: &'a str,
+        raw_images: &'a [SystemManifestRawImage],
+        warning: &'a str,
+    }
+
+    let marker = RawInstallMarker {
+        pending,
+        source_commit: &manifest.source_commit,
+        raw_images: &manifest.raw_images,
+        warning: "raw partition update has no automatic rollback",
+    };
+    let data = serde_json::to_vec_pretty(&marker)
+        .map_err(|err| AppError::Internal(format!("encode raw system update marker: {err}")))?;
+    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_MARKER).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(SYSTEM_RAW_INSTALL_MARKER, data)?;
+    Ok(())
+}
+
+fn remount_root_readonly() -> Result<()> {
+    nix::mount::mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY,
+        None::<&str>,
+    )
+    .map_err(|err| AppError::Internal(format!("failed to remount rootfs read-only: {err}")))
+}
+
+fn sync_filesystems() {
+    unsafe {
+        nix::libc::sync();
+    }
+}
+
+fn schedule_reboot_syscall() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(2));
+        unsafe {
+            nix::libc::sync();
+            let _ = nix::libc::reboot(nix::libc::LINUX_REBOOT_CMD_RESTART);
+        }
+    });
 }
 
 fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
@@ -1119,7 +1315,46 @@ fn validate_system_manifest(
             )));
         }
         total_size = total_size.saturating_add(file.size);
-        if total_size > MAX_SYSTEM_UPDATE_BYTES {
+        if total_size > MAX_SYSTEM_UPDATE_PAYLOAD_BYTES {
+            return Err(AppError::BadRequest(
+                "system update payload is too large".to_string(),
+            ));
+        }
+    }
+
+    for image in &manifest.raw_images {
+        validate_raw_image_manifest(image)?;
+        let payload_path = safe_payload_join(payload_dir, &image.payload)?;
+        if !payload_path.is_file() {
+            return Err(AppError::BadRequest(format!(
+                "system update raw image is missing {}",
+                image.payload
+            )));
+        }
+
+        let metadata = fs::metadata(&payload_path)?;
+        if metadata.len() != image.size {
+            return Err(AppError::BadRequest(format!(
+                "system update raw image size mismatch: {}",
+                image.payload
+            )));
+        }
+        let actual = hash_file(&payload_path)?.sha256;
+        if !actual.eq_ignore_ascii_case(&image.sha256) {
+            return Err(AppError::BadRequest(format!(
+                "system update raw image checksum mismatch: {}",
+                image.payload
+            )));
+        }
+
+        if !listed.insert(image.payload.clone()) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate system update payload entry: {}",
+                image.payload
+            )));
+        }
+        total_size = total_size.saturating_add(image.size);
+        if total_size > MAX_SYSTEM_UPDATE_PAYLOAD_BYTES {
             return Err(AppError::BadRequest(
                 "system update payload is too large".to_string(),
             ));
@@ -1164,15 +1399,31 @@ fn validate_manifest_shape(manifest: &SystemManifest, latest: &SystemLatest) -> 
             "system update required_free_bytes is too large".to_string(),
         ));
     }
-    if manifest.files.is_empty() {
+    if manifest.files.is_empty() && manifest.raw_images.is_empty() {
         return Err(AppError::BadRequest(
-            "system update manifest has no files".to_string(),
+            "system update manifest has no payload entries".to_string(),
         ));
     }
     if manifest.operations.is_empty() {
         return Err(AppError::BadRequest(
             "system update manifest has no operations".to_string(),
         ));
+    }
+    if !manifest.raw_images.is_empty() {
+        if !manifest.requires_reboot {
+            return Err(AppError::BadRequest(
+                "raw system update images require reboot".to_string(),
+            ));
+        }
+        if !manifest
+            .operations
+            .iter()
+            .any(|operation| operation == "write-raw-devices")
+        {
+            return Err(AppError::BadRequest(
+                "raw system update manifest must include write-raw-devices".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -1214,6 +1465,7 @@ fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()
 }
 
 fn staged_summary(record: &SystemStageRecord) -> SystemStagedUpdate {
+    let image_count = record.manifest.raw_images.len();
     SystemStagedUpdate {
         version: record.latest.version.clone(),
         target: record.latest.target.clone(),
@@ -1226,7 +1478,9 @@ fn staged_summary(record: &SystemStageRecord) -> SystemStagedUpdate {
         kernel_version: record.manifest.kernel_version.clone(),
         required_free_bytes: record.manifest.required_free_bytes,
         requires_reboot: record.manifest.requires_reboot,
-        file_count: record.manifest.files.len(),
+        file_count: record.manifest.files.len() + image_count,
+        image_count,
+        destructive: image_count > 0,
     }
 }
 
@@ -1241,7 +1495,9 @@ fn validate_payload_path(path: &str) -> Result<()> {
         || path.contains("//")
         || path.ends_with('/')
         || path.ends_with("/..")
-        || !(path.starts_with("boot/") || path.starts_with("rootfs/"))
+        || !(path.starts_with("boot/")
+            || path.starts_with("rootfs/")
+            || path.starts_with("images/"))
         || !path.chars().all(|ch| {
             ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '+' | '/' | '@' | '=' | '-')
         })
@@ -1262,6 +1518,29 @@ fn validate_install_path(install: &str, payload: &str) -> Result<()> {
     }
     validate_absolute_install_path(install)?;
     Ok(())
+}
+
+fn validate_raw_image_manifest(image: &SystemManifestRawImage) -> Result<()> {
+    validate_payload_path(&image.payload)?;
+    validate_sha256_hex(&image.sha256)?;
+    validate_text_field("raw_image_label", &image.label, 32)?;
+    if image.size == 0 || image.size > MAX_SYSTEM_UPDATE_PAYLOAD_BYTES {
+        return Err(AppError::BadRequest(
+            "invalid system update raw image size".to_string(),
+        ));
+    }
+
+    match (
+        image.label.as_str(),
+        image.payload.as_str(),
+        image.device.as_str(),
+    ) {
+        ("BOOT", "images/boot.vfat", RAW_BOOT_DEVICE) => Ok(()),
+        ("ROOTFS", "images/rootfs.sd", RAW_ROOTFS_DEVICE) => Ok(()),
+        _ => Err(AppError::BadRequest(
+            "unsupported system update raw image target".to_string(),
+        )),
+    }
 }
 
 fn install_path_for_payload(payload: &str) -> Result<String> {
@@ -1895,6 +2174,7 @@ mod tests {
                 "install-known-paths".to_string(),
             ],
             files: vec![file],
+            raw_images: Vec::new(),
         }
     }
 
@@ -2064,6 +2344,80 @@ mod tests {
             size: fs::metadata(&file).unwrap().len(),
             sha256: hashes.sha256,
         });
+
+        assert!(validate_system_manifest(&manifest, &valid_latest(), &payload_dir).is_err());
+    }
+
+    #[test]
+    fn validates_raw_image_manifest_payload_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload_dir = temp.path().join("payload");
+        let file = payload_dir.join("images/rootfs.sd");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"rootfs image").unwrap();
+        let hashes = hash_file(&file).unwrap();
+
+        let manifest = SystemManifest {
+            format: "hardened-nanokvm-system-update-v1".to_string(),
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            base_version: "2025-02-17-19-08-3649fe.img".to_string(),
+            kernel_version: "5.10.4-tag-hardened.1".to_string(),
+            source_commit: "abcdef1".to_string(),
+            created_utc: "2026-06-28T00:00:00Z".to_string(),
+            required_free_bytes: 2_147_483_648,
+            requires_reboot: true,
+            operations: vec![
+                "stage".to_string(),
+                "write-raw-devices".to_string(),
+                "reboot".to_string(),
+            ],
+            files: Vec::new(),
+            raw_images: vec![SystemManifestRawImage {
+                payload: "images/rootfs.sd".to_string(),
+                device: RAW_ROOTFS_DEVICE.to_string(),
+                label: "ROOTFS".to_string(),
+                size: fs::metadata(&file).unwrap().len(),
+                sha256: hashes.sha256,
+            }],
+        };
+
+        validate_system_manifest(&manifest, &valid_latest(), &payload_dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_raw_image_unknown_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload_dir = temp.path().join("payload");
+        let file = payload_dir.join("images/rootfs.sd");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"rootfs image").unwrap();
+        let hashes = hash_file(&file).unwrap();
+
+        let manifest = SystemManifest {
+            format: "hardened-nanokvm-system-update-v1".to_string(),
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            base_version: "2025-02-17-19-08-3649fe.img".to_string(),
+            kernel_version: "5.10.4-tag-hardened.1".to_string(),
+            source_commit: "abcdef1".to_string(),
+            created_utc: "2026-06-28T00:00:00Z".to_string(),
+            required_free_bytes: 2_147_483_648,
+            requires_reboot: true,
+            operations: vec![
+                "stage".to_string(),
+                "write-raw-devices".to_string(),
+                "reboot".to_string(),
+            ],
+            files: Vec::new(),
+            raw_images: vec![SystemManifestRawImage {
+                payload: "images/rootfs.sd".to_string(),
+                device: "/dev/sda1".to_string(),
+                label: "ROOTFS".to_string(),
+                size: fs::metadata(&file).unwrap().len(),
+                sha256: hashes.sha256,
+            }],
+        };
 
         assert!(validate_system_manifest(&manifest, &valid_latest(), &payload_dir).is_err());
     }

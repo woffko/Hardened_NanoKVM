@@ -5,7 +5,7 @@ import {
   RocketOutlined,
   SmileOutlined
 } from '@ant-design/icons';
-import { Button, Divider, Modal, Result, Spin } from 'antd';
+import { Alert, Button, Divider, Modal, Result, Spin } from 'antd';
 import { useTranslation } from 'react-i18next';
 import semver from 'semver';
 
@@ -177,7 +177,18 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
     Modal.confirm({
       title: t('settings.update.system.installConfirmTitle'),
-      content: t('settings.update.system.installConfirmDesc'),
+      content: systemStaged.destructive ? (
+        <div className="space-y-3">
+          <div>{t('settings.update.system.rawInstallConfirmDesc')}</div>
+          <Alert
+            type="error"
+            showIcon
+            message={t('settings.update.system.rawInstallWarning')}
+          />
+        </div>
+      ) : (
+        t('settings.update.system.installConfirmDesc')
+      ),
       okText: t('settings.update.system.install'),
       cancelText: t('settings.update.cancel'),
       onOk: installSystemUpdate
@@ -572,6 +583,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 versionLine(
                   t('settings.update.system.fileCount'),
                   systemStaged.fileCount.toString()
+                )}
+              {systemStaged?.destructive &&
+                versionLine(
+                  t('settings.update.system.rawImages'),
+                  systemStaged.imageCount.toString()
                 )}
               {systemPending &&
                 versionLine(t('settings.update.system.pendingVersion'), systemPending.version)}

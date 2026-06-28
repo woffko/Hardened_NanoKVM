@@ -40,6 +40,8 @@ export type SystemStagedUpdate = {
   requiredFreeBytes: number;
   requiresReboot: boolean;
   fileCount: number;
+  imageCount: number;
+  destructive: boolean;
 };
 
 export type SystemPendingUpdate = {

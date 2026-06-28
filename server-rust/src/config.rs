@@ -90,6 +90,7 @@ pub struct Security {
     pub refresh_token_duration: u64,
     pub revoke_tokens_on_password_change: bool,
     pub allow_unsigned_updates: bool,
+    pub allow_raw_system_updates: bool,
     pub allow_terminal: bool,
     pub allow_remote_image_download: bool,
     pub allow_auth_disable: bool,
@@ -186,6 +187,7 @@ impl Default for Security {
             refresh_token_duration: 604_800,
             revoke_tokens_on_password_change: true,
             allow_unsigned_updates: false,
+            allow_raw_system_updates: false,
             allow_terminal: false,
             allow_remote_image_download: false,
             allow_auth_disable: false,
@@ -202,7 +204,7 @@ impl Default for Paths {
             session_secret_file: PathBuf::from(DEFAULT_SECRET_PATH),
             web_root: PathBuf::from("/kvmapp/server/web"),
             image_directory: PathBuf::from("/data"),
-            update_cache_dir: PathBuf::from("/root/.kvmcache"),
+            update_cache_dir: PathBuf::from("/data/.hardened-kvmcache"),
             system_update_public_key: PathBuf::from("/etc/kvm/system-update-signing.pub.pem"),
         }
     }
@@ -302,6 +304,9 @@ impl Config {
         if self.security.allow_unsigned_updates {
             warn!("unsigned updates are allowed");
         }
+        if self.security.allow_raw_system_updates {
+            warn!("raw partition system updates are allowed");
+        }
         if self.security.allow_default_admin {
             warn!("legacy admin/admin bootstrap is enabled");
         }
@@ -310,6 +315,9 @@ impl Config {
     fn normalize_legacy_fields(&mut self) {
         if self.jwt.secret_key.is_empty() && !self.jwt.secret_key_legacy.is_empty() {
             self.jwt.secret_key = self.jwt.secret_key_legacy.clone();
+        }
+        if self.paths.update_cache_dir == PathBuf::from("/root/.kvmcache") {
+            self.paths.update_cache_dir = PathBuf::from("/data/.hardened-kvmcache");
         }
     }
 

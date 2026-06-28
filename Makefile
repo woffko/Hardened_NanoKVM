@@ -26,8 +26,10 @@ SYSTEM_UPDATE_TAG ?= hardened-system-$(SYSTEM_UPDATE_VERSION)
 VENDOR_SDK_OUTPUT ?= build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd
 VENDOR_SDK_UPGRADE ?= $(VENDOR_SDK_OUTPUT)/upgrade.zip
 VENDOR_SDK_INSPECTION ?= build/vendor-upgrade-inspection.json
+RAW_SYSTEM_UPDATE_BOOT ?= $(VENDOR_SDK_OUTPUT)/images/boot.vfat
+RAW_SYSTEM_UPDATE_ROOTFS ?= $(VENDOR_SDK_OUTPUT)/rawimages/rootfs.sd
 
-.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image vendor-sdk vendor-sdk-stock vendor-sdk-inspect system-update-bundle system-update-metadata support all clean
+.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image vendor-sdk vendor-sdk-stock vendor-sdk-inspect system-update-bundle raw-system-update-bundle system-update-metadata support all clean
 
 # Default target
 all: app support
@@ -51,6 +53,7 @@ help:
 	@echo "  vendor-sdk-stock - Build the stock SDK image with a Buildroot-safe PATH"
 	@echo "  vendor-sdk-inspect - Validate vendor upgrade.zip and write JSON inspection"
 	@echo "  system-update-bundle   - Package a staged system-update payload"
+	@echo "  raw-system-update-bundle - Package experimental raw boot/rootfs images"
 	@echo "  system-update-metadata - Generate GitHub latest JSON for the system bundle"
 	@echo "  support       - Build hardware support libraries"
 	@echo "  all           - Build both app and support (default)"
@@ -142,6 +145,9 @@ vendor-sdk-inspect:
 #   $(SYSTEM_UPDATE_PAYLOAD)/rootfs/<path>  -> /<path>
 system-update-bundle:
 	@scripts/create-system-update-bundle.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TARGET)" "$(SYSTEM_UPDATE_PAYLOAD)" "$(SYSTEM_UPDATE_OUT)"
+
+raw-system-update-bundle:
+	@scripts/create-raw-system-update-bundle.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TARGET)" "$(RAW_SYSTEM_UPDATE_BOOT)" "$(RAW_SYSTEM_UPDATE_ROOTFS)" "$(SYSTEM_UPDATE_OUT)"
 
 system-update-metadata:
 	@scripts/create-system-update-metadata.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TAG)" "$(SYSTEM_UPDATE_OUT)/hardened-nanokvm-system-$(SYSTEM_UPDATE_VERSION).tar.gz" "$(SYSTEM_UPDATE_OUT)/system-latest.json"
