@@ -11,6 +11,7 @@ import semver from 'semver';
 
 import * as api from '@/api/application.ts';
 import type {
+  SystemBootHealth,
   SystemLatest,
   SystemPendingUpdate,
   SystemRollbackInfo,
@@ -37,6 +38,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemLatest, setSystemLatest] = useState<SystemLatest | null>(null);
   const [systemStaged, setSystemStaged] = useState<SystemStagedUpdate | null>(null);
   const [systemPending, setSystemPending] = useState<SystemPendingUpdate | null>(null);
+  const [systemBootHealth, setSystemBootHealth] = useState<SystemBootHealth | null>(null);
   const [systemRollback, setSystemRollback] = useState<SystemRollbackInfo | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
 
@@ -129,11 +131,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemCurrent(rsp.data.current);
         setSystemStaged(rsp.data.staged || null);
         setSystemPending(rsp.data.pending || null);
+        setSystemBootHealth(rsp.data.bootHealth || null);
         setSystemRollback(rsp.data.rollback || null);
       })
       .catch(() => {
         setSystemStaged(null);
         setSystemPending(null);
+        setSystemBootHealth(null);
         setSystemRollback(null);
       });
   }
@@ -201,6 +205,36 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       .catch(() => {
         setSystemStatus('failed');
         setSystemErrMsg(t('settings.update.system.installFailed'));
+      })
+      .finally(() => {
+        setIsLocked(false);
+      });
+  }
+
+  function confirmSystemUpdate() {
+    if (!systemPending || systemStatus === 'confirming') return;
+
+    setIsLocked(true);
+    setSystemStatus('confirming');
+    setSystemErrMsg('');
+
+    api
+      .confirmSystemUpdate()
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data) {
+          setSystemStatus('failed');
+          setSystemErrMsg(t('settings.update.system.confirmFailed'));
+          return;
+        }
+
+        setSystemPending(null);
+        setSystemBootHealth(null);
+        setSystemStatus('confirmed');
+        refreshSystemUpdateStatus();
+      })
+      .catch(() => {
+        setSystemStatus('failed');
+        setSystemErrMsg(t('settings.update.system.confirmFailed'));
       })
       .finally(() => {
         setIsLocked(false);
@@ -365,13 +399,17 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             </div>
           )}
 
-          {(systemStatus === 'installing' || systemStatus === 'rollingBack') && (
+          {(systemStatus === 'installing' ||
+            systemStatus === 'rollingBack' ||
+            systemStatus === 'confirming') && (
             <div className="flex flex-col items-center justify-center space-y-6 py-10">
               <Spin indicator={<LoadingOutlined spin />} />
               <span className="text-neutral-500">
-                {systemStatus === 'installing'
-                  ? t('settings.update.system.installing')
-                  : t('settings.update.system.rollingBack')}
+                {systemStatus === 'confirming'
+                  ? t('settings.update.system.confirming')
+                  : systemStatus === 'installing'
+                    ? t('settings.update.system.installing')
+                    : t('settings.update.system.rollingBack')}
               </span>
             </div>
           )}
@@ -442,6 +480,20 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               icon={<CloudSyncOutlined />}
               title={t('settings.update.system.rollbackDone')}
               subTitle={t('settings.update.system.rebootRequired')}
+              extra={[
+                <Button key="refresh" onClick={checkSystemUpdates}>
+                  {t('settings.update.system.refresh')}
+                </Button>
+              ]}
+            />
+          )}
+
+          {systemStatus === 'confirmed' && (
+            <Result
+              status="success"
+              icon={<CloudSyncOutlined />}
+              title={t('settings.update.system.confirmed')}
+              subTitle={t('settings.update.system.bootGood')}
               extra={[
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
@@ -523,6 +575,20 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 )}
               {systemPending &&
                 versionLine(t('settings.update.system.pendingVersion'), systemPending.version)}
+              {systemBootHealth &&
+                versionLine(
+                  t('settings.update.system.bootHealth'),
+                  systemBootHealth.healthy
+                    ? t('settings.update.system.healthy')
+                    : t('settings.update.system.unhealthy')
+                )}
+              {systemPending && systemBootHealth?.healthy && (
+                <div className="flex justify-end pt-2">
+                  <Button size="small" type="primary" onClick={confirmSystemUpdate}>
+                    {t('settings.update.system.confirmBoot')}
+                  </Button>
+                </div>
+              )}
               {systemRollback &&
                 versionLine(t('settings.update.system.rollbackBackup'), systemRollback.backupId)}
             </div>

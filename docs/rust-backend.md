@@ -135,11 +135,12 @@ The generated image installs:
   `/api/system-update/download` downloads and verifies the system archive in
   the update cache, checks the archive digests and every manifest payload hash,
   and records `staged.json`; `/api/system-update/status` reports that staged
-  bundle plus pending/rollback state. `/api/system-update/install` re-verifies
-  the staged archive, backs up touched files, applies payload files atomically,
-  writes `/etc/kvm/system-version.json`, and records pending/backup markers.
-  `/api/system-update/rollback` restores the latest backup manually. These
-  routes do not reboot automatically.
+  bundle plus pending/boot-health/rollback state. `/api/system-update/install`
+  re-verifies the staged archive, backs up touched files, applies payload files
+  atomically, writes `/etc/kvm/system-version.json`, and records
+  pending/backup markers. `/api/system-update/confirm` writes a boot-good
+  marker after basic health checks. `/api/system-update/rollback` restores the
+  latest backup manually. These routes do not reboot automatically.
 - UI branding for Hardened NanoKVM and version `beta - 1.0.1`.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Web UI backend switch in Settings > Device > Advanced.
@@ -151,9 +152,8 @@ The generated image installs:
 - Signed update verification is not finished yet. Current beta updates trust
   the Hardened GitHub release metadata over HTTPS plus sha512 verification of
   the downloaded `kvmapp` archive.
-- System-update boot-good confirmation and automatic rollback after a bad boot
-  are not implemented yet. Signed system metadata is still TODO. See
-  `docs/system-update-plan.md`.
+- Automatic rollback after a bad boot is not implemented yet. Signed system
+  metadata is still TODO. See `docs/system-update-plan.md`.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. New
   SD-card flashes use the first-boot web setup screen instead. Lost credentials
   are recovered by reflashing the SD card.

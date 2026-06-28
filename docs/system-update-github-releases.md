@@ -155,8 +155,10 @@ rollback:
 - `POST /api/system-update/install` re-verifies the staged archive, backs up
   touched files under the update cache, applies payload files atomically, writes
   `/etc/kvm/system-version.json`, and writes pending/backup markers.
+- `POST /api/system-update/confirm` marks a pending update as boot-good after
+  basic backend/version/boot-marker/web-root checks pass.
 - `POST /api/system-update/rollback` restores files from the latest backup
   marker and clears the pending marker.
 
-The backend does not reboot automatically. Automatic boot-good confirmation and
-rollback-on-bad-boot are still TODO.
+The backend does not reboot automatically. Automatic rollback-on-bad-boot is
+still TODO.

@@ -524,6 +524,11 @@ const en = {
             'This will replace base-system files from the verified bundle. Reboot will be required.',
           installed: 'installed',
           rebootRequired: 'Reboot is required to activate this system state.',
+          confirming: 'Confirming system update boot...',
+          confirmBoot: 'Confirm Boot',
+          confirmFailed: 'Boot confirmation failed',
+          confirmed: 'Boot confirmed',
+          bootGood: 'The pending system update was marked as boot-good.',
           rollingBack: 'Rolling back system update...',
           rollback: 'Rollback',
           rollbackDone: 'Rollback prepared',
@@ -545,6 +550,9 @@ const en = {
           requiredFree: 'Required free space',
           fileCount: 'Files',
           pendingVersion: 'Pending version',
+          bootHealth: 'Boot health',
+          healthy: 'Healthy',
+          unhealthy: 'Needs attention',
           rollbackBackup: 'Rollback backup'
         },
         offline: {

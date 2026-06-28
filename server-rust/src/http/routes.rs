@@ -45,6 +45,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/system-update/download", post(system_update::download))
         .route("/api/system-update/install", post(system_update::install))
         .route("/api/system-update/rollback", post(system_update::rollback))
+        .route("/api/system-update/confirm", post(system_update::confirm))
         .route("/api/vm/info", get(vm::get_info))
         .route("/api/vm/hardware", get(vm::get_hardware))
         .route(

@@ -44,6 +44,7 @@ const SYSTEM_BACKUPS_DIR_NAME: &str = "backups";
 const SYSTEM_BACKUP_RECORD: &str = "backup.json";
 const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
 const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
+const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
 
 static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
@@ -114,6 +115,7 @@ pub struct SystemStatusRsp {
     pub current: SystemVersion,
     pub staged: Option<SystemStagedUpdate>,
     pub pending: Option<SystemPendingUpdate>,
+    pub boot_health: Option<SystemBootHealth>,
     pub rollback: Option<SystemRollbackInfo>,
     pub error: Option<String>,
 }
@@ -161,6 +163,23 @@ pub struct SystemInstallRsp {
 pub struct SystemRollbackRsp {
     pub restored: SystemRollbackInfo,
     pub reboot_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemBootHealth {
+    pub backend_running: bool,
+    pub version_matches_pending: bool,
+    pub boot_marker_present: bool,
+    pub web_root_present: bool,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemConfirmRsp {
+    pub confirmed: SystemPendingUpdate,
+    pub health: SystemBootHealth,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +302,9 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let pending = read_pending_update().ok().flatten();
+    let boot_health = pending
+        .as_ref()
+        .map(|pending| evaluate_boot_health(&current, pending, &state));
     let rollback = read_last_backup_record(&stage_dir)
         .ok()
         .flatten()
@@ -293,6 +315,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
             current,
             staged,
             pending,
+            boot_health,
             rollback,
             error: None,
         }))),
@@ -302,6 +325,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
                 current,
                 staged: None,
                 pending,
+                boot_health,
                 rollback,
                 error: Some(err.to_string()),
             })))
@@ -363,6 +387,28 @@ pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse
     Ok(Json(ApiResponse::ok(SystemRollbackRsp {
         reboot_required: restored.requires_reboot,
         restored,
+    })))
+}
+
+pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _guard = acquire_update_lock()?;
+    let current = read_current_system_version();
+    let pending = read_pending_update()?
+        .ok_or_else(|| AppError::NotFound("no pending system update found".to_string()))?;
+    let health = evaluate_boot_health(&current, &pending, &state);
+
+    if !health.healthy {
+        return Err(AppError::BadRequest(
+            "system update boot health check failed".to_string(),
+        ));
+    }
+
+    write_boot_good(&pending, &health)?;
+    remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+
+    Ok(Json(ApiResponse::ok(SystemConfirmRsp {
+        confirmed: pending,
+        health,
     })))
 }
 
@@ -1265,6 +1311,46 @@ fn write_pending_update(pending: &SystemPendingUpdate) -> Result<()> {
     let data = serde_json::to_vec_pretty(pending)
         .map_err(|err| AppError::Internal(format!("encode pending system update: {err}")))?;
     atomic_write_file(Path::new(SYSTEM_PENDING_FILE), &data, 0o644)
+}
+
+fn write_boot_good(pending: &SystemPendingUpdate, health: &SystemBootHealth) -> Result<()> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BootGood<'a> {
+        confirmed_at: u64,
+        pending: &'a SystemPendingUpdate,
+        health: &'a SystemBootHealth,
+    }
+
+    let data = serde_json::to_vec_pretty(&BootGood {
+        confirmed_at: now_unix_seconds(),
+        pending,
+        health,
+    })
+    .map_err(|err| AppError::Internal(format!("encode system update boot-good marker: {err}")))?;
+    atomic_write_file(Path::new(SYSTEM_BOOT_GOOD_FILE), &data, 0o644)
+}
+
+fn evaluate_boot_health(
+    current: &SystemVersion,
+    pending: &SystemPendingUpdate,
+    state: &AppState,
+) -> SystemBootHealth {
+    let version_matches_pending =
+        current.version == pending.version && current.target == pending.target;
+    let boot_marker_present = Path::new(BOOT_VERSION_FILE).is_file();
+    let web_root_present = state.config.paths.web_root.join("index.html").is_file();
+    let backend_running = true;
+    let healthy =
+        backend_running && version_matches_pending && boot_marker_present && web_root_present;
+
+    SystemBootHealth {
+        backend_running,
+        version_matches_pending,
+        boot_marker_present,
+        web_root_present,
+        healthy,
+    }
 }
 
 fn write_last_backup_record(record: &SystemInstallRecord) -> Result<()> {

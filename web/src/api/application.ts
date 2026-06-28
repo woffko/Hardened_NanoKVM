@@ -60,6 +60,14 @@ export type SystemRollbackInfo = {
   requiresReboot: boolean;
 };
 
+export type SystemBootHealth = {
+  backendRunning: boolean;
+  versionMatchesPending: boolean;
+  bootMarkerPresent: boolean;
+  webRootPresent: boolean;
+  healthy: boolean;
+};
+
 // get application version
 export function getVersion() {
   return http.get('/api/application/version');
@@ -97,6 +105,11 @@ export function installSystemUpdate() {
 // rollback the latest base-system update backup
 export function rollbackSystemUpdate() {
   return http.post('/api/system-update/rollback');
+}
+
+// confirm a pending base-system update as boot-good
+export function confirmSystemUpdate() {
+  return http.post('/api/system-update/confirm');
 }
 
 // update application to latest version
