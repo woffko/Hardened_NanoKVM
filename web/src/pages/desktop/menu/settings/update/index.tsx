@@ -5,12 +5,18 @@ import {
   RocketOutlined,
   SmileOutlined
 } from '@ant-design/icons';
-import { Button, Divider, Result, Spin } from 'antd';
+import { Button, Divider, Modal, Result, Spin } from 'antd';
 import { useTranslation } from 'react-i18next';
 import semver from 'semver';
 
 import * as api from '@/api/application.ts';
-import type { SystemLatest, SystemStagedUpdate, SystemVersion } from '@/api/application.ts';
+import type {
+  SystemLatest,
+  SystemPendingUpdate,
+  SystemRollbackInfo,
+  SystemStagedUpdate,
+  SystemVersion
+} from '@/api/application.ts';
 
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
@@ -30,6 +36,8 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemCurrent, setSystemCurrent] = useState<SystemVersion | null>(null);
   const [systemLatest, setSystemLatest] = useState<SystemLatest | null>(null);
   const [systemStaged, setSystemStaged] = useState<SystemStagedUpdate | null>(null);
+  const [systemPending, setSystemPending] = useState<SystemPendingUpdate | null>(null);
+  const [systemRollback, setSystemRollback] = useState<SystemRollbackInfo | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
 
   useEffect(() => {
@@ -120,9 +128,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         if (rsp.code !== 0 || !rsp.data) return;
         setSystemCurrent(rsp.data.current);
         setSystemStaged(rsp.data.staged || null);
+        setSystemPending(rsp.data.pending || null);
+        setSystemRollback(rsp.data.rollback || null);
       })
       .catch(() => {
         setSystemStaged(null);
+        setSystemPending(null);
+        setSystemRollback(null);
       });
   }
 
@@ -150,6 +162,85 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       .catch(() => {
         setSystemStatus('failed');
         setSystemErrMsg(t('settings.update.system.downloadFailed'));
+      })
+      .finally(() => {
+        setIsLocked(false);
+      });
+  }
+
+  function confirmInstallSystemUpdate() {
+    if (!systemStaged || systemStatus === 'installing') return;
+
+    Modal.confirm({
+      title: t('settings.update.system.installConfirmTitle'),
+      content: t('settings.update.system.installConfirmDesc'),
+      okText: t('settings.update.system.install'),
+      cancelText: t('settings.update.cancel'),
+      onOk: installSystemUpdate
+    });
+  }
+
+  function installSystemUpdate() {
+    setIsLocked(true);
+    setSystemStatus('installing');
+    setSystemErrMsg('');
+
+    return api
+      .installSystemUpdate()
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data) {
+          setSystemStatus('failed');
+          setSystemErrMsg(t('settings.update.system.installFailed'));
+          return;
+        }
+
+        setSystemPending(rsp.data.installed);
+        setSystemStatus('installed');
+        refreshSystemUpdateStatus();
+      })
+      .catch(() => {
+        setSystemStatus('failed');
+        setSystemErrMsg(t('settings.update.system.installFailed'));
+      })
+      .finally(() => {
+        setIsLocked(false);
+      });
+  }
+
+  function confirmRollbackSystemUpdate() {
+    if (!systemRollback || systemStatus === 'rollingBack') return;
+
+    Modal.confirm({
+      title: t('settings.update.system.rollbackConfirmTitle'),
+      content: t('settings.update.system.rollbackConfirmDesc'),
+      okText: t('settings.update.system.rollback'),
+      cancelText: t('settings.update.cancel'),
+      onOk: rollbackSystemUpdate
+    });
+  }
+
+  function rollbackSystemUpdate() {
+    setIsLocked(true);
+    setSystemStatus('rollingBack');
+    setSystemErrMsg('');
+
+    return api
+      .rollbackSystemUpdate()
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data) {
+          setSystemStatus('failed');
+          setSystemErrMsg(t('settings.update.system.rollbackFailed'));
+          return;
+        }
+
+        setSystemRollback(rsp.data.restored);
+        setSystemPending(null);
+        setSystemStatus('rolledBack');
+        refreshSystemUpdateStatus();
+      })
+      .catch(() => {
+        setSystemStatus('failed');
+        setSystemErrMsg(t('settings.update.system.rollbackFailed'));
       })
       .finally(() => {
         setIsLocked(false);
@@ -274,6 +365,17 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             </div>
           )}
 
+          {(systemStatus === 'installing' || systemStatus === 'rollingBack') && (
+            <div className="flex flex-col items-center justify-center space-y-6 py-10">
+              <Spin indicator={<LoadingOutlined spin />} />
+              <span className="text-neutral-500">
+                {systemStatus === 'installing'
+                  ? t('settings.update.system.installing')
+                  : t('settings.update.system.rollingBack')}
+              </span>
+            </div>
+          )}
+
           {systemStatus === 'latest' && systemCurrent && (
             <Result
               status="success"
@@ -283,7 +385,12 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               extra={[
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
-                </Button>
+                </Button>,
+                systemRollback ? (
+                  <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
+                    {t('settings.update.system.rollback')}
+                  </Button>
+                ) : null
               ]}
             />
           )}
@@ -305,6 +412,37 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                     {t('settings.update.system.releaseNotes')}
                   </Button>
                 ) : null,
+                <Button key="refresh" onClick={checkSystemUpdates}>
+                  {t('settings.update.system.refresh')}
+                </Button>,
+                <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
+                  {t('settings.update.system.install')}
+                </Button>
+              ]}
+            />
+          )}
+
+          {systemStatus === 'installed' && systemPending && (
+            <Result
+              status="warning"
+              icon={<CloudSyncOutlined />}
+              title={`${systemPending.version} ${t('settings.update.system.installed')}`}
+              subTitle={t('settings.update.system.rebootRequired')}
+              extra={[
+                <Button key="refresh" onClick={checkSystemUpdates}>
+                  {t('settings.update.system.refresh')}
+                </Button>
+              ]}
+            />
+          )}
+
+          {systemStatus === 'rolledBack' && systemRollback && (
+            <Result
+              status="success"
+              icon={<CloudSyncOutlined />}
+              title={t('settings.update.system.rollbackDone')}
+              subTitle={t('settings.update.system.rebootRequired')}
+              extra={[
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>
@@ -332,7 +470,12 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 </Button>,
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
-                </Button>
+                </Button>,
+                systemRollback ? (
+                  <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
+                    {t('settings.update.system.rollback')}
+                  </Button>
+                ) : null
               ]}
             />
           )}
@@ -346,7 +489,12 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               extra={[
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
-                </Button>
+                </Button>,
+                systemRollback ? (
+                  <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
+                    {t('settings.update.system.rollback')}
+                  </Button>
+                ) : null
               ]}
             />
           )}
@@ -373,6 +521,10 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   t('settings.update.system.fileCount'),
                   systemStaged.fileCount.toString()
                 )}
+              {systemPending &&
+                versionLine(t('settings.update.system.pendingVersion'), systemPending.version)}
+              {systemRollback &&
+                versionLine(t('settings.update.system.rollbackBackup'), systemRollback.backupId)}
             </div>
           )}
         </div>

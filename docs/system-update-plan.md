@@ -26,12 +26,14 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
   vendor SDK is not yet established.
-- System-update version/check/status/download is implemented in the Rust
-  backend and GUI through the staging phase. It displays the current system
-  baseline, validates GitHub `system-latest.json`, downloads the archive,
+- System-update version/check/status/download/install/rollback is implemented
+  in the Rust backend and GUI through manual rollback. It displays the current
+  system baseline, validates GitHub `system-latest.json`, downloads the archive,
   verifies archive sha256/sha512, safely extracts it, validates `manifest.json`,
-  verifies every payload file hash/size/path, and records a staged bundle.
-  Install, rollback, and boot health checks are not implemented yet.
+  verifies every payload file hash/size/path, backs up touched files, applies
+  payload files atomically, writes `/etc/kvm/system-version.json`, and records
+  pending/backup markers. Automatic boot-good confirmation and automatic
+  rollback after a bad boot are not implemented yet.
 
 ## Implementation Order
 
@@ -67,18 +69,19 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - `GET /api/system-update/check` (implemented read-only);
    - `GET /api/system-update/status` (implemented read-only);
    - `POST /api/system-update/download` (implemented staging-only);
-   - `POST /api/system-update/install`;
-   - `POST /api/system-update/rollback`.
+   - `POST /api/system-update/install` (implemented manual);
+   - `POST /api/system-update/rollback` (implemented manual).
 
 6. Implement staging, backup, install, and rollback:
    - download to the configured update cache, currently
      `/root/.kvmcache/system-update`;
    - unpack into a staging directory and verify manifest/payload files
      (implemented);
-   - back up kernel, dtb, modules, and config files to `/data/system-backups`;
-   - write a pending-update marker;
-   - install only after all checks pass;
-   - reboot into the updated system.
+   - back up touched files under
+     `/root/.kvmcache/system-update/backups/<id>` (implemented);
+   - write a pending-update marker under `/etc/kvm` (implemented);
+   - install only after all checks pass (implemented);
+   - reboot into the updated system (manual through the existing reboot API/UI).
 
 7. Add boot health confirmation:
    - Rust backend started;
@@ -108,8 +111,9 @@ The current helper scripts are:
 - `scripts/create-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
 
-The Rust backend can download and verify these archives into staging. The
-installer is not implemented yet.
+The Rust backend can download, verify, install, and manually roll back these
+archives. The installer does not reboot automatically and does not yet perform
+automatic boot-good confirmation.
 
 ## Required Test Sequence
 
@@ -118,7 +122,8 @@ installer is not implemented yet.
 3. Backend API download/status flow.
 4. Backend API install/rollback flow.
 5. GUI flow.
-6. Long video, HID, network, reboot, and backend-switching soak after update.
+6. Boot-good confirmation and rollback-on-bad-boot flow.
+7. Long video, HID, network, reboot, and backend-switching soak after update.
 
 ## Non-Goals For The First Version
 

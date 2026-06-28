@@ -6,6 +6,7 @@ use std::{
     collections::BTreeSet,
     fs,
     io::{self, Read},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -39,6 +40,10 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SYSTEM_STAGE_DIR_NAME: &str = "system-update";
 const SYSTEM_EXTRACT_DIR_NAME: &str = "extract";
 const SYSTEM_STAGE_RECORD: &str = "staged.json";
+const SYSTEM_BACKUPS_DIR_NAME: &str = "backups";
+const SYSTEM_BACKUP_RECORD: &str = "backup.json";
+const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
+const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
 
 static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
@@ -108,6 +113,8 @@ pub struct SystemStagedUpdate {
 pub struct SystemStatusRsp {
     pub current: SystemVersion,
     pub staged: Option<SystemStagedUpdate>,
+    pub pending: Option<SystemPendingUpdate>,
+    pub rollback: Option<SystemRollbackInfo>,
     pub error: Option<String>,
 }
 
@@ -117,6 +124,43 @@ pub struct SystemDownloadRsp {
     pub current: SystemVersion,
     pub latest: SystemLatest,
     pub staged: SystemStagedUpdate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemPendingUpdate {
+    pub version: String,
+    pub target: String,
+    pub backup_id: String,
+    pub installed_at: u64,
+    pub requires_reboot: bool,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRollbackInfo {
+    pub version: String,
+    pub target: String,
+    pub backup_id: String,
+    pub installed_at: u64,
+    pub file_count: usize,
+    pub requires_reboot: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInstallRsp {
+    pub current: SystemVersion,
+    pub installed: SystemPendingUpdate,
+    pub reboot_required: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRollbackRsp {
+    pub restored: SystemRollbackInfo,
+    pub reboot_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +201,33 @@ struct SystemManifestFile {
     install: String,
     size: u64,
     sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SystemInstallRecord {
+    version: String,
+    target: String,
+    backup_id: String,
+    installed_at: u64,
+    requires_reboot: bool,
+    files: Vec<SystemBackupFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SystemBackupFile {
+    install: String,
+    backup: String,
+    existed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledSystemVersion {
+    version: String,
+    target: String,
+    base_version: String,
+    kernel_version: String,
+    rootfs_version: String,
 }
 
 #[derive(Debug)]
@@ -211,11 +282,18 @@ pub async fn check() -> Result<impl IntoResponse> {
 pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
+    let pending = read_pending_update().ok().flatten();
+    let rollback = read_last_backup_record(&stage_dir)
+        .ok()
+        .flatten()
+        .map(|record| rollback_info(&record));
 
     match read_staged_update(&stage_dir) {
         Ok(staged) => Ok(Json(ApiResponse::ok(SystemStatusRsp {
             current,
             staged,
+            pending,
+            rollback,
             error: None,
         }))),
         Err(err) => {
@@ -223,6 +301,8 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
                 current,
                 staged: None,
+                pending,
+                rollback,
                 error: Some(err.to_string()),
             })))
         }
@@ -260,6 +340,29 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         current,
         latest,
         staged: staged_summary(&record),
+    })))
+}
+
+pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _guard = acquire_update_lock()?;
+    let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
+    let installed = install_staged_update(&stage_dir)?;
+
+    Ok(Json(ApiResponse::ok(SystemInstallRsp {
+        current: read_current_system_version(),
+        reboot_required: installed.requires_reboot,
+        installed,
+    })))
+}
+
+pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _guard = acquire_update_lock()?;
+    let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
+    let restored = rollback_last_system_update(&stage_dir)?;
+
+    Ok(Json(ApiResponse::ok(SystemRollbackRsp {
+        reboot_required: restored.requires_reboot,
+        restored,
     })))
 }
 
@@ -528,6 +631,217 @@ fn extract_and_verify_system_bundle(
     validate_system_manifest(&manifest, latest, &payload_dir)?;
 
     Ok(manifest)
+}
+
+fn install_staged_update(stage_dir: &Path) -> Result<SystemPendingUpdate> {
+    let record = read_stage_record(stage_dir)?
+        .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
+    validate_latest_system(&record.latest)?;
+
+    let archive = stage_dir.join(&record.latest.name);
+    if !archive.is_file() {
+        return Err(AppError::BadRequest(
+            "staged system update archive is missing".to_string(),
+        ));
+    }
+    verify_system_archive(&archive, &record.latest)?;
+    let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
+    let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
+
+    let backup_id = format!("{}-{}", manifest.version, now_unix_seconds());
+    validate_filename(&backup_id)?;
+    let backup_dir = backup_dir_for(stage_dir, &backup_id);
+    remove_dir_if_exists(&backup_dir)?;
+    fs::create_dir_all(&backup_dir)?;
+
+    let mut install_record = SystemInstallRecord {
+        version: manifest.version.clone(),
+        target: manifest.target.clone(),
+        backup_id,
+        installed_at: now_unix_seconds(),
+        requires_reboot: manifest.requires_reboot,
+        files: Vec::new(),
+    };
+
+    let mut backed_up = BTreeSet::new();
+    for file in &manifest.files {
+        backup_install_target(
+            &file.install,
+            &backup_dir,
+            &mut install_record,
+            &mut backed_up,
+        )?;
+    }
+    if !backed_up.contains(SYSTEM_VERSION_FILE) {
+        backup_install_target(
+            SYSTEM_VERSION_FILE,
+            &backup_dir,
+            &mut install_record,
+            &mut backed_up,
+        )?;
+    }
+    write_backup_record(&backup_dir, &install_record)?;
+
+    let apply_result = (|| -> Result<()> {
+        for file in &manifest.files {
+            install_payload_file(&payload_dir, file)?;
+        }
+        write_installed_system_version(&manifest)?;
+        write_pending_update(&pending_update(&install_record))?;
+        write_last_backup_record(&install_record)?;
+        Ok(())
+    })();
+
+    if let Err(err) = apply_result {
+        tracing::error!(error = %err, "system update install failed, rolling back applied files");
+        if let Err(rollback_err) = rollback_from_record(stage_dir, &install_record) {
+            tracing::error!(error = %rollback_err, "failed to rollback after system update install error");
+        }
+        return Err(err);
+    }
+
+    Ok(pending_update(&install_record))
+}
+
+fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
+    let record = read_last_backup_record(stage_dir)?
+        .ok_or_else(|| AppError::NotFound("no system update backup found".to_string()))?;
+    rollback_from_record(stage_dir, &record)?;
+    remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+    Ok(rollback_info(&record))
+}
+
+fn rollback_from_record(stage_dir: &Path, record: &SystemInstallRecord) -> Result<()> {
+    let backup_dir = backup_dir_for(stage_dir, &record.backup_id);
+    if !backup_dir.is_dir() {
+        return Err(AppError::Internal(format!(
+            "system update backup directory is missing: {}",
+            record.backup_id
+        )));
+    }
+
+    for file in record.files.iter().rev() {
+        let install = validate_absolute_install_path(&file.install)?;
+        if file.existed {
+            let backup = safe_backup_join(&backup_dir, &file.backup)?;
+            if !backup.is_file() {
+                return Err(AppError::Internal(format!(
+                    "system update backup file is missing: {}",
+                    file.backup
+                )));
+            }
+            atomic_copy_file(&backup, &install, backup_file_mode(&backup)?)?;
+        } else {
+            remove_file_if_exists(&install)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn install_payload_file(payload_dir: &Path, file: &SystemManifestFile) -> Result<()> {
+    validate_install_path(&file.install, &file.payload)?;
+    let payload = safe_payload_join(payload_dir, &file.payload)?;
+    let install = validate_absolute_install_path(&file.install)?;
+    atomic_copy_file(&payload, &install, install_file_mode(&file.install))
+}
+
+fn write_installed_system_version(manifest: &SystemManifest) -> Result<()> {
+    let version = InstalledSystemVersion {
+        version: manifest.version.clone(),
+        target: manifest.target.clone(),
+        base_version: manifest.base_version.clone(),
+        kernel_version: manifest.kernel_version.clone(),
+        rootfs_version: read_rootfs_version(),
+    };
+    let data = serde_json::to_vec_pretty(&version)
+        .map_err(|err| AppError::Internal(format!("encode system version: {err}")))?;
+    atomic_write_file(Path::new(SYSTEM_VERSION_FILE), &data, 0o644)
+}
+
+fn backup_install_target(
+    install: &str,
+    backup_dir: &Path,
+    record: &mut SystemInstallRecord,
+    backed_up: &mut BTreeSet<String>,
+) -> Result<()> {
+    let install_path = validate_absolute_install_path(install)?;
+    if !backed_up.insert(install.to_string()) {
+        return Ok(());
+    }
+
+    let backup = backup_relative_for_install(install)?;
+    let backup_path = safe_backup_join(backup_dir, &backup)?;
+    let existed = install_path.exists();
+
+    if existed {
+        let metadata = fs::symlink_metadata(&install_path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(AppError::BadRequest(format!(
+                "system update can only backup regular files: {install}"
+            )));
+        }
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&install_path, &backup_path)?;
+        fs::set_permissions(&backup_path, metadata.permissions())?;
+    }
+
+    record.files.push(SystemBackupFile {
+        install: install.to_string(),
+        backup,
+        existed,
+    });
+    Ok(())
+}
+
+fn atomic_write_file(target: &Path, data: &[u8], mode: u32) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    reject_symlink_parents(target)?;
+    if target
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(AppError::BadRequest(format!(
+            "refusing to replace symlink: {}",
+            target.display()
+        )));
+    }
+
+    let temp = temp_install_path(target)?;
+    remove_file_if_exists(&temp)?;
+    fs::write(&temp, data)?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+    fs::rename(&temp, target)?;
+    Ok(())
+}
+
+fn atomic_copy_file(source: &Path, target: &Path, mode: u32) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    reject_symlink_parents(target)?;
+    if target
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(AppError::BadRequest(format!(
+            "refusing to replace symlink: {}",
+            target.display()
+        )));
+    }
+
+    let temp = temp_install_path(target)?;
+    remove_file_if_exists(&temp)?;
+    fs::copy(source, &temp)?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+    fs::rename(&temp, target)?;
+    Ok(())
 }
 
 fn validate_system_extract_root(extract_dir: &Path) -> Result<()> {
@@ -885,6 +1199,230 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or_default()
 }
 
+fn read_stage_record(stage_dir: &Path) -> Result<Option<SystemStageRecord>> {
+    let record_path = stage_dir.join(SYSTEM_STAGE_RECORD);
+    if !record_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(record_path)?;
+    let record: SystemStageRecord = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid staged system update: {err}")))?;
+    validate_latest_system(&record.latest)?;
+    validate_manifest_shape(&record.manifest, &record.latest)?;
+    Ok(Some(record))
+}
+
+fn read_pending_update() -> Result<Option<SystemPendingUpdate>> {
+    let path = Path::new(SYSTEM_PENDING_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(path)?;
+    let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
+    validate_token("pending version", &pending.version)?;
+    validate_token("pending target", &pending.target)?;
+    validate_filename(&pending.backup_id)?;
+    Ok(Some(pending))
+}
+
+fn read_last_backup_record(stage_dir: &Path) -> Result<Option<SystemInstallRecord>> {
+    let marker = Path::new(SYSTEM_LAST_BACKUP_FILE);
+    if !marker.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read(marker)?;
+    let record: SystemInstallRecord = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid system update backup marker: {err}")))?;
+    validate_install_record(&record)?;
+
+    let backup_record = backup_dir_for(stage_dir, &record.backup_id).join(SYSTEM_BACKUP_RECORD);
+    if !backup_record.is_file() {
+        return Ok(None);
+    }
+
+    Ok(Some(record))
+}
+
+fn validate_install_record(record: &SystemInstallRecord) -> Result<()> {
+    validate_token("backup version", &record.version)?;
+    validate_token("backup target", &record.target)?;
+    validate_filename(&record.backup_id)?;
+    if record.files.is_empty() {
+        return Err(AppError::BadRequest(
+            "system update backup record has no files".to_string(),
+        ));
+    }
+    for file in &record.files {
+        validate_absolute_install_path(&file.install)?;
+        validate_backup_relative(&file.backup)?;
+    }
+    Ok(())
+}
+
+fn write_pending_update(pending: &SystemPendingUpdate) -> Result<()> {
+    let data = serde_json::to_vec_pretty(pending)
+        .map_err(|err| AppError::Internal(format!("encode pending system update: {err}")))?;
+    atomic_write_file(Path::new(SYSTEM_PENDING_FILE), &data, 0o644)
+}
+
+fn write_last_backup_record(record: &SystemInstallRecord) -> Result<()> {
+    let data = serde_json::to_vec_pretty(record)
+        .map_err(|err| AppError::Internal(format!("encode system update backup marker: {err}")))?;
+    atomic_write_file(Path::new(SYSTEM_LAST_BACKUP_FILE), &data, 0o600)
+}
+
+fn write_backup_record(backup_dir: &Path, record: &SystemInstallRecord) -> Result<()> {
+    let data = serde_json::to_vec_pretty(record)
+        .map_err(|err| AppError::Internal(format!("encode system update backup: {err}")))?;
+    fs::write(backup_dir.join(SYSTEM_BACKUP_RECORD), data)?;
+    Ok(())
+}
+
+fn pending_update(record: &SystemInstallRecord) -> SystemPendingUpdate {
+    SystemPendingUpdate {
+        version: record.version.clone(),
+        target: record.target.clone(),
+        backup_id: record.backup_id.clone(),
+        installed_at: record.installed_at,
+        requires_reboot: record.requires_reboot,
+        file_count: record.files.len(),
+    }
+}
+
+fn rollback_info(record: &SystemInstallRecord) -> SystemRollbackInfo {
+    SystemRollbackInfo {
+        version: record.version.clone(),
+        target: record.target.clone(),
+        backup_id: record.backup_id.clone(),
+        installed_at: record.installed_at,
+        file_count: record.files.len(),
+        requires_reboot: record.requires_reboot,
+    }
+}
+
+fn backup_dir_for(stage_dir: &Path, backup_id: &str) -> PathBuf {
+    stage_dir.join(SYSTEM_BACKUPS_DIR_NAME).join(backup_id)
+}
+
+fn validate_absolute_install_path(install: &str) -> Result<PathBuf> {
+    if install.is_empty()
+        || !install.starts_with('/')
+        || install == "/"
+        || install.contains('\\')
+        || install.contains("//")
+        || install.contains("/../")
+        || install.ends_with("/..")
+        || install.ends_with('/')
+        || install.chars().any(|ch| ch.is_control())
+        || install.starts_with("/proc/")
+        || install.starts_with("/sys/")
+        || install.starts_with("/dev/")
+        || install.starts_with("/run/")
+        || install.starts_with("/tmp/")
+        || install.starts_with("/data/")
+        || install.starts_with("/kvmapp/")
+        || install.starts_with("/root/.kvmcache/")
+    {
+        return Err(AppError::BadRequest(format!(
+            "invalid system update install path: {install}"
+        )));
+    }
+    Ok(PathBuf::from(install))
+}
+
+fn backup_relative_for_install(install: &str) -> Result<String> {
+    validate_absolute_install_path(install)?;
+    Ok(install.trim_start_matches('/').to_string())
+}
+
+fn validate_backup_relative(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains("//")
+        || path == "."
+        || path == ".."
+        || path.starts_with("../")
+        || path.contains("/../")
+        || path.ends_with("/..")
+        || path.ends_with('/')
+        || path.chars().any(|ch| ch.is_control())
+    {
+        return Err(AppError::BadRequest(
+            "invalid system update backup path".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn safe_backup_join(backup_dir: &Path, relative: &str) -> Result<PathBuf> {
+    validate_backup_relative(relative)?;
+    let target = backup_dir.join(relative);
+    if !target.starts_with(backup_dir) {
+        return Err(AppError::BadRequest(
+            "system update backup path escapes backup directory".to_string(),
+        ));
+    }
+    Ok(target)
+}
+
+fn reject_symlink_parents(target: &Path) -> Result<()> {
+    let mut current = target.parent();
+    while let Some(path) = current {
+        if path == Path::new("/") {
+            return Ok(());
+        }
+        if fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(AppError::BadRequest(format!(
+                "refusing to install through symlink parent: {}",
+                path.display()
+            )));
+        }
+        current = path.parent();
+    }
+    Ok(())
+}
+
+fn temp_install_path(target: &Path) -> Result<PathBuf> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| AppError::BadRequest("install path has no parent".to_string()))?;
+    let filename = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::BadRequest("install filename is not UTF-8".to_string()))?;
+    Ok(parent.join(format!(
+        ".hardened-system-update.{}.{}.tmp",
+        std::process::id(),
+        filename
+    )))
+}
+
+fn install_file_mode(install: &str) -> u32 {
+    if install.starts_with("/etc/init.d/") || install.starts_with("/usr/bin/") {
+        0o755
+    } else {
+        0o644
+    }
+}
+
+fn backup_file_mode(path: &Path) -> Result<u32> {
+    Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn validate_metadata_url(url: &str) -> Result<()> {
     if !url.starts_with(GITHUB_SYSTEM_CHANNEL_PREFIX) || !url.ends_with("/system-latest.json") {
         return Err(AppError::Internal(
@@ -1092,5 +1630,18 @@ mod tests {
         });
 
         assert!(validate_system_manifest(&manifest, &valid_latest(), &payload_dir).is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_install_paths() {
+        assert!(validate_absolute_install_path("/boot/boot.sd").is_ok());
+        assert!(validate_absolute_install_path("/etc/kvm/system-version.json").is_ok());
+        assert!(validate_absolute_install_path("/proc/version").is_err());
+        assert!(validate_absolute_install_path("/dev/null").is_err());
+        assert!(validate_absolute_install_path("/kvmapp/server/NanoKVM-Server").is_err());
+        assert!(
+            validate_absolute_install_path("/root/.kvmcache/system-update/staged.json").is_err()
+        );
+        assert!(validate_absolute_install_path("/etc/../passwd").is_err());
     }
 }

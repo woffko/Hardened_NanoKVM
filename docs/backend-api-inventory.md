@@ -61,10 +61,10 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 |---|---|---|
 | GET | `/api/system-update/version` | Implemented read-only; reports persisted `/etc/kvm/system-version.json` when present, otherwise falls back to `/boot/ver`, kernel release, Buildroot version, hardware marker, and target `sg2002-licheervnano-sd`. |
 | GET | `/api/system-update/check` | Implemented read-only; reads GitHub `hardened-system-stable/system-latest.json`, validates metadata shape, trusted URLs, archive name, size, sha256, sha512, and reports update availability. |
-| GET | `/api/system-update/status` | Implemented read-only; reports the verified staged system bundle when one exists under the update cache. |
+| GET | `/api/system-update/status` | Implemented read-only; reports the verified staged system bundle, pending installed update marker, and latest rollback backup when present. |
 | POST | `/api/system-update/download` | Implemented staging-only; downloads the GitHub release asset, checks size, sha256, sha512, extracts it safely, verifies `manifest.json`, verifies every payload file hash/size/path, and writes `staged.json`. It does not install or reboot. |
-| POST | `/api/system-update/install` | Not implemented. |
-| POST | `/api/system-update/rollback` | Not implemented. |
+| POST | `/api/system-update/install` | Implemented guarded install; re-verifies staged archive, backs up each target file, applies payload files atomically, writes `/etc/kvm/system-version.json`, writes pending/backup markers, and returns without rebooting. |
+| POST | `/api/system-update/rollback` | Implemented manual rollback; restores files from the latest backup marker and clears the pending marker. It returns without rebooting. |
 
 ### VM, Device, And Settings
 

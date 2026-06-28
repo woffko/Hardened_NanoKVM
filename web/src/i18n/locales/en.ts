@@ -516,8 +516,23 @@ const en = {
           available: 'A base-system update is available.',
           downloading: 'Downloading and verifying system update...',
           downloadVerify: 'Download and Verify',
+          installing: 'Installing staged system update...',
+          install: 'Install',
+          installFailed: 'Install failed',
+          installConfirmTitle: 'Install system update?',
+          installConfirmDesc:
+            'This will replace base-system files from the verified bundle. Reboot will be required.',
+          installed: 'installed',
+          rebootRequired: 'Reboot is required to activate this system state.',
+          rollingBack: 'Rolling back system update...',
+          rollback: 'Rollback',
+          rollbackDone: 'Rollback prepared',
+          rollbackFailed: 'Rollback failed',
+          rollbackConfirmTitle: 'Rollback system update?',
+          rollbackConfirmDesc:
+            'This will restore files from the latest system-update backup. Reboot will be required.',
           staged: 'staged',
-          stagedDesc: 'The system update archive was downloaded and verified. Installation is not enabled yet.',
+          stagedDesc: 'The system update archive was downloaded and verified. You can install it now.',
           refresh: 'Refresh',
           releaseNotes: 'Release Notes',
           base: 'Base',
@@ -528,7 +543,9 @@ const en = {
           stagedVersion: 'Staged version',
           archive: 'Archive',
           requiredFree: 'Required free space',
-          fileCount: 'Files'
+          fileCount: 'Files',
+          pendingVersion: 'Pending version',
+          rollbackBackup: 'Rollback backup'
         },
         offline: {
           title: 'Offline Updates',

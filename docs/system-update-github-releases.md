@@ -140,16 +140,23 @@ high-risk. The first real system-update release should be a small rootfs-only
 hardening bundle, followed by a kernel bundle only after a reproducible vendor
 SDK image build is established.
 
-## Device-Side Staging
+## Device-Side Flow
 
-The Rust backend currently supports download and verification only:
+The Rust backend currently supports manual download, verification, install, and
+rollback:
 
 - `GET /api/system-update/check` validates `system-latest.json`.
 - `POST /api/system-update/download` downloads the referenced archive into the
   update cache, verifies archive sha256/sha512, extracts it with safe path
   handling, validates `manifest.json`, and verifies every payload file listed in
   the manifest.
-- `GET /api/system-update/status` reports the staged bundle from `staged.json`.
+- `GET /api/system-update/status` reports the staged bundle from `staged.json`,
+  pending update marker, and latest rollback backup.
+- `POST /api/system-update/install` re-verifies the staged archive, backs up
+  touched files under the update cache, applies payload files atomically, writes
+  `/etc/kvm/system-version.json`, and writes pending/backup markers.
+- `POST /api/system-update/rollback` restores files from the latest backup
+  marker and clears the pending marker.
 
-No system files are installed at this stage. `/boot`, `/`, kernel, modules, and
-rootfs files are left untouched until the install/rollback phase is implemented.
+The backend does not reboot automatically. Automatic boot-good confirmation and
+rollback-on-bad-boot are still TODO.

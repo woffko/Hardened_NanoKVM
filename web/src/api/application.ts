@@ -42,6 +42,24 @@ export type SystemStagedUpdate = {
   fileCount: number;
 };
 
+export type SystemPendingUpdate = {
+  version: string;
+  target: string;
+  backupId: string;
+  installedAt: number;
+  requiresReboot: boolean;
+  fileCount: number;
+};
+
+export type SystemRollbackInfo = {
+  version: string;
+  target: string;
+  backupId: string;
+  installedAt: number;
+  fileCount: number;
+  requiresReboot: boolean;
+};
+
 // get application version
 export function getVersion() {
   return http.get('/api/application/version');
@@ -69,6 +87,16 @@ export function downloadSystemUpdate() {
     url: '/api/system-update/download',
     timeout: 15 * 60 * 1000
   });
+}
+
+// install a staged base-system update
+export function installSystemUpdate() {
+  return http.post('/api/system-update/install');
+}
+
+// rollback the latest base-system update backup
+export function rollbackSystemUpdate() {
+  return http.post('/api/system-update/rollback');
 }
 
 // update application to latest version
