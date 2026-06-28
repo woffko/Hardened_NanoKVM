@@ -35,6 +35,12 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   pending/backup markers, generates an init-time rollback script, supports
   manual boot-good confirmation after basic health checks, and can
   automatically roll back a pending update when boot health fails.
+- The first signed rootfs-only smoke release is published:
+  `hardened-system-0.1.0-dev.1`, with channel metadata on
+  `hardened-system-stable`. It was validated on `10.0.87.132` for
+  check/download/install/status/confirm/rollback and reboot sanity. This uses a
+  temporary local test signing key and is not a production key-management
+  process.
 
 ## Implementation Order
 

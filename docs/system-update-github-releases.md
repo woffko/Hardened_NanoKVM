@@ -62,6 +62,17 @@ Production stable/preview channel metadata must use
 `signature_algorithm: "sha256-rsa-pkcs1-v1_5"` and a non-`unsigned`
 `signature_key_id`.
 
+## Current Smoke Release
+
+The current `hardened-system-stable` channel points to prerelease
+`hardened-system-0.1.0-dev.1`. This is a rootfs-only smoke bundle that installs
+`/etc/kvm/hardened-system-update-test` and does not require a reboot.
+
+It is intended to validate the sysupgrade plumbing, not to deliver real kernel
+or Buildroot security backports. It was signed with a temporary local test key;
+production use needs a real release-key process and public-key distribution
+plan.
+
 ## Bundle Layout
 
 System-update archives are `tar.gz` files with this layout:
