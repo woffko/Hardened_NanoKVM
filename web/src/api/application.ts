@@ -101,7 +101,11 @@ export function downloadSystemUpdate() {
 
 // install a staged base-system update
 export function installSystemUpdate() {
-  return http.post('/api/system-update/install');
+  return http.request({
+    method: 'post',
+    url: '/api/system-update/install',
+    timeout: 30 * 60 * 1000
+  });
 }
 
 // rollback the latest base-system update backup

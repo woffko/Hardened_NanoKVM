@@ -523,7 +523,7 @@ const en = {
           installConfirmDesc:
             'This will replace base-system files from the verified bundle. Reboot will be required.',
           rawInstallConfirmDesc:
-            'This verified bundle will write raw boot/rootfs images to the SD-card partitions and reboot automatically.',
+            'This verified bundle will write raw boot/rootfs images to the SD-card partitions and reboot automatically. Writing can take several minutes; keep power connected.',
           rawInstallWarning:
             'There is no automatic rollback for raw partition updates. If boot fails, recover the SD card manually.',
           installed: 'installed',

@@ -1019,6 +1019,12 @@ fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage
 fn write_raw_image_to_device(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
     let payload = safe_payload_join(payload_dir, &image.payload)?;
     let device = Path::new(&image.device);
+    tracing::warn!(
+        payload = %image.payload,
+        device = %image.device,
+        size = image.size,
+        "starting raw system image write"
+    );
     let mut source = fs::File::open(&payload)?;
     let mut target = OpenOptions::new().write(true).open(device)?;
     let written = io::copy(&mut source, &mut target)?;
@@ -1029,6 +1035,12 @@ fn write_raw_image_to_device(payload_dir: &Path, image: &SystemManifestRawImage)
         )));
     }
     target.sync_all()?;
+    tracing::warn!(
+        payload = %image.payload,
+        device = %image.device,
+        written,
+        "finished raw system image write"
+    );
     Ok(())
 }
 
