@@ -65,6 +65,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/vm/mdns/disable", post(vm::disable_mdns))
         .route("/api/vm/system/reboot", post(vm::reboot))
         .route("/api/vm/terminal", get(vm::terminal))
+        .route("/api/vm/terminal/unlock", post(vm::unlock_terminal))
         .route(
             "/api/vm/terminal/enabled",
             get(vm::get_terminal_enabled).post(vm::set_terminal_enabled),

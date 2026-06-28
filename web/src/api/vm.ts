@@ -130,6 +130,11 @@ export function setTerminalEnabled(enabled: boolean) {
   return http.post('/api/vm/terminal/enabled', { enabled });
 }
 
+// unlock web terminal before opening shell
+export function unlockTerminal(username: string, password: string) {
+  return http.post('/api/vm/terminal/unlock', { username, password });
+}
+
 // get session lock duration
 export function getSessionLock() {
   return http.get('/api/vm/session-lock');

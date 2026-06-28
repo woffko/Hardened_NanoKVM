@@ -1,7 +1,7 @@
 use axum::{
     Extension, Json,
     extract::{
-        State,
+        ConnectInfo, Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
@@ -26,7 +26,7 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     ptr,
-    time::Duration,
+    time::{Duration, Instant as StdInstant},
 };
 use tokio::{sync::mpsc, task, time};
 use tracing::{debug, info, warn};
@@ -34,6 +34,7 @@ use tracing::{debug, info, warn};
 use crate::{
     AppError, Result,
     api::stream,
+    auth::compat_crypto::decode_frontend_password,
     config::Config,
     error::ApiResponse,
     ffi::kvm,
@@ -73,6 +74,7 @@ const TLS_KEY_FILE: &str = "/etc/kvm/server.key";
 const TERMINAL_MAX_MESSAGE_SIZE: usize = 1024;
 const TERMINAL_DEFAULT_ROWS: u16 = 24;
 const TERMINAL_DEFAULT_COLS: u16 = 80;
+const TERMINAL_TICKET_TTL_SECS: u64 = 120;
 
 #[derive(Debug, Serialize)]
 pub struct IpInfo {
@@ -145,6 +147,24 @@ pub struct SetTlsReq {
 #[derive(Debug, Deserialize)]
 pub struct SetTerminalReq {
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TerminalUnlockReq {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TerminalUnlockRsp {
+    pub ticket: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TerminalConnectQuery {
+    pub ticket: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,6 +534,8 @@ pub async fn reboot() -> Result<impl IntoResponse> {
 
 pub async fn terminal(
     State(state): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    Query(query): Query<TerminalConnectQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
@@ -523,14 +545,23 @@ pub async fn terminal(
     if !validate_ws_origin(&headers, &state.config) {
         return Err(AppError::Forbidden("invalid websocket origin".to_string()));
     }
+    if !state
+        .terminal_tickets
+        .consume(&query.ticket, &session)
+        .await
+    {
+        return Err(AppError::Forbidden(
+            "terminal unlock is required".to_string(),
+        ));
+    }
 
     Ok(ws
         .max_message_size(TERMINAL_MAX_MESSAGE_SIZE)
-        .on_upgrade(handle_terminal_socket)
+        .on_upgrade(move |socket| handle_terminal_socket(socket, session.expires_at))
         .into_response())
 }
 
-async fn handle_terminal_socket(mut socket: WebSocket) {
+async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
     let terminal = match spawn_terminal_pty() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -573,9 +604,18 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     debug!("terminal websocket connected");
+    let session_deadline = time::sleep(expires_at.saturating_duration_since(StdInstant::now()));
+    tokio::pin!(session_deadline);
 
     loop {
         tokio::select! {
+            _ = &mut session_deadline => {
+                let _ = ws_tx.send(Message::Close(Some(CloseFrame {
+                    code: 1008,
+                    reason: "terminal session expired".into(),
+                }))).await;
+                break;
+            }
             data = pty_rx.recv() => {
                 let Some(data) = data else {
                     break;
@@ -621,6 +661,56 @@ async fn handle_terminal_socket(mut socket: WebSocket) {
     let _ = task::spawn_blocking(move || cleanup_terminal_process_blocking(child)).await;
     let _ = reader_task.await;
     debug!("terminal websocket disconnected");
+}
+
+pub async fn unlock_terminal(
+    State(state): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    ConnectInfo(addr): ConnectInfo<tls::ClientAddr>,
+    Json(req): Json<TerminalUnlockReq>,
+) -> Result<impl IntoResponse> {
+    if state.config.auth_disabled() || !state.terminal_enabled() {
+        return Err(AppError::Forbidden("terminal is disabled".to_string()));
+    }
+    if req.username != session.username {
+        return Err(AppError::InvalidCredentials);
+    }
+
+    let source_ip = addr.0.ip().to_string();
+    let limiter_username = format!("terminal:{}", session.username);
+    {
+        let mut limiter = state.login_limiter.write().await;
+        if limiter.check(&source_ip, &limiter_username) {
+            return Err(AppError::RateLimited(
+                "terminal unlock locked due to too many failed attempts".to_string(),
+            ));
+        }
+    }
+
+    let password = decode_frontend_password(&req.password)?;
+    if !state.accounts.verify(&session.username, &password)? {
+        let mut limiter = state.login_limiter.write().await;
+        let locked = limiter.record_failure(&source_ip, &limiter_username);
+        if locked {
+            warn!(source_ip, username = %session.username, "terminal unlock lockout threshold reached");
+        }
+        return Err(AppError::InvalidCredentials);
+    }
+
+    state
+        .login_limiter
+        .write()
+        .await
+        .record_success(&source_ip, &limiter_username);
+    let ticket = state
+        .terminal_tickets
+        .issue(&session, TERMINAL_TICKET_TTL_SECS)
+        .await;
+
+    Ok(Json(ApiResponse::ok(TerminalUnlockRsp {
+        ticket: ticket.token,
+        expires_at: ticket.expires_at_unix,
+    })))
 }
 
 pub async fn get_terminal_enabled(State(state): State<AppState>) -> Result<impl IntoResponse> {
