@@ -45,6 +45,8 @@ const SYSTEM_BACKUP_RECORD: &str = "backup.json";
 const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
 const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
 const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
+const SYSTEM_ROLLBACK_SCRIPT_FILE: &str = "/etc/kvm/system-update-rollback.sh";
+const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-attempted";
 
 static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
@@ -733,8 +735,11 @@ fn install_staged_update(stage_dir: &Path) -> Result<SystemPendingUpdate> {
             install_payload_file(&payload_dir, file)?;
         }
         write_installed_system_version(&manifest)?;
-        write_pending_update(&pending_update(&install_record))?;
         write_last_backup_record(&install_record)?;
+        write_rollback_script(stage_dir, &install_record)?;
+        remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_ATTEMPT_FILE))?;
+        remove_file_if_exists(Path::new(SYSTEM_BOOT_GOOD_FILE))?;
+        write_pending_update(&pending_update(&install_record))?;
         Ok(())
     })();
 
@@ -754,6 +759,9 @@ fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
         .ok_or_else(|| AppError::NotFound("no system update backup found".to_string()))?;
     rollback_from_record(stage_dir, &record)?;
     remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+    remove_file_if_exists(Path::new(SYSTEM_BOOT_GOOD_FILE))?;
+    remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE))?;
+    remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_ATTEMPT_FILE))?;
     Ok(rollback_info(&record))
 }
 
@@ -1359,6 +1367,68 @@ fn write_last_backup_record(record: &SystemInstallRecord) -> Result<()> {
     atomic_write_file(Path::new(SYSTEM_LAST_BACKUP_FILE), &data, 0o600)
 }
 
+fn write_rollback_script(stage_dir: &Path, record: &SystemInstallRecord) -> Result<()> {
+    let script = rollback_script_for_record(stage_dir, record)?;
+    atomic_write_file(
+        Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE),
+        script.as_bytes(),
+        0o700,
+    )
+}
+
+fn rollback_script_for_record(stage_dir: &Path, record: &SystemInstallRecord) -> Result<String> {
+    validate_install_record(record)?;
+    let backup_dir = backup_dir_for(stage_dir, &record.backup_id);
+    let mut script = String::from(
+        "#!/bin/sh\n\
+set -eu\n\
+LOG=/tmp/system-update-watchdog.log\n\
+echo \"$(date '+%Y-%m-%d %H:%M:%S') automatic system-update rollback started\" >> \"$LOG\"\n",
+    );
+
+    for file in record.files.iter().rev() {
+        let install = validate_absolute_install_path(&file.install)?;
+        let install_parent = install.parent().ok_or_else(|| {
+            AppError::Internal("system update install path has no parent".to_string())
+        })?;
+        script.push_str(&format!("mkdir -p {}\n", shell_quote_path(install_parent)?));
+        if file.existed {
+            let backup = safe_backup_join(&backup_dir, &file.backup)?;
+            if !backup.is_file() {
+                return Err(AppError::Internal(format!(
+                    "system update backup file is missing: {}",
+                    file.backup
+                )));
+            }
+            script.push_str(&format!(
+                "cp -p {} {}\n",
+                shell_quote_path(&backup)?,
+                shell_quote_path(&install)?
+            ));
+        } else {
+            script.push_str(&format!("rm -f {}\n", shell_quote_path(&install)?));
+        }
+    }
+
+    script.push_str(&format!(
+        "rm -f {} {} {}\n\
+sync\n\
+echo \"$(date '+%Y-%m-%d %H:%M:%S') automatic system-update rollback finished\" >> \"$LOG\"\n",
+        shell_quote_path(Path::new(SYSTEM_PENDING_FILE))?,
+        shell_quote_path(Path::new(SYSTEM_BOOT_GOOD_FILE))?,
+        shell_quote_path(Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE))?,
+    ));
+
+    Ok(script)
+}
+
+fn shell_quote_path(path: &Path) -> Result<String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))?;
+    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+}
+
 fn write_backup_record(backup_dir: &Path, record: &SystemInstallRecord) -> Result<()> {
     let data = serde_json::to_vec_pretty(record)
         .map_err(|err| AppError::Internal(format!("encode system update backup: {err}")))?;
@@ -1729,5 +1799,61 @@ mod tests {
             validate_absolute_install_path("/root/.kvmcache/system-update/staged.json").is_err()
         );
         assert!(validate_absolute_install_path("/etc/../passwd").is_err());
+    }
+
+    #[test]
+    fn rollback_script_restores_files_in_reverse_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage_dir = temp.path().join("system-update");
+        let backup_dir = stage_dir.join("backups/0.1.0-123/etc");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::write(backup_dir.join("config"), b"old config").unwrap();
+
+        let record = SystemInstallRecord {
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            backup_id: "0.1.0-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            files: vec![
+                SystemBackupFile {
+                    install: "/etc/config".to_string(),
+                    backup: "etc/config".to_string(),
+                    existed: true,
+                },
+                SystemBackupFile {
+                    install: "/boot/new.bin".to_string(),
+                    backup: "boot/new.bin".to_string(),
+                    existed: false,
+                },
+            ],
+        };
+
+        let script = rollback_script_for_record(&stage_dir, &record).unwrap();
+        let remove_new = script.find("rm -f '/boot/new.bin'").unwrap();
+        let restore_config = script.find("cp -p ").unwrap();
+
+        assert!(remove_new < restore_config);
+        assert!(script.contains("'/etc/kvm/system-update-pending.json'"));
+        assert!(script.contains("'/etc/kvm/system-update-rollback.sh'"));
+    }
+
+    #[test]
+    fn rollback_script_rejects_missing_backup_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let record = SystemInstallRecord {
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            backup_id: "0.1.0-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            files: vec![SystemBackupFile {
+                install: "/etc/config".to_string(),
+                backup: "etc/config".to_string(),
+                existed: true,
+            }],
+        };
+
+        assert!(rollback_script_for_record(temp.path(), &record).is_err());
     }
 }

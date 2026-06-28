@@ -10,6 +10,13 @@ disable_stale_autostarts() {
 
 WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
 H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
+SYSTEM_UPDATE_WATCHDOG_PID_FILE=/tmp/system-update-watchdog.pid
+SYSTEM_UPDATE_LOG=/tmp/system-update-watchdog.log
+SYSTEM_VERSION_FILE=/etc/kvm/system-version.json
+SYSTEM_PENDING_FILE=/etc/kvm/system-update-pending.json
+SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
+SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
+SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
 
 wait_process_exit() {
     name="$1"
@@ -21,12 +28,21 @@ wait_process_exit() {
     sleep 1
 }
 
-stop_watchdog() {
-    if [ -f "$WATCHDOG_PID_FILE" ]; then
-        pid="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)"
+stop_pid_file() {
+    pid_file="$1"
+    if [ -f "$pid_file" ]; then
+        pid="$(cat "$pid_file" 2>/dev/null)"
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
-        rm -f "$WATCHDOG_PID_FILE"
+        rm -f "$pid_file"
     fi
+}
+
+stop_watchdog() {
+    stop_pid_file "$WATCHDOG_PID_FILE"
+}
+
+stop_system_update_watchdog() {
+    stop_pid_file "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
 }
 
 cleanup_server_backups() {
@@ -63,11 +79,12 @@ start_server_runtime() {
 
 health_check() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsS --max-time 3 http://127.0.0.1/api/health >/dev/null 2>&1 && return 0
-        curl -kfsS --max-time 3 https://127.0.0.1/api/health >/dev/null 2>&1 && return 0
+        curl -kfsS --max-time 3 https://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+        curl -fsS --max-time 3 http://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -q -T 3 -O - http://127.0.0.1/api/health >/dev/null 2>&1 && return 0
+        wget --no-check-certificate -q -T 3 -O - https://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+        wget -q -T 3 -O - http://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
     fi
     return 1
 }
@@ -116,7 +133,83 @@ start_watchdog() {
     echo $! > "$WATCHDOG_PID_FILE"
 }
 
+json_string_value() {
+    file="$1"
+    key="$2"
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | head -n 1
+}
+
+system_update_version_matches() {
+    pending_version="$(json_string_value "$SYSTEM_PENDING_FILE" version)"
+    pending_target="$(json_string_value "$SYSTEM_PENDING_FILE" target)"
+    current_version="$(json_string_value "$SYSTEM_VERSION_FILE" version)"
+    current_target="$(json_string_value "$SYSTEM_VERSION_FILE" target)"
+
+    [ -n "$pending_version" ] && [ "$pending_version" = "$current_version" ] || return 1
+    [ -n "$pending_target" ] && [ "$pending_target" = "$current_target" ] || return 1
+    return 0
+}
+
+system_update_boot_healthy() {
+    [ -f "$SYSTEM_PENDING_FILE" ] || return 1
+    [ -f /boot/ver ] || return 1
+    [ -f /kvmapp/server/web/index.html ] || return 1
+    system_update_version_matches || return 1
+    health_check || return 1
+    return 0
+}
+
+run_system_update_rollback() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') system update boot health failed; rolling back" >> "$SYSTEM_UPDATE_LOG"
+    printf '%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" > "$SYSTEM_ROLLBACK_ATTEMPT_FILE"
+
+    if [ ! -x "$SYSTEM_ROLLBACK_SCRIPT" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') rollback script is missing or not executable: $SYSTEM_ROLLBACK_SCRIPT" >> "$SYSTEM_UPDATE_LOG"
+        return 1
+    fi
+
+    if sh "$SYSTEM_ROLLBACK_SCRIPT" >> "$SYSTEM_UPDATE_LOG" 2>&1; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') rebooting after automatic system update rollback" >> "$SYSTEM_UPDATE_LOG"
+        sync
+        reboot -f 2>/dev/null || reboot
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') automatic system update rollback failed" >> "$SYSTEM_UPDATE_LOG"
+        return 1
+    fi
+}
+
+start_system_update_watchdog() {
+    [ -f "$SYSTEM_PENDING_FILE" ] || return
+    [ -f "$SYSTEM_BOOT_GOOD_FILE" ] && return
+    [ -f "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+
+    (
+        echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update detected; waiting for boot health" >> "$SYSTEM_UPDATE_LOG"
+
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if [ ! -f "$SYSTEM_PENDING_FILE" ] || [ -f "$SYSTEM_BOOT_GOOD_FILE" ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update was cleared" >> "$SYSTEM_UPDATE_LOG"
+                exit 0
+            fi
+            if system_update_boot_healthy; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update boot health is OK" >> "$SYSTEM_UPDATE_LOG"
+                exit 0
+            fi
+            sleep 10
+        done
+
+        if [ -f "$SYSTEM_ROLLBACK_ATTEMPT_FILE" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') automatic system update rollback already attempted; leaving device for manual recovery" >> "$SYSTEM_UPDATE_LOG"
+            exit 0
+        fi
+
+        run_system_update_rollback
+    ) &
+    echo $! > "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
+}
+
 stop_runtime() {
+    stop_system_update_watchdog
     stop_watchdog
     killall kvm_system 2>/dev/null
     killall NanoKVM-Server 2>/dev/null
@@ -134,6 +227,7 @@ start_runtime() {
 
     start_server_runtime
     start_watchdog
+    start_system_update_watchdog
 }
 
 case "$1" in

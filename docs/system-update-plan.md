@@ -32,9 +32,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   verifies archive sha256/sha512, safely extracts it, validates `manifest.json`,
   verifies every payload file hash/size/path, backs up touched files, applies
   payload files atomically, writes `/etc/kvm/system-version.json`, records
-  pending/backup markers, and supports manual boot-good confirmation after
-  basic health checks. Automatic rollback after a bad boot is not implemented
-  yet.
+  pending/backup markers, generates an init-time rollback script, supports
+  manual boot-good confirmation after basic health checks, and can
+  automatically roll back a pending update when boot health fails.
 
 ## Implementation Order
 
@@ -84,18 +84,20 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - back up touched files under
      `/root/.kvmcache/system-update/backups/<id>` (implemented);
    - write a pending-update marker under `/etc/kvm` (implemented);
+   - generate `/etc/kvm/system-update-rollback.sh` for boot-time recovery
+     (implemented);
    - install only after all checks pass (implemented);
    - reboot into the updated system (manual through the existing reboot API/UI).
 
 7. Add boot health confirmation:
    - Rust backend started;
    - HTTP/HTTPS reachable;
-   - video pipeline responds;
-   - HID paths exist;
-   - network is alive;
-   - after success, write `boot-good` (partially implemented with backend,
-     version, boot marker, and web root checks);
-   - otherwise rollback on next boot (not implemented).
+   - persisted system version matches the pending update;
+   - boot marker exists;
+   - web root exists;
+   - after success, write `boot-good` manually from GUI/API;
+   - otherwise `S95nanokvm` executes `/etc/kvm/system-update-rollback.sh` and
+     reboots after rollback (implemented).
 
 8. Add GUI support under Check for Updates:
    - separate `Application Update` and `System Update` sections;
@@ -119,8 +121,10 @@ The current helper scripts are:
 - `scripts/verify-system-update-metadata.sh`
 
 The Rust backend can download, verify, install, manually confirm boot-good, and
-manually roll back these archives. The installer does not reboot automatically
-and does not yet perform automatic rollback after a bad boot.
+manually roll back these archives. The installer does not reboot automatically.
+If a rebooted pending update fails local boot health checks, `S95nanokvm`
+executes the generated rollback script and reboots after restoring the previous
+files.
 
 ## Required Test Sequence
 

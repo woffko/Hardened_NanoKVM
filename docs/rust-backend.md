@@ -156,8 +156,10 @@ The generated image installs:
 - Signed update verification is not finished yet. Current beta updates trust
   the Hardened GitHub release metadata over HTTPS plus sha512 verification of
   the downloaded `kvmapp` archive.
-- Automatic rollback after a bad boot is not implemented yet. Signed system
-  metadata is still TODO. See `docs/system-update-plan.md`.
+- Signed system-update metadata enforcement is still TODO. The system-update
+  installer now generates an init-time rollback script, and `S95nanokvm` runs a
+  boot watchdog that rolls back pending system updates when local health checks
+  fail after boot.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. New
   SD-card flashes use the first-boot web setup screen instead. Lost credentials
   are recovered by reflashing the SD card.
