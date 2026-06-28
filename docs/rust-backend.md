@@ -127,6 +127,10 @@ The generated image installs:
   `/api/application/version` reads `latest.json`, `/api/application/update`
   downloads the release archive, verifies sha512, installs it under `/kvmapp`,
   and restarts `S95nanokvm`.
+- Read-only system-update version/check routes:
+  `/api/system-update/version` reports the current base-system identity and
+  `/api/system-update/check` validates GitHub-hosted `system-latest.json`
+  metadata without downloading or installing the system archive.
 - UI branding for Hardened NanoKVM and version `beta - 1.0.1`.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Web UI backend switch in Settings > Device > Advanced.
@@ -138,8 +142,9 @@ The generated image installs:
 - Signed update verification is not finished yet. Current beta updates trust
   the Hardened GitHub release metadata over HTTPS plus sha512 verification of
   the downloaded `kvmapp` archive.
-- GUI system updates for kernel, dtb, modules, boot files, or rootfs files are
-  not implemented yet. See `docs/system-update-plan.md`.
+- System-update download/install/rollback for kernel, dtb, modules, boot files,
+  or rootfs files is not implemented yet. The GUI can display current/latest
+  system versions only. See `docs/system-update-plan.md`.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. New
   SD-card flashes use the first-boot web setup screen instead. Lost credentials
   are recovered by reflashing the SD card.

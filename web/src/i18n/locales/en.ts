@@ -505,6 +505,22 @@ const en = {
         previewDesc: 'Get early access to new features and improvements',
         previewTip:
           'Please be aware that preview releases may contain bugs or incomplete functionality!',
+        application: {
+          title: 'Application Update'
+        },
+        system: {
+          title: 'System Update',
+          queryFailed: 'Get system version failed',
+          isLatest: 'The base system is up to date.',
+          available: 'A base-system update is available.',
+          refresh: 'Refresh',
+          releaseNotes: 'Release Notes',
+          base: 'Base',
+          kernel: 'Kernel',
+          rootfs: 'Rootfs',
+          target: 'Target',
+          latestTarget: 'Latest target'
+        },
         offline: {
           title: 'Offline Updates',
           desc: 'Update through local installation package',

@@ -9,7 +9,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     api::{
         account, application, autostart, compatibility, download, hid, network, picoclaw, script,
-        storage, stream, tailscale, vm, webrtc_stream,
+        storage, stream, system_update, tailscale, vm, webrtc_stream,
     },
     http::middleware::{picoclaw_internal, protected},
     security::headers::security_headers,
@@ -36,6 +36,11 @@ pub fn build(state: AppState) -> Router {
             "/api/application/preview",
             get(application::get_preview).post(application::set_preview),
         )
+        .route(
+            "/api/system-update/version",
+            get(system_update::get_version),
+        )
+        .route("/api/system-update/check", get(system_update::check))
         .route("/api/vm/info", get(vm::get_info))
         .route("/api/vm/hardware", get(vm::get_hardware))
         .route(

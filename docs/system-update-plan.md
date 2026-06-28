@@ -26,8 +26,10 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
   vendor SDK is not yet established.
-- GUI system updates for kernel, dtb, modules, boot files, or rootfs files are
-  not implemented yet.
+- Read-only system-update version/check is implemented in the Rust backend and
+  GUI. It displays the current system baseline and validates GitHub
+  `system-latest.json` metadata. Download, install, rollback, and boot health
+  checks are not implemented yet.
 
 ## Implementation Order
 
@@ -59,8 +61,8 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - keep unsigned system updates blocked except for explicit development mode.
 
 5. Add Rust backend API:
-   - `GET /api/system-update/version`;
-   - `GET /api/system-update/check`;
+   - `GET /api/system-update/version` (implemented read-only);
+   - `GET /api/system-update/check` (implemented read-only);
    - `POST /api/system-update/download`;
    - `POST /api/system-update/install`;
    - `GET /api/system-update/status`;

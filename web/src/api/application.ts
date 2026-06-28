@@ -2,9 +2,44 @@ import { http } from '@/lib/http.ts';
 import { getCsrfToken } from '@/lib/cookie.ts';
 import { getBaseUrl } from '@/lib/service.ts';
 
+export type SystemVersion = {
+  version: string;
+  target: string;
+  baseVersion: string;
+  kernelVersion: string;
+  rootfsVersion: string;
+  model: string;
+  hardwareVersion: string;
+  source: string;
+};
+
+export type SystemLatest = {
+  kind: string;
+  format: number;
+  channel: string;
+  version: string;
+  target: string;
+  name: string;
+  sha256: string;
+  sha512: string;
+  size: number;
+  url: string;
+  releaseNotesUrl: string;
+};
+
 // get application version
 export function getVersion() {
   return http.get('/api/application/version');
+}
+
+// get current base-system version
+export function getSystemVersion() {
+  return http.get('/api/system-update/version');
+}
+
+// check for base-system updates
+export function checkSystemUpdate() {
+  return http.get('/api/system-update/check');
 }
 
 // update application to latest version

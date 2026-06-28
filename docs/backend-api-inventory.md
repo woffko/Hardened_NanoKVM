@@ -55,6 +55,17 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
 | GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
 
+### System Updates
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/system-update/version` | Implemented read-only; reports persisted `/etc/kvm/system-version.json` when present, otherwise falls back to `/boot/ver`, kernel release, Buildroot version, hardware marker, and target `sg2002-licheervnano-sd`. |
+| GET | `/api/system-update/check` | Implemented read-only; reads GitHub `hardened-system-stable/system-latest.json`, validates metadata shape, trusted URLs, archive name, size, sha256, sha512, and reports update availability. |
+| POST | `/api/system-update/download` | Not implemented. |
+| POST | `/api/system-update/install` | Not implemented. |
+| GET | `/api/system-update/status` | Not implemented. |
+| POST | `/api/system-update/rollback` | Not implemented. |
+
 ### VM, Device, And Settings
 
 | Method | Path | Rust Status |
