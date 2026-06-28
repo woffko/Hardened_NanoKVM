@@ -69,6 +69,18 @@ install_path_for_payload() {
   esac
 }
 
+validate_install_path() {
+  path="$1"
+  case "$path" in
+    /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/* | \
+      /tmp | /tmp/* | /data | /data/* | /kvmapp | /kvmapp/* | \
+      /root/.kvmcache | /root/.kvmcache/*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 if [ "$#" -ne 4 ]; then
   usage
 fi
@@ -144,6 +156,7 @@ MANIFEST="$STAGE_DIR/manifest.json"
     rel="${file#$STAGE_DIR/payload/}"
     safe_payload_path "$rel" || die "unsafe payload path: $rel"
     install_path=$(install_path_for_payload "$rel")
+    validate_install_path "$install_path" || die "unsafe install path: $install_path"
     size=$(wc -c < "$file" | tr -d ' ')
     sha256=$(sha256sum "$file" | awk '{print $1}')
 

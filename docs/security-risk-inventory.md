@@ -56,7 +56,9 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
   after validation; signed metadata is still pending.
 - Future system update cache: planned under `/data/update-cache`, with backups
   under `/data/system-backups`. System-update archives are constrained to
-  `payload/boot/*` and `payload/rootfs/*` by the packaging contract.
+  `payload/boot/*` and `payload/rootfs/*` by the packaging contract, and
+  runtime/device/cache roots such as `/dev`, `/proc`, `/sys`, `/run`, `/tmp`,
+  `/data`, `/kvmapp`, and `/root/.kvmcache` are rejected.
 - Image directory: `/data`, must use resolved containment and reject symlinks.
 - Script directory: `/etc/kvm/scripts`, must use basename inventory and argv execution only.
 - Autostart directory: `/etc/kvm/autostart`, must reject slash-bearing names and traversal.

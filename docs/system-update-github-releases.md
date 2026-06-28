@@ -101,6 +101,9 @@ The backend must install only known paths:
 
 - `payload/boot/<file>` maps to `/boot/<file>`.
 - `payload/rootfs/<path>` maps to `/<path>`.
+- The packager and backend reject installs to runtime, device, cache, and
+  application roots: `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`,
+  `/kvmapp`, and `/root/.kvmcache`.
 
 The archive must not contain arbitrary scripts. Installer behavior is fixed in
 the Rust backend: verify, stage, back up, install known paths, mark pending,

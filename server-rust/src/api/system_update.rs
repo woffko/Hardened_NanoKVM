@@ -1260,6 +1260,7 @@ fn validate_install_path(install: &str, payload: &str) -> Result<()> {
             "system update install path mismatch for {payload}"
         )));
     }
+    validate_absolute_install_path(install)?;
     Ok(())
 }
 
@@ -1642,20 +1643,34 @@ fn validate_absolute_install_path(install: &str) -> Result<PathBuf> {
         || install.ends_with("/..")
         || install.ends_with('/')
         || install.chars().any(|ch| ch.is_control())
-        || install.starts_with("/proc/")
-        || install.starts_with("/sys/")
-        || install.starts_with("/dev/")
-        || install.starts_with("/run/")
-        || install.starts_with("/tmp/")
-        || install.starts_with("/data/")
-        || install.starts_with("/kvmapp/")
-        || install.starts_with("/root/.kvmcache/")
+        || blocked_system_update_install_root(install)
     {
         return Err(AppError::BadRequest(format!(
             "invalid system update install path: {install}"
         )));
     }
     Ok(PathBuf::from(install))
+}
+
+fn blocked_system_update_install_root(install: &str) -> bool {
+    const BLOCKED_ROOTS: &[&str] = &[
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/tmp",
+        "/data",
+        "/kvmapp",
+        "/root/.kvmcache",
+    ];
+
+    BLOCKED_ROOTS.iter().any(|root| {
+        install == *root
+            || install
+                .strip_prefix(root)
+                .map(|rest| rest.starts_with('/'))
+                .unwrap_or(false)
+    })
 }
 
 fn backup_relative_for_install(install: &str) -> Result<String> {
@@ -2017,13 +2032,40 @@ mod tests {
     fn rejects_unsafe_install_paths() {
         assert!(validate_absolute_install_path("/boot/boot.sd").is_ok());
         assert!(validate_absolute_install_path("/etc/kvm/system-version.json").is_ok());
+        assert!(validate_absolute_install_path("/proc").is_err());
         assert!(validate_absolute_install_path("/proc/version").is_err());
+        assert!(validate_absolute_install_path("/sys").is_err());
+        assert!(validate_absolute_install_path("/dev").is_err());
         assert!(validate_absolute_install_path("/dev/null").is_err());
+        assert!(validate_absolute_install_path("/run").is_err());
+        assert!(validate_absolute_install_path("/tmp").is_err());
+        assert!(validate_absolute_install_path("/data").is_err());
+        assert!(validate_absolute_install_path("/kvmapp").is_err());
         assert!(validate_absolute_install_path("/kvmapp/server/NanoKVM-Server").is_err());
+        assert!(validate_absolute_install_path("/root/.kvmcache").is_err());
         assert!(
             validate_absolute_install_path("/root/.kvmcache/system-update/staged.json").is_err()
         );
         assert!(validate_absolute_install_path("/etc/../passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_manifest_installing_to_blocked_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload_dir = temp.path().join("payload");
+        let file = payload_dir.join("rootfs/dev");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"not a device").unwrap();
+        let hashes = hash_file(&file).unwrap();
+
+        let manifest = valid_manifest(SystemManifestFile {
+            payload: "rootfs/dev".to_string(),
+            install: "/dev".to_string(),
+            size: fs::metadata(&file).unwrap().len(),
+            sha256: hashes.sha256,
+        });
+
+        assert!(validate_system_manifest(&manifest, &valid_latest(), &payload_dir).is_err());
     }
 
     #[test]
