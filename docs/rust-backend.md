@@ -158,8 +158,11 @@ The generated image installs:
   the downloaded `kvmapp` archive.
 - Signed system-update metadata enforcement is implemented. Stable/preview
   metadata must verify against `paths.system_update_public_key`; unsigned
-  metadata is accepted only when `security.allow_unsigned_updates=true`. The
-  system-update installer also generates an init-time rollback script, and
+  metadata is accepted only when `security.allow_unsigned_updates=true`.
+  `S95nanokvm` installs the bundled default public key from
+  `/kvmapp/system/keys/system-update-signing.pub.pem` into `/etc/kvm` before
+  the backend starts. The system-update installer also generates an init-time
+  rollback script, and
   `S95nanokvm` runs a boot watchdog that rolls back pending system updates when
   local health checks fail after boot.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. New

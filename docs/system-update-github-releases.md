@@ -55,6 +55,13 @@ public verification key must be installed at
 `/etc/kvm/system-update-signing.pub.pem` unless `paths.system_update_public_key`
 overrides it in `server.yaml`.
 
+`S95nanokvm` installs the bundled key from
+`/kvmapp/system/keys/system-update-signing.pub.pem` into the default `/etc/kvm`
+path on service start. Key rotation for devices using the default path is
+therefore a `kvmapp` update followed by publishing channel metadata signed with
+the new private key. Devices that set `paths.system_update_public_key` to a
+custom path are responsible for provisioning that key themselves.
+
 Unsigned channel metadata is accepted only for explicit development devices with
 `security.allow_unsigned_updates: true`. In that case `system-latest.json` must
 carry `signature_algorithm: "unsigned"` and `signature_key_id: "unsigned"`.
@@ -70,8 +77,10 @@ The current `hardened-system-stable` channel points to prerelease
 
 It is intended to validate the sysupgrade plumbing, not to deliver real kernel
 or Buildroot security backports. It was signed with a temporary local test key;
-production use needs a real release-key process and public-key distribution
-plan.
+the matching public key is currently bundled under
+`kvmapp/system/keys/system-update-signing.pub.pem`. Production use still needs a
+real release-key custody process before this channel should carry real
+kernel/rootfs security backports.
 
 ## Bundle Layout
 

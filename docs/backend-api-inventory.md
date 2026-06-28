@@ -184,7 +184,9 @@ Rust hardening fields under `security` include `require_csrf`,
 
 Rust-only path fields include `paths.system_update_public_key`, defaulting to
 `/etc/kvm/system-update-signing.pub.pem`, for detached system-update metadata
-signature verification.
+signature verification. The default key is synchronized from
+`/kvmapp/system/keys/system-update-signing.pub.pem` by `S95nanokvm` on service
+start.
 
 ## External Components To Preserve
 

@@ -39,8 +39,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `hardened-system-0.1.0-dev.1`, with channel metadata on
   `hardened-system-stable`. It was validated on `10.0.87.132` for
   check/download/install/status/confirm/rollback and reboot sanity. This uses a
-  temporary local test signing key and is not a production key-management
-  process.
+  temporary local test signing key. Its public key is bundled in `kvmapp` and
+  installed to `/etc/kvm/system-update-signing.pub.pem` on service start, but
+  this is still not a production private-key custody process.
 
 ## Implementation Order
 
