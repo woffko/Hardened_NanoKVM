@@ -60,6 +60,7 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - bootstrap the pinned SDK checkout with `make vendor-sdk`;
    - run the stock build with `make vendor-sdk-stock` so Buildroot gets a
      Linux-only PATH on WSL hosts;
+   - inspect the generated `upgrade.zip` with `make vendor-sdk-inspect`;
    - build a stock image first, without Hardened changes;
    - boot it on test hardware;
    - verify video, HID, storage, network, SSH, web UI, and backend switching;

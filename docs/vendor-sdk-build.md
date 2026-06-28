@@ -131,6 +131,32 @@ Artifacts under
 This is still a stock SDK artifact. Do not add Hardened files until it boots on
 test hardware and passes the baseline checks below.
 
+## Vendor Upgrade Inspection
+
+After a successful stock build, validate the vendor OTA zip without extracting
+or flashing it:
+
+```sh
+make vendor-sdk-inspect
+```
+
+This writes `build/vendor-upgrade-inspection.json`. The inspection tool parses
+`partition_sd.xml` with an XML parser, verifies `META/metadata.txt` MD5 hashes,
+computes SHA256 for every zip entry, and records the BOOT/ROOTFS partition image
+sizes. It is intentionally read-only and does not enable raw partition writes in
+the backend.
+
+For the first successful stock output, the vendor OTA layout is:
+
+```text
+BOOT   80,960 KiB  boot.sd
+ROOTFS 1,581,056 KiB  rootfs.sd
+```
+
+The generated `upgrade.zip` contains raw partition images plus vendor recovery
+helpers. Treat it as an input artifact for analysis until stock-image boot
+validation and rollback strategy are complete.
+
 ## Baseline Checks
 
 On a stock SDK image, verify at minimum:
