@@ -63,9 +63,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - sign channel metadata with a project release key (tooling implemented with
      detached OpenSSL sha256/RSA signatures);
    - verify metadata signatures on device before trusting `system-latest.json`
-     (backend enforcement TODO);
+     (backend enforcement implemented);
    - keep unsigned system updates blocked except for explicit development mode
-     (TODO).
+     through `security.allow_unsigned_updates` (implemented).
 
 5. Add Rust backend API:
    - `GET /api/system-update/version` (implemented read-only);
@@ -112,7 +112,9 @@ The initial release contract is documented in
 Versioned system-update releases carry immutable archives named
 `hardened-nanokvm-system-<version>.tar.gz`. Fixed channel releases carry
 `system-latest.json`, which points to the versioned archive and includes sha256,
-sha512, target hardware, size, and release notes URL.
+sha512, target hardware, size, release notes URL, signature algorithm, and
+signature key id. Signed channel releases must also carry
+`system-latest.json.sig`.
 
 The current helper scripts are:
 
@@ -121,10 +123,12 @@ The current helper scripts are:
 - `scripts/verify-system-update-metadata.sh`
 
 The Rust backend can download, verify, install, manually confirm boot-good, and
-manually roll back these archives. The installer does not reboot automatically.
-If a rebooted pending update fails local boot health checks, `S95nanokvm`
-executes the generated rollback script and reboots after restoring the previous
-files.
+manually roll back these archives. It enforces signed channel metadata by
+default using `paths.system_update_public_key`, with unsigned metadata accepted
+only when `security.allow_unsigned_updates=true`. The installer does not reboot
+automatically. If a rebooted pending update fails local boot health checks,
+`S95nanokvm` executes the generated rollback script and reboots after restoring
+the previous files.
 
 ## Required Test Sequence
 

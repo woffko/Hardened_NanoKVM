@@ -18,9 +18,15 @@ SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 SHA512=$(openssl dgst -sha512 -binary "$ARCHIVE" | base64 | tr -d '\n')
 URL="https://github.com/woffko/Hardened_NanoKVM/releases/download/$TAG/$NAME"
 RELEASE_NOTES_URL="https://github.com/woffko/Hardened_NanoKVM/releases/tag/$TAG"
-SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-sha256-rsa-pkcs1-v1_5}"
-SIGNATURE_KEY_ID="${SYSTEM_UPDATE_SIGNATURE_KEY_ID:-unsigned}"
 SIGNING_KEY="${SYSTEM_UPDATE_SIGNING_KEY:-}"
+
+if [ -n "$SIGNING_KEY" ]; then
+  SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-sha256-rsa-pkcs1-v1_5}"
+  SIGNATURE_KEY_ID="${SYSTEM_UPDATE_SIGNATURE_KEY_ID:-hardened-system-dev}"
+else
+  SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-unsigned}"
+  SIGNATURE_KEY_ID="${SYSTEM_UPDATE_SIGNATURE_KEY_ID:-unsigned}"
+fi
 
 case "$VERSION" in
   "" | *[!A-Za-z0-9._+-]* | .* | *..* | *.)
@@ -50,6 +56,33 @@ case "$CHANNEL" in
     exit 1
     ;;
 esac
+
+case "$SIGNATURE_ALGORITHM" in
+  sha256-rsa-pkcs1-v1_5 | unsigned) ;;
+  *)
+    echo "invalid signature algorithm: $SIGNATURE_ALGORITHM" >&2
+    exit 1
+    ;;
+esac
+
+case "$SIGNATURE_KEY_ID" in
+  "" | *[!A-Za-z0-9._+-]* | .* | *..* | *.)
+    echo "invalid signature key id: $SIGNATURE_KEY_ID" >&2
+    exit 1
+    ;;
+esac
+
+if [ -z "$SIGNING_KEY" ]; then
+  if [ "$SIGNATURE_ALGORITHM" != "unsigned" ] || [ "$SIGNATURE_KEY_ID" != "unsigned" ]; then
+    echo "unsigned metadata must use signature_algorithm=unsigned and signature_key_id=unsigned" >&2
+    exit 1
+  fi
+else
+  if [ "$SIGNATURE_ALGORITHM" = "unsigned" ] || [ "$SIGNATURE_KEY_ID" = "unsigned" ]; then
+    echo "signed metadata cannot use unsigned signature markers" >&2
+    exit 1
+  fi
+fi
 
 case "$NAME" in
   hardened-nanokvm-system-*.tar.gz) ;;

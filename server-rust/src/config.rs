@@ -105,6 +105,7 @@ pub struct Paths {
     pub web_root: PathBuf,
     pub image_directory: PathBuf,
     pub update_cache_dir: PathBuf,
+    pub system_update_public_key: PathBuf,
 }
 
 impl Default for Config {
@@ -202,6 +203,7 @@ impl Default for Paths {
             web_root: PathBuf::from("/kvmapp/server/web"),
             image_directory: PathBuf::from("/data"),
             update_cache_dir: PathBuf::from("/root/.kvmcache"),
+            system_update_public_key: PathBuf::from("/etc/kvm/system-update-signing.pub.pem"),
         }
     }
 }

@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
     collections::BTreeSet,
-    fs,
-    io::{self, Read},
-    os::unix::fs::PermissionsExt,
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +14,7 @@ use std::{
 
 use crate::{
     AppError, Result,
+    config::Config,
     error::ApiResponse,
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
@@ -34,6 +35,8 @@ const GITHUB_SYSTEM_DOWNLOAD_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-";
 const GITHUB_SYSTEM_CHANNEL_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-";
+const SYSTEM_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
+const SYSTEM_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
 const MAX_SYSTEM_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -77,6 +80,8 @@ pub struct SystemLatest {
     pub size: u64,
     pub url: String,
     pub release_notes_url: String,
+    pub signature_algorithm: String,
+    pub signature_key_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,10 +279,10 @@ pub async fn get_version() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn check() -> Result<impl IntoResponse> {
+pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
 
-    match get_latest_system(false).await {
+    match get_latest_system(false, &state.config).await {
         Ok(latest) => {
             let update_available =
                 latest.target == current.target && latest.version != current.version;
@@ -338,7 +343,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
 pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let current = read_current_system_version();
-    let latest = get_latest_system(false).await?;
+    let latest = get_latest_system(false, &state.config).await?;
 
     if latest.target != current.target {
         return Err(AppError::BadRequest(format!(
@@ -414,9 +419,9 @@ pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse>
     })))
 }
 
-async fn get_latest_system(preview: bool) -> Result<SystemLatest> {
+async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLatest> {
     if preview {
-        match fetch_latest_system(GITHUB_SYSTEM_PREVIEW_JSON).await {
+        match fetch_latest_system(GITHUB_SYSTEM_PREVIEW_JSON, config).await {
             Ok(latest) => return Ok(latest),
             Err(err) => {
                 tracing::warn!(
@@ -427,11 +432,21 @@ async fn get_latest_system(preview: bool) -> Result<SystemLatest> {
         }
     }
 
-    fetch_latest_system(GITHUB_SYSTEM_LATEST_JSON).await
+    fetch_latest_system(GITHUB_SYSTEM_LATEST_JSON, config).await
 }
 
-async fn fetch_latest_system(url: &str) -> Result<SystemLatest> {
+async fn fetch_latest_system(url: &str, config: &Config) -> Result<SystemLatest> {
     validate_metadata_url(url)?;
+    let metadata = fetch_system_metadata(url).await?;
+
+    let latest: SystemLatest = serde_json::from_slice(&metadata)
+        .map_err(|err| AppError::Internal(format!("invalid system-latest.json: {err}")))?;
+    validate_latest_system(&latest)?;
+    enforce_system_metadata_signature(url, &metadata, &latest, config).await?;
+    Ok(latest)
+}
+
+async fn fetch_system_metadata(url: &str) -> Result<Vec<u8>> {
     let output = run_allowed(
         AllowedCommand::Curl,
         [
@@ -448,11 +463,115 @@ async fn fetch_latest_system(url: &str) -> Result<SystemLatest> {
     )
     .await?;
     ensure_success(&output, "query latest system release metadata")?;
+    Ok(output.stdout)
+}
 
-    let latest: SystemLatest = serde_json::from_slice(&output.stdout)
-        .map_err(|err| AppError::Internal(format!("invalid system-latest.json: {err}")))?;
-    validate_latest_system(&latest)?;
-    Ok(latest)
+async fn enforce_system_metadata_signature(
+    metadata_url: &str,
+    metadata: &[u8],
+    latest: &SystemLatest,
+    config: &Config,
+) -> Result<()> {
+    if system_metadata_is_unsigned(latest) {
+        if config.security.allow_unsigned_updates {
+            tracing::warn!(
+                version = %latest.version,
+                channel = %latest.channel,
+                "accepting unsigned system update metadata because allow_unsigned_updates is enabled"
+            );
+            return Ok(());
+        }
+        return Err(AppError::BadRequest(
+            "unsigned system update metadata is not allowed".to_string(),
+        ));
+    }
+
+    if latest.signature_algorithm != SYSTEM_UPDATE_SIGNATURE_ALGORITHM {
+        return Err(AppError::BadRequest(
+            "unsupported system update metadata signature algorithm".to_string(),
+        ));
+    }
+    if !config.paths.system_update_public_key.is_file() {
+        return Err(AppError::Config(format!(
+            "system update public key is not configured: {}",
+            config.paths.system_update_public_key.display()
+        )));
+    }
+
+    let signature_url = metadata_signature_url(metadata_url)?;
+    let signature = fetch_system_metadata_signature(&signature_url).await?;
+    verify_system_metadata_signature(metadata, &signature, &config.paths.system_update_public_key)
+        .await
+}
+
+async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
+    let output = run_allowed(
+        AllowedCommand::Curl,
+        ["-fsSL", "--connect-timeout", "10", "--max-time", "30", url],
+        METADATA_TIMEOUT,
+    )
+    .await?;
+    ensure_success(&output, "download system update metadata signature")?;
+    if output.stdout.is_empty() || output.stdout.len() > 16 * 1024 {
+        return Err(AppError::BadRequest(
+            "invalid system update metadata signature size".to_string(),
+        ));
+    }
+    Ok(output.stdout)
+}
+
+async fn verify_system_metadata_signature(
+    metadata: &[u8],
+    signature: &[u8],
+    public_key: &Path,
+) -> Result<()> {
+    let metadata_path = temp_verify_path("metadata")?;
+    let signature_path = temp_verify_path("signature")?;
+
+    let result = async {
+        write_verify_temp_file(&metadata_path, metadata)?;
+        write_verify_temp_file(&signature_path, signature)?;
+
+        let output = run_allowed(
+            AllowedCommand::OpenSsl,
+            [
+                "dgst",
+                "-sha256",
+                "-verify",
+                path_arg(public_key)?,
+                "-signature",
+                path_arg(&signature_path)?,
+                path_arg(&metadata_path)?,
+            ],
+            METADATA_TIMEOUT,
+        )
+        .await?;
+
+        if output.status == 0 {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(error = %stderr, "system update metadata signature verification failed");
+            Err(AppError::BadRequest(
+                "system update metadata signature verification failed".to_string(),
+            ))
+        }
+    }
+    .await;
+
+    let _ = remove_file_if_exists(&metadata_path);
+    let _ = remove_file_if_exists(&signature_path);
+    result
+}
+
+fn metadata_signature_url(metadata_url: &str) -> Result<String> {
+    validate_metadata_url(metadata_url)?;
+    Ok(format!("{metadata_url}.sig"))
+}
+
+fn system_metadata_is_unsigned(latest: &SystemLatest) -> bool {
+    latest.signature_algorithm == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
+        && latest.signature_key_id == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
 }
 
 async fn download_system_asset(latest: &SystemLatest, target: &Path) -> Result<()> {
@@ -626,6 +745,7 @@ fn validate_latest_system(latest: &SystemLatest) -> Result<()> {
             "system release notes URL does not match version".to_string(),
         ));
     }
+    validate_system_metadata_signature_fields(latest)?;
 
     if latest.size == 0 || latest.size > MAX_SYSTEM_UPDATE_BYTES {
         return Err(AppError::BadRequest(
@@ -642,6 +762,26 @@ fn validate_latest_system(latest: &SystemLatest) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+fn validate_system_metadata_signature_fields(latest: &SystemLatest) -> Result<()> {
+    if system_metadata_is_unsigned(latest) {
+        return Ok(());
+    }
+    if latest.signature_algorithm == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
+        || latest.signature_key_id == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
+    {
+        return Err(AppError::BadRequest(
+            "invalid unsigned system update metadata marker".to_string(),
+        ));
+    }
+    if latest.signature_algorithm != SYSTEM_UPDATE_SIGNATURE_ALGORITHM {
+        return Err(AppError::BadRequest(
+            "unsupported system update metadata signature algorithm".to_string(),
+        ));
+    }
+    validate_token("signature_key_id", &latest.signature_key_id)?;
     Ok(())
 }
 
@@ -1238,6 +1378,26 @@ fn path_arg(path: &Path) -> Result<&str> {
         .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))
 }
 
+fn temp_verify_path(kind: &str) -> Result<PathBuf> {
+    validate_token("temporary file kind", kind)?;
+    Ok(PathBuf::from(format!(
+        "/tmp/hardened-system-update-{}-{}-{kind}.tmp",
+        std::process::id(),
+        now_unix_nanos()
+    )))
+}
+
+fn write_verify_temp_file(path: &Path, data: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn remove_dir_if_exists(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -1250,6 +1410,13 @@ fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn now_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
         .unwrap_or_default()
 }
 
@@ -1688,6 +1855,8 @@ mod tests {
             size: 1024,
             url: "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.0/hardened-nanokvm-system-0.1.0.tar.gz".to_string(),
             release_notes_url: "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0".to_string(),
+            signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
+            signature_key_id: "hardened-system-test".to_string(),
         }
     }
 
@@ -1734,6 +1903,8 @@ mod tests {
             release_notes_url:
                 "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0"
                     .to_string(),
+            signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
+            signature_key_id: "hardened-system-test".to_string(),
         };
 
         assert!(validate_latest_system(&latest).is_err());
@@ -1745,6 +1916,35 @@ mod tests {
         latest.url = "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.0/hardened-nanokvm-system-other.tar.gz".to_string();
 
         assert!(validate_latest_system(&latest).is_err());
+    }
+
+    #[test]
+    fn accepts_unsigned_system_metadata_marker_shape() {
+        let mut latest = valid_latest();
+        latest.signature_algorithm = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        latest.signature_key_id = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+
+        validate_latest_system(&latest).unwrap();
+        assert!(system_metadata_is_unsigned(&latest));
+    }
+
+    #[test]
+    fn rejects_partial_unsigned_system_metadata_marker() {
+        let mut latest = valid_latest();
+        latest.signature_algorithm = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        latest.signature_key_id = "hardened-system-test".to_string();
+
+        assert!(validate_latest_system(&latest).is_err());
+    }
+
+    #[test]
+    fn builds_metadata_signature_url_from_metadata_url() {
+        let url = "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json";
+
+        assert_eq!(
+            metadata_signature_url(url).unwrap(),
+            "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json.sig"
+        );
     }
 
     #[test]

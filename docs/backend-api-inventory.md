@@ -182,6 +182,10 @@ Rust hardening fields under `security` include `require_csrf`,
 `allow_remote_image_download`, `allow_auth_disable`, `allow_default_admin`, and
 `allowed_origins`.
 
+Rust-only path fields include `paths.system_update_public_key`, defaulting to
+`/etc/kvm/system-update-signing.pub.pem`, for detached system-update metadata
+signature verification.
+
 ## External Components To Preserve
 
 - `kvm_system` and `kvm_vision` remain external components.
@@ -196,4 +200,6 @@ Rust hardening fields under `security` include `require_csrf`,
   regression testing, especially uncommon settings and exact error semantics.
 - H.264 WebRTC needs longer browser/ICE validation.
 - `kvmapp` updates need signed release metadata.
-- GUI system updates for vendor-kernel/security backports are not implemented.
+- System-update API/GUI exists, including signed metadata enforcement and
+  rollback, but real vendor-kernel/security-backport bundles still need device
+  testing and release assets.

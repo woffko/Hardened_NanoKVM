@@ -46,12 +46,21 @@ Expected channel asset:
 
 - `system-latest.json`
 - `system-latest.json.sha256`
-- `system-latest.json.sig` when `SYSTEM_UPDATE_SIGNING_KEY` is set.
-- `system-latest.json.sig.base64` when `SYSTEM_UPDATE_SIGNING_KEY` is set.
+- `system-latest.json.sig`
+- `system-latest.json.sig.base64`
 
-The current implementation verifies trusted GitHub URLs plus archive sha256 and
-sha512 from `system-latest.json`. Signature generation and verification tooling
-exists, but backend signature enforcement is still TODO.
+The Rust backend verifies trusted GitHub URLs, detached
+`system-latest.json.sig` signatures, archive sha256, and archive sha512. The
+public verification key must be installed at
+`/etc/kvm/system-update-signing.pub.pem` unless `paths.system_update_public_key`
+overrides it in `server.yaml`.
+
+Unsigned channel metadata is accepted only for explicit development devices with
+`security.allow_unsigned_updates: true`. In that case `system-latest.json` must
+carry `signature_algorithm: "unsigned"` and `signature_key_id: "unsigned"`.
+Production stable/preview channel metadata must use
+`signature_algorithm: "sha256-rsa-pkcs1-v1_5"` and a non-`unsigned`
+`signature_key_id`.
 
 ## Bundle Layout
 
@@ -117,6 +126,10 @@ make system-update-metadata \
   SYSTEM_UPDATE_TAG=hardened-system-0.1.0
 ```
 
+Without `SYSTEM_UPDATE_SIGNING_KEY`, the helper creates unsigned development
+metadata. A production stable/preview channel must be generated with a signing
+key.
+
 Create signed channel metadata:
 
 ```sh
@@ -144,7 +157,7 @@ build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha256
 build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha512
 build/system-updates/system-latest.json
 build/system-updates/system-latest.json.sha256
-build/system-updates/system-latest.json.sig      # only when signing key is set
+build/system-updates/system-latest.json.sig      # when signing key is set
 build/system-updates/system-latest.json.sig.base64
 ```
 
@@ -168,10 +181,12 @@ SDK image build is established.
 
 ## Device-Side Flow
 
-The Rust backend currently supports manual download, verification, install, and
-rollback:
+The Rust backend currently supports manual download, verification, install,
+rollback, and boot-watchdog rollback:
 
-- `GET /api/system-update/check` validates `system-latest.json`.
+- `GET /api/system-update/check` validates `system-latest.json`, rejects
+  unsigned metadata by default, downloads `system-latest.json.sig` for signed
+  metadata, and verifies the detached signature with OpenSSL.
 - `POST /api/system-update/download` downloads the referenced archive into the
   update cache, verifies archive sha256/sha512, extracts it with safe path
   handling, validates `manifest.json`, and verifies every payload file listed in
@@ -184,7 +199,8 @@ rollback:
 - `POST /api/system-update/confirm` marks a pending update as boot-good after
   basic backend/version/boot-marker/web-root checks pass.
 - `POST /api/system-update/rollback` restores files from the latest backup
-  marker and clears the pending marker.
+  marker and clears pending/boot-good/rollback markers.
 
-The backend does not reboot automatically. Automatic rollback-on-bad-boot is
-still TODO.
+The backend does not reboot automatically. On the next boot, `S95nanokvm`
+checks a pending update and runs `/etc/kvm/system-update-rollback.sh` once if
+local health checks do not pass.
