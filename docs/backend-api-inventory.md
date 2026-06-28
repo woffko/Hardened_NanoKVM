@@ -51,7 +51,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method | Path | Rust Status |
 |---|---|---|
 | GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and Hardened GitHub release `latest.json`. |
-| POST | `/api/application/update` | Implemented alpha path; downloads Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, installs `/kvmapp`, and restarts service. Signed release metadata is still TODO. |
+| POST | `/api/application/update` | Implemented beta release path; downloads Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, installs `/kvmapp`, and restarts service. Signed release metadata is still TODO. |
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
 | GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
 

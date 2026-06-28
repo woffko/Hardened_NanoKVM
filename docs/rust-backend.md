@@ -1,6 +1,6 @@
 # Rust Backend Status
 
-The Rust backend lives in `server-rust/`. It is an alpha replacement for the
+The Rust backend lives in `server-rust/`. It is a beta replacement for the
 privileged Go `NanoKVM-Server` process and keeps the existing NanoKVM runtime:
 `kvm_system`, `libkvm.so`, USB gadget scripts, the Maix multimedia stack, and
 the React frontend.
@@ -9,7 +9,7 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current public alpha release metadata points to `0.1.9` from
+Current public beta release metadata points to `1.0.0` from
 `woffko/Hardened_NanoKVM` GitHub Releases.
 
 ## Build
@@ -127,7 +127,7 @@ The generated image installs:
   `/api/application/version` reads `latest.json`, `/api/application/update`
   downloads the release archive, verifies sha512, installs it under `/kvmapp`,
   and restarts `S95nanokvm`.
-- UI branding for Hardened NanoKVM and version `alfa - 0.1.9`.
+- UI branding for Hardened NanoKVM and version `beta - 1.0.0`.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Web UI backend switch in Settings > Device > Advanced.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
@@ -135,7 +135,7 @@ The generated image installs:
 
 ## Intentionally Disabled
 
-- Signed update verification is not finished yet. Current alpha updates trust
+- Signed update verification is not finished yet. Current beta updates trust
   the Hardened GitHub release metadata over HTTPS plus sha512 verification of
   the downloaded `kvmapp` archive.
 - GUI system updates for kernel, dtb, modules, boot files, or rootfs files are

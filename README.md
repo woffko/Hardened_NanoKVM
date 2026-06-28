@@ -19,7 +19,7 @@
 
 ## Hardened NanoKVM
 
-Hardened NanoKVM is an alpha fork of Sipeed NanoKVM focused on replacing the
+Hardened NanoKVM is a beta fork of Sipeed NanoKVM focused on replacing the
 privileged Go web backend with a smaller Rust backend while keeping the existing
 NanoKVM hardware, web UI, native video pipeline, and service layout.
 
@@ -29,12 +29,12 @@ a drop-in replacement for `NanoKVM-Server` and continues to use the existing
 The original Go backend is still kept as a fallback for comparison and recovery.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **alfa - 0.1.9**.
+application version **beta - 1.0.0**.
 
-The current public alpha release is published from the `woffko` fork at
-[`hardened-rust-alpha-0.1.9`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-alpha-0.1.9).
+The first public beta release is published from the `woffko` fork at
+[`hardened-rust-beta-1.0`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-1.0).
 
-## Current Alpha Status
+## Current Beta Status
 
 This fork is usable for active device testing, but it is not a finished firmware
 release. The current development flow is to run the Rust backend on a real
@@ -53,7 +53,7 @@ harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Alpha online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
+| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a reproducible full vendor-SDK image build is planned but not established yet. |
 | System updates | Planned as a separate GUI updater for vendor-kernel security backports. It is not implemented yet and will require signed manifests, staging, rollback, and boot health checks. |
 

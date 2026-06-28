@@ -1,4 +1,4 @@
-## Hardened NanoKVM 0.1.10 (Unreleased)
+## Hardened NanoKVM 1.0.0 Beta (2026-06-28)
 
 ### Features
 
