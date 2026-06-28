@@ -561,6 +561,8 @@ const ru = {
           requiredFree: 'Нужно свободного места',
           fileCount: 'Файлов',
           rawImages: 'Raw-образы',
+          progress: 'Ход операции',
+          progressMessage: 'Сообщение',
           pendingVersion: 'Ожидающая версия',
           bootHealth: 'Состояние загрузки',
           healthy: 'В норме',

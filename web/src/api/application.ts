@@ -53,6 +53,15 @@ export type SystemPendingUpdate = {
   fileCount: number;
 };
 
+export type SystemUpdateProgress = {
+  operation: string;
+  phase: string;
+  version?: string | null;
+  startedAt: number;
+  updatedAt: number;
+  message?: string | null;
+};
+
 export type SystemRollbackInfo = {
   version: string;
   target: string;

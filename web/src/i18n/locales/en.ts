@@ -554,6 +554,8 @@ const en = {
           requiredFree: 'Required free space',
           fileCount: 'Files',
           rawImages: 'Raw images',
+          progress: 'Progress',
+          progressMessage: 'Progress message',
           pendingVersion: 'Pending version',
           bootHealth: 'Boot health',
           healthy: 'Healthy',

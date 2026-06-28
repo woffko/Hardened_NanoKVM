@@ -16,6 +16,7 @@ import type {
   SystemPendingUpdate,
   SystemRollbackInfo,
   SystemStagedUpdate,
+  SystemUpdateProgress,
   SystemVersion
 } from '@/api/application.ts';
 
@@ -40,6 +41,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemPending, setSystemPending] = useState<SystemPendingUpdate | null>(null);
   const [systemBootHealth, setSystemBootHealth] = useState<SystemBootHealth | null>(null);
   const [systemRollback, setSystemRollback] = useState<SystemRollbackInfo | null>(null);
+  const [systemProgress, setSystemProgress] = useState<SystemUpdateProgress | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
 
   useEffect(() => {
@@ -128,17 +130,46 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       .getSystemUpdateStatus()
       .then((rsp: any) => {
         if (rsp.code !== 0 || !rsp.data) return;
+        const progress = rsp.data.progress || null;
+        const staged = rsp.data.staged || null;
+        const pending = rsp.data.pending || null;
+
         setSystemCurrent(rsp.data.current);
-        setSystemStaged(rsp.data.staged || null);
-        setSystemPending(rsp.data.pending || null);
+        setSystemStaged(staged);
+        setSystemPending(pending);
         setSystemBootHealth(rsp.data.bootHealth || null);
         setSystemRollback(rsp.data.rollback || null);
+        setSystemProgress(progress);
+
+        if (progress?.phase === 'failed') {
+          setSystemStatus('failed');
+          setSystemErrMsg(progress.message || t('settings.update.system.queryFailed'));
+          return;
+        }
+
+        if (progress?.operation && progress.phase !== 'done') {
+          if (progress.operation === 'download') setSystemStatus('downloading');
+          else if (progress.operation === 'install') setSystemStatus('installing');
+          else if (progress.operation === 'rollback') setSystemStatus('rollingBack');
+          else if (progress.operation === 'confirm') setSystemStatus('confirming');
+          return;
+        }
+
+        if (pending) {
+          setSystemStatus('installed');
+          return;
+        }
+
+        if (staged) {
+          setSystemStatus('staged');
+        }
       })
       .catch(() => {
         setSystemStaged(null);
         setSystemPending(null);
         setSystemBootHealth(null);
         setSystemRollback(null);
+        setSystemProgress(null);
       });
   }
 
@@ -168,6 +199,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemErrMsg(t('settings.update.system.downloadFailed'));
       })
       .finally(() => {
+        refreshSystemUpdateStatus();
         setIsLocked(false);
       });
   }
@@ -218,6 +250,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemErrMsg(t('settings.update.system.installFailed'));
       })
       .finally(() => {
+        refreshSystemUpdateStatus();
         setIsLocked(false);
       });
   }
@@ -288,6 +321,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemErrMsg(t('settings.update.system.rollbackFailed'));
       })
       .finally(() => {
+        refreshSystemUpdateStatus();
         setIsLocked(false);
       });
   }
@@ -406,7 +440,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
           {systemStatus === 'downloading' && (
             <div className="flex flex-col items-center justify-center space-y-6 py-10">
               <Spin indicator={<LoadingOutlined spin />} />
-              <span className="text-neutral-500">{t('settings.update.system.downloading')}</span>
+              <span className="text-neutral-500">
+                {systemProgress?.message || t('settings.update.system.downloading')}
+              </span>
             </div>
           )}
 
@@ -419,7 +455,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 {systemStatus === 'confirming'
                   ? t('settings.update.system.confirming')
                   : systemStatus === 'installing'
-                    ? t('settings.update.system.installing')
+                    ? systemProgress?.message || t('settings.update.system.installing')
                     : t('settings.update.system.rollingBack')}
               </span>
             </div>
@@ -435,6 +471,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>,
+                systemStaged ? (
+                  <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
+                    {t('settings.update.system.install')}
+                  </Button>
+                ) : null,
                 systemRollback ? (
                   <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
                     {t('settings.update.system.rollback')}
@@ -589,6 +630,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   t('settings.update.system.rawImages'),
                   systemStaged.imageCount.toString()
                 )}
+              {systemProgress &&
+                versionLine(
+                  t('settings.update.system.progress'),
+                  `${systemProgress.operation}/${systemProgress.phase}`
+                )}
+              {systemProgress?.message &&
+                versionLine(t('settings.update.system.progressMessage'), systemProgress.message)}
               {systemPending &&
                 versionLine(t('settings.update.system.pendingVersion'), systemPending.version)}
               {systemBootHealth &&

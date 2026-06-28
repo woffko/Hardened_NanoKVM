@@ -8,6 +8,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -45,6 +46,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SYSTEM_STAGE_DIR_NAME: &str = "system-update";
 const SYSTEM_EXTRACT_DIR_NAME: &str = "extract";
 const SYSTEM_STAGE_RECORD: &str = "staged.json";
+const SYSTEM_PROGRESS_RECORD: &str = "progress.json";
 const SYSTEM_BACKUPS_DIR_NAME: &str = "backups";
 const SYSTEM_BACKUP_RECORD: &str = "backup.json";
 const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
@@ -53,6 +55,8 @@ const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
 const SYSTEM_ROLLBACK_SCRIPT_FILE: &str = "/etc/kvm/system-update-rollback.sh";
 const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-attempted";
 const SYSTEM_RAW_INSTALL_MARKER: &str = "/data/hardened-system-raw-update-pending.json";
+const SYSTEM_RAW_INSTALL_RUN_DIR: &str = "/tmp/hardened-system-raw-update";
+const SYSTEM_RAW_INSTALL_LOG: &str = "/data/hardened-system-raw-update.log";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
 
@@ -71,7 +75,7 @@ pub struct SystemVersion {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemLatest {
     pub kind: String,
@@ -134,7 +138,19 @@ pub struct SystemStatusRsp {
     pub pending: Option<SystemPendingUpdate>,
     pub boot_health: Option<SystemBootHealth>,
     pub rollback: Option<SystemRollbackInfo>,
+    pub progress: Option<SystemUpdateProgress>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemUpdateProgress {
+    pub operation: String,
+    pub phase: String,
+    pub version: Option<String>,
+    pub started_at: u64,
+    pub updated_at: u64,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,7 +232,7 @@ struct SystemStageRecord {
     manifest: SystemManifest,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SystemManifest {
     format: String,
     version: String,
@@ -233,7 +249,7 @@ struct SystemManifest {
     raw_images: Vec<SystemManifestRawImage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SystemManifestFile {
     payload: String,
     install: String,
@@ -241,7 +257,7 @@ struct SystemManifestFile {
     sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SystemManifestRawImage {
     payload: String,
     device: String,
@@ -294,6 +310,29 @@ impl Drop for UpdateGuard {
     }
 }
 
+impl SystemUpdateProgress {
+    fn new(
+        operation: impl Into<String>,
+        phase: impl Into<String>,
+        version: Option<String>,
+        message: Option<String>,
+    ) -> Self {
+        let now = now_unix_seconds();
+        Self {
+            operation: operation.into(),
+            phase: phase.into(),
+            version,
+            started_at: now,
+            updated_at: now,
+            message,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        !matches!(self.phase.as_str(), "failed" | "done")
+    }
+}
+
 pub async fn get_version() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(SystemVersionRsp {
         current: read_current_system_version(),
@@ -329,7 +368,11 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
 pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let pending = read_pending_update().ok().flatten();
+    let mut pending = read_pending_update().ok().flatten();
+    let progress = read_normalized_update_progress(&stage_dir, &current, pending.as_ref());
+    if raw_pending_marker_is_stale(&current, pending.as_ref(), progress.as_ref()) {
+        pending = None;
+    }
     let boot_health = pending
         .as_ref()
         .map(|pending| evaluate_boot_health(&current, pending, &state));
@@ -345,6 +388,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
             pending,
             boot_health,
             rollback,
+            progress,
             error: None,
         }))),
         Err(err) => {
@@ -355,6 +399,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
                 pending,
                 boot_health,
                 rollback,
+                progress,
                 error: Some(err.to_string()),
             })))
         }
@@ -374,18 +419,60 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     }
 
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
+    let cache_stage_dir = stage_dir.clone();
+    let cache_latest = latest.clone();
+    if let Some(staged) =
+        run_blocking_system_update("check cached system update staging", move || {
+            read_cached_staged_update(&cache_stage_dir, &cache_latest)
+        })
+        .await?
+    {
+        remove_update_progress(&stage_dir)?;
+        return Ok(Json(ApiResponse::ok(SystemDownloadRsp {
+            current,
+            latest,
+            staged,
+        })));
+    }
+
     let prepare_dir = stage_dir.clone();
     run_blocking_system_update("prepare system update staging", move || {
         prepare_stage_dir(&prepare_dir)
     })
     .await?;
 
+    write_update_progress(
+        &stage_dir,
+        SystemUpdateProgress::new(
+            "download",
+            "downloading",
+            Some(latest.version.clone()),
+            None,
+        ),
+    )?;
+
     let archive = stage_dir.join(&latest.name);
-    download_system_asset(&latest, &archive).await?;
+    if let Err(err) = download_system_asset(&latest, &archive).await {
+        let _ = write_update_progress(
+            &stage_dir,
+            SystemUpdateProgress::new(
+                "download",
+                "failed",
+                Some(latest.version.clone()),
+                Some("download failed".to_string()),
+            ),
+        );
+        return Err(err);
+    }
+
+    write_update_progress(
+        &stage_dir,
+        SystemUpdateProgress::new("download", "verifying", Some(latest.version.clone()), None),
+    )?;
 
     let stage_dir_for_verify = stage_dir.clone();
     let latest_for_verify = latest.clone();
-    let staged = run_blocking_system_update("verify and stage system update", move || {
+    let staged = match run_blocking_system_update("verify and stage system update", move || {
         let archive = stage_dir_for_verify.join(&latest_for_verify.name);
         verify_system_archive(&archive, &latest_for_verify)?;
 
@@ -399,7 +486,24 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         write_stage_record(&stage_dir_for_verify, &record)?;
         Ok(staged_summary(&record))
     })
-    .await?;
+    .await
+    {
+        Ok(staged) => staged,
+        Err(err) => {
+            let _ = write_update_progress(
+                &stage_dir,
+                SystemUpdateProgress::new(
+                    "download",
+                    "failed",
+                    Some(latest.version.clone()),
+                    Some("verification failed".to_string()),
+                ),
+            );
+            return Err(err);
+        }
+    };
+
+    remove_update_progress(&stage_dir)?;
 
     Ok(Json(ApiResponse::ok(SystemDownloadRsp {
         current,
@@ -411,11 +515,22 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
+    let progress_stage_dir = stage_dir.clone();
     let config = (*state.config).clone();
-    let installed = run_blocking_system_update("install staged system update", move || {
+    let installed = match run_blocking_system_update("install staged system update", move || {
         install_staged_update(&stage_dir, &config)
     })
-    .await?;
+    .await
+    {
+        Ok(installed) => installed,
+        Err(err) => {
+            let _ = write_update_progress(
+                &progress_stage_dir,
+                SystemUpdateProgress::new("install", "failed", None, Some(err.to_string())),
+            );
+            return Err(err);
+        }
+    };
 
     Ok(Json(ApiResponse::ok(SystemInstallRsp {
         current: read_current_system_version(),
@@ -453,6 +568,8 @@ pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse>
 
     write_boot_good(&pending, &health)?;
     remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
+    remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
 
     Ok(Json(ApiResponse::ok(SystemConfirmRsp {
         confirmed: pending,
@@ -722,6 +839,46 @@ fn read_staged_update(stage_dir: &Path) -> Result<Option<SystemStagedUpdate>> {
     Ok(Some(staged_summary(&record)))
 }
 
+fn read_cached_staged_update(
+    stage_dir: &Path,
+    latest: &SystemLatest,
+) -> Result<Option<SystemStagedUpdate>> {
+    let Some(record) = read_stage_record(stage_dir)? else {
+        return Ok(None);
+    };
+    if record.latest != *latest {
+        return Ok(None);
+    }
+    let Some(staged) = read_staged_update(stage_dir)? else {
+        return Ok(None);
+    };
+
+    match validate_cached_system_extract(stage_dir, &record) {
+        Ok(()) => Ok(Some(staged)),
+        Err(err) => {
+            tracing::warn!(error = %err, "cached staged system update is not reusable");
+            Ok(None)
+        }
+    }
+}
+
+fn validate_cached_system_extract(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
+    let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
+    validate_system_extract_root(&extract_dir)?;
+
+    let manifest_path = extract_dir.join("manifest.json");
+    let manifest: SystemManifest = serde_json::from_slice(&fs::read(&manifest_path)?)
+        .map_err(|err| AppError::BadRequest(format!("invalid system update manifest: {err}")))?;
+    if manifest != record.manifest {
+        return Err(AppError::BadRequest(
+            "cached system update manifest does not match staged record".to_string(),
+        ));
+    }
+
+    let payload_dir = extract_dir.join("payload");
+    validate_system_manifest(&record.manifest, &record.latest, &payload_dir)
+}
+
 fn read_rootfs_version() -> String {
     let Some(raw) = read_trimmed(OS_RELEASE_FILE) else {
         return String::new();
@@ -877,8 +1034,13 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
     let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
 
+    write_update_progress(
+        stage_dir,
+        SystemUpdateProgress::new("install", "preparing", Some(manifest.version.clone()), None),
+    )?;
+
     if !manifest.raw_images.is_empty() {
-        return install_raw_image_update(&manifest, &payload_dir, config);
+        return install_raw_image_update(stage_dir, &manifest, &payload_dir, config);
     }
 
     let backup_id = format!("{}-{}", manifest.version, now_unix_seconds());
@@ -933,13 +1095,24 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
         if let Err(rollback_err) = rollback_from_record(stage_dir, &install_record) {
             tracing::error!(error = %rollback_err, "failed to rollback after system update install error");
         }
+        let _ = write_update_progress(
+            stage_dir,
+            SystemUpdateProgress::new(
+                "install",
+                "failed",
+                Some(manifest.version.clone()),
+                Some(err.to_string()),
+            ),
+        );
         return Err(err);
     }
 
+    remove_update_progress(stage_dir)?;
     Ok(pending_update(&install_record))
 }
 
 fn install_raw_image_update(
+    stage_dir: &Path,
     manifest: &SystemManifest,
     payload_dir: &Path,
     config: &Config,
@@ -969,22 +1142,17 @@ fn install_raw_image_update(
         validate_raw_image_payload(payload_dir, image)?;
     }
     write_raw_install_marker(manifest, &pending)?;
-
+    write_update_progress(
+        stage_dir,
+        SystemUpdateProgress::new(
+            "install",
+            "launching",
+            Some(manifest.version.clone()),
+            Some("raw image writer is starting".to_string()),
+        ),
+    )?;
+    launch_raw_image_updater(stage_dir, manifest, payload_dir, &pending)?;
     sync_filesystems();
-    if manifest
-        .raw_images
-        .iter()
-        .any(|image| image.device == RAW_ROOTFS_DEVICE)
-    {
-        remount_root_readonly()?;
-    }
-
-    for image in raw_images_install_order(&manifest.raw_images) {
-        write_raw_image_to_device(payload_dir, image)?;
-    }
-
-    sync_filesystems();
-    schedule_reboot_syscall();
 
     Ok(pending)
 }
@@ -997,6 +1165,150 @@ fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemMan
         _ => 2,
     });
     ordered
+}
+
+fn launch_raw_image_updater(
+    stage_dir: &Path,
+    manifest: &SystemManifest,
+    payload_dir: &Path,
+    pending: &SystemPendingUpdate,
+) -> Result<()> {
+    let run_dir = Path::new(SYSTEM_RAW_INSTALL_RUN_DIR);
+    remove_dir_if_exists(run_dir)?;
+    fs::create_dir_all(run_dir)?;
+    fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700))?;
+
+    let busybox_src = find_busybox_binary()?;
+    let busybox_dst = run_dir.join("busybox");
+    fs::copy(&busybox_src, &busybox_dst)?;
+    fs::set_permissions(&busybox_dst, fs::Permissions::from_mode(0o755))?;
+
+    let script_path = run_dir.join("run.sh");
+    let script = raw_image_updater_script(stage_dir, manifest, payload_dir, pending)?;
+    fs::write(&script_path, script)?;
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700))?;
+
+    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_LOG).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(SYSTEM_RAW_INSTALL_LOG)?;
+    let stderr = stdout.try_clone()?;
+
+    Command::new(&busybox_dst)
+        .arg("sh")
+        .arg(&script_path)
+        .current_dir(run_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|err| AppError::Internal(format!("failed to launch raw image updater: {err}")))?;
+
+    tracing::warn!(
+        version = %manifest.version,
+        images = manifest.raw_images.len(),
+        log = SYSTEM_RAW_INSTALL_LOG,
+        "launched raw system image updater"
+    );
+    Ok(())
+}
+
+fn find_busybox_binary() -> Result<PathBuf> {
+    for candidate in ["/bin/busybox", "/usr/bin/busybox", "/sbin/busybox"] {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+    }
+
+    Err(AppError::Internal(
+        "busybox binary is required for raw system updates".to_string(),
+    ))
+}
+
+fn raw_image_updater_script(
+    stage_dir: &Path,
+    manifest: &SystemManifest,
+    payload_dir: &Path,
+    pending: &SystemPendingUpdate,
+) -> Result<String> {
+    let busybox = shell_quote_path(&Path::new(SYSTEM_RAW_INSTALL_RUN_DIR).join("busybox"))?;
+    let log = shell_quote_path(Path::new(SYSTEM_RAW_INSTALL_LOG))?;
+    let progress = shell_quote_path(&stage_dir.join(SYSTEM_PROGRESS_RECORD))?;
+    let progress_dir = shell_quote_path(stage_dir)?;
+    let version = shell_quote(&manifest.version);
+    let started_at = pending.installed_at;
+
+    let mut script = format!(
+        "#!/bin/sh\n\
+set -u\n\
+BB={busybox}\n\
+LOG={log}\n\
+PROGRESS={progress}\n\
+PROGRESS_DIR={progress_dir}\n\
+VERSION={version}\n\
+STARTED_AT={started_at}\n\
+log() {{\n\
+  NOW=$($BB date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || $BB echo unknown)\n\
+  $BB printf '%s %s\\n' \"$NOW\" \"$1\" >> \"$LOG\" || true\n\
+}}\n\
+progress() {{\n\
+  NOW=$($BB date +%s 2>/dev/null || $BB echo 0)\n\
+  $BB mkdir -p \"$PROGRESS_DIR\" >/dev/null 2>&1 || true\n\
+  $BB printf '{{\"operation\":\"install\",\"phase\":\"%s\",\"version\":\"%s\",\"startedAt\":%s,\"updatedAt\":%s,\"message\":\"%s\"}}\\n' \"$1\" \"$VERSION\" \"$STARTED_AT\" \"$NOW\" \"$2\" > \"$PROGRESS\" || true\n\
+}}\n\
+fail() {{\n\
+  progress failed \"$1\"\n\
+  log \"failed: $1\"\n\
+  $BB mount -o remount,rw / >/dev/null 2>&1 || true\n\
+  /etc/init.d/S95nanokvm start >/dev/null 2>&1 || true\n\
+  exit 1\n\
+}}\n\
+cd /tmp || exit 1\n\
+progress writing 'raw image write in progress'\n\
+log 'raw system image update started'\n\
+$BB sleep 2\n\
+log 'stopping NanoKVM backend'\n\
+/etc/init.d/S95nanokvm stop >/dev/null 2>&1 || true\n\
+$BB sync\n\
+$BB mount -o remount,ro / >/dev/null 2>&1 || fail 'failed to remount rootfs read-only'\n\
+if $BB grep -q ' /boot ' /proc/mounts >/dev/null 2>&1; then\n\
+  $BB umount /boot >/dev/null 2>&1 || $BB mount -o remount,ro /boot >/dev/null 2>&1 || true\n\
+fi\n"
+    );
+
+    for image in raw_images_install_order(&manifest.raw_images) {
+        let payload = safe_payload_join(payload_dir, &image.payload)?;
+        let payload = shell_quote_path(&payload)?;
+        let device = shell_quote_path(Path::new(&image.device))?;
+        let message = format!("writing {}", image.label);
+        script.push_str(&format!(
+            "progress writing {}\n\
+log 'writing {} to {}'\n\
+$BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'\n",
+            shell_quote(&message),
+            image.label,
+            image.device,
+            payload,
+            device,
+            image.label
+        ));
+        script.push_str(&format!("log '{} image write finished'\n", image.label));
+    }
+
+    script.push_str(
+        "progress rebooting 'raw image write finished; rebooting'\n\
+log 'raw system image update finished; rebooting'\n\
+$BB sync\n\
+$BB sleep 2\n\
+$BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n",
+    );
+
+    Ok(script)
 }
 
 fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
@@ -1027,34 +1339,6 @@ fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage
         }
     }
 
-    Ok(())
-}
-
-fn write_raw_image_to_device(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
-    let payload = safe_payload_join(payload_dir, &image.payload)?;
-    let device = Path::new(&image.device);
-    tracing::warn!(
-        payload = %image.payload,
-        device = %image.device,
-        size = image.size,
-        "starting raw system image write"
-    );
-    let mut source = fs::File::open(&payload)?;
-    let mut target = OpenOptions::new().write(true).open(device)?;
-    let written = io::copy(&mut source, &mut target)?;
-    if written != image.size {
-        return Err(AppError::Internal(format!(
-            "raw system update wrote {written} bytes to {}, expected {}",
-            image.device, image.size
-        )));
-    }
-    target.sync_all()?;
-    tracing::warn!(
-        payload = %image.payload,
-        device = %image.device,
-        written,
-        "finished raw system image write"
-    );
     Ok(())
 }
 
@@ -1092,41 +1376,37 @@ fn write_raw_install_marker(
     Ok(())
 }
 
-fn remount_root_readonly() -> Result<()> {
-    nix::mount::mount(
-        None::<&str>,
-        "/",
-        None::<&str>,
-        nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY,
-        None::<&str>,
-    )
-    .map_err(|err| AppError::Internal(format!("failed to remount rootfs read-only: {err}")))
-}
-
 fn sync_filesystems() {
     unsafe {
         nix::libc::sync();
     }
 }
 
-fn schedule_reboot_syscall() {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(2));
-        unsafe {
-            nix::libc::sync();
-            let _ = nix::libc::reboot(nix::libc::LINUX_REBOOT_CMD_RESTART);
-        }
-    });
-}
-
 fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
+    write_update_progress(
+        stage_dir,
+        SystemUpdateProgress::new("rollback", "preparing", None, None),
+    )?;
     let record = read_last_backup_record(stage_dir)?
         .ok_or_else(|| AppError::NotFound("no system update backup found".to_string()))?;
-    rollback_from_record(stage_dir, &record)?;
+    if let Err(err) = rollback_from_record(stage_dir, &record) {
+        let _ = write_update_progress(
+            stage_dir,
+            SystemUpdateProgress::new(
+                "rollback",
+                "failed",
+                Some(record.version.clone()),
+                Some(err.to_string()),
+            ),
+        );
+        return Err(err);
+    }
     remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
     remove_file_if_exists(Path::new(SYSTEM_BOOT_GOOD_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_ATTEMPT_FILE))?;
+    remove_update_progress(stage_dir)?;
     Ok(rollback_info(&record))
 }
 
@@ -1749,18 +2029,149 @@ fn read_stage_record(stage_dir: &Path) -> Result<Option<SystemStageRecord>> {
     Ok(Some(record))
 }
 
-fn read_pending_update() -> Result<Option<SystemPendingUpdate>> {
-    let path = Path::new(SYSTEM_PENDING_FILE);
+fn read_normalized_update_progress(
+    stage_dir: &Path,
+    current: &SystemVersion,
+    pending: Option<&SystemPendingUpdate>,
+) -> Option<SystemUpdateProgress> {
+    let mut progress = match read_update_progress(stage_dir) {
+        Ok(progress) => progress?,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to read system update progress");
+            return None;
+        }
+    };
+
+    if progress.operation == "install"
+        && matches!(
+            progress.phase.as_str(),
+            "rebooting" | "writing" | "launching"
+        )
+        && pending
+            .map(|pending| current.version == pending.version && current.target == pending.target)
+            .unwrap_or(false)
+    {
+        let _ = remove_update_progress(stage_dir);
+        return None;
+    }
+
+    let lock_active = update_lock_active();
+    let now = now_unix_seconds();
+    let stale = progress
+        .updated_at
+        .checked_add(60 * 60)
+        .map(|expires| expires < now)
+        .unwrap_or(false);
+    if progress.is_active() && (stale || (progress.operation != "install" && !lock_active)) {
+        progress.phase = "failed".to_string();
+        progress.updated_at = now;
+        progress.message = Some("system update operation did not complete".to_string());
+        let _ = write_update_progress(stage_dir, progress.clone());
+    }
+
+    Some(progress)
+}
+
+fn read_update_progress(stage_dir: &Path) -> Result<Option<SystemUpdateProgress>> {
+    let path = stage_dir.join(SYSTEM_PROGRESS_RECORD);
     if !path.exists() {
         return Ok(None);
     }
     let raw = fs::read(path)?;
-    let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
-        .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
+    let progress: SystemUpdateProgress = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid system update progress: {err}")))?;
+    validate_update_progress(&progress)?;
+    Ok(Some(progress))
+}
+
+fn write_update_progress(stage_dir: &Path, progress: SystemUpdateProgress) -> Result<()> {
+    validate_update_progress(&progress)?;
+    fs::create_dir_all(stage_dir)?;
+    let data = serde_json::to_vec_pretty(&progress)
+        .map_err(|err| AppError::Internal(format!("encode system update progress: {err}")))?;
+    fs::write(stage_dir.join(SYSTEM_PROGRESS_RECORD), data)?;
+    Ok(())
+}
+
+fn remove_update_progress(stage_dir: &Path) -> Result<()> {
+    remove_file_if_exists(&stage_dir.join(SYSTEM_PROGRESS_RECORD))
+}
+
+fn validate_update_progress(progress: &SystemUpdateProgress) -> Result<()> {
+    validate_token("system update progress operation", &progress.operation)?;
+    validate_token("system update progress phase", &progress.phase)?;
+    if let Some(version) = &progress.version {
+        validate_token("system update progress version", version)?;
+    }
+    if let Some(message) = &progress.message {
+        validate_text_field("system update progress message", message, 256)?;
+    }
+    Ok(())
+}
+
+fn update_lock_active() -> bool {
+    SYSTEM_UPDATE_LOCK
+        .lock()
+        .map(|is_updating| *is_updating)
+        .unwrap_or(false)
+}
+
+fn raw_pending_marker_is_stale(
+    current: &SystemVersion,
+    pending: Option<&SystemPendingUpdate>,
+    progress: Option<&SystemUpdateProgress>,
+) -> bool {
+    let Some(pending) = pending else {
+        return false;
+    };
+    if Path::new(SYSTEM_PENDING_FILE).exists() || !pending.backup_id.starts_with("raw-") {
+        return false;
+    }
+    if current.version == pending.version && current.target == pending.target {
+        return false;
+    }
+    matches!(
+        progress.map(|progress| (progress.operation.as_str(), progress.phase.as_str())),
+        None | Some(("install", "failed")) | Some(("install", "done"))
+    )
+}
+
+fn read_pending_update() -> Result<Option<SystemPendingUpdate>> {
+    let path = Path::new(SYSTEM_PENDING_FILE);
+    if path.exists() {
+        let raw = fs::read(path)?;
+        let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
+            .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
+        validate_pending_update(&pending)?;
+        return Ok(Some(pending));
+    }
+
+    read_raw_pending_update()
+}
+
+fn read_raw_pending_update() -> Result<Option<SystemPendingUpdate>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawInstallMarker {
+        pending: SystemPendingUpdate,
+    }
+
+    let path = Path::new(SYSTEM_RAW_INSTALL_MARKER);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(path)?;
+    let marker: RawInstallMarker = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid raw pending system update: {err}")))?;
+    validate_pending_update(&marker.pending)?;
+    Ok(Some(marker.pending))
+}
+
+fn validate_pending_update(pending: &SystemPendingUpdate) -> Result<()> {
     validate_token("pending version", &pending.version)?;
     validate_token("pending target", &pending.target)?;
     validate_filename(&pending.backup_id)?;
-    Ok(Some(pending))
+    Ok(())
 }
 
 fn read_last_backup_record(stage_dir: &Path) -> Result<Option<SystemInstallRecord>> {
@@ -1909,7 +2320,11 @@ fn shell_quote_path(path: &Path) -> Result<String> {
     let value = path
         .to_str()
         .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))?;
-    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+    Ok(shell_quote(value))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn write_backup_record(backup_dir: &Path, record: &SystemInstallRecord) -> Result<()> {
