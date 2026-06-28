@@ -128,6 +128,7 @@ The generated image installs:
   downloads the release archive, verifies sha512, installs it under `/kvmapp`,
   and restarts `S95nanokvm`.
 - UI branding for Hardened NanoKVM and version `alfa - 0.1.9`.
+- First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Web UI backend switch in Settings > Device > Advanced.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
   update archives.
@@ -139,8 +140,9 @@ The generated image installs:
   the downloaded `kvmapp` archive.
 - GUI system updates for kernel, dtb, modules, boot files, or rootfs files are
   not implemented yet. See `docs/system-update-plan.md`.
-- Default `admin/admin` bootstrap is disabled by default in Rust config. It can
-  be enabled only for isolated compatibility test images.
+- Default `admin/admin` bootstrap is disabled by default in Rust config. New
+  SD-card flashes use the first-boot web setup screen instead. Lost credentials
+  are recovered by reflashing the SD card.
 
 ## Known Issues And Remaining Work
 
@@ -153,7 +155,8 @@ The generated image installs:
   The current `S95nanokvm` disables stale autostarts, removes known stale web
   backup directories, and was verified through reboot, login, MJPEG, and H.264
   Direct streaming on the test device.
-- First-boot/account setup UX needs product-level polishing.
+- First-boot/account setup needs continued product testing on fresh SD-card
+  flashes.
 - `kvmapp` update signature verification is still missing; current releases
   use trusted GitHub URLs plus sha512 verification.
 - Remote ISO download needs a final production policy before it should be

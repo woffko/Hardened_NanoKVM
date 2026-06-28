@@ -1,3 +1,20 @@
+## Hardened NanoKVM 0.1.10 (Unreleased)
+
+### Features
+
+* Added a first-boot web setup flow: if `/etc/kvm/pwd` is missing, the login
+  page now prompts the user to create the first administrator account instead
+  of relying on a default web password.
+* Added public `GET /api/auth/setup` status for the setup screen and kept
+  `POST /api/auth/setup` one-shot: after the account file exists, setup returns
+  conflict.
+
+### Security
+
+* Kept default `admin/admin` web bootstrap disabled for SD-card images.
+* Updated password recovery text to reflect the Hardened policy: lost web/root
+  credentials are recovered by reflashing the SD card.
+
 ## Hardened NanoKVM 0.1.9 (2026-06-27)
 
 ### Bug Fixes

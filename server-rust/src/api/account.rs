@@ -50,6 +50,11 @@ pub struct PasswordUpdatedRsp {
     pub is_updated: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SetupStateRsp {
+    pub required: bool,
+}
+
 pub async fn login(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<ClientAddr>,
@@ -119,6 +124,12 @@ pub async fn setup_first_account(
     change_root_password(&password).await?;
     state.accounts.set_account(&req.username, &password)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_setup_state(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(SetupStateRsp {
+        required: !state.accounts.exists(),
+    })))
 }
 
 pub async fn logout(

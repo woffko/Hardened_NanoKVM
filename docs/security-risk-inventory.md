@@ -6,7 +6,7 @@ This inventory drives the Rust rewrite hardening work. It combines the Go backen
 
 | Area | Existing Risk | Rust Rewrite Requirement | Initial Rust Status |
 |---|---|---|---|
-| First boot auth | Missing `/etc/kvm/pwd` falls back to `admin/admin`. | No default credential; require explicit setup or device-unique initial secret. | Rust default is hardened: `security.allow_default_admin=false`. Temporary isolated test devices can explicitly set it true to seed `admin/admin` as an Argon2id hash. |
+| First boot auth | Missing `/etc/kvm/pwd` falls back to `admin/admin`. | No default credential; require explicit setup or device-unique initial secret. | Rust default is hardened: `security.allow_default_admin=false`. Fresh SD-card flashes expose a one-shot first-boot web setup flow while `/etc/kvm/pwd` is missing. Temporary isolated test devices can explicitly set `allow_default_admin=true` to seed `admin/admin` as an Argon2id hash. |
 | Password storage | Go stores bcrypt or legacy encrypted compatibility values. | Argon2id, unique salt, no plaintext. | Implemented in `auth/password.rs`. |
 | Session revocation | JWT is self-contained; logout rotates secret globally. | Opaque/session-id or JWT with jti revocation; logout revokes active session; password change revokes all user sessions. | Implemented in-memory opaque sessions. Persistence policy still needs device decision. |
 | CSRF | Cookie auth without CSRF token. | CSRF token for state-changing browser endpoints plus Origin/Referer checks. | Implemented. Middleware enforces `x-csrf-token` on protected POST/PUT/PATCH/DELETE and validates Origin/Referer when present. |
@@ -64,7 +64,8 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 ## Follow-Up For Hardening
 
 1. Add signed metadata/artifact verification for `kvmapp` updates.
-2. Keep `security.allow_default_admin=false` for production use.
+2. Keep `security.allow_default_admin=false` for production use and rely on
+   first-boot setup for fresh SD-card flashes.
 3. Finish systematic Go API parity and error-semantics audit.
 4. Keep remote ISO download disabled by default until final allowlist/content
    policy is accepted.

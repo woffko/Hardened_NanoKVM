@@ -47,7 +47,7 @@ harden one subsystem at a time.
 | Go fallback | Preserved and switchable from the web UI. |
 | Web UI | Existing React UI is retained, with Hardened branding and a backend switch. |
 | HTTPS | Implemented in Rust with HTTP-to-HTTPS redirect and existing cert config support. |
-| Authentication | Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. |
+| Authentication | First-boot web account setup, Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. |
 | Video | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
 | HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
@@ -64,6 +64,10 @@ harden one subsystem at a time.
 - Added hardened auth/session handling: generated per-device secret, CSRF token
   binding, Origin checks, login lockout, explicit session revocation, and safer
   password storage.
+- Added a first-boot setup screen for new SD-card flashes. If `/etc/kvm/pwd`
+  does not exist, the web UI requires creating the first administrator account
+  before normal login is available. Lost credentials are recovered by reflashing
+  the SD card.
 - Added Rust implementations for the main browser workflows: login, static UI,
   MJPEG, H.264 Direct, H.264 WebRTC signaling, HID, terminal, storage, network,
   Tailscale, scripts, and many VM settings routes.
@@ -129,8 +133,8 @@ On the Go backend, `/api/health` is expected to return 404.
   payload.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
-- First-boot/account setup UX still needs product-level polish. Existing test
-  devices can keep their current account file; new default `admin/admin`
+- First-boot/account setup is implemented for Rust/Hardened images. Existing
+  test devices can keep their current account file; new default `admin/admin`
   bootstrap is disabled unless explicitly enabled for isolated compatibility
   testing.
 - The repository does not build a full boot/rootfs image from SDK sources. The

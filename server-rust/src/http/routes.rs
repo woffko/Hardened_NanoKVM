@@ -173,7 +173,10 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(compatibility::health))
         .route("/api/auth/login", post(account::login))
-        .route("/api/auth/setup", post(account::setup_first_account))
+        .route(
+            "/api/auth/setup",
+            get(account::get_setup_state).post(account::setup_first_account),
+        )
         .route("/api/network/wifi", post(network::connect_wifi_no_auth))
         .route("/api/network/wifi/verify", post(network::verify_ap_login))
         .merge(picoclaw_loopback_routes())

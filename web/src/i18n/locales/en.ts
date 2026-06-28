@@ -3,6 +3,7 @@ const en = {
     head: {
       desktop: 'Remote Desktop',
       login: 'Login',
+      firstSetup: 'First Setup',
       changePassword: 'Change Password',
       terminal: 'Terminal',
       wifi: 'Wi-Fi'
@@ -23,21 +24,27 @@ const en = {
       changePasswordDesc: 'For the security of your device, please change the password!',
       differentPassword: 'Passwords do not match',
       illegalUsername: 'Username contains illegal characters',
-      illegalPassword: 'Password contains illegal characters',
+      illegalPassword:
+        'Password must be at least 8 characters and cannot contain quotes or slashes',
       forgetPassword: 'Forgot Password',
       ok: 'Ok',
       cancel: 'Cancel',
       loginButtonText: 'Login',
+      setupTitle: 'Create administrator account',
+      setupDescription:
+        'No web account exists on this device yet. Create the first administrator account to continue.',
+      setupRecovery: 'If this password is lost, recovery requires reflashing the SD card.',
+      setupButtonText: 'Create account',
       tips: {
-        reset1:
-          'To reset the passwords, press and hold the BOOT button on the NanoKVM for 10 seconds.',
-        reset2: 'For detailed steps, please consult this document:',
-        reset3: 'Web default account:',
+        reset1: 'Password recovery for this Hardened image requires reflashing the SD card.',
+        reset2: 'For general NanoKVM recovery information, see:',
+        reset3: 'Web account:',
+        resetWebAccount: 'created during first setup',
         reset4: 'SSH default account:',
         change1: 'Please note that this action will change the following passwords:',
         change2: 'Web login password',
         change3: 'System root password (SSH login password)',
-        change4: 'To reset the passwords, press and hold the BOOT button on the NanoKVM.'
+        change4: 'If this password is lost, recovery requires reflashing the SD card.'
       }
     },
     wifi: {

@@ -32,7 +32,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 |---|---|---|
 | GET | `/api/health` | Implemented; returns Rust backend health. |
 | POST | `/api/auth/login` | Implemented with opaque session token, CSRF token, login lockout, and configurable session duration. |
-| POST | `/api/auth/setup` | Implemented for first-account setup flow. |
+| GET/POST | `/api/auth/setup` | Implemented for first-account setup flow; GET reports whether setup is required, POST creates the first account only while `/etc/kvm/pwd` is missing. |
 | POST | `/api/network/wifi` | Implemented for AP-mode no-auth Wi-Fi flow with AP key verification. |
 | POST | `/api/network/wifi/verify` | Implemented for AP-mode verification. |
 

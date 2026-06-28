@@ -47,7 +47,9 @@ export const Tips = () => {
             <ul className="list-outside list-disc">
               <li>
                 {t('auth.tips.reset3')}
-                <Text code={true}>admin/admin</Text>
+                <Text>
+                  {t('auth.tips.resetWebAccount', { defaultValue: 'created during first setup' })}
+                </Text>
               </li>
               <li>
                 {t('auth.tips.reset4')}
