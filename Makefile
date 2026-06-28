@@ -24,7 +24,7 @@ SYSTEM_UPDATE_PAYLOAD ?= build/system-update-payload
 SYSTEM_UPDATE_OUT ?= build/system-updates
 SYSTEM_UPDATE_TAG ?= hardened-system-$(SYSTEM_UPDATE_VERSION)
 
-.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image vendor-sdk system-update-bundle system-update-metadata support all clean
+.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image vendor-sdk vendor-sdk-stock system-update-bundle system-update-metadata support all clean
 
 # Default target
 all: app support
@@ -45,6 +45,7 @@ help:
 	@echo "  rust-kvmapp   - Package Rust backend into build/kvmapp-rust"
 	@echo "  sd-image      - Build patched Hardened NanoKVM SD image from NANOKVM_BASE_IMAGE"
 	@echo "  vendor-sdk    - Bootstrap the pinned Sipeed LicheeRV Nano vendor SDK checkout"
+	@echo "  vendor-sdk-stock - Build the stock SDK image with a Buildroot-safe PATH"
 	@echo "  system-update-bundle   - Package a staged system-update payload"
 	@echo "  system-update-metadata - Generate GitHub latest JSON for the system bundle"
 	@echo "  support       - Build hardware support libraries"
@@ -120,6 +121,11 @@ sd-image:
 # work. The SDK itself stays under build/vendor and is not committed.
 vendor-sdk:
 	@scripts/bootstrap-vendor-sdk.sh
+
+# Build the unmodified stock SDK image. This intentionally sanitizes PATH
+# because Buildroot rejects WSL/Windows PATH entries containing spaces.
+vendor-sdk-stock:
+	@scripts/build-vendor-sdk-stock.sh
 
 # Package a staged system-update payload.
 # Expected payload layout:

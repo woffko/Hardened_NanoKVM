@@ -59,10 +59,7 @@ make vendor-sdk
 After bootstrap:
 
 ```sh
-cd build/vendor/LicheeRV-Nano-Build
-source build/cvisetup.sh
-defconfig sg2002_licheervnano_sd
-build_all
+make vendor-sdk-stock
 ```
 
 The `defconfig sg2002_licheervnano_sd` step was verified on 2026-06-28 against
@@ -78,12 +75,61 @@ Output path: install/soc_sg2002_licheervnano_sd
 It currently emits a non-fatal `FLASH_SIZE_SHRINK` duplicate-setting warning
 from the upstream defconfig.
 
+`make vendor-sdk-stock` runs the upstream `source build/cvisetup.sh`,
+`defconfig sg2002_licheervnano_sd`, and `build_all` sequence with a sanitized
+Linux-only `PATH`. This is required on WSL hosts because Buildroot rejects
+Windows PATH entries such as `/mnt/c/Program Files/...`.
+
+`make vendor-sdk-stock` checks for required host tools before starting the long
+SDK build. On the current WSL host, `cpio`, `mkdosfs`, and `mcopy` were missing
+from the sanitized PATH. If sudo is unavailable, local fallbacks can be unpacked
+under `build/host-deps`; `build/host-deps/usr/sbin` and
+`build/host-deps/usr/bin` are included first in the default
+`make vendor-sdk-stock` PATH:
+
+```sh
+mkdir -p build/host-deps
+cd build/host-deps
+apt-get download cpio dosfstools mtools
+for deb in *.deb; do dpkg-deb -x "$deb" .; done
+```
+
+`dosfstools` provides `mkdosfs`; `mtools` provides `mcopy`.
+
+Manual equivalent:
+
+```sh
+cd build/vendor/LicheeRV-Nano-Build
+source build/cvisetup.sh
+defconfig sg2002_licheervnano_sd
+build_all
+```
+
 The upstream README notes that `qt5svg` or `qt5base` can fail on the first
 build on some hosts; in that case, retry `build_all`.
 
-The first successful output must be treated as a stock image. Do not add
-Hardened files until the stock image boots on test hardware and passes the
-baseline checks below.
+`make vendor-sdk-stock` also fails if the upstream `build_all` sequence returns
+success but no full SD image is produced. This happened with missing FAT tools:
+partial `boot.sd`, `rootfs.sd`, and `upgrade.zip` files existed, but genimage
+could not produce the final `*.img`.
+
+## First Successful Stock Output
+
+The first full stock SDK image was produced locally on 2026-06-28 from the
+pinned `NanoKVM` SDK SHA `d88d58feca49ef15f4cc7bd1f27dbf17dc25f85e`.
+
+Artifacts under
+`build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd`:
+
+| Artifact | Size | SHA256 |
+| --- | ---: | --- |
+| `images/2026-06-28-19-11-d88d58.img` | 1,627,390,464 | `f80090dfa56b3c84b1b5675e3139236b2e171fd59ecdb421b0b15d6adcfefeab` |
+| `upgrade.zip` | 221,537,349 | `289ae7e3cadfebc53f70be2a0903b75492efce3492c737426d526dd69683c60d` |
+| `boot.sd` | 11,553,892 | `32ef1c92ae9f6f2974c3efa0c0f80fa9e8f1b49e8ef8e8b2ac6dd30b4ed3cf05` |
+| `rootfs.sd` | 1,610,618,944 | `c40280a77ad5f7727983b8aaa1a967fad16c7bb9f0e9d8ed30146956eb44a6f1` |
+
+This is still a stock SDK artifact. Do not add Hardened files until it boots on
+test hardware and passes the baseline checks below.
 
 ## Baseline Checks
 

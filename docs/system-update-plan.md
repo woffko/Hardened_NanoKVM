@@ -25,9 +25,10 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 - SD-card images are currently produced by patching a trusted upstream NanoKVM
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - The Sipeed/LicheeRV Nano vendor SDK source and `host-tools` refs have been
-  selected and can be bootstrapped with `make vendor-sdk`. The pinned checkout
-  and `defconfig sg2002_licheervnano_sd` have been verified locally. A
-  reproducible, hardware-validated stock SDK image is not yet established.
+  selected and can be bootstrapped with `make vendor-sdk`. The pinned checkout,
+  `defconfig sg2002_licheervnano_sd`, and a full stock SD image build through
+  `make vendor-sdk-stock` have been verified locally. Hardware boot validation
+  for that stock image is still pending.
 - System-update version/check/status/download/install/rollback is implemented
   in the Rust backend and GUI through manual rollback. It displays the current
   system baseline, validates GitHub `system-latest.json`, downloads the archive,
@@ -57,6 +58,8 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 
 2. Reproduce a clean stock build from the Sipeed/LicheeRV Nano vendor SDK:
    - bootstrap the pinned SDK checkout with `make vendor-sdk`;
+   - run the stock build with `make vendor-sdk-stock` so Buildroot gets a
+     Linux-only PATH on WSL hosts;
    - build a stock image first, without Hardened changes;
    - boot it on test hardware;
    - verify video, HID, storage, network, SSH, web UI, and backend switching;
