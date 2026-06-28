@@ -45,9 +45,13 @@ Expected assets:
 Expected channel asset:
 
 - `system-latest.json`
+- `system-latest.json.sha256`
+- `system-latest.json.sig` when `SYSTEM_UPDATE_SIGNING_KEY` is set.
+- `system-latest.json.sig.base64` when `SYSTEM_UPDATE_SIGNING_KEY` is set.
 
-The first implementation verifies `sha512` from `system-latest.json`. The final
-installer must also verify a release signature before allowing system writes.
+The current implementation verifies trusted GitHub URLs plus archive sha256 and
+sha512 from `system-latest.json`. Signature generation and verification tooling
+exists, but backend signature enforcement is still TODO.
 
 ## Bundle Layout
 
@@ -113,6 +117,25 @@ make system-update-metadata \
   SYSTEM_UPDATE_TAG=hardened-system-0.1.0
 ```
 
+Create signed channel metadata:
+
+```sh
+SYSTEM_UPDATE_SIGNING_KEY=/secure/path/system-update-signing.pem \
+SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-2026q3 \
+make system-update-metadata \
+  SYSTEM_UPDATE_VERSION=0.1.0 \
+  SYSTEM_UPDATE_TAG=hardened-system-0.1.0
+```
+
+Verify signed metadata:
+
+```sh
+scripts/verify-system-update-metadata.sh \
+  build/system-updates/system-latest.json \
+  build/system-updates/system-latest.json.sig \
+  /secure/path/system-update-signing.pub.pem
+```
+
 The output defaults to:
 
 ```text
@@ -120,6 +143,9 @@ build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz
 build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha256
 build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha512
 build/system-updates/system-latest.json
+build/system-updates/system-latest.json.sha256
+build/system-updates/system-latest.json.sig      # only when signing key is set
+build/system-updates/system-latest.json.sig.base64
 ```
 
 ## Current Device Baseline

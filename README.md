@@ -55,7 +55,7 @@ harden one subsystem at a time.
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
 | Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; a reproducible full vendor-SDK image build is planned but not established yet. |
-| System updates | Planned as a separate GUI updater for vendor-kernel security backports. It is not implemented yet and will require signed manifests, staging, rollback, and boot health checks. |
+| System updates | Separate GitHub channel metadata, staging download/verify, guarded install, manual boot-good confirmation, and manual rollback are implemented. Signature enforcement and automatic rollback after a bad boot are still pending. |
 
 ## What Changed In This Fork
 
@@ -128,9 +128,9 @@ On the Go backend, `/api/health` is expected to return 404.
 - Online update checks read Hardened release metadata from
   `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
   after sha512 verification. Full signed release verification is still pending.
-- GUI system updates for kernel/rootfs security backports are planned but not
-  implemented. Current GUI updates replace only the `kvmapp` application
-  payload.
+- GUI system updates for kernel/rootfs security backports can stage, verify,
+  install, confirm boot-good, and manually roll back system bundles. Signature
+  enforcement and automatic rollback after a bad boot are still pending.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
 - First-boot/account setup is implemented for Rust/Hardened images. Existing

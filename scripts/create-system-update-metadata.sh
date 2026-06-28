@@ -18,6 +18,9 @@ SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 SHA512=$(openssl dgst -sha512 -binary "$ARCHIVE" | base64 | tr -d '\n')
 URL="https://github.com/woffko/Hardened_NanoKVM/releases/download/$TAG/$NAME"
 RELEASE_NOTES_URL="https://github.com/woffko/Hardened_NanoKVM/releases/tag/$TAG"
+SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-sha256-rsa-pkcs1-v1_5}"
+SIGNATURE_KEY_ID="${SYSTEM_UPDATE_SIGNATURE_KEY_ID:-unsigned}"
+SIGNING_KEY="${SYSTEM_UPDATE_SIGNING_KEY:-}"
 
 case "$VERSION" in
   "" | *[!A-Za-z0-9._+-]* | .* | *..* | *.)
@@ -68,8 +71,21 @@ cat > "$OUTPUT" <<EOF
   "sha512": "$SHA512",
   "size": $SIZE,
   "url": "$URL",
-  "release_notes_url": "$RELEASE_NOTES_URL"
+  "release_notes_url": "$RELEASE_NOTES_URL",
+  "signature_algorithm": "$SIGNATURE_ALGORITHM",
+  "signature_key_id": "$SIGNATURE_KEY_ID"
 }
 EOF
+
+sha256sum "$OUTPUT" > "$OUTPUT.sha256"
+
+if [ -n "$SIGNING_KEY" ]; then
+  [ -f "$SIGNING_KEY" ] || {
+    echo "signing key does not exist: $SIGNING_KEY" >&2
+    exit 1
+  }
+  openssl dgst -sha256 -sign "$SIGNING_KEY" -out "$OUTPUT.sig" "$OUTPUT"
+  base64 "$OUTPUT.sig" | tr -d '\n' > "$OUTPUT.sig.base64"
+fi
 
 echo "$OUTPUT"

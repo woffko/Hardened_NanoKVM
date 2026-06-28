@@ -60,10 +60,12 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
      from the archive.
 
 4. Add signature verification:
-   - sign the manifest with a project release key, for example Ed25519 or
-     minisign;
-   - verify the signature and every file hash on device before installation;
-   - keep unsigned system updates blocked except for explicit development mode.
+   - sign channel metadata with a project release key (tooling implemented with
+     detached OpenSSL sha256/RSA signatures);
+   - verify metadata signatures on device before trusting `system-latest.json`
+     (backend enforcement TODO);
+   - keep unsigned system updates blocked except for explicit development mode
+     (TODO).
 
 5. Add Rust backend API:
    - `GET /api/system-update/version` (implemented read-only);
@@ -114,6 +116,7 @@ The current helper scripts are:
 
 - `scripts/create-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
+- `scripts/verify-system-update-metadata.sh`
 
 The Rust backend can download, verify, install, manually confirm boot-good, and
 manually roll back these archives. The installer does not reboot automatically
