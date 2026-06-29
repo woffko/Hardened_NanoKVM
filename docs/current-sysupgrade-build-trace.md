@@ -761,3 +761,30 @@ Raw manifest notes:
     `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
   - ROOTFS `/dev/mmcblk0p2`, payload sha256
     `d73b8d23989f7797deb96e73b0f0816054bed47f63877336c1315386b48e79cd`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.1`
+- System release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.1-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Post-publish verification:
+
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app version `2.0.1` and points to `hardened-rust-beta-2.0.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-rust-preview/latest.json`
+  returns app version `2.0.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json`
+  returns system version `0.2.1-raw.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-preview/system-latest.json`
+  returns system version `0.2.1-raw.1`.
+- Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.1`.
+- Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
+  `latest=0.2.1-raw.1`, `updateAvailable=true`.
