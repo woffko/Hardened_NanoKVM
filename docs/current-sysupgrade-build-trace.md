@@ -81,13 +81,11 @@ M  buildroot/package/python3/python3.mk
 
 Next planned steps:
 
-1. Publish versioned release `hardened-system-0.1.3-raw.1` with the raw bundle
-   and system metadata.
-2. Update the stable channel release `hardened-system-stable` so GUI update
-   checks see `system-latest.json`.
-3. Test the GUI update check/install on a sacrificial NanoKVM with raw updates
+1. Test the GUI update check/install on a sacrificial NanoKVM with raw updates
    explicitly enabled and SD-card recovery available.
-4. Record device-side installer logs and outcome here.
+2. Record device-side installer logs and outcome here.
+3. If the GUI install succeeds, decide whether to keep `hardened-system-stable`
+   pointed at `0.1.4-raw.1` or move this raw build to preview-only.
 
 Progress log:
 
@@ -194,32 +192,39 @@ Generated raw system-update bundle:
 BASE_VERSION=2026-06-29-12-08-d88d58.img \
 KERNEL_VERSION=5.10.4-tag- \
 scripts/create-raw-system-update-bundle.sh \
-  0.1.3-raw.1 \
+  0.1.4-raw.1 \
   sg2002-licheervnano-sd \
   build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
   build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
   build/system-updates
 ```
 
+Note:
+
+- A local intermediate `0.1.3-raw.1` bundle was built first, but the GitHub tag
+  already existed with older assets. The published release was bumped to
+  `0.1.4-raw.1` to avoid overwriting and cache confusion.
+
 Bundle artifacts:
 
 | Artifact | Path | Size | SHA256 |
 | --- | --- | ---: | --- |
-| Raw system-update archive | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/hardened-nanokvm-system-0.1.3-raw.1.tar.gz` | 225M | `671a202d93c9ed0df78d701daa9f1262b147baabd9ac8276496ed4b3bf8a7d12` |
-| Metadata | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json` | 762 bytes | `0432ce2d36a40ce4923fdb87e78f89adca92ebcdb5960df73ef98843c33ef65f` |
-| Metadata signature | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json.sig` | 384 bytes | `69f9f0120747cd24888abe240ffd99d7642fd4006f62928530cc54ab8f40f50a` |
+| Raw system-update archive | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/hardened-nanokvm-system-0.1.4-raw.1.tar.gz` | 225M | `14a3654de1741c6beabea80d95a3647c990daf1e8a3b907a0158c5e91b3d5f83` |
+| Metadata | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json` | 762 bytes | `4ba73f0d4b888089a127e4a0e9f2c920aa75df97b00cf1922be1e1654eeccf5f` |
+| Metadata signature | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json.sig` | 384 bytes | `7bc1a09be4507b26b2c12e7bfc6224bc70dbc7b295e84723be0bf69968345fea` |
 
 Bundle manifest notes:
 
-- Version: `0.1.3-raw.1`
+- Version: `0.1.4-raw.1`
 - Target: `sg2002-licheervnano-sd`
+- Source commit: `52f491c`
 - Required staging free space: `2147483648` bytes.
 - Raw writes:
   - `/dev/mmcblk0p2` from `images/rootfs.sd`
   - `/dev/mmcblk0p1` from `images/boot.vfat`
 - Bundle script patches `/etc/kvm/system-version.json` into the rootfs copy
   before archiving, so the rootfs hash inside the archive is:
-  `741d4e0529c6d0c3b22ec1f2956c88a629c0af2c27ba7f333090afe24b0a1069`.
+  `3330105693b94e952dd5dcbb0dd356c391750fba34f9916fec45c59213c758e1`.
 
 Metadata signing:
 
@@ -227,9 +232,9 @@ Metadata signing:
 SYSTEM_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
 SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
 scripts/create-system-update-metadata.sh \
-  0.1.3-raw.1 \
-  hardened-system-0.1.3-raw.1 \
-  build/system-updates/hardened-nanokvm-system-0.1.3-raw.1.tar.gz \
+  0.1.4-raw.1 \
+  hardened-system-0.1.4-raw.1 \
+  build/system-updates/hardened-nanokvm-system-0.1.4-raw.1.tar.gz \
   build/system-updates/system-latest.json
 ```
 
@@ -239,6 +244,35 @@ Signature verification passed:
 scripts/verify-system-update-metadata.sh \
   build/system-updates/system-latest.json \
   build/system-updates/system-latest.json.sig \
+  kvmapp/system/keys/system-update-signing.pub.pem
+```
+
+Result: `Verified OK`.
+
+GitHub publication:
+
+- Branch pushed:
+  `feature/new-buildroot-sysupgrade-lab` at `52f491c`.
+- Versioned release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.4-raw.1`
+- Uploaded versioned release assets:
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz`
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz.sha256`
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz.sha512`
+  - `system-latest.json`
+  - `system-latest.json.sha256`
+  - `system-latest.json.sig`
+  - `system-latest.json.sig.base64`
+  - `Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz`
+  - `Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.sha256`
+- Stable channel release updated:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- Public channel metadata was downloaded from GitHub and verified locally:
+
+```sh
+scripts/verify-system-update-metadata.sh \
+  /tmp/hardened-system-stable-latest.json \
+  /tmp/hardened-system-stable-latest.json.sig \
   kvmapp/system/keys/system-update-signing.pub.pem
 ```
 
