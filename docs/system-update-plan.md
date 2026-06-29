@@ -30,6 +30,16 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `defconfig sg2002_licheervnano_sd`, and a full stock SD image build through
   `make vendor-sdk-stock` have been verified locally. Hardware boot validation
   for that stock image is still pending.
+- A separate branch, `feature/new-buildroot-sysupgrade-lab`, records the
+  newer-SDK/newer-Buildroot feasibility study. Sipeed `main`/`20260407` remain
+  Buildroot 2023.11.2 with `linux_5.10`; `newsdk` is an experimental
+  patch/submodule workflow and is not yet proven NanoKVM/LT6911-ready; official
+  newer Buildroot would be a board-port project rather than a drop-in SDK
+  update.
+- Because the new Buildroot path is not yet proven, the preferred security
+  direction is a curated backport fork of the proven Buildroot 2023.11.2 vendor
+  SDK. Userspace package backports are viable; kernel 5.10 critical fixes remain
+  a separate lab track because of vendor HDMI/MMF and USB gadget dependencies.
 - System-update version/check/status/download/install/rollback is implemented
   in the Rust backend and GUI through manual rollback. It displays the current
   system baseline, validates GitHub `system-latest.json`, downloads the archive,
@@ -163,6 +173,10 @@ The current helper scripts are:
 
 The pinned vendor SDK bootstrap and stock-image validation sequence are
 documented in [vendor-sdk-build.md](vendor-sdk-build.md).
+Newer SDK and new Buildroot feasibility notes are documented in
+[new-buildroot-sysupgrade-study.md](new-buildroot-sysupgrade-study.md).
+The Buildroot 2023.11.2 security backport route is documented in
+[buildroot-2023-security-backport-plan.md](buildroot-2023-security-backport-plan.md).
 Live device layout observations are recorded in
 [system-update-live-inventory.md](system-update-live-inventory.md).
 

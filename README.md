@@ -211,6 +211,8 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 - **System update plan:** Track planned GUI system updates for vendor-kernel security backports in [docs/system-update-plan.md](docs/system-update-plan.md).
 - **System update releases:** Package future kernel/rootfs update bundles for GitHub-hosted channels with [docs/system-update-github-releases.md](docs/system-update-github-releases.md).
 - **Vendor SDK build path:** Bootstrap and validate the Sipeed/LicheeRV Nano SDK for future full base-system images in [docs/vendor-sdk-build.md](docs/vendor-sdk-build.md).
+- **New Buildroot study:** Track feasibility of newer SDK/newer Buildroot sysupgrade images in [docs/new-buildroot-sysupgrade-study.md](docs/new-buildroot-sysupgrade-study.md).
+- **Buildroot 2023 security backports:** Evaluate critical userspace backports for the proven vendor SDK baseline in [docs/buildroot-2023-security-backport-plan.md](docs/buildroot-2023-security-backport-plan.md).
 - **Security status:** Review hardening scope and remaining risk in [docs/security-risk-inventory.md](docs/security-risk-inventory.md).
 - **Frontend UI:** Develop, lint, and build the React interface in [web/README.md](web/README.md).
 

@@ -21,6 +21,8 @@ The Sipeed repository also has newer refs such as `main`, `newsdk`,
 reproduction attempt should start from the explicit `NanoKVM` branch because
 that branch is the clearest NanoKVM-specific vendor candidate. Newer refs can
 be evaluated only after the `NanoKVM` branch produces a working stock image.
+The newer-SDK and newer-Buildroot feasibility notes are tracked separately in
+[new-buildroot-sysupgrade-study.md](new-buildroot-sysupgrade-study.md).
 
 Community mainline Buildroot trees are useful research inputs, but they are not
 the first update path. They need separate proof for CSI, MMF, H.264/VENC,
