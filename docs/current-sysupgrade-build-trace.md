@@ -785,6 +785,10 @@ Post-publish verification:
   returns system version `0.2.1-raw.1`.
 - `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-preview/system-latest.json`
   returns system version `0.2.1-raw.1`.
+- Downloaded GitHub app `latest.json` signature verified with
+  `scripts/verify-update-metadata.sh`: `Verified OK`.
+- Downloaded GitHub system `system-latest.json` signature verified with
+  `scripts/verify-system-update-metadata.sh`: `Verified OK`.
 - Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.1`.
 - Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
   `latest=0.2.1-raw.1`, `updateAvailable=true`.
