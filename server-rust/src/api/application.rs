@@ -569,7 +569,7 @@ fn restart_nanokvm_after_response() {
     });
 }
 
-fn is_preview_enabled() -> bool {
+pub(crate) fn is_preview_enabled() -> bool {
     Path::new(PREVIEW_UPDATES_FLAG).exists()
 }
 

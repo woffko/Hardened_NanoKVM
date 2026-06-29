@@ -16,6 +16,7 @@ use tokio::task;
 
 use crate::{
     AppError, Result,
+    api::application::is_preview_enabled,
     config::Config,
     error::ApiResponse,
     state::AppState,
@@ -342,7 +343,7 @@ pub async fn get_version() -> Result<impl IntoResponse> {
 pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
 
-    match get_latest_system(false, &state.config).await {
+    match get_latest_system(is_preview_enabled(), &state.config).await {
         Ok(latest) => {
             let update_available =
                 latest.target == current.target && latest.version != current.version;
@@ -409,7 +410,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
 pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let _guard = acquire_update_lock()?;
     let current = read_current_system_version();
-    let latest = get_latest_system(false, &state.config).await?;
+    let latest = get_latest_system(is_preview_enabled(), &state.config).await?;
 
     if latest.target != current.target {
         return Err(AppError::BadRequest(format!(

@@ -1,4 +1,4 @@
-## Hardened NanoKVM 1.0.3 Beta Sysupgrade (2026-06-29)
+## Hardened NanoKVM 1.0.4 Beta Sysupgrade (2026-06-29)
 
 ### Bug Fixes
 
@@ -12,6 +12,8 @@
   switch appear to bounce back to disabled.
 * Hardened raw partition install diagnostics and failure handling around
   read-only rootfs remounts.
+* Fixed system-update preview channel handling. System update check/download
+  now respects the same Preview Updates flag as application updates.
 
 ### Documentation
 

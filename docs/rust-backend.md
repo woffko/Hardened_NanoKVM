@@ -9,7 +9,7 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current sysupgrade branch beta release target is `1.0.3` from
+Current sysupgrade branch beta release target is `1.0.4` from
 `feature/nanokvm-sysupgrade-lifeline`.
 
 ## Build
