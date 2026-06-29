@@ -1,3 +1,13 @@
+## Hardened NanoKVM Beta 2.0.7 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed a login-loop after IP/protocol changes or stale browser cookies. The
+  web UI can now recover its CSRF cookie from the protected account endpoint
+  when the HttpOnly session cookie is still valid.
+* The CSRF cookie is now written and removed explicitly at path `/`, avoiding
+  route-specific cookie state after hash-route navigation.
+
 ## Hardened NanoKVM Beta 2.0.6 (2026-06-29)
 
 ### Bug Fixes

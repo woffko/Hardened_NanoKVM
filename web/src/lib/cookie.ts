@@ -23,12 +23,16 @@ export function getCsrfToken() {
 }
 
 export function setCsrfToken(token: string, expiresAt?: number) {
-  Cookies.set(COOKIE_CSRF_KEY, token, { expires: cookieExpires(expiresAt) });
+  Cookies.set(COOKIE_CSRF_KEY, token, {
+    expires: cookieExpires(expiresAt),
+    path: '/',
+    sameSite: 'Lax'
+  });
 }
 
 export function removeToken() {
   // Removes the old JS-readable token cookie from pre-hardening builds.
   // Current sessions are cleared by /api/auth/logout via an HttpOnly cookie.
-  Cookies.remove(COOKIE_TOKEN_KEY);
-  Cookies.remove(COOKIE_CSRF_KEY);
+  Cookies.remove(COOKIE_TOKEN_KEY, { path: '/' });
+  Cookies.remove(COOKIE_CSRF_KEY, { path: '/' });
 }

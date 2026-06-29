@@ -45,6 +45,10 @@ pub struct ChangePasswordReq {
 #[derive(Debug, Serialize)]
 pub struct AccountRsp {
     pub username: String,
+    #[serde(rename = "csrfToken")]
+    pub csrf_token: String,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +168,8 @@ pub async fn get_account(
     }
     Ok(Json(ApiResponse::ok(AccountRsp {
         username: account.username,
+        csrf_token: session.csrf_token,
+        expires_at: session.expires_at_unix,
     })))
 }
 
