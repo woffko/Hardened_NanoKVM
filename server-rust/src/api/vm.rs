@@ -38,7 +38,11 @@ use crate::{
     config::Config,
     error::ApiResponse,
     ffi::kvm,
-    http::{middleware::CurrentSession, tls},
+    http::{
+        cookie::{session_cookie, session_cookie_secure},
+        middleware::CurrentSession,
+        tls,
+    },
     state::{AppState, is_allowed_session_lock_duration},
     system::command::{AllowedCommand, run_allowed},
     ws::{hid as hid_ws, origin::validate_ws_origin},
@@ -813,11 +817,25 @@ pub async fn set_session_lock(
     config.write()?;
     state.set_session_lock_duration(req.duration);
     let session = state.sessions.retime(&session.token, req.duration).await;
+    let mut headers = HeaderMap::new();
+    if let Some(session) = &session {
+        headers.insert(
+            axum::http::header::SET_COOKIE,
+            session_cookie(
+                &session.token,
+                req.duration,
+                session_cookie_secure(&state.config.proto),
+            )?,
+        );
+    }
 
-    Ok(Json(ApiResponse::ok(SessionLockRsp {
-        duration: req.duration,
-        expires_at: session.map(|session| session.expires_at_unix),
-    })))
+    Ok((
+        headers,
+        Json(ApiResponse::ok(SessionLockRsp {
+            duration: req.duration,
+            expires_at: session.map(|session| session.expires_at_unix),
+        })),
+    ))
 }
 
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {

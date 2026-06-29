@@ -80,7 +80,7 @@ Important distinction:
 - The generated SD-card image contains a vfat boot partition with `fip.bin`,
   `rawimages/boot.sd`, and mode marker files.
 - The stock SDK rootfs does not contain `/kvmapp`, `/etc/kvm`, NanoKVM init
-  scripts, Hardened web assets, or backend switching files. It must not be used
+  scripts, Hardened web assets, or Rust-only backend files. It must not be used
   directly for GUI raw partition updates.
 
 ## Raw 0.1.0 Recovery Finding

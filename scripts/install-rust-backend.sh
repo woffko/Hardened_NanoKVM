@@ -10,7 +10,6 @@ SRC="$1"
 DEST_DIR="/kvmapp/server"
 DEST="$DEST_DIR/NanoKVM-Server"
 BACKUP_DIR="/kvmapp/backends"
-GO_BACKUP="$BACKUP_DIR/NanoKVM-Server.go"
 RUST_BACKUP="$BACKUP_DIR/NanoKVM-Server.rust"
 
 if [ ! -x "$SRC" ]; then
@@ -19,10 +18,10 @@ if [ ! -x "$SRC" ]; then
 fi
 
 mkdir -p "$BACKUP_DIR"
-
-if [ ! -f "$GO_BACKUP" ] && [ -f "$DEST" ]; then
-  cp "$DEST" "$GO_BACKUP"
-fi
+rm -f "$BACKUP_DIR/NanoKVM-Server.go" \
+  "$DEST_DIR/NanoKVM-Server.go" \
+  "$DEST_DIR/NanoKVM-Server.go.bak" \
+  /etc/kvm/scripts/switch-backend-go.sh 2>/dev/null || true
 
 cp "$SRC" "$DEST"
 chmod 0755 "$DEST"

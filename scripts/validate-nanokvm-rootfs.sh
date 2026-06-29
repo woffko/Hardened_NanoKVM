@@ -5,7 +5,7 @@ usage() {
   echo "usage: $0 <rootfs.ext4>" >&2
   echo "" >&2
   echo "environment:" >&2
-  echo "  EXPECTED_BACKEND=rust|go|any   default: rust" >&2
+  echo "  EXPECTED_BACKEND=rust|any      default: rust" >&2
   echo "  EXPECTED_KVMAPP_VERSION=<version> optional" >&2
   exit 1
 }
@@ -27,7 +27,7 @@ EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-}"
 command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
 
 case "$EXPECTED_BACKEND" in
-  rust | go | any) ;;
+  rust | any) ;;
   *) die "invalid EXPECTED_BACKEND: $EXPECTED_BACKEND" ;;
 esac
 
@@ -62,6 +62,13 @@ require_regular() {
   require_type "$1" "regular"
 }
 
+reject_path() {
+  path="$1"
+  if debugfs_output "stat $path" >/dev/null; then
+    die "forbidden path exists: $path"
+  fi
+}
+
 dump_file() {
   path="$1"
   name="$2"
@@ -92,20 +99,21 @@ require_dir /kvmapp/system/init.d
 require_dir /kvmapp/server/web
 require_dir /etc/init.d
 require_dir /etc/kvm
-require_dir /etc/kvm/scripts
 
 require_regular /kvmapp/version
 require_regular /kvmapp/server/NanoKVM-Server
 require_regular /kvmapp/backends/NanoKVM-Server.rust
-require_regular /kvmapp/backends/NanoKVM-Server.go
 require_regular /kvmapp/kvm_system/kvm_system
 require_regular /kvmapp/system/init.d/S95nanokvm
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem
 require_regular /kvmapp/server/web/index.html
 require_regular /etc/init.d/S95nanokvm
 require_regular /etc/kvm/backend
-require_regular /etc/kvm/scripts/switch-backend-go.sh
-require_regular /etc/kvm/scripts/switch-backend-rust.sh
+
+reject_path /kvmapp/backends/NanoKVM-Server.go
+reject_path /kvmapp/server/NanoKVM-Server.go
+reject_path /kvmapp/server/NanoKVM-Server.go.bak
+reject_path /etc/kvm/scripts/switch-backend-go.sh
 
 version_file=$(dump_file /kvmapp/version version)
 version=$(trim_file "$version_file")
@@ -118,7 +126,7 @@ fi
 backend_file=$(dump_file /etc/kvm/backend backend)
 backend=$(trim_file "$backend_file")
 case "$backend" in
-  rust | go) ;;
+  rust) ;;
   *) die "unexpected /etc/kvm/backend value: $backend" ;;
 esac
 

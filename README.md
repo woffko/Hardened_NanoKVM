@@ -26,26 +26,26 @@ NanoKVM hardware, web UI, native video pipeline, and service layout.
 The project goal is not to rewrite the whole firmware. The Rust backend remains
 a drop-in replacement for `NanoKVM-Server` and continues to use the existing
 `kvm_system`, `libkvm.so`, USB gadget setup, Maix multimedia stack, and frontend.
-The original Go backend is still kept as a fallback for comparison and recovery.
+Security release builds are Rust-only: the legacy Go backend and backend switch
+scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **beta - 1.0.2**.
+application version **beta - 1.0.5**.
 
 The current public beta release is published from the `woffko` fork at
-[`hardened-rust-beta-1.0.2`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-1.0.2).
+[`hardened-rust-beta-1.0.5`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-1.0.5).
 
 ## Current Beta Status
 
 This fork is usable for active device testing, but it is not a finished firmware
 release. The current development flow is to run the Rust backend on a real
-NanoKVM device, compare behavior against the original Go backend, and port or
-harden one subsystem at a time.
+NanoKVM device and harden one subsystem at a time.
 
 | Area | Status |
 | --- | --- |
 | Rust backend | Runs on the device as a replacement `NanoKVM-Server`. |
-| Go fallback | Preserved and switchable from the web UI. |
-| Web UI | Existing React UI is retained, with Hardened branding and a backend switch. |
+| Go fallback | Removed from shipped app and SD-card artifacts. Release validation fails if legacy Go backend files are present. |
+| Web UI | Existing React UI is retained with Hardened branding. The backend switch has been removed for Rust-only releases. |
 | HTTPS | Implemented in Rust with HTTP-to-HTTPS redirect and existing cert config support. |
 | Authentication | First-boot web account setup, Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. |
 | Video | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
@@ -53,7 +53,7 @@ harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
+| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
 | System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Raw full-rootfs updates are lab-only and now require validated Hardened SD rootfs images. Real kernel/rootfs security payloads are still pending. |
 
@@ -79,13 +79,13 @@ harden one subsystem at a time.
   calls.
 - Added guarded remote ISO download by URL, disabled by default and controlled
   from Settings > Appearance.
-- Added a web UI switch under **Settings > Device > Advanced**:
-  **Enable Hardened Backend** toggles between Rust/Hardened and the original Go
-  backend.
+- Removed the legacy Go backend from shipped artifacts and removed the web UI
+  backend switch. Release validators reject `NanoKVM-Server.go` and
+  `switch-backend-go.sh`.
 - Added device uptime to About and a Settings > Device session lock selector
   for 5, 15, 30, and 60 minute sessions.
-- Added persistent backend binaries under `/kvmapp/backends/`:
-  `NanoKVM-Server.rust` and `NanoKVM-Server.go`.
+- Added signed application update metadata verification for `latest.json`.
+- Added persistent Rust backend binary under `/kvmapp/backends/NanoKVM-Server.rust`.
 - Made `S95nanokvm` startup idempotent for testing: stale `S95nanokvm.*`
   backup scripts are removed from boot autostart, existing runtime processes
   are stopped before copy/start, stale web backup directories are removed from
@@ -93,41 +93,25 @@ harden one subsystem at a time.
 - Updated branding: login screen, toolbar, and About page identify the Hardened
   build, and the login screen and toolbar use the Hardened NanoKVM wordmark.
 
-## Backend Switching
+## Rust Backend Health
 
-For test devices, backend switching is handled by scripts installed under
-`/etc/kvm/scripts/`:
-
-```text
-switch-backend-rust.sh
-switch-backend-go.sh
-```
-
-Both scripts copy the selected backend into `/kvmapp/server/NanoKVM-Server` and
-then use the stock `/etc/init.d/S95nanokvm restart` flow. This keeps the upstream
-runtime behavior while avoiding extra backup binaries inside `/kvmapp/server`,
-which would otherwise consume too much `/tmp` space during service startup.
-
-The web UI switch calls these scripts through the existing custom-script API, so
-it works from either backend. When the Rust backend is active,
+When the Rust backend is active,
 `GET /api/health` returns:
 
 ```json
 {"code":0,"msg":"success","data":{"backend":"rust","phase":"skeleton","status":"ok"}}
 ```
 
-On the Go backend, `/api/health` is expected to return 404.
-
 ## Still Not Finished
 
 - Full API parity is not complete. Some routes are implemented for compatibility
-  but still need deeper behavior and edge-case testing against the Go backend.
+  but still need deeper behavior and edge-case testing.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants. H.264 Direct has been verified against the Rust backend on
   hardware.
 - Online update checks read Hardened release metadata from
   `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
-  after sha512 verification. Full signed release verification is still pending.
+  after signed metadata and sha512 verification.
 - GUI system updates for kernel/rootfs security backports can stage, verify,
   install, confirm boot-good, manually roll back system bundles, and
   automatically roll back a pending update after a bad boot. Real kernel/rootfs
@@ -222,7 +206,7 @@ Choose the NanoKVM model that best fits your deployment:
 Start with the guide that matches the part of NanoKVM you want to work on:
 
 - **System support modules:** Build and update the low-level hardware support components in [support/sg2002/README.md](support/sg2002/README.md).
-- **Backend service:** Set up, build, and understand the Go service in [server/README.md](server/README.md).
+- **Legacy upstream backend reference:** The original Go service source remains in [server/](server/) for reference and runtime library history, but it is no longer shipped in Hardened releases.
 - **Hardened Rust backend:** Build, package, and test the Rust replacement in [docs/rust-backend.md](docs/rust-backend.md).
 - **System update plan:** Track planned GUI system updates for vendor-kernel security backports in [docs/system-update-plan.md](docs/system-update-plan.md).
 - **System update releases:** Package future kernel/rootfs update bundles for GitHub-hosted channels with [docs/system-update-github-releases.md](docs/system-update-github-releases.md).

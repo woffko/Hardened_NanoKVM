@@ -1,7 +1,8 @@
 # System Update GitHub Releases
 
 Hardened NanoKVM system updates are published separately from `kvmapp`
-application updates. Application updates continue to use `latest.json`.
+application updates. Application updates continue to use signed `latest.json`
+metadata from the GitHub latest-release endpoint.
 System updates use their own channel metadata so that a kernel/rootfs release
 does not become the GitHub `latest` release and break the application updater.
 
@@ -174,7 +175,7 @@ build/sd-image/raw-system-update/Hardened_NanoKVM_<version>_Rev1_4_2_rust/rootfs
 Do not create raw GUI-installable releases directly from
 `build/vendor/LicheeRV-Nano-Build/.../rawimages/rootfs.sd`. That file is a
 stock SDK rootfs and does not contain `/kvmapp`, `/etc/kvm`, the Hardened init
-script, web assets, or backend switching files. The raw bundle helper validates
+script, web assets, or Rust-only backend files. The raw bundle helper validates
 the rootfs with `scripts/validate-nanokvm-rootfs.sh` and rejects stock images.
 
 Override `RAW_SYSTEM_UPDATE_BOOT` and `RAW_SYSTEM_UPDATE_ROOTFS` only with

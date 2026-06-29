@@ -79,10 +79,10 @@ image. The output is written under `build/sd-image/` as `.img`, `.img.xz`, and
 The generated image installs:
 
 - Rust as the active `/kvmapp/server/NanoKVM-Server`.
-- Original Go backend backup at `/kvmapp/backends/NanoKVM-Server.go`.
 - Rust backend backup at `/kvmapp/backends/NanoKVM-Server.rust`.
-- Backend switch scripts under `/etc/kvm/scripts/`.
 - `/etc/kvm/backend` with initial value `rust`.
+- Release validation rejects legacy Go backend files such as
+  `/kvmapp/backends/NanoKVM-Server.go` and `/etc/kvm/scripts/switch-backend-go.sh`.
 
 ## Implemented
 
@@ -130,8 +130,8 @@ The generated image installs:
   storage image paths, and update archives.
 - Online and offline `kvmapp` updates through Hardened GitHub Releases:
   `/api/application/version` reads `latest.json`, `/api/application/update`
-  downloads the release archive, verifies sha512, installs it under `/kvmapp`,
-  and restarts `S95nanokvm`.
+  verifies signed release metadata, downloads the release archive, verifies
+  sha512, installs it under `/kvmapp`, and restarts `S95nanokvm`.
 - Read-only system-update version/check routes:
   `/api/system-update/version` reports the current base-system identity and
   `/api/system-update/check` validates GitHub-hosted `system-latest.json`
@@ -146,9 +146,9 @@ The generated image installs:
   pending/backup markers. `/api/system-update/confirm` writes a boot-good
   marker after basic health checks. `/api/system-update/rollback` restores the
   latest backup manually. These routes do not reboot automatically.
-- UI branding for Hardened NanoKVM and version `beta - 1.0.2`.
+- UI branding for Hardened NanoKVM and version `beta - 1.0.5`.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
-- Web UI backend switch in Settings > Device > Advanced.
+- Rust-only release artifacts without the legacy Go backend switch.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
   update archives.
 
@@ -172,7 +172,8 @@ The generated image installs:
 
 ## Known Issues And Remaining Work
 
-- Full API parity against the Go backend still needs route-by-route validation.
+- Full API parity still needs route-by-route validation against historical
+  upstream behavior.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants.
 - Video setting changes need more route-by-route stress testing. Reproduced
@@ -183,8 +184,9 @@ The generated image installs:
   Direct streaming on the test device.
 - First-boot/account setup needs continued product testing on fresh SD-card
   flashes.
-- `kvmapp` update signature verification is still missing; current releases
-  use trusted GitHub URLs plus sha512 verification.
+- `kvmapp` update metadata signature verification is implemented. Releases must
+  include `latest.json.sig`; unsigned metadata is accepted only when
+  `security.allow_unsigned_updates=true`.
 - Remote ISO download needs a final production policy before it should be
   treated as broadly enabled functionality.
 - PicoClaw needs end-to-end runtime/session/history validation against the real
@@ -204,9 +206,5 @@ scp scripts/install-rust-backend.sh root@nanokvm:/tmp/install-rust-backend.sh
 ssh root@nanokvm 'sh /tmp/install-rust-backend.sh /tmp/NanoKVM-Server.rust'
 ```
 
-Backend switching after both binaries are installed:
-
-```sh
-ssh root@nanokvm 'sh /etc/kvm/scripts/switch-backend-rust.sh'
-ssh root@nanokvm 'sh /etc/kvm/scripts/switch-backend-go.sh'
-```
+The manual installer also removes any legacy Go backend backup left by older
+test builds.

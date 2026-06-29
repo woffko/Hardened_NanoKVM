@@ -16,8 +16,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 
 - Application updates are implemented as `kvmapp` tarballs published through
   `woffko/Hardened_NanoKVM` GitHub Releases.
-- Application update metadata is served as `latest.json` and the downloaded
-  archive is verified with sha512 before installation.
+- Application update metadata is served as signed `latest.json` plus
+  `latest.json.sig`, and the downloaded archive is verified with sha512 before
+  installation.
 - System updates will use a separate GitHub release channel metadata file,
   `system-latest.json`, attached to fixed channel tags such as
   `hardened-system-stable`. They must not use GitHub `/releases/latest` while
@@ -73,7 +74,7 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - inspect the generated `upgrade.zip` with `make vendor-sdk-inspect`;
    - build a stock image first, without Hardened changes;
    - boot it on test hardware;
-   - verify video, HID, storage, network, SSH, web UI, and backend switching;
+   - verify video, HID, storage, network, SSH, web UI, and Rust-only backend startup;
    - only then apply selected security backports.
 
 3. Define a separate system-update bundle format:
