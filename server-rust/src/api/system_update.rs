@@ -1252,9 +1252,13 @@ PROGRESS={progress}\n\
 PROGRESS_DIR={progress_dir}\n\
 VERSION={version}\n\
 STARTED_AT={started_at}\n\
+RAW_WRITE_STARTED=0\n\
+kmsg() {{\n\
+  [ -w /dev/kmsg ] && $BB printf 'hardened-system-update: %s\\n' \"$1\" > /dev/kmsg || true\n\
+}}\n\
 log() {{\n\
   NOW=$($BB date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || $BB echo unknown)\n\
-  $BB printf '%s %s\\n' \"$NOW\" \"$1\" >> \"$LOG\" || true\n\
+  $BB printf '%s %s\\n' \"$NOW\" \"$1\" >> \"$LOG\" || kmsg \"$1\"\n\
 }}\n\
 progress() {{\n\
   NOW=$($BB date +%s 2>/dev/null || $BB echo 0)\n\
@@ -1264,21 +1268,94 @@ progress() {{\n\
 fail() {{\n\
   progress failed \"$1\"\n\
   log \"failed: $1\"\n\
+  if [ \"$RAW_WRITE_STARTED\" = \"1\" ]; then\n\
+    log 'raw write had started; rebooting instead of restarting services'\n\
+    $BB sync\n\
+    $BB sleep 2\n\
+    $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
+    exit 1\n\
+  fi\n\
   $BB mount -o remount,rw / >/dev/null 2>&1 || true\n\
   /etc/init.d/S95nanokvm start >/dev/null 2>&1 || true\n\
   exit 1\n\
+}}\n\
+root_is_ro() {{\n\
+  while read DEV MNT TYPE OPTS REST; do\n\
+    [ \"$MNT\" = '/' ] || continue\n\
+    case \",$OPTS,\" in\n\
+      *,ro,*) return 0 ;;\n\
+      *) return 1 ;;\n\
+    esac\n\
+  done < /proc/mounts\n\
+  return 1\n\
+}}\n\
+stop_update_runtime() {{\n\
+  log 'stopping NanoKVM runtime'\n\
+  /etc/init.d/S95nanokvm stop >> \"$LOG\" 2>&1 || true\n\
+  for PID_FILE in /tmp/nanokvm-watchdog.pid /tmp/system-update-watchdog.pid; do\n\
+    if [ -f \"$PID_FILE\" ]; then\n\
+      PID=$($BB cat \"$PID_FILE\" 2>/dev/null || true)\n\
+      [ -n \"$PID\" ] && $BB kill \"$PID\" >/dev/null 2>&1 || true\n\
+      $BB rm -f \"$PID_FILE\" >/dev/null 2>&1 || true\n\
+    fi\n\
+  done\n\
+  $BB killall NanoKVM-Server >/dev/null 2>&1 || true\n\
+  $BB killall kvm_system >/dev/null 2>&1 || true\n\
+  $BB sleep 1\n\
+  $BB killall -9 NanoKVM-Server >/dev/null 2>&1 || true\n\
+  $BB killall -9 kvm_system >/dev/null 2>&1 || true\n\
+  for PROC in /proc/[0-9]*; do\n\
+    PID=${{PROC##*/}}\n\
+    CMD=$($BB tr '\\0' ' ' < \"$PROC/cmdline\" 2>/dev/null || true)\n\
+    case \"$CMD\" in\n\
+      *'/etc/init.d/S95nanokvm start'*) $BB kill -9 \"$PID\" >/dev/null 2>&1 || true ;;\n\
+    esac\n\
+  done\n\
+  $BB rm -rf /tmp/kvm_system /tmp/server >/dev/null 2>&1 || true\n\
+}}\n\
+prepare_boot_readonly() {{\n\
+  if $BB grep -q ' /boot ' /proc/mounts >/dev/null 2>&1; then\n\
+    log 'preparing /boot read-only'\n\
+    $BB umount /boot >> \"$LOG\" 2>&1 || $BB mount -o remount,ro /boot >> \"$LOG\" 2>&1 || true\n\
+  fi\n\
+}}\n\
+force_root_readonly() {{\n\
+  progress writing 'remounting rootfs read-only'\n\
+  log 'attempting rootfs read-only remount'\n\
+  REMOUNT_ERR=$($BB mount -o remount,ro / 2>&1)\n\
+  REMOUNT_RC=$?\n\
+  if [ \"$REMOUNT_RC\" = '0' ] || root_is_ro; then\n\
+    log 'rootfs is read-only after normal remount'\n\
+    return 0\n\
+  fi\n\
+  log \"normal rootfs read-only remount failed rc=$REMOUNT_RC: $REMOUNT_ERR\"\n\
+  log 'rootfs users after failed remount:'\n\
+  $BB fuser -m / >> \"$LOG\" 2>&1 || true\n\
+  $BB lsof / >> \"$LOG\" 2>&1 || true\n\
+  if [ -w /proc/sysrq-trigger ]; then\n\
+    progress writing 'forcing read-only remount with sysrq'\n\
+    log 'forcing read-only remount through sysrq u'\n\
+    $BB sync\n\
+    $BB echo u > /proc/sysrq-trigger\n\
+    $BB sleep 3\n\
+    if root_is_ro; then\n\
+      log 'rootfs is read-only after sysrq remount'\n\
+      return 0\n\
+    fi\n\
+    log 'sysrq remount did not make rootfs read-only'\n\
+  else\n\
+    log 'sysrq-trigger is unavailable'\n\
+  fi\n\
+  fail 'failed to remount rootfs read-only'\n\
 }}\n\
 cd /tmp || exit 1\n\
 progress writing 'raw image write in progress'\n\
 log 'raw system image update started'\n\
 $BB sleep 2\n\
-log 'stopping NanoKVM backend'\n\
-/etc/init.d/S95nanokvm stop >/dev/null 2>&1 || true\n\
+stop_update_runtime\n\
 $BB sync\n\
-$BB mount -o remount,ro / >/dev/null 2>&1 || fail 'failed to remount rootfs read-only'\n\
-if $BB grep -q ' /boot ' /proc/mounts >/dev/null 2>&1; then\n\
-  $BB umount /boot >/dev/null 2>&1 || $BB mount -o remount,ro /boot >/dev/null 2>&1 || true\n\
-fi\n"
+prepare_boot_readonly\n\
+force_root_readonly\n"
     );
 
     for image in raw_images_install_order(&manifest.raw_images) {
@@ -1289,6 +1366,7 @@ fi\n"
         script.push_str(&format!(
             "progress writing {}\n\
 log 'writing {} to {}'\n\
+RAW_WRITE_STARTED=1\n\
 $BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'\n",
             shell_quote(&message),
             image.label,

@@ -12,33 +12,45 @@ export const Ssh = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    setIsLoading(true);
-
-    api
-      .getSSHState()
-      .then((rsp) => {
-        if (rsp.data?.enabled) {
-          setIsEnabled(true);
-        }
-      })
-      .finally(() => {
-        setIsLoading(false);
-      });
+    void refresh();
   }, []);
 
-  async function update() {
+  async function refresh() {
+    setIsLoading(true);
+
+    try {
+      const rsp = await api.getSSHState();
+      if (rsp.code === 0) {
+        setIsEnabled(Boolean(rsp.data?.enabled));
+      }
+    } catch (err) {
+      console.log(err);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function update(checked: boolean) {
     if (isLoading) return;
     setIsLoading(true);
 
-    const rsp = isEnabled ? await api.disableSSH() : await api.enableSSH();
-    setIsLoading(false);
+    try {
+      const rsp = checked ? await api.enableSSH() : await api.disableSSH();
+      if (rsp.code !== 0) {
+        console.log(rsp.msg);
+        return;
+      }
 
-    if (rsp.code !== 0) {
-      console.log(rsp.msg);
-      return;
+      if (typeof rsp.data?.enabled === 'boolean') {
+        setIsEnabled(rsp.data.enabled);
+      } else {
+        setIsEnabled(checked);
+      }
+    } catch (err) {
+      console.log(err);
+    } finally {
+      setIsLoading(false);
     }
-
-    setIsEnabled(!isEnabled);
   }
 
   return (

@@ -471,11 +471,6 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>,
-                systemStaged ? (
-                  <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
-                    {t('settings.update.system.install')}
-                  </Button>
-                ) : null,
                 systemRollback ? (
                   <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
                     {t('settings.update.system.rollback')}
@@ -594,6 +589,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>,
+                systemStaged ? (
+                  <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
+                    {t('settings.update.system.install')}
+                  </Button>
+                ) : null,
                 systemRollback ? (
                   <Button key="rollback" danger onClick={confirmRollbackSystemUpdate}>
                     {t('settings.update.system.rollback')}

@@ -55,6 +55,7 @@ const ETC_HOSTS_FILE: &str = "/etc/hosts";
 const WEB_TITLE_FILE: &str = "/etc/kvm/web-title";
 const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
 const SSH_STOP_FLAG: &str = "/etc/kvm/ssh_stop";
+const SSH_PROCESS_NAME: &str = "sshd";
 const OLED_EXIST_FILE: &str = "/etc/kvm/oled_exist";
 const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
 const GO_MEM_LIMIT_FILE: &str = "/etc/kvm/GOMEMLIMIT";
@@ -397,30 +398,89 @@ pub async fn reset_hdmi() -> Result<impl IntoResponse> {
 
 pub async fn get_ssh_state() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(EnabledRsp {
-        enabled: !Path::new(SSH_STOP_FLAG).exists(),
+        enabled: ssh_enabled().await,
     })))
 }
 
 pub async fn enable_ssh() -> Result<impl IntoResponse> {
-    run_checked(
+    if ssh_enabled().await {
+        return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: true })));
+    }
+
+    let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_on"],
         Duration::from_secs(5),
         "enable ssh failed",
     )
-    .await?;
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    .await;
+    wait_for_ssh_state(true, Duration::from_secs(3)).await;
+    let enabled = ssh_enabled().await;
+    if let Err(err) = result
+        && !enabled
+    {
+        return Err(err);
+    }
+    Ok(Json(ApiResponse::ok(EnabledRsp { enabled })))
 }
 
 pub async fn disable_ssh() -> Result<impl IntoResponse> {
-    run_checked(
+    if ssh_stop_requested() && !sshd_is_running().await {
+        return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: false })));
+    }
+
+    let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_off"],
         Duration::from_secs(5),
         "disable ssh failed",
     )
-    .await?;
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    .await;
+    wait_for_ssh_state(false, Duration::from_secs(3)).await;
+    let enabled = ssh_enabled().await;
+    if let Err(err) = result
+        && (enabled || !ssh_stop_requested())
+    {
+        return Err(err);
+    }
+    Ok(Json(ApiResponse::ok(EnabledRsp { enabled })))
+}
+
+async fn ssh_enabled() -> bool {
+    !ssh_stop_requested() && sshd_is_running().await
+}
+
+fn ssh_stop_requested() -> bool {
+    Path::new(SSH_STOP_FLAG).exists()
+}
+
+async fn sshd_is_running() -> bool {
+    match run_allowed(
+        AllowedCommand::Pidof,
+        [SSH_PROCESS_NAME],
+        Duration::from_secs(2),
+    )
+    .await
+    {
+        Ok(output) => output.status == 0 && !output.stdout.is_empty(),
+        Err(err) => {
+            debug!(error = %err, "failed to check sshd process");
+            false
+        }
+    }
+}
+
+async fn wait_for_ssh_state(enabled: bool, timeout: Duration) {
+    let deadline = StdInstant::now() + timeout;
+    loop {
+        if ssh_enabled().await == enabled {
+            return;
+        }
+        if StdInstant::now() >= deadline {
+            return;
+        }
+        time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 pub async fn get_mdns_state() -> Result<impl IntoResponse> {

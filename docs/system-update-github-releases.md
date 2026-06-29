@@ -154,20 +154,31 @@ KERNEL_VERSION=5.10.4-tag-hardened.1 \
 make system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0
 ```
 
-Create an experimental raw boot/rootfs bundle from vendor SDK artifacts:
+Create an experimental raw boot/rootfs bundle from the patched Hardened SD
+image:
 
 ```sh
+make rust-kvmapp RUST_TARGET=riscv64gc-unknown-linux-musl
+make sd-image HARDENED_RELEASE_VERSION=1.0.3
+make raw-system-update-images HARDENED_RELEASE_VERSION=1.0.3
 make raw-system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0-raw.1
 ```
 
-The default raw inputs are:
+The default raw inputs are extracted from the patched SD image into:
 
 ```text
-build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/boot.vfat
-build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/rawimages/rootfs.sd
+build/sd-image/raw-system-update/Hardened_NanoKVM_<version>_Rev1_4_2_rust/boot.vfat
+build/sd-image/raw-system-update/Hardened_NanoKVM_<version>_Rev1_4_2_rust/rootfs.sd
 ```
 
-Override them with `RAW_SYSTEM_UPDATE_BOOT` and `RAW_SYSTEM_UPDATE_ROOTFS`.
+Do not create raw GUI-installable releases directly from
+`build/vendor/LicheeRV-Nano-Build/.../rawimages/rootfs.sd`. That file is a
+stock SDK rootfs and does not contain `/kvmapp`, `/etc/kvm`, the Hardened init
+script, web assets, or backend switching files. The raw bundle helper validates
+the rootfs with `scripts/validate-nanokvm-rootfs.sh` and rejects stock images.
+
+Override `RAW_SYSTEM_UPDATE_BOOT` and `RAW_SYSTEM_UPDATE_ROOTFS` only with
+images extracted from a validated Hardened SD image.
 
 Create channel metadata:
 
@@ -210,6 +221,20 @@ build/system-updates/system-latest.json
 build/system-updates/system-latest.json.sha256
 build/system-updates/system-latest.json.sig      # when signing key is set
 build/system-updates/system-latest.json.sig.base64
+```
+
+## Revoked Experimental Raw Release
+
+Do not use `hardened-system-0.1.0-raw.1`. It was built from the vendor SDK stock
+rootfs instead of the patched Hardened SD image rootfs. A device that installs
+that raw bundle can boot into plain Buildroot without `/kvmapp`, NanoKVM init,
+or the expected network/runtime configuration and therefore may require SD-card
+reflash recovery.
+
+Any replacement raw release must pass:
+
+```sh
+scripts/validate-nanokvm-rootfs.sh <rootfs.sd>
 ```
 
 ## Current Device Baseline

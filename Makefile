@@ -23,13 +23,19 @@ SYSTEM_UPDATE_TARGET ?= sg2002-licheervnano-sd
 SYSTEM_UPDATE_PAYLOAD ?= build/system-update-payload
 SYSTEM_UPDATE_OUT ?= build/system-updates
 SYSTEM_UPDATE_TAG ?= hardened-system-$(SYSTEM_UPDATE_VERSION)
+HARDENED_RELEASE_VERSION ?= $(shell cat kvmapp/version 2>/dev/null || printf alpha-0.1)
+HARDENED_RELEASE_VERSION_SAFE := $(shell printf '%s' '$(HARDENED_RELEASE_VERSION)' | sed 's/[^A-Za-z0-9]/_/g')
+SD_IMAGE_OUT ?= build/sd-image
+SD_IMAGE_BASENAME ?= Hardened_NanoKVM_$(HARDENED_RELEASE_VERSION_SAFE)_Rev1_4_2_rust
+RAW_SYSTEM_UPDATE_SD_IMAGE ?= $(SD_IMAGE_OUT)/$(SD_IMAGE_BASENAME).img
+RAW_SYSTEM_UPDATE_IMAGE_DIR ?= $(SD_IMAGE_OUT)/raw-system-update/$(SD_IMAGE_BASENAME)
 VENDOR_SDK_OUTPUT ?= build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd
 VENDOR_SDK_UPGRADE ?= $(VENDOR_SDK_OUTPUT)/upgrade.zip
 VENDOR_SDK_INSPECTION ?= build/vendor-upgrade-inspection.json
-RAW_SYSTEM_UPDATE_BOOT ?= $(VENDOR_SDK_OUTPUT)/images/boot.vfat
-RAW_SYSTEM_UPDATE_ROOTFS ?= $(VENDOR_SDK_OUTPUT)/rawimages/rootfs.sd
+RAW_SYSTEM_UPDATE_BOOT ?= $(RAW_SYSTEM_UPDATE_IMAGE_DIR)/boot.vfat
+RAW_SYSTEM_UPDATE_ROOTFS ?= $(RAW_SYSTEM_UPDATE_IMAGE_DIR)/rootfs.sd
 
-.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image vendor-sdk vendor-sdk-stock vendor-sdk-inspect system-update-bundle raw-system-update-bundle system-update-metadata support all clean
+.PHONY: help check-root builder-image rebuild-image check-image shell app rust-app web-app rust-kvmapp sd-image raw-system-update-images vendor-sdk vendor-sdk-stock vendor-sdk-inspect system-update-bundle raw-system-update-bundle system-update-metadata support all clean
 
 # Default target
 all: app support
@@ -49,6 +55,7 @@ help:
 	@echo "  web-app       - Build frontend into web/dist"
 	@echo "  rust-kvmapp   - Package Rust backend into build/kvmapp-rust"
 	@echo "  sd-image      - Build patched Hardened NanoKVM SD image from NANOKVM_BASE_IMAGE"
+	@echo "  raw-system-update-images - Extract boot/rootfs from patched Hardened SD image"
 	@echo "  vendor-sdk    - Bootstrap the pinned Sipeed LicheeRV Nano vendor SDK checkout"
 	@echo "  vendor-sdk-stock - Build the stock SDK image with a Buildroot-safe PATH"
 	@echo "  vendor-sdk-inspect - Validate vendor upgrade.zip and write JSON inspection"
@@ -122,7 +129,13 @@ rust-kvmapp: rust-app
 # Full boot/rootfs builds still require the external LicheeRV Nano SDK flow.
 # This target patches a trusted NanoKVM base image with the current Rust kvmapp.
 sd-image:
-	@scripts/build-rust-sd-image.sh
+	@OUT_DIR="$(SD_IMAGE_OUT)" \
+	  HARDENED_RELEASE_VERSION="$(HARDENED_RELEASE_VERSION)" \
+	  OUTPUT_BASENAME="$(SD_IMAGE_BASENAME)" \
+	  scripts/build-rust-sd-image.sh
+
+raw-system-update-images: sd-image
+	@scripts/extract-sd-raw-images.sh "$(RAW_SYSTEM_UPDATE_SD_IMAGE)" "$(RAW_SYSTEM_UPDATE_IMAGE_DIR)"
 
 # Bootstrap the external Sipeed SDK checkout used for reproducible stock image
 # work. The SDK itself stays under build/vendor and is not committed.
@@ -146,7 +159,7 @@ vendor-sdk-inspect:
 system-update-bundle:
 	@scripts/create-system-update-bundle.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TARGET)" "$(SYSTEM_UPDATE_PAYLOAD)" "$(SYSTEM_UPDATE_OUT)"
 
-raw-system-update-bundle:
+raw-system-update-bundle: raw-system-update-images
 	@scripts/create-raw-system-update-bundle.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TARGET)" "$(RAW_SYSTEM_UPDATE_BOOT)" "$(RAW_SYSTEM_UPDATE_ROOTFS)" "$(SYSTEM_UPDATE_OUT)"
 
 system-update-metadata:

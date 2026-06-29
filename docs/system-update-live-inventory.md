@@ -79,6 +79,31 @@ Important distinction:
 - `rawimages/rootfs.sd` is an ext4 filesystem image.
 - The generated SD-card image contains a vfat boot partition with `fip.bin`,
   `rawimages/boot.sd`, and mode marker files.
+- The stock SDK rootfs does not contain `/kvmapp`, `/etc/kvm`, NanoKVM init
+  scripts, Hardened web assets, or backend switching files. It must not be used
+  directly for GUI raw partition updates.
+
+## Raw 0.1.0 Recovery Finding
+
+On 2026-06-29, an SD card from a failed `hardened-system-0.1.0-raw.1` GUI raw
+install was inspected offline. The boot partition marker was
+`2026-06-28-19-11-d88d58.img`, and the rootfs was a stock Buildroot image from
+the reproduced vendor SDK:
+
+```text
+os-release: Buildroot 2023.11.2, VERSION=-gd88d58fec
+/etc/hostname: licheervnano
+/kvmapp: missing
+/etc/kvm/system-version.json: missing
+/etc/init.d/S95nanokvm: missing
+/etc/network/interfaces: loopback only
+```
+
+The rootfs filesystem was readable but marked with journal recovery/errors after
+the failed boot. The main failure was the artifact contents, not just the
+runtime raw writer: the release pipeline packaged a stock SDK rootfs. Raw
+releases must now be built from a patched Hardened SD image and validated with
+`scripts/validate-nanokvm-rootfs.sh` before publishing.
 
 ## Safety Conclusions
 
@@ -86,10 +111,10 @@ Do not treat the vendor `partition_sd.xml` as the live installed-device layout.
 The live device has a third `/data` partition and a larger root partition, while
 the vendor OTA describes only BOOT and ROOTFS.
 
-Do not enable raw partition writes from the GUI until there is a partition-aware
-installer with explicit device identity checks, enough `/data` backup space,
-power-loss handling, and a tested recovery path. The current Rust system-update
-installer should remain file-level only.
+Do not enable raw partition writes from the GUI on non-lab devices until there
+is a partition-aware installer with explicit device identity checks, enough
+`/data` backup space, power-loss handling, and a tested recovery path. Raw
+updates remain SD-card-recovery-only even after rootfs content validation.
 
 Near-term safe update paths:
 

@@ -47,11 +47,13 @@ TARGET="$2"
 BOOT_IMAGE="$3"
 ROOTFS_IMAGE="$4"
 OUT_DIR="$5"
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 validate_token "version" "$VERSION"
 validate_token "target" "$TARGET"
 [ -f "$BOOT_IMAGE" ] || die "boot image does not exist: $BOOT_IMAGE"
 [ -f "$ROOTFS_IMAGE" ] || die "rootfs image does not exist: $ROOTFS_IMAGE"
+"$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$ROOTFS_IMAGE" >/dev/null
 
 BASE_VERSION="${BASE_VERSION:-unknown}"
 KERNEL_VERSION="${KERNEL_VERSION:-unknown}"

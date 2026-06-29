@@ -113,6 +113,11 @@ printf 'rust\n' > "$STATE_FILE"
 echo "Updating rootfs with Hardened kvmapp..."
 debugfs -w -f "$DEBUGFS_CMDS" "$ROOTFS_IMAGE" >/dev/null
 
+echo "Validating Hardened rootfs..."
+EXPECTED_BACKEND="${EXPECTED_BACKEND:-rust}" \
+EXPECTED_KVMAPP_VERSION="$(cat "$KVMAPP_DIR/version")" \
+  "$ROOT/scripts/validate-nanokvm-rootfs.sh" "$ROOTFS_IMAGE" >/dev/null
+
 echo "Writing rootfs partition back into SD image..."
 dd if="$ROOTFS_IMAGE" of="$OUT_IMAGE" bs=512 seek="$ROOTFS_START" conv=notrunc status=none
 

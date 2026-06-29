@@ -160,3 +160,37 @@ The init script also starts a local health watchdog. If `/api/health` fails
 repeatedly, it writes `/etc/kvm/h264_safe_mode`, forces `/kvmapp/kvm/type` to
 `mjpeg`, and restarts only `NanoKVM-Server`.
 
+## SD And Raw System Update Builds
+
+The safe raw-system-update flow is:
+
+```sh
+cargo test --manifest-path server-rust/Cargo.toml
+corepack pnpm --dir web build
+server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+  APP_VERSION="$(cat kvmapp/version)" \
+  scripts/package-rust-kvmapp.sh
+make sd-image HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
+make raw-system-update-images HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
+make raw-system-update-bundle \
+  HARDENED_RELEASE_VERSION="$(cat kvmapp/version)" \
+  SYSTEM_UPDATE_VERSION="<system-version>"
+```
+
+`scripts/extract-sd-raw-images.sh` accepts either `.img` or `.img.xz`; compressed
+images are decompressed to a temporary file before partition extraction.
+
+`make raw-system-update-bundle` must package boot/rootfs images extracted from
+the patched Hardened SD image. Do not point it at vendor SDK
+`rawimages/rootfs.sd`; that is a stock Buildroot rootfs without `/kvmapp`,
+`/etc/kvm`, NanoKVM init, or web assets.
+
+The guard rail is:
+
+```sh
+scripts/validate-nanokvm-rootfs.sh <rootfs.sd>
+```
+
+The validator must pass before signing or uploading any raw system update.
+`hardened-system-0.1.0-raw.1` failed this rule and is considered revoked.

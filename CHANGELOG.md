@@ -1,3 +1,25 @@
+## Hardened NanoKVM 1.0.3 Beta Sysupgrade (2026-06-29)
+
+### Bug Fixes
+
+* Added rootfs content validation for experimental raw system-update releases so
+  stock vendor SDK rootfs images without Hardened NanoKVM files are rejected
+  before packaging.
+* Changed raw system-update build defaults to extract boot/rootfs from the
+  patched Hardened SD image instead of vendor SDK stock artifacts.
+* Made the SSH setting idempotent and state-based. Re-enabling an already
+  running SSH service now reports `enabled: true` instead of letting the GUI
+  switch appear to bounce back to disabled.
+* Hardened raw partition install diagnostics and failure handling around
+  read-only rootfs remounts.
+
+### Documentation
+
+* Marked `hardened-system-0.1.0-raw.1` as a revoked experimental raw release
+  and documented the correct SD/raw release build flow.
+* Recorded that SDK-derived raw images should be tested only after a fresh
+  known-good Hardened SD image from this sysupgrade branch passes end-to-end.
+
 ## Hardened NanoKVM 1.0.2 Beta (2026-06-28)
 
 ### Bug Fixes

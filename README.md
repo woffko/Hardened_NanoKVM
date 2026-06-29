@@ -55,7 +55,7 @@ harden one subsystem at a time.
 | Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
 | Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with sha512 verification from `latest.json`; signed release verification is still pending. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
-| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Real kernel/rootfs payloads are still pending. |
+| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Raw full-rootfs updates are lab-only and now require validated Hardened SD rootfs images. Real kernel/rootfs security payloads are still pending. |
 
 ## What Changed In This Fork
 
@@ -131,7 +131,9 @@ On the Go backend, `/api/health` is expected to return 404.
 - GUI system updates for kernel/rootfs security backports can stage, verify,
   install, confirm boot-good, manually roll back system bundles, and
   automatically roll back a pending update after a bad boot. Real kernel/rootfs
-  payloads are still pending.
+  payloads are still pending. Experimental raw full-rootfs releases must be
+  built from a patched Hardened SD image; `hardened-system-0.1.0-raw.1` is
+  revoked because it used a stock vendor SDK rootfs.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
 - First-boot/account setup is implemented for Rust/Hardened images. Existing

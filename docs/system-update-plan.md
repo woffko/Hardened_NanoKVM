@@ -41,8 +41,13 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 - Experimental raw boot/rootfs partition bundles are implemented behind
   `security.allow_raw_system_updates`. They can be staged through the same GUI,
   write only `images/boot.vfat` to `/dev/mmcblk0p1` and
-  `rawimages/rootfs.sd` to `/dev/mmcblk0p2`, sync, and reboot. This is for lab
-  devices with SD-card recovery only and has no automatic rollback.
+  `images/rootfs.sd` to `/dev/mmcblk0p2`, sync, and reboot. This is for lab
+  devices with SD-card recovery only and has no automatic rollback. Raw bundle
+  tooling now rejects rootfs images that do not contain the Hardened NanoKVM
+  `/kvmapp`, `/etc/kvm`, init script, web assets, and backend-switching files.
+- `hardened-system-0.1.0-raw.1` is a revoked experimental raw release. It was
+  built from the stock vendor SDK rootfs and must not be installed. Use a newer
+  raw release produced from a validated Hardened SD image.
 - The first signed rootfs-only smoke release is published:
   `hardened-system-0.1.0-dev.1`, with channel metadata on
   `hardened-system-stable`. It was validated on `10.0.87.132` for
@@ -125,6 +130,14 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - explicit warning for kernel/base updates;
    - progress, verification state, reboot prompt, and rollback status.
 
+9. Add remote syslog support for update observability:
+   - `Settings > Device > Advanced` toggle and host/port/protocol fields;
+   - BusyBox `syslogd` forwarding with local logging kept enabled;
+   - Rust/backend, init/watchdog, and raw updater logs routed through syslog
+     tags such as `nanokvm-server` and `hardened-system-update`;
+   - `Send test log` action in the GUI;
+   - LAN/VPN-only warning because initial syslog transport is plaintext UDP.
+
 ## GitHub Release Contract
 
 The initial release contract is documented in
@@ -141,6 +154,8 @@ The current helper scripts are:
 
 - `scripts/bootstrap-vendor-sdk.sh`
 - `scripts/create-system-update-bundle.sh`
+- `scripts/extract-sd-raw-images.sh`
+- `scripts/validate-nanokvm-rootfs.sh`
 - `scripts/create-raw-system-update-bundle.sh`
 - `scripts/create-system-update-metadata.sh`
 - `scripts/verify-system-update-metadata.sh`
@@ -160,13 +175,22 @@ the previous files.
 
 ## Required Test Sequence
 
-1. Manual system bundle install over SSH.
-2. Manual rollback.
-3. Backend API download/status flow.
-4. Backend API install/rollback flow.
-5. GUI flow.
-6. Rollback-on-bad-boot flow.
-7. Long video, HID, network, reboot, and backend-switching soak after update.
+1. Validate raw/system update tooling against a freshly built known-good
+   Hardened SD image from the sysupgrade branch before testing any SDK-derived
+   image. Do not use the old `1.0.1` baseline for this stage because it predates
+   the bundled system-update public key.
+2. Extract boot/rootfs from that known-good image, validate the rootfs, build a
+   raw bundle, install it through GUI/API on sacrificial SD media, and confirm
+   web, SSH, video, HID, and reboot behavior.
+3. Manual system bundle install over SSH.
+4. Manual rollback.
+5. Backend API download/status flow.
+6. Backend API install/rollback flow.
+7. GUI flow.
+8. Rollback-on-bad-boot flow.
+9. Only after the known-good Hardened image path passes, repeat the same flow
+   with SDK-derived images.
+10. Long video, HID, network, reboot, and backend-switching soak after update.
 
 ## Non-Goals For The First Version
 

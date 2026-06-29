@@ -9,8 +9,8 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current public beta release metadata points to `1.0.2` from
-`woffko/Hardened_NanoKVM` GitHub Releases.
+Current sysupgrade branch beta release target is `1.0.3` from
+`feature/nanokvm-sysupgrade-lifeline`.
 
 ## Build
 
