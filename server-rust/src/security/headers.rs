@@ -6,7 +6,9 @@ use axum::{
 };
 
 pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
-    let is_api = req.uri().path().starts_with("/api/");
+    let path = req.uri().path().to_string();
+    let is_api = path.starts_with("/api/");
+    let is_html_shell = path == "/" || path.ends_with(".html");
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
@@ -29,7 +31,7 @@ pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
         "Permissions-Policy",
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    if is_api {
+    if is_api || is_html_shell {
         headers.insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store, max-age=0"),

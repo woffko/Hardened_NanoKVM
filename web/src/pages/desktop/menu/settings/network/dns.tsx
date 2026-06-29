@@ -382,6 +382,12 @@ export const DNS = () => {
     }
 
     setIsSaving(true);
+    let redirectTimer: number | undefined;
+    if (mode === 'manual') {
+      setMessage(t('settings.network.dns.redirecting'));
+      redirectTimer = window.setTimeout(() => window.location.assign(redirectURL), 5000);
+    }
+
     try {
       const rsp = await api.setDNS(
         mode,
@@ -396,6 +402,7 @@ export const DNS = () => {
           : undefined
       );
       if (rsp.code !== 0) {
+        if (redirectTimer) window.clearTimeout(redirectTimer);
         setError(rsp.msg || t('settings.network.dns.saveFailed'));
         return;
       }
@@ -411,8 +418,9 @@ export const DNS = () => {
       setOriginalGateway(normalizedGateway);
 
       if (mode === 'manual') {
+        if (redirectTimer) window.clearTimeout(redirectTimer);
         setMessage(t('settings.network.dns.redirecting'));
-        window.setTimeout(() => window.location.assign(redirectURL), 1200);
+        window.setTimeout(() => window.location.assign(redirectURL), 800);
       } else {
         await getDNS(false);
         setMessage(t('settings.network.dns.saved'));
@@ -420,8 +428,10 @@ export const DNS = () => {
     } catch (err) {
       console.log(err);
       if (mode === 'manual') {
-        setMessage(t('settings.network.dns.redirecting'));
-        window.setTimeout(() => window.location.assign(redirectURL), 1200);
+        if (!redirectTimer) {
+          setMessage(t('settings.network.dns.redirecting'));
+          window.setTimeout(() => window.location.assign(redirectURL), 1200);
+        }
         return;
       }
       setError(t('settings.network.dns.saveFailed'));

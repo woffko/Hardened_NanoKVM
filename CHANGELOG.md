@@ -1,3 +1,15 @@
+## Hardened NanoKVM Beta 2.0.6 (2026-06-29)
+
+### Bug Fixes
+
+* Made Manual network Apply schedule the browser redirect before waiting for
+  the network-setting POST to finish, so changing the device IP still moves the
+  browser to the target address if the request is interrupted by the Ethernet
+  restart.
+* Added `Cache-Control: no-store` to the HTML shell responses. This avoids old
+  browsers reusing a stale React bundle after an application update, which can
+  leave the UI stuck on the login screen until site data or cache is cleared.
+
 ## Hardened NanoKVM Beta 2.0.5 (2026-06-29)
 
 ### Features
