@@ -929,3 +929,53 @@ Device check:
   `latest=2.0.3`.
 - `10.0.87.133` system check: `current=0.0.0-stock`,
   `latest=0.2.2-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.4 Legacy Failed-Progress Cleanup
+
+Reason:
+
+- another device on app `2.0.3` still displayed
+  `forbidden: raw partition system updates are disabled` even with the raw
+  update toggle enabled;
+- root cause was a legacy `install/failed` progress record written by older
+  builds before raw updates were enabled, not the current raw-update setting;
+- the app `2.0.3` UI already showed Download and Verify for newer metadata, but
+  it still displayed the stale failed-progress message.
+
+Fix:
+
+- app version bumped to `2.0.4`;
+- Rust status normalization clears legacy `install/failed` progress records
+  that have no staged version;
+- UI hides stale failed-progress text when a newer system update can be
+  downloaded and verified.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- app metadata signature verified locally and after GitHub publication:
+  `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.4.tar.gz` | `ac6e8dbf248503f3cb1cb4887af8b9d6024674e13669391ff635f46751026483` |
+| App metadata | `build/artifacts/latest.json` | `9a52e6b29c352cdb7b55c634c0106c67010428d05b752c97e43aec23ed7db980` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `918a65854af8129a2e30d8f50262f26dee36517cf5d0583d52a5bae825581d3f` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.4`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System stable/preview remain at `0.2.2-raw.1`.
+
+Device check:
+
+- `10.0.87.133` app after installing `2.0.3`: `current=2.0.3`,
+  `latest=2.0.4`.
+- `10.0.87.133` Download and Verify completed for system `0.2.2-raw.1`;
+  status now shows staged `0.2.2-raw.1` and `progress=null`.
