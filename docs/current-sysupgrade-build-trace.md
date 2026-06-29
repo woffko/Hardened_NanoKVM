@@ -465,3 +465,44 @@ Fix applied locally:
   - `sh -n kvmapp/system/init.d/S95nanokvm`
   - `sh -n scripts/build-rust-sd-image.sh`
   - `sh -n scripts/validate-nanokvm-rootfs.sh`
+
+Final sensorfix release:
+
+- Code/source commit for the fixed artifacts:
+  `06c643f Fix LT6911 sensor config in sysupgrade image`.
+- Branch pushed:
+  `feature/new-buildroot-sysupgrade-lab`.
+- Release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.5-raw.1`
+- Stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- Public stable metadata was checked and returns:
+  - version: `0.1.5-raw.1`;
+  - sha256:
+    `88d681e07f99128ce9e8f6d9f61fde21502afab727d117f3708f641a98379936`;
+  - URL:
+    `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.5-raw.1/hardened-nanokvm-system-0.1.5-raw.1.tar.gz`.
+- Final local artifacts:
+  - app archive:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/artifacts/nanokvm-kvmapp-rust.tar.gz`
+    sha256 `7d5ca62eef83099e93e3691758733123671bef43392558718bf903b01bf1f31b`;
+  - SD image:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_sensorfix_Rev1_4_2_rust.img`
+    sha256 `ba3f08b4657a47b4529154c9094d4ac5c761b1c60294b9265ba198a1b1f734c0`;
+  - compressed SD image:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_sensorfix_Rev1_4_2_rust.img.xz`
+    sha256 `8c330399656b183ce72f861f16abb332e276033445ea5c87f3e16e69db946bf0`;
+  - raw system-update archive:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/hardened-nanokvm-system-0.1.5-raw.1.tar.gz`
+    sha256 `88d681e07f99128ce9e8f6d9f61fde21502afab727d117f3708f641a98379936`;
+  - final metadata:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json`
+    sha256 `63ce32f551342d22a9ef2dacb3e98380f40ee4cbcdaccb3568e212ed7ceea64a`.
+- Final raw manifest source commit is `06c643f`; raw image entries inside the
+  archive:
+  - ROOTFS `/dev/mmcblk0p2` sha256
+    `a33ef9313ec64449cf6f86df3a9a27672ed5efbd0f55a152180ad3c87321bc41`;
+  - BOOT `/dev/mmcblk0p1` sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`.
+- `10.0.87.133` was inspected read-only only. No files, services, or reboot
+  actions were changed there.
