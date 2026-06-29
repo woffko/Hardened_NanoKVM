@@ -506,3 +506,107 @@ Final sensorfix release:
     `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`.
 - `10.0.87.133` was inspected read-only only. No files, services, or reboot
   actions were changed there.
+
+## 2026-06-29: Beta 2 Integrated App/SD/Raw Release Build
+
+Goal:
+
+- publish a single beta 2 line that includes the latest Rust-only application,
+  the sysupgrade GUI/backend work, the LT6911 sensorfix, and the Buildroot
+  2023.11.2 security-backport SD/rootfs baseline;
+- add a GUI switch on Check for Updates for explicitly enabling raw system
+  updates before destructive boot/rootfs writes;
+- ship app update, SD-card image, and raw system-update bundle together.
+
+Source commit:
+
+- `8fa6bd6 Add guarded raw system update toggle`
+
+Versioning:
+
+- application update version: `2.0.0`
+- web display version: `beta 2`
+- raw system-update version: `0.2.0-raw.1`
+- app release tag: `hardened-rust-beta-2`
+- system release tag: `hardened-system-0.2.0-raw.1`
+
+Base image for SD/raw:
+
+- `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img`
+- This is the vendor Buildroot `2023.11.2` SDK image with selected
+  Buildroot `2023.11.3` package-level security backports. It is not a full
+  Buildroot version migration.
+
+Build commands used:
+
+```sh
+cargo check --manifest-path server-rust/Cargo.toml
+corepack pnpm --dir web build
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+APP_VERSION=2.0.0 \
+ARTIFACT_NAME=hardened-nanokvm-kvmapp-2.0.0.tar.gz \
+KVM_SYSTEM_SOURCE=/home/w0w/Hardened_NanoKVM/build/kvmapp-rust/kvmapp/kvm_system/kvm_system \
+  scripts/package-rust-kvmapp.sh
+NANOKVM_BASE_IMAGE=/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img \
+SD_IMAGE_BASENAME=Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust \
+HARDENED_RELEASE_VERSION=2.0.0 \
+  make sd-image
+scripts/extract-sd-raw-images.sh \
+  build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust
+BASE_VERSION=2026-06-29-12-08-d88d58.img \
+KERNEL_VERSION=5.10.4-tag- \
+  scripts/create-raw-system-update-bundle.sh \
+  0.2.0-raw.1 \
+  sg2002-licheervnano-sd \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
+  build/system-updates
+```
+
+Validation:
+
+- `cargo check`: passed.
+- `corepack pnpm --dir web build`: passed.
+- `scripts/validate-nanokvm-rootfs.sh` on the SD rootfs image: passed with
+  `kvmapp version: 2.0.0`, `backend: rust`.
+- `scripts/verify-update-metadata.sh`: `Verified OK`.
+- `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.0.tar.gz` | `acc2a60ffc11bbb751b185ed2b59d1fe6226f1921881fc941e39c4e0e117b989` |
+| App metadata | `build/artifacts/latest.json` | `5a4b29ed5c7e663dbfcfe7e0929e54c52b6f84bf2ed2480b475bf0893a81954f` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `592ee3a1b11e772d084bbd215e7ce488e9ef68cb1250d3dab577b3ce9f3ce07f` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `d5fb17a7550c9534b7b54926fc2c0ee9cde274ece7459704002ea735a08882d7` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `eb8ed7195e731acfc874c6250f1e64974b02b96b14778645cf91f5a4f4dd3eed` |
+| SD rootfs image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `07364d3fee1f543c7daa75625d4d03a361a57a971cc1404921d193d60924e75b` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.0-raw.1.tar.gz` | `a718b5546ffea67ebc8ead8ebd7c93f2278faa0d69a950264848acb99d9ac310` |
+| System metadata | `build/system-updates/system-latest.json` | `0fa53649380dfcb5a65df66e2ddf1172cd14c1be63d1ec9085624ab6c2563129` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `9f835ca2e1b7ffe4844039cb2fe3f57f44b6dd35c23c6aefd638f01460a0357a` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `8fa6bd6`
+- required staging free space: `2147483648` bytes
+- raw writes:
+  - ROOTFS `/dev/mmcblk0p2`, patched payload sha256
+    `54480569cee2641e70d3825deba37696f041c7125c9e2329882e62af9f6c1b3e`
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
