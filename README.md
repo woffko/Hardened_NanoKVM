@@ -57,6 +57,101 @@ NanoKVM device and harden one subsystem at a time.
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
 | System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Raw full-rootfs updates are lab-only and now require validated Hardened SD rootfs images. Real kernel/rootfs security payloads are still pending. |
 
+## How Updates Work
+
+Hardened NanoKVM has two separate update paths. They are intentionally split
+because the application can usually be replaced safely, while system updates
+write raw SD-card partitions and can make the device unbootable if interrupted
+or if the wrong image is installed.
+
+### Application Updates
+
+Application updates replace only the Hardened `kvmapp` payload:
+
+- Rust backend binaries: `/kvmapp/server/NanoKVM-Server` and
+  `/kvmapp/backends/NanoKVM-Server.rust`.
+- Web UI assets under `/kvmapp/server/web`.
+- Hardened helper scripts, init scripts, keys, version files, and app-side
+  configuration defaults shipped in `kvmapp`.
+
+They do not rewrite the boot partition, rootfs partition, kernel, bootloader, or
+base Buildroot system. This is the normal update path for backend fixes, UI
+fixes, auth/session changes, H.264/HID/storage/network endpoint changes, and
+branding.
+
+The GUI checks GitHub Releases in the `woffko/Hardened_NanoKVM` fork. Stable
+application metadata is published as `latest.json` on the latest beta release,
+for example:
+
+```text
+https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
+```
+
+The metadata points to a versioned app archive such as
+`hardened-nanokvm-kvmapp-2.0.6.tar.gz` on a release tag such as
+`hardened-rust-beta-2.0.6`. The device verifies signed metadata and the archive
+sha512 before installing. The preview toggle uses the `hardened-rust-preview`
+channel metadata, but it still installs the versioned archive named by that
+metadata.
+
+Offline application updates use the same archive format, but the archive is
+uploaded from the browser instead of downloaded from GitHub.
+
+### Raw System Updates
+
+Raw system updates are different. They are full partition-image updates for the
+SD card and currently target the NanoKVM SD layout:
+
+- raw rootfs image for `/dev/mmcblk0p2`;
+- raw boot image for `/dev/mmcblk0p1`;
+- metadata describing the target board, expected image hashes, base image,
+  kernel string, required free space, and source commit.
+
+These updates can change the base Buildroot rootfs, boot files, kernel-side
+payloads, bundled `kvmapp`, init scripts installed in rootfs, and system
+version metadata. They are intended for system/security work that cannot be
+done by replacing `kvmapp` alone.
+
+Because raw updates write SD-card partitions, the GUI keeps them behind an
+explicit **Allow raw system updates** switch on the Check for Updates screen.
+Enabling it means the device may require SD-card reflash recovery if the update
+is interrupted or the image is bad.
+
+System update metadata is published through a stable channel release:
+
+```text
+https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json
+```
+
+That channel metadata points to a versioned raw system release such as
+`hardened-system-0.2.4-raw.1`, which contains:
+
+- `hardened-nanokvm-system-<version>.tar.gz`;
+- `system-latest.json` and signature files;
+- matching SD-card image artifacts for manual flashing or recovery;
+- the matching application archive for traceability.
+
+The device downloads the raw archive into `/data/.hardened-kvmcache`, verifies
+the signed metadata and payload hashes, stages the update, and then runs the
+guarded install step. After a raw install, the device must reboot. The user then
+confirms a good boot in the GUI; if a pending boot is not confirmed, the
+watchdog/rollback path is designed to restore the previous staged system state
+where possible.
+
+### Which Update Should Be Used?
+
+Use an application update for normal Hardened backend and UI changes. It is the
+preferred path for routine beta testing.
+
+Use a raw system update only when the change must modify the base SD-card
+system: boot/rootfs contents, kernel-side payloads, rootfs-installed init
+scripts, or a full system security image. Keep a recovery SD-card image
+available before testing raw updates.
+
+The current beta release publishes both so a test device can first update the
+application through the GUI and then, if needed, use the same Check for Updates
+screen to stage and install the matching raw system image.
+
 ## What Changed In This Fork
 
 - Added `server-rust/`, a Rust backend that preserves the existing API envelope
