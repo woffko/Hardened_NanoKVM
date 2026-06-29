@@ -35,6 +35,10 @@ application version **beta 2.0.7**.
 The current public beta release is published from the `woffko` fork at
 [`hardened-rust-beta-2.0.7`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.7).
 
+The latest application hotfix is **2.0.7**. The latest raw system-update and
+SD-card artifacts are currently still the **2.0.6 / 0.2.4-raw.1** builds; a
+matching raw/SD rebuild for app `2.0.7` has not been published yet.
+
 ## Current Beta Status
 
 This fork is usable for active device testing, but it is not a finished firmware
@@ -53,9 +57,9 @@ NanoKVM device and harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, full wired DHCP/manual IP/DNS settings, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. |
-| SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
-| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Raw full-rootfs updates are lab-only and now require validated Hardened SD rootfs images. Real kernel/rootfs security payloads are still pending. |
+| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current app channel: `2.0.7`. |
+| SD image | Latest published SD image is beta `2.0.6`, built by patching a trusted NanoKVM Rev1.4.2 base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
+| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.4-raw.1`, built from the beta `2.0.6` SD rootfs. Raw full-rootfs updates are lab-only. Real kernel/rootfs security payloads are still pending. |
 
 ## How Updates Work
 
@@ -88,8 +92,8 @@ https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
 ```
 
 The metadata points to a versioned app archive such as
-`hardened-nanokvm-kvmapp-2.0.6.tar.gz` on a release tag such as
-`hardened-rust-beta-2.0.6`. The device verifies signed metadata and the archive
+`hardened-nanokvm-kvmapp-2.0.7.tar.gz` on a release tag such as
+`hardened-rust-beta-2.0.7`. The device verifies signed metadata and the archive
 sha512 before installing. The preview toggle uses the `hardened-rust-preview`
 channel metadata, but it still installs the versioned archive named by that
 metadata.
@@ -138,6 +142,24 @@ confirms a good boot in the GUI; if a pending boot is not confirmed, the
 watchdog/rollback path is designed to restore the previous staged system state
 where possible.
 
+### Current Published Channels
+
+The channels can intentionally move independently:
+
+- Application stable/latest: `2.0.7`, tag `hardened-rust-beta-2.0.7`.
+- Application preview: `hardened-rust-preview`, currently also points to
+  `2.0.7`.
+- Raw system stable: `0.2.4-raw.1`, tag
+  `hardened-system-0.2.4-raw.1`.
+- Raw system preview: `hardened-system-preview`, currently points to the same
+  raw metadata as stable.
+- Latest published SD image: beta `2.0.6`, matching raw system
+  `0.2.4-raw.1`.
+
+An app-only hotfix can be newer than the raw/SD image. That is the current
+state: app `2.0.7` fixes browser auth-state recovery, while raw/SD remain at
+the previous `2.0.6` system payload.
+
 ### Which Update Should Be Used?
 
 Use an application update for normal Hardened backend and UI changes. It is the
@@ -148,9 +170,10 @@ system: boot/rootfs contents, kernel-side payloads, rootfs-installed init
 scripts, or a full system security image. Keep a recovery SD-card image
 available before testing raw updates.
 
-The current beta release publishes both so a test device can first update the
-application through the GUI and then, if needed, use the same Check for Updates
-screen to stage and install the matching raw system image.
+The beta channels publish both update paths, but they do not have to advance at
+the same time. A test device should normally install the latest app update
+first, then install a raw system update only when the raw channel offers a newer
+system payload and SD-card recovery is available.
 
 ## What Changed In This Fork
 
@@ -159,6 +182,10 @@ screen to stage and install the matching raw system image.
 - Added hardened auth/session handling: generated per-device secret, CSRF token
   binding, Origin checks, login lockout, explicit session revocation, and safer
   password storage.
+- Added browser auth-state recovery for IP/protocol changes: if the HttpOnly
+  session cookie is still valid but the JS-readable CSRF cookie is missing, the
+  web UI restores CSRF state through `/api/auth/account` instead of returning
+  immediately to the login screen.
 - Added a first-boot setup screen for new SD-card flashes. If `/etc/kvm/pwd`
   does not exist, the web UI requires creating the first administrator account
   before normal login is available. Lost credentials are recovered by reflashing
@@ -208,14 +235,14 @@ When the Rust backend is active,
   browser variants. H.264 Direct has been verified against the Rust backend on
   hardware.
 - Online update checks read Hardened release metadata from
-  `github.com/woffko/Hardened_NanoKVM` and install the release `kvmapp` tarball
-  after signed metadata and sha512 verification.
+  `github.com/woffko/Hardened_NanoKVM` and install versioned release archives
+  after signed metadata and payload hash verification.
 - GUI system updates for kernel/rootfs security backports can stage, verify,
   install, confirm boot-good, manually roll back system bundles, and
   automatically roll back a pending update after a bad boot. Real kernel/rootfs
-  payloads are still pending. Experimental raw full-rootfs releases must be
-  built from a patched Hardened SD image; `hardened-system-0.1.0-raw.1` is
-  revoked because it used a stock vendor SDK rootfs.
+  payloads are still pending. Current raw full-rootfs releases are built from
+  patched Hardened SD images; `hardened-system-0.1.0-raw.1` is revoked because
+  it used a stock vendor SDK rootfs.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
 - First-boot/account setup is implemented for Rust/Hardened images. Existing
@@ -291,10 +318,10 @@ Choose the NanoKVM model that best fits your deployment:
 │   ├── server      # Front-end and back-end integration
 │   └── system      # Essential system components
 ├── web             # NanoKVM Front-end (UI)
-├── server          # NanoKVM Back-end (Service)
+├── server          # Legacy upstream Go backend reference
 ├── server-rust     # Hardened Rust backend replacement
 ├── scripts/nanokvm # Device-side helper scripts used while testing this fork
-├── docs            # Backend inventory, security notes, and Rust backend status
+├── docs            # Handoff, build trace, update plans, security notes
 ├── support         # Auxiliary modules (Image subsystem, status, updates, OLED, HID, etc.)
 ├── ...
 ```
@@ -311,6 +338,7 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 - **Vendor SDK build path:** Bootstrap and validate the Sipeed/LicheeRV Nano SDK for future full base-system images in [docs/vendor-sdk-build.md](docs/vendor-sdk-build.md).
 - **New Buildroot study:** Track feasibility of newer SDK/newer Buildroot sysupgrade images in [docs/new-buildroot-sysupgrade-study.md](docs/new-buildroot-sysupgrade-study.md).
 - **Buildroot 2023 security backports:** Evaluate critical userspace backports for the proven vendor SDK baseline in [docs/buildroot-2023-security-backport-plan.md](docs/buildroot-2023-security-backport-plan.md).
+- **Current handoff:** Start from the latest project/device/release state in [docs/handoff.md](docs/handoff.md).
 - **Current sysupgrade trace:** Keep active raw-system-update build handoff notes in [docs/current-sysupgrade-build-trace.md](docs/current-sysupgrade-build-trace.md).
 - **Security status:** Review hardening scope and remaining risk in [docs/security-risk-inventory.md](docs/security-risk-inventory.md).
 - **Frontend UI:** Develop, lint, and build the React interface in [web/README.md](web/README.md).
