@@ -10,6 +10,8 @@ disable_stale_autostarts() {
 
 WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
 H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
+SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
+SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
 
 wait_process_exit() {
     name="$1"
@@ -53,6 +55,15 @@ ensure_kvm_state_files() {
     [ -f /kvmapp/kvm/state ] || printf '0\n' > /kvmapp/kvm/state
     [ -f /kvmapp/kvm/width ] || printf '1920\n' > /kvmapp/kvm/width
     [ -f /kvmapp/kvm/height ] || printf '1080\n' > /kvmapp/kvm/height
+}
+
+install_system_update_public_key() {
+    [ -f "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" ] || return
+    mkdir -p /etc/kvm
+    if ! cmp -s "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"; then
+        cp "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"
+        chmod 0644 "$SYSTEM_UPDATE_PUBLIC_KEY"
+    fi
 }
 
 start_server_runtime() {
@@ -127,6 +138,7 @@ stop_runtime() {
 
 start_runtime() {
     cleanup_server_backups
+    install_system_update_public_key
     ensure_kvm_state_files
 
     cp -r /kvmapp/kvm_system /tmp/

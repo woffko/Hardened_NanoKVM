@@ -11,7 +11,6 @@ OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_
 
 OUT_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.img"
 ROOTFS_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.rootfs.ext"
-GO_BACKEND="$OUT_DIR/$OUTPUT_BASENAME.NanoKVM-Server.go"
 STATE_FILE="$OUT_DIR/$OUTPUT_BASENAME.backend-state"
 DEBUGFS_CMDS="$OUT_DIR/$OUTPUT_BASENAME.debugfs.cmd"
 
@@ -32,8 +31,6 @@ require_dir() {
 require_file "$BASE_IMAGE"
 require_dir "$KVMAPP_DIR"
 require_file "$KVMAPP_DIR/server/NanoKVM-Server"
-require_file "$ROOT/scripts/nanokvm/switch-backend-go.sh"
-require_file "$ROOT/scripts/nanokvm/switch-backend-rust.sh"
 
 mkdir -p "$OUT_DIR"
 
@@ -52,9 +49,6 @@ cp -f "$BASE_IMAGE" "$OUT_IMAGE"
 echo "Extracting rootfs partition..."
 dd if="$OUT_IMAGE" of="$ROOTFS_IMAGE" bs=512 skip="$ROOTFS_START" count="$ROOTFS_SECTORS" status=none
 
-echo "Saving original Go backend from base image..."
-debugfs -R "dump /kvmapp/server/NanoKVM-Server $GO_BACKEND" "$ROOTFS_IMAGE" >/dev/null 2>&1
-chmod 0644 "$GO_BACKEND"
 printf 'rust\n' > "$STATE_FILE"
 
 {
@@ -77,10 +71,8 @@ printf 'rust\n' > "$STATE_FILE"
 
   printf 'mkdir /kvmapp/backends\n'
   printf 'rm /kvmapp/backends/NanoKVM-Server.go\n'
-  printf 'write %s /kvmapp/backends/NanoKVM-Server.go\n' "$GO_BACKEND"
-  printf 'sif /kvmapp/backends/NanoKVM-Server.go mode 0100755\n'
-  printf 'sif /kvmapp/backends/NanoKVM-Server.go uid 1000\n'
-  printf 'sif /kvmapp/backends/NanoKVM-Server.go gid 1000\n'
+  printf 'rm /kvmapp/server/NanoKVM-Server.go\n'
+  printf 'rm /kvmapp/server/NanoKVM-Server.go.bak\n'
   printf 'rm /kvmapp/backends/NanoKVM-Server.rust\n'
   printf 'write %s /kvmapp/backends/NanoKVM-Server.rust\n' "$KVMAPP_DIR/server/NanoKVM-Server"
   printf 'sif /kvmapp/backends/NanoKVM-Server.rust mode 0100755\n'
@@ -88,20 +80,13 @@ printf 'rust\n' > "$STATE_FILE"
   printf 'sif /kvmapp/backends/NanoKVM-Server.rust gid 1000\n'
 
   printf 'mkdir /etc/kvm\n'
-  printf 'mkdir /etc/kvm/scripts\n'
   printf 'rm /etc/kvm/backend\n'
   printf 'write %s /etc/kvm/backend\n' "$STATE_FILE"
   printf 'sif /etc/kvm/backend mode 0100644\n'
   printf 'sif /etc/kvm/backend uid 0\n'
   printf 'sif /etc/kvm/backend gid 0\n'
-
-  for script in switch-backend-go.sh switch-backend-rust.sh; do
-    printf 'rm /etc/kvm/scripts/%s\n' "$script"
-    printf 'write %s /etc/kvm/scripts/%s\n' "$ROOT/scripts/nanokvm/$script" "$script"
-    printf 'sif /etc/kvm/scripts/%s mode 0100755\n' "$script"
-    printf 'sif /etc/kvm/scripts/%s uid 0\n' "$script"
-    printf 'sif /etc/kvm/scripts/%s gid 0\n' "$script"
-  done
+  printf 'rm /etc/kvm/scripts/switch-backend-go.sh\n'
+  printf 'rm /etc/kvm/scripts/switch-backend-rust.sh\n'
 
   printf 'rm /etc/init.d/S95nanokvm\n'
   printf 'write %s /etc/init.d/S95nanokvm\n' "$KVMAPP_DIR/system/init.d/S95nanokvm"

@@ -1,3 +1,25 @@
+## Hardened NanoKVM 1.0.5 Beta Security (2026-06-29)
+
+### Security
+
+* Removed the legacy Go backend from shipped `kvmapp` and SD-card artifacts.
+  Release validation now rejects `NanoKVM-Server.go` and
+  `switch-backend-go.sh` if they reappear.
+* Hardened web sessions by moving the session token to an HttpOnly cookie.
+  The frontend keeps only the CSRF token in JavaScript-readable storage.
+* Added signed application update metadata verification. Online app updates now
+  require `latest.json.sig` unless `security.allow_unsigned_updates=true`.
+* Hardened application update archives by rejecting symlinks and forbidden
+  legacy backend files before `/kvmapp` is replaced.
+* Made `/etc/kvm/server.yaml` writes atomic, mode `0600`, and symlink-safe.
+* Updated frontend dependencies and lockfile; `pnpm audit --audit-level low`
+  reports no known vulnerabilities.
+
+### Changed
+
+* Removed the Settings > Device > Advanced backend switch from the web UI.
+* Raised the displayed application version to `beta - 1.0.5`.
+
 ## Hardened NanoKVM 1.0.2 Beta (2026-06-28)
 
 ### Bug Fixes

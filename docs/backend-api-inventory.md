@@ -50,8 +50,8 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method | Path | Rust Status |
 |---|---|---|
-| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and Hardened GitHub release `latest.json`. |
-| POST | `/api/application/update` | Implemented beta release path; downloads Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, installs `/kvmapp`, and restarts service. Signed release metadata is still TODO. |
+| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. |
+| POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. |
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
 | GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
 
@@ -170,6 +170,12 @@ Rust hardening fields under `security` include `require_csrf`,
 `allow_remote_image_download`, `allow_auth_disable`, `allow_default_admin`, and
 `allowed_origins`.
 
+Rust-only path fields include `paths.system_update_public_key`, defaulting to
+`/etc/kvm/system-update-signing.pub.pem`, for detached application-update
+metadata signature verification. The default key is synchronized from
+`/kvmapp/system/keys/system-update-signing.pub.pem` by `S95nanokvm` on service
+start.
+
 ## External Components To Preserve
 
 - `kvm_system` and `kvm_vision` remain external components.
@@ -180,8 +186,10 @@ Rust hardening fields under `security` include `require_csrf`,
 
 ## Current Gaps
 
-- Full route-by-route parity against the Go backend still needs systematic
-  regression testing, especially uncommon settings and exact error semantics.
+- Full route-by-route parity against historical upstream behavior still needs
+  systematic regression testing, especially uncommon settings and exact error
+  semantics.
 - H.264 WebRTC needs longer browser/ICE validation.
-- `kvmapp` updates need signed release metadata.
+- `kvmapp` update metadata is signed; release publishing must upload
+  `latest.json` and `latest.json.sig`.
 - GUI system updates for vendor-kernel/security backports are not implemented.

@@ -2,8 +2,8 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     net::{IpAddr, SocketAddr},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    path::{Component, Path, PathBuf},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -105,6 +105,7 @@ pub struct Paths {
     pub web_root: PathBuf,
     pub image_directory: PathBuf,
     pub update_cache_dir: PathBuf,
+    pub system_update_public_key: PathBuf,
 }
 
 impl Default for Config {
@@ -202,6 +203,7 @@ impl Default for Paths {
             web_root: PathBuf::from("/kvmapp/server/web"),
             image_directory: PathBuf::from("/data"),
             update_cache_dir: PathBuf::from("/root/.kvmcache"),
+            system_update_public_key: PathBuf::from("/etc/kvm/system-update-signing.pub.pem"),
         }
     }
 }
@@ -233,12 +235,9 @@ impl Config {
         let path = std::env::var("NANOKVM_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let data = serde_yaml::to_string(self)
             .map_err(|err| AppError::Config(format!("failed to serialize config: {err}")))?;
-        fs::write(path, data)?;
+        write_yaml_0600_atomic(&path, data.as_bytes())?;
         Ok(())
     }
 
@@ -354,9 +353,96 @@ fn write_secret_0600(path: &Path, secret: &str) -> Result<()> {
     Ok(())
 }
 
+fn write_yaml_0600_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(AppError::Config("empty config path".to_string()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("config path has no parent".to_string()))?;
+    ensure_no_symlink_components(parent)?;
+    fs::create_dir_all(parent)?;
+    ensure_no_symlink_components(path)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::Config("config path has invalid file name".to_string()))?;
+    let tmp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        random_tmp_suffix()
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&tmp_path, path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        if let Ok(parent_dir) = fs::File::open(parent) {
+            let _ = parent_dir.sync_all();
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn ensure_no_symlink_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) => current.push(component.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                return Err(AppError::Config(
+                    "config path cannot contain parent directory components".to_string(),
+                ));
+            }
+            Component::Normal(value) => current.push(value),
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(AppError::Config(format!(
+                    "refusing to write config through symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(metadata) if metadata.file_type().is_fifo() || metadata.file_type().is_socket() => {
+                return Err(AppError::Config(format!(
+                    "refusing to write config through special file: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+fn random_tmp_suffix() -> String {
+    let mut bytes = [0_u8; 8];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn default_disables_legacy_admin_bootstrap() {
@@ -382,5 +468,29 @@ mod tests {
                 "{host} should need a dedicated loopback listener"
             );
         }
+    }
+
+    #[test]
+    fn config_write_uses_0600_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        write_yaml_0600_atomic(&path, b"proto: http\n").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_to_string(path).unwrap(), "proto: http\n");
+    }
+
+    #[test]
+    fn config_write_rejects_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.yaml");
+        let link = dir.path().join("server.yaml");
+        fs::write(&target, b"proto: http\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let err = write_yaml_0600_atomic(&link, b"proto: https\n").unwrap_err();
+        assert!(err.to_string().contains("symlink"));
+        assert_eq!(fs::read_to_string(target).unwrap(), "proto: http\n");
     }
 }

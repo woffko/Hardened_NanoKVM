@@ -16,8 +16,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 
 - Application updates are implemented as `kvmapp` tarballs published through
   `woffko/Hardened_NanoKVM` GitHub Releases.
-- Application update metadata is served as `latest.json` and the downloaded
-  archive is verified with sha512 before installation.
+- Application update metadata is served as signed `latest.json` plus
+  `latest.json.sig`, and the downloaded archive is verified with sha512 before
+  installation.
 - SD-card images are currently produced by patching a trusted upstream NanoKVM
   Rev1.4.2 base image with the current Hardened `kvmapp`.
 - A reproducible full boot/rootfs image build from the Sipeed/LicheeRV Nano
@@ -38,7 +39,7 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
 2. Reproduce a clean stock build from the Sipeed/LicheeRV Nano vendor SDK:
    - build a stock image first, without Hardened changes;
    - boot it on test hardware;
-   - verify video, HID, storage, network, SSH, web UI, and backend switching;
+   - verify video, HID, storage, network, SSH, web UI, and Rust-only backend startup;
    - only then apply selected security backports.
 
 3. Define a separate system-update bundle format:

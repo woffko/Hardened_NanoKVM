@@ -75,6 +75,10 @@ chmod 0755 "$KVMAPP_STAGE/server/NanoKVM-Server"
 cp "$RUST_BINARY" "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
 chmod 0755 "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
 
+rm -f "$KVMAPP_STAGE/backends/NanoKVM-Server.go" \
+  "$KVMAPP_STAGE/server/NanoKVM-Server.go" \
+  "$KVMAPP_STAGE/server/NanoKVM-Server.go.bak"
+
 if [ -d "$ROOT_DIR/server/dl_lib" ]; then
   mkdir -p "$KVMAPP_STAGE/server/dl_lib"
   cp -R "$ROOT_DIR/server/dl_lib/." "$KVMAPP_STAGE/server/dl_lib/"
@@ -96,6 +100,11 @@ fi
   printf 'app_version: %s\n' "$(cat "$KVMAPP_STAGE/version")"
   printf 'kvm_system_helper: %s\n' "$(wc -c < "$KVMAPP_STAGE/kvm_system/kvm_system" | tr -d ' ') bytes"
 } > "$STAGE_DIR/MANIFEST.txt"
+
+if find "$KVMAPP_STAGE" \( -name 'NanoKVM-Server.go' -o -name 'NanoKVM-Server.go.bak' \) | grep -q .; then
+  echo "legacy Go backend found in staged kvmapp" >&2
+  exit 1
+fi
 
 ARCHIVE="$OUT_DIR/$ARTIFACT_NAME"
 tar -C "$STAGE_DIR" -czf "$ARCHIVE" kvmapp MANIFEST.txt

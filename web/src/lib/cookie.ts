@@ -12,19 +12,7 @@ function cookieExpires(expiresAt?: number) {
 }
 
 export function existToken() {
-  const token = Cookies.get(COOKIE_TOKEN_KEY);
-  return !!token;
-}
-
-export function getToken() {
-  const token = Cookies.get(COOKIE_TOKEN_KEY);
-  if (!token) return null;
-
-  return token;
-}
-
-export function setToken(token: string, expiresAt?: number) {
-  Cookies.set(COOKIE_TOKEN_KEY, token, { expires: cookieExpires(expiresAt) });
+  return !!getCsrfToken();
 }
 
 export function getCsrfToken() {
@@ -39,6 +27,8 @@ export function setCsrfToken(token: string, expiresAt?: number) {
 }
 
 export function removeToken() {
+  // Removes the old JS-readable token cookie from pre-hardening builds.
+  // Current sessions are cleared by /api/auth/logout via an HttpOnly cookie.
   Cookies.remove(COOKIE_TOKEN_KEY);
   Cookies.remove(COOKIE_CSRF_KEY);
 }

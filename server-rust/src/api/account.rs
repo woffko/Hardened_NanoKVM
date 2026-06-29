@@ -1,7 +1,7 @@
 use axum::{
     Extension, Json,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, HeaderValue, header},
+    http::{HeaderMap, header},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,11 @@ use crate::{
     AppError, Result,
     auth::{compat_crypto::decode_frontend_password, password::validate_account_credentials},
     error::ApiResponse,
-    http::{middleware::CurrentSession, tls::ClientAddr},
+    http::{
+        cookie::{expired_session_cookie, session_cookie, session_cookie_secure},
+        middleware::CurrentSession,
+        tls::ClientAddr,
+    },
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed_with_stdin},
 };
@@ -26,7 +30,6 @@ pub struct LoginReq {
 
 #[derive(Debug, Serialize)]
 pub struct LoginRsp {
-    pub token: String,
     #[serde(rename = "csrfToken")]
     pub csrf_token: String,
     #[serde(rename = "expiresAt")]
@@ -100,10 +103,13 @@ pub async fn login(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        secure_cookie(&session.token, session_lock_duration)?,
+        session_cookie(
+            &session.token,
+            session_lock_duration,
+            session_cookie_secure(&state.config.proto),
+        )?,
     );
     let body = Json(ApiResponse::ok(LoginRsp {
-        token: session.token,
         csrf_token: session.csrf_token,
         expires_at: session.expires_at_unix,
     }));
@@ -140,7 +146,7 @@ pub async fn logout(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("nano-kvm-token=; Path=/; Max-Age=0; SameSite=Lax"),
+        expired_session_cookie(session_cookie_secure(&state.config.proto))?,
     );
     Ok((headers, Json(ApiResponse::<()>::ok_empty())))
 }
@@ -185,12 +191,6 @@ pub async fn change_password(
         state.sessions.revoke_user(&req.username).await;
     }
     Ok(Json(ApiResponse::<()>::ok_empty()))
-}
-
-fn secure_cookie(token: &str, max_age_secs: u64) -> Result<HeaderValue> {
-    let value = format!("nano-kvm-token={token}; Path=/; Max-Age={max_age_secs}; SameSite=Lax");
-    HeaderValue::from_str(&value)
-        .map_err(|err| AppError::Internal(format!("failed to build cookie: {err}")))
 }
 
 async fn change_root_password(password: &str) -> Result<()> {
