@@ -427,6 +427,8 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const isStagedLatest = stagedMatchesLatest(systemStaged, systemLatest);
   const canDownloadLatestSystemUpdate =
     !!systemLatest && (!systemStaged || !isStagedLatest) && systemStatus !== 'downloading';
+  const showSystemProgress =
+    !!systemProgress && !(systemProgress.phase === 'failed' && canDownloadLatestSystemUpdate);
 
   return (
     <>
@@ -699,7 +701,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               status="warning"
               icon={<CloudSyncOutlined />}
               title={systemCurrent?.version || t('settings.update.system.title')}
-              subTitle={systemErrMsg}
+              subTitle={
+                canDownloadLatestSystemUpdate
+                  ? t('settings.update.system.available')
+                  : systemErrMsg
+              }
               extra={[
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
@@ -756,12 +762,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   t('settings.update.system.rawImages'),
                   systemStaged.imageCount.toString()
                 )}
-              {systemProgress &&
+              {showSystemProgress &&
                 versionLine(
                   t('settings.update.system.progress'),
                   `${systemProgress.operation}/${systemProgress.phase}`
                 )}
-              {systemProgress?.message &&
+              {showSystemProgress &&
+                systemProgress?.message &&
                 versionLine(t('settings.update.system.progressMessage'), systemProgress.message)}
               {systemPending &&
                 versionLine(t('settings.update.system.pendingVersion'), systemPending.version)}

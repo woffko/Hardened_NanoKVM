@@ -2357,6 +2357,11 @@ fn read_normalized_update_progress(
         return None;
     }
 
+    if progress.operation == "install" && progress.phase == "failed" && progress.version.is_none() {
+        let _ = remove_update_progress(stage_dir);
+        return None;
+    }
+
     let lock_active = update_lock_active();
     let now = now_unix_seconds();
     let stale = progress

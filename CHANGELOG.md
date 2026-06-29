@@ -1,3 +1,13 @@
+## Hardened NanoKVM Beta 2.0.4 (2026-06-29)
+
+### Bug Fixes
+
+* Cleared legacy `install/failed` system-update progress records without a
+  staged version. These records were left by older app builds after pressing
+  Install while raw system updates were disabled.
+* Hid stale failed-progress messages when a newer system update is available
+  for Download and Verify.
+
 ## Hardened NanoKVM Beta 2.0.3 (2026-06-29)
 
 ### Bug Fixes
