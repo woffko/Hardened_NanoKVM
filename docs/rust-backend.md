@@ -9,8 +9,8 @@ The backend is tested on real NanoKVM hardware at this stage. API parity is not
 complete, but the main browser workflows are now implemented deeply enough for
 interactive device testing.
 
-Current sysupgrade branch beta release target is `1.0.4` from
-`feature/nanokvm-sysupgrade-lifeline`.
+Current sysupgrade branch beta release target is `beta 2` / app version
+`2.0.0` from `feature/new-buildroot-sysupgrade-lab`.
 
 ## Build
 
@@ -146,7 +146,10 @@ The generated image installs:
   pending/backup markers. `/api/system-update/confirm` writes a boot-good
   marker after basic health checks. `/api/system-update/rollback` restores the
   latest backup manually. These routes do not reboot automatically.
-- UI branding for Hardened NanoKVM and version `beta - 1.0.5`.
+- UI branding for Hardened NanoKVM and version `beta 2`.
+- Guarded raw system-update switch in Check for Updates. Raw boot/rootfs writes
+  stay disabled by default and require an explicit warning confirmation before
+  `/api/system-update/install` can apply a destructive staged bundle.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Rust-only release artifacts without the legacy Go backend switch.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
@@ -154,9 +157,9 @@ The generated image installs:
 
 ## Intentionally Disabled
 
-- Signed update verification is not finished yet. Current beta updates trust
-  the Hardened GitHub release metadata over HTTPS plus sha512 verification of
-  the downloaded `kvmapp` archive.
+- Signed application update metadata enforcement is implemented. Releases must
+  include `latest.json.sig`; unsigned metadata is accepted only when
+  `security.allow_unsigned_updates=true`.
 - Signed system-update metadata enforcement is implemented. Stable/preview
   metadata must verify against `paths.system_update_public_key`; unsigned
   metadata is accepted only when `security.allow_unsigned_updates=true`.
@@ -184,9 +187,6 @@ The generated image installs:
   Direct streaming on the test device.
 - First-boot/account setup needs continued product testing on fresh SD-card
   flashes.
-- `kvmapp` update metadata signature verification is implemented. Releases must
-  include `latest.json.sig`; unsigned metadata is accepted only when
-  `security.allow_unsigned_updates=true`.
 - Remote ISO download needs a final production policy before it should be
   treated as broadly enabled functionality.
 - PicoClaw needs end-to-end runtime/session/history validation against the real

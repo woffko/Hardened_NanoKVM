@@ -99,6 +99,16 @@ export function getSystemUpdateStatus() {
   return http.get('/api/system-update/status');
 }
 
+// get raw partition system update permission
+export function getRawSystemUpdatesEnabled() {
+  return http.get('/api/system-update/raw-enabled');
+}
+
+// enable/disable raw partition system updates
+export function setRawSystemUpdatesEnabled(enabled: boolean) {
+  return http.post('/api/system-update/raw-enabled', { enabled });
+}
+
 // download and verify a base-system update into staging
 export function downloadSystemUpdate() {
   return http.request({

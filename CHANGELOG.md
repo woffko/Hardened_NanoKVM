@@ -1,3 +1,22 @@
+## Hardened NanoKVM Beta 2 (2026-06-29)
+
+### Features
+
+* Added a guarded **Allow raw system updates** switch directly to the
+  Check for Updates screen. Enabling it shows a recovery warning before raw
+  boot/rootfs writes are allowed.
+* Prepared the beta 2 release line to ship the latest Rust-only application,
+  SD-card image, and GUI-installable raw system-update bundle from the same
+  integrated sysupgrade build.
+
+### Changed
+
+* Raised the application update version to `2.0.0`; the web UI displays this
+  release as `beta 2`.
+* System raw update installs now re-read `/etc/kvm/server.yaml` immediately
+  before install, so enabling raw updates in the GUI works without restarting
+  the backend.
+
 ## Hardened NanoKVM 1.0.5 Beta Security (2026-06-29)
 
 ### Security

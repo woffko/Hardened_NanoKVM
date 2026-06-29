@@ -512,6 +512,14 @@ const en = {
           title: 'System Update',
           queryFailed: 'Get system version failed',
           downloadFailed: 'Download or verification failed',
+          rawEnable: 'Allow raw system updates',
+          rawEnableDesc:
+            'Allow verified raw boot/rootfs images to be written to the SD-card from this screen.',
+          rawEnableConfirmTitle: 'Allow raw system updates?',
+          rawEnableConfirmDesc:
+            'Raw system updates can replace boot and rootfs partitions. Use this only when you have physical recovery access.',
+          rawInstallDisabled:
+            'This staged update writes raw SD-card partitions. Enable raw system updates before installing it.',
           isLatest: 'The base system is up to date.',
           available: 'A base-system update is available.',
           downloading: 'Downloading and verifying system update...',

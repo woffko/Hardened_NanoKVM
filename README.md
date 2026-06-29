@@ -30,10 +30,10 @@ Security release builds are Rust-only: the legacy Go backend and backend switch
 scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **beta - 1.0.5**.
+application version **beta 2**.
 
 The current public beta release is published from the `woffko` fork at
-[`hardened-rust-beta-1.0.5`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-1.0.5).
+[`hardened-rust-beta-2`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2).
 
 ## Current Beta Status
 

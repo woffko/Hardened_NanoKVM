@@ -144,6 +144,16 @@ pub struct SystemStatusRsp {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RawUpdateEnabledRsp {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetRawUpdateEnabledReq {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemUpdateProgress {
@@ -342,6 +352,20 @@ pub async fn get_version() -> Result<impl IntoResponse> {
     })))
 }
 
+pub async fn get_raw_enabled() -> Result<impl IntoResponse> {
+    let config = Config::read()?;
+    Ok(Json(ApiResponse::ok(RawUpdateEnabledRsp {
+        enabled: config.security.allow_raw_system_updates,
+    })))
+}
+
+pub async fn set_raw_enabled(Json(req): Json<SetRawUpdateEnabledReq>) -> Result<impl IntoResponse> {
+    let mut config = Config::read()?;
+    config.security.allow_raw_system_updates = req.enabled;
+    config.write()?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
 pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
 
@@ -531,7 +555,10 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
     let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
-    let config = (*state.config).clone();
+    let config = Config::read().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "failed to refresh config before system update install");
+        (*state.config).clone()
+    });
     write_update_progress(
         &stage_dir,
         SystemUpdateProgress::new(

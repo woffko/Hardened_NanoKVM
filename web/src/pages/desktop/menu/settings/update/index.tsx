@@ -5,7 +5,7 @@ import {
   RocketOutlined,
   SmileOutlined
 } from '@ant-design/icons';
-import { Alert, Button, Divider, Modal, Result, Spin } from 'antd';
+import { Alert, Button, Divider, Modal, Result, Spin, Switch } from 'antd';
 import { useTranslation } from 'react-i18next';
 import semver from 'semver';
 
@@ -43,10 +43,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemRollback, setSystemRollback] = useState<SystemRollbackInfo | null>(null);
   const [systemProgress, setSystemProgress] = useState<SystemUpdateProgress | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
+  const [systemRawEnabled, setSystemRawEnabled] = useState(false);
+  const [systemRawUpdating, setSystemRawUpdating] = useState(false);
 
   useEffect(() => {
     checkForUpdates();
     checkSystemUpdates();
+    refreshRawSystemUpdatesEnabled();
   }, []);
 
   function isVersionAtLeast(current: string, latest: string) {
@@ -171,6 +174,49 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemRollback(null);
         setSystemProgress(null);
       });
+  }
+
+  function refreshRawSystemUpdatesEnabled() {
+    api.getRawSystemUpdatesEnabled().then((rsp: any) => {
+      if (rsp.code === 0 && rsp.data) {
+        setSystemRawEnabled(!!rsp.data.enabled);
+      }
+    });
+  }
+
+  function changeRawSystemUpdatesEnabled(enabled: boolean) {
+    const applyChange = () => {
+      setSystemRawUpdating(true);
+      api
+        .setRawSystemUpdatesEnabled(enabled)
+        .then((rsp: any) => {
+          if (rsp.code === 0) {
+            setSystemRawEnabled(enabled);
+          }
+        })
+        .finally(() => {
+          setSystemRawUpdating(false);
+          refreshRawSystemUpdatesEnabled();
+        });
+    };
+
+    if (!enabled) {
+      applyChange();
+      return;
+    }
+
+    Modal.confirm({
+      title: t('settings.update.system.rawEnableConfirmTitle'),
+      content: (
+        <div className="space-y-3">
+          <div>{t('settings.update.system.rawEnableConfirmDesc')}</div>
+          <Alert type="error" showIcon message={t('settings.update.system.rawInstallWarning')} />
+        </div>
+      ),
+      okText: t('settings.update.confirm'),
+      cancelText: t('settings.update.cancel'),
+      onOk: applyChange
+    });
   }
 
   function downloadSystemUpdate() {
@@ -430,6 +476,28 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         <Divider className="opacity-50" />
         <div className="space-y-4">
           <div className="text-sm text-neutral-300">{t('settings.update.system.title')}</div>
+          <div className="flex items-center justify-between gap-6 rounded border border-neutral-800 px-3 py-3">
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm text-neutral-300">
+                {t('settings.update.system.rawEnable')}
+              </div>
+              <div className="text-xs text-neutral-500">
+                {t('settings.update.system.rawEnableDesc')}
+              </div>
+            </div>
+            <Switch
+              checked={systemRawEnabled}
+              loading={systemRawUpdating}
+              onChange={changeRawSystemUpdatesEnabled}
+            />
+          </div>
+          {systemStaged?.destructive && !systemRawEnabled && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t('settings.update.system.rawInstallDisabled')}
+            />
+          )}
 
           {systemStatus === 'loading' && (
             <div className="flex justify-center py-10">
@@ -500,7 +568,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>,
-                <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
+                <Button
+                  key="install"
+                  type="primary"
+                  danger
+                  disabled={systemStaged.destructive && !systemRawEnabled}
+                  onClick={confirmInstallSystemUpdate}
+                >
                   {t('settings.update.system.install')}
                 </Button>
               ]}
@@ -590,7 +664,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   {t('settings.update.system.refresh')}
                 </Button>,
                 systemStaged ? (
-                  <Button key="install" type="primary" danger onClick={confirmInstallSystemUpdate}>
+                  <Button
+                    key="install"
+                    type="primary"
+                    danger
+                    disabled={systemStaged.destructive && !systemRawEnabled}
+                    onClick={confirmInstallSystemUpdate}
+                  >
                     {t('settings.update.system.install')}
                   </Button>
                 ) : null,

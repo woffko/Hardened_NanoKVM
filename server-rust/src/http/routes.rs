@@ -40,6 +40,10 @@ pub fn build(state: AppState) -> Router {
             "/api/system-update/version",
             get(system_update::get_version),
         )
+        .route(
+            "/api/system-update/raw-enabled",
+            get(system_update::get_raw_enabled).post(system_update::set_raw_enabled),
+        )
         .route("/api/system-update/check", get(system_update::check))
         .route("/api/system-update/status", get(system_update::status))
         .route("/api/system-update/download", post(system_update::download))
