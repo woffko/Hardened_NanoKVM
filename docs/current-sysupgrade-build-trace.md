@@ -979,3 +979,6 @@ Device check:
   `latest=2.0.4`.
 - `10.0.87.133` Download and Verify completed for system `0.2.2-raw.1`;
   status now shows staged `0.2.2-raw.1` and `progress=null`.
+- `10.0.87.133` app was then updated to `2.0.4`; final check reports
+  app `current=2.0.4`, `latest=2.0.4`, staged system `0.2.2-raw.1`,
+  and `progress=null`.
