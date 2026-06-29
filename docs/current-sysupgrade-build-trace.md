@@ -1132,3 +1132,95 @@ Notes:
   environment with DNS resolution errors for `api.github.com`; direct GitHub
   download URLs for app/system metadata succeeded and both downloaded
   signatures verified.
+
+## 2026-06-29: Beta 2.0.6 Redirect/Cache Hotfix Release
+
+Reason:
+
+- after updating to app `2.0.5`, changing wired Manual IP from the GUI could
+  leave the browser on the old address if the network-setting POST was
+  interrupted by `S30eth` restarting Ethernet;
+- one browser also kept returning to the login page after the app update, while
+  another browser worked. Device API login/session checks were healthy, so the
+  likely cause was stale browser state or a stale cached React shell;
+- `10.0.87.133` also had a bad manually-entered DNS server
+  `10.0.77.133`. It was corrected on-device to local router/DNS `10.0.87.5`
+  over HTTPS.
+
+Fix:
+
+- app version bumped to `2.0.6`;
+- Manual network Apply now schedules the browser redirect before waiting for
+  the POST to finish, so navigation still happens if Ethernet restart cuts the
+  request;
+- backend security headers now add `Cache-Control: no-store, max-age=0` for
+  `/` and `*.html`, not only `/api/*`, so browsers do not reuse stale
+  `index.html` after app updates;
+- old GitHub releases were intentionally not deleted. Channel releases
+  `hardened-system-stable`, `hardened-rust-preview`, and
+  `hardened-system-preview` remain because update checks depend on them.
+
+Validation:
+
+- `cargo fmt --check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web file: passed.
+- `git diff --check`: passed.
+- Rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.6`.
+- App and system update metadata signatures verified locally and after
+  downloading the published metadata from GitHub.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.6.tar.gz` | `893933918298bad101cf3d8efe83ab3d66eddbc1b03b0f4d3fdde7946533a31d` |
+| App metadata | `build/artifacts/latest.json` | `5362c40239a8d41ed5ebb44cd8deddc2c5af1ae5ba8b1f9c5e8f69f057306a13` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `a11ae96c371557345a2d9e10990953a58b9a42d877fa97fc30a29022e4dea44f` |
+
+Generated SD-card artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `7bf2007d93224401c29d41da9cf6818d45d0af2431a782fc81c6d27fbc5367ce` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `338df3e1477984892986f3e7ae5ce491bf0cb2001d827863bd5212fd8e8f3752` |
+| Rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `3f2f70e4315ac082823dee0a36440b6fb52ebbe7af9c8bf1529e8f44e7307e02` |
+
+Generated raw system update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.4-raw.1.tar.gz` | `a4faeafaf25ce6cbb1357f4318e34fa09d39bcded9fcaa1f8838cec89648e961` |
+| System metadata | `build/system-updates/system-latest.json` | `ef51d82d79e399c6c7e2efc8713325d75feaca8047b9260d9a98aae1f42dd54f` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `a9b00667c3639195b0c15f32ee6d935eb39e32c3906e59f7dfb3fc10755b8d0e` |
+
+Raw system manifest:
+
+- version: `0.2.4-raw.1`
+- target: `sg2002-licheervnano-sd`
+- base: `2026-06-29-12-08-d88d58.img`
+- kernel: `5.10.4-tag-`
+- source commit: `33e8f3a`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.6`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.4-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device check:
+
+- `10.0.87.133` current app: `2.0.5`, latest app: `2.0.6`;
+- `10.0.87.133` current system: `0.2.2-raw.1`, latest system:
+  `0.2.4-raw.1`, `updateAvailable=true`;
+- `10.0.87.133` network DNS after correction:
+  mode `manual`, servers/effective/DHCP all `10.0.87.5`, address
+  `10.0.87.133/24`, gateway `10.0.87.5`.
