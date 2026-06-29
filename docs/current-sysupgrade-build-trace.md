@@ -610,3 +610,22 @@ Raw manifest notes:
     `54480569cee2641e70d3825deba37696f041c7125c9e2329882e62af9f6c1b3e`
   - BOOT `/dev/mmcblk0p1`, payload sha256
     `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2`
+- System release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.0-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+
+Post-publish verification:
+
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app version `2.0.0` and points to `hardened-rust-beta-2`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json`
+  returns system version `0.2.0-raw.1` and points to
+  `hardened-system-0.2.0-raw.1`.
+- Both downloaded metadata signatures verified with
+  `kvmapp/system/keys/system-update-signing.pub.pem`.
