@@ -14,6 +14,7 @@ ROOTFS_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.rootfs.ext"
 GO_BACKEND="$OUT_DIR/$OUTPUT_BASENAME.NanoKVM-Server.go"
 STATE_FILE="$OUT_DIR/$OUTPUT_BASENAME.backend-state"
 DEBUGFS_CMDS="$OUT_DIR/$OUTPUT_BASENAME.debugfs.cmd"
+FSTAB_FILE="$OUT_DIR/$OUTPUT_BASENAME.fstab"
 
 require_file() {
   if [ ! -f "$1" ]; then
@@ -57,6 +58,11 @@ debugfs -R "dump /kvmapp/server/NanoKVM-Server $GO_BACKEND" "$ROOTFS_IMAGE" >/de
 chmod 0644 "$GO_BACKEND"
 printf 'rust\n' > "$STATE_FILE"
 
+debugfs -R "dump /etc/fstab $FSTAB_FILE" "$ROOTFS_IMAGE" >/dev/null 2>&1 || : > "$FSTAB_FILE"
+if ! grep -Eq '^[[:space:]]*[^#]+[[:space:]]+/data[[:space:]]+' "$FSTAB_FILE"; then
+  printf '\n/dev/mmcblk0p3\t/data\texfat\tdefaults\t0\t0\n' >> "$FSTAB_FILE"
+fi
+
 {
   printf 'mkdir /kvmapp\n'
   find "$KVMAPP_DIR" -type d | sort | while IFS= read -r dir; do
@@ -89,6 +95,11 @@ printf 'rust\n' > "$STATE_FILE"
 
   printf 'mkdir /etc/kvm\n'
   printf 'mkdir /etc/kvm/scripts\n'
+  printf 'rm /etc/fstab\n'
+  printf 'write %s /etc/fstab\n' "$FSTAB_FILE"
+  printf 'sif /etc/fstab mode 0100644\n'
+  printf 'sif /etc/fstab uid 0\n'
+  printf 'sif /etc/fstab gid 0\n'
   printf 'rm /etc/kvm/backend\n'
   printf 'write %s /etc/kvm/backend\n' "$STATE_FILE"
   printf 'sif /etc/kvm/backend mode 0100644\n'

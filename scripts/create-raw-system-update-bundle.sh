@@ -38,6 +38,42 @@ json_image() {
     "$payload" "$device" "$label" "$size" "$sha256"
 }
 
+patch_rootfs_image() {
+  rootfs="$1"
+  fstab_file="$STAGE_DIR/rootfs-fstab"
+  version_file="$STAGE_DIR/system-version.json"
+  debugfs_cmds="$STAGE_DIR/rootfs-patch.debugfs"
+
+  command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
+  debugfs -R "dump /etc/fstab $fstab_file" "$rootfs" >/dev/null 2>&1 || : > "$fstab_file"
+  if ! grep -Eq '^[[:space:]]*[^#]+[[:space:]]+/data[[:space:]]+' "$fstab_file"; then
+    printf '\n/dev/mmcblk0p3\t/data\texfat\tdefaults\t0\t0\n' >> "$fstab_file"
+  fi
+
+  {
+    printf '{\n'
+    printf '  "version": "%s",\n' "$VERSION"
+    printf '  "target": "%s"\n' "$TARGET"
+    printf '}\n'
+  } > "$version_file"
+
+  {
+    printf 'mkdir /etc/kvm\n'
+    printf 'rm /etc/fstab\n'
+    printf 'write %s /etc/fstab\n' "$fstab_file"
+    printf 'sif /etc/fstab mode 0100644\n'
+    printf 'sif /etc/fstab uid 0\n'
+    printf 'sif /etc/fstab gid 0\n'
+    printf 'rm /etc/kvm/system-version.json\n'
+    printf 'write %s /etc/kvm/system-version.json\n' "$version_file"
+    printf 'sif /etc/kvm/system-version.json mode 0100644\n'
+    printf 'sif /etc/kvm/system-version.json uid 0\n'
+    printf 'sif /etc/kvm/system-version.json gid 0\n'
+  } > "$debugfs_cmds"
+
+  debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1
+}
+
 if [ "$#" -ne 5 ]; then
   usage
 fi
@@ -75,6 +111,8 @@ trap 'rm -rf "$STAGE_DIR"' EXIT INT TERM
 mkdir -p "$STAGE_DIR/payload/images" "$OUT_DIR"
 cp -f "$BOOT_IMAGE" "$STAGE_DIR/payload/images/boot.vfat"
 cp -f "$ROOTFS_IMAGE" "$STAGE_DIR/payload/images/rootfs.sd"
+patch_rootfs_image "$STAGE_DIR/payload/images/rootfs.sd"
+"$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$STAGE_DIR/payload/images/rootfs.sd" >/dev/null
 
 CREATED_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 SOURCE_COMMIT=$(git -C "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)" rev-parse --short HEAD 2>/dev/null || printf unknown)

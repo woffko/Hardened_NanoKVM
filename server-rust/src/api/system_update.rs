@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
+    cmp::Ordering,
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -217,12 +218,14 @@ pub struct SystemConfirmRsp {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct PersistedSystemVersion {
     version: Option<String>,
     target: Option<String>,
+    #[serde(alias = "baseVersion")]
     base_version: Option<String>,
+    #[serde(alias = "kernelVersion")]
     kernel_version: Option<String>,
+    #[serde(alias = "rootfsVersion")]
     rootfs_version: Option<String>,
 }
 
@@ -285,7 +288,6 @@ struct SystemBackupFile {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct InstalledSystemVersion {
     version: String,
     target: String,
@@ -345,8 +347,7 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
 
     match get_latest_system(is_preview_enabled(), &state.config).await {
         Ok(latest) => {
-            let update_available =
-                latest.target == current.target && latest.version != current.version;
+            let update_available = system_update_is_newer(&current, &latest);
             Ok(Json(ApiResponse::ok(SystemCheckRsp {
                 current,
                 latest: Some(latest),
@@ -408,7 +409,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
 }
 
 pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let _guard = acquire_update_lock()?;
+    let guard = acquire_update_lock()?;
     let current = read_current_system_version();
     let latest = get_latest_system(is_preview_enabled(), &state.config).await?;
 
@@ -416,6 +417,12 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         return Err(AppError::BadRequest(format!(
             "system update target mismatch: device {}, release {}",
             current.target, latest.target
+        )));
+    }
+    if !system_update_is_newer(&current, &latest) {
+        return Err(AppError::BadRequest(format!(
+            "no newer system update available: current {}, release {}",
+            current.version, latest.version
         )));
     }
 
@@ -473,20 +480,27 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 
     let stage_dir_for_verify = stage_dir.clone();
     let latest_for_verify = latest.clone();
-    let staged = match run_blocking_system_update("verify and stage system update", move || {
-        let archive = stage_dir_for_verify.join(&latest_for_verify.name);
-        verify_system_archive(&archive, &latest_for_verify)?;
+    let staged = match run_blocking_system_update_with_guard(
+        "verify and stage system update",
+        guard,
+        move || {
+            let archive = stage_dir_for_verify.join(&latest_for_verify.name);
+            verify_system_archive(&archive, &latest_for_verify)?;
 
-        let manifest =
-            extract_and_verify_system_bundle(&archive, &stage_dir_for_verify, &latest_for_verify)?;
-        let record = SystemStageRecord {
-            staged_at: now_unix_seconds(),
-            latest: latest_for_verify,
-            manifest,
-        };
-        write_stage_record(&stage_dir_for_verify, &record)?;
-        Ok(staged_summary(&record))
-    })
+            let manifest = extract_and_verify_system_bundle(
+                &archive,
+                &stage_dir_for_verify,
+                &latest_for_verify,
+            )?;
+            let record = SystemStageRecord {
+                staged_at: now_unix_seconds(),
+                latest: latest_for_verify,
+                manifest,
+            };
+            write_stage_record(&stage_dir_for_verify, &record)?;
+            Ok(staged_summary(&record))
+        },
+    )
     .await
     {
         Ok(staged) => staged,
@@ -514,13 +528,33 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 }
 
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let _guard = acquire_update_lock()?;
+    let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
     let config = (*state.config).clone();
-    let installed = match run_blocking_system_update("install staged system update", move || {
-        install_staged_update(&stage_dir, &config)
-    })
+    write_update_progress(
+        &stage_dir,
+        SystemUpdateProgress::new(
+            "install",
+            "starting",
+            None,
+            Some("starting system update install".to_string()),
+        ),
+    )?;
+    let installed = match run_blocking_system_update_with_guard(
+        "install staged system update",
+        guard,
+        move || match install_staged_update(&stage_dir, &config) {
+            Ok(installed) => Ok(installed),
+            Err(err) => {
+                let _ = write_update_progress(
+                    &stage_dir,
+                    SystemUpdateProgress::new("install", "failed", None, Some(err.to_string())),
+                );
+                Err(err)
+            }
+        },
+    )
     .await
     {
         Ok(installed) => installed,
@@ -541,12 +575,13 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
 }
 
 pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let _guard = acquire_update_lock()?;
+    let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let restored = run_blocking_system_update("rollback system update", move || {
-        rollback_last_system_update(&stage_dir)
-    })
-    .await?;
+    let restored =
+        run_blocking_system_update_with_guard("rollback system update", guard, move || {
+            rollback_last_system_update(&stage_dir)
+        })
+        .await?;
 
     Ok(Json(ApiResponse::ok(SystemRollbackRsp {
         reboot_required: restored.requires_reboot,
@@ -1031,7 +1066,25 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
             "staged system update archive is missing".to_string(),
         ));
     }
+    write_update_progress(
+        stage_dir,
+        SystemUpdateProgress::new(
+            "install",
+            "verifying",
+            Some(record.latest.version.clone()),
+            Some("verifying staged system update archive".to_string()),
+        ),
+    )?;
     verify_system_archive(&archive, &record.latest)?;
+    write_update_progress(
+        stage_dir,
+        SystemUpdateProgress::new(
+            "install",
+            "extracting",
+            Some(record.latest.version.clone()),
+            Some("extracting staged system update payload".to_string()),
+        ),
+    )?;
     let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
 
@@ -1815,6 +1868,98 @@ fn system_stage_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join(SYSTEM_STAGE_DIR_NAME)
 }
 
+fn system_update_is_newer(current: &SystemVersion, latest: &SystemLatest) -> bool {
+    latest.target == current.target
+        && compare_system_versions(&latest.version, &current.version) == Some(Ordering::Greater)
+}
+
+fn compare_system_versions(left: &str, right: &str) -> Option<Ordering> {
+    let left = ParsedSystemVersion::parse(left)?;
+    let right = ParsedSystemVersion::parse(right)?;
+    Some(left.cmp(&right))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedSystemVersion<'a> {
+    core: Vec<u64>,
+    suffix: Option<&'a str>,
+}
+
+impl<'a> ParsedSystemVersion<'a> {
+    fn parse(version: &'a str) -> Option<Self> {
+        let (core, suffix) = version
+            .split_once('-')
+            .map(|(core, suffix)| (core, Some(suffix)))
+            .unwrap_or((version, None));
+        let core = core
+            .split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        if core.is_empty() {
+            return None;
+        }
+        Some(Self { core, suffix })
+    }
+}
+
+impl Ord for ParsedSystemVersion<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let segment_count = self.core.len().max(other.core.len());
+        for index in 0..segment_count {
+            let ordering = self
+                .core
+                .get(index)
+                .copied()
+                .unwrap_or_default()
+                .cmp(&other.core.get(index).copied().unwrap_or_default());
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+
+        match (self.suffix, other.suffix) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) => compare_version_suffix(left, right),
+        }
+    }
+}
+
+impl PartialOrd for ParsedSystemVersion<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn compare_version_suffix(left: &str, right: &str) -> Ordering {
+    let mut left_parts = left.split('.');
+    let mut right_parts = right.split('.');
+
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) => {
+                let ordering = compare_version_suffix_part(left, right);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+fn compare_version_suffix_part(left: &str, right: &str) -> Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
 fn prepare_stage_dir(stage_dir: &Path) -> Result<()> {
     if stage_dir == Path::new("/") || stage_dir.as_os_str().is_empty() {
         return Err(AppError::Config(
@@ -1847,6 +1992,22 @@ where
     task::spawn_blocking(f)
         .await
         .map_err(|err| AppError::Internal(format!("{operation} task failed: {err}")))?
+}
+
+async fn run_blocking_system_update_with_guard<T, F>(
+    operation: &'static str,
+    guard: UpdateGuard,
+    f: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    run_blocking_system_update(operation, move || {
+        let _guard = guard;
+        f()
+    })
+    .await
 }
 
 fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
@@ -2792,6 +2953,87 @@ mod tests {
 
         let latest: SystemLatest = serde_json::from_str(raw).unwrap();
         validate_latest_system(&latest).unwrap();
+    }
+
+    #[test]
+    fn parses_persisted_system_version_in_snake_and_camel_case() {
+        let snake: PersistedSystemVersion = serde_json::from_str(
+            r#"{
+  "version": "0.1.2-raw.1",
+  "target": "sg2002-licheervnano-sd",
+  "base_version": "2026-01-05-1_4_1.img",
+  "kernel_version": "5.10.4-tag-",
+  "rootfs_version": "Buildroot 2023.11.2"
+}"#,
+        )
+        .unwrap();
+        assert_eq!(snake.version.as_deref(), Some("0.1.2-raw.1"));
+        assert_eq!(snake.base_version.as_deref(), Some("2026-01-05-1_4_1.img"));
+        assert_eq!(snake.kernel_version.as_deref(), Some("5.10.4-tag-"));
+        assert_eq!(snake.rootfs_version.as_deref(), Some("Buildroot 2023.11.2"));
+
+        let camel: PersistedSystemVersion = serde_json::from_str(
+            r#"{
+  "version": "0.1.2-raw.1",
+  "target": "sg2002-licheervnano-sd",
+  "baseVersion": "2026-01-05-1_4_1.img",
+  "kernelVersion": "5.10.4-tag-",
+  "rootfsVersion": "Buildroot 2023.11.2"
+}"#,
+        )
+        .unwrap();
+        assert_eq!(camel.version.as_deref(), Some("0.1.2-raw.1"));
+        assert_eq!(camel.base_version.as_deref(), Some("2026-01-05-1_4_1.img"));
+        assert_eq!(camel.kernel_version.as_deref(), Some("5.10.4-tag-"));
+        assert_eq!(camel.rootfs_version.as_deref(), Some("Buildroot 2023.11.2"));
+    }
+
+    #[test]
+    fn compares_system_update_versions_numerically() {
+        assert_eq!(
+            compare_system_versions("0.1.2-raw.1", "0.1.0-raw.1"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_system_versions("0.1.0-raw.1", "0.1.2-raw.1"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_system_versions("0.1.10-raw.1", "0.1.2-raw.1"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_system_versions("0.1.2-raw.2", "0.1.2-raw.1"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_system_versions("0.1.2", "0.1.2-raw.1"),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn only_reports_newer_system_release_as_update_available() {
+        let current = SystemVersion {
+            version: "0.1.2-raw.1".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            base_version: String::new(),
+            kernel_version: String::new(),
+            rootfs_version: String::new(),
+            model: String::new(),
+            hardware_version: String::new(),
+            source: "test".to_string(),
+        };
+
+        let mut latest = valid_latest();
+        latest.version = "0.1.0-raw.1".to_string();
+        assert!(!system_update_is_newer(&current, &latest));
+
+        latest.version = "0.1.2-raw.2".to_string();
+        assert!(system_update_is_newer(&current, &latest));
+
+        latest.target = "other-target".to_string();
+        assert!(!system_update_is_newer(&current, &latest));
     }
 
     #[test]
