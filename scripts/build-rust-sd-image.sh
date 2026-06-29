@@ -6,6 +6,7 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 OUT_DIR="${OUT_DIR:-$BUILD_DIR/sd-image}"
 BASE_IMAGE="${NANOKVM_BASE_IMAGE:-$OUT_DIR/20260123_NanoKVM_Rev1_4_2.img}"
 KVMAPP_DIR="${KVMAPP_DIR:-$BUILD_DIR/kvmapp-rust/kvmapp}"
+SENSOR_DATA_DIR="${SENSOR_DATA_DIR:-$KVMAPP_DIR/system/mnt-data}"
 VERSION="${HARDENED_RELEASE_VERSION:-alpha-0.1}"
 OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_Rev1_4_2_rust}"
 
@@ -98,6 +99,27 @@ fi
   printf 'sif /etc/kvm/backend gid 0\n'
   printf 'rm /etc/kvm/scripts/switch-backend-go.sh\n'
   printf 'rm /etc/kvm/scripts/switch-backend-rust.sh\n'
+
+  if [ -d "$SENSOR_DATA_DIR" ]; then
+    printf 'mkdir /mnt\n'
+    printf 'mkdir /mnt/data\n'
+    find "$SENSOR_DATA_DIR" -type f | sort | while IFS= read -r file; do
+      rel="${file#$SENSOR_DATA_DIR/}"
+      perm="$(stat -c '%a' "$file")"
+      printf 'rm /mnt/data/%s\n' "$rel"
+      printf 'write %s /mnt/data/%s\n' "$file" "$rel"
+      printf 'sif /mnt/data/%s mode 0100%s\n' "$rel" "$perm"
+      printf 'sif /mnt/data/%s uid 0\n' "$rel"
+      printf 'sif /mnt/data/%s gid 0\n' "$rel"
+    done
+    if [ -f "$SENSOR_DATA_DIR/sensor_cfg.ini.LT" ]; then
+      printf 'rm /mnt/data/sensor_cfg.ini\n'
+      printf 'write %s /mnt/data/sensor_cfg.ini\n' "$SENSOR_DATA_DIR/sensor_cfg.ini.LT"
+      printf 'sif /mnt/data/sensor_cfg.ini mode 0100644\n'
+      printf 'sif /mnt/data/sensor_cfg.ini uid 0\n'
+      printf 'sif /mnt/data/sensor_cfg.ini gid 0\n'
+    fi
+  fi
 
   printf 'rm /etc/init.d/S95nanokvm\n'
   printf 'write %s /etc/init.d/S95nanokvm\n' "$KVMAPP_DIR/system/init.d/S95nanokvm"

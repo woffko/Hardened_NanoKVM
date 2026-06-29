@@ -96,9 +96,11 @@ require_dir /kvmapp/server
 require_dir /kvmapp/backends
 require_dir /kvmapp/system
 require_dir /kvmapp/system/init.d
+require_dir /kvmapp/system/mnt-data
 require_dir /kvmapp/server/web
 require_dir /etc/init.d
 require_dir /etc/kvm
+require_dir /mnt/data
 
 require_regular /kvmapp/version
 require_regular /kvmapp/server/NanoKVM-Server
@@ -106,9 +108,12 @@ require_regular /kvmapp/backends/NanoKVM-Server.rust
 require_regular /kvmapp/kvm_system/kvm_system
 require_regular /kvmapp/system/init.d/S95nanokvm
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem
+require_regular /kvmapp/system/mnt-data/sensor_cfg.ini.LT
 require_regular /kvmapp/server/web/index.html
 require_regular /etc/init.d/S95nanokvm
 require_regular /etc/kvm/backend
+require_regular /mnt/data/sensor_cfg.ini.LT
+require_regular /mnt/data/sensor_cfg.ini
 
 reject_path /kvmapp/backends/NanoKVM-Server.go
 reject_path /kvmapp/server/NanoKVM-Server.go

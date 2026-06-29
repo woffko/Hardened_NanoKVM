@@ -285,3 +285,183 @@ Risk notes:
 - Recovery is SD-card rewrite, not automatic rollback.
 - Kernel is still the vendor 5.10 tree; no kernel security rebase is included in
   this first bundle.
+
+## 2026-06-29: Device Install Attempt on `10.0.87.132`
+
+Start state before installing `0.1.4-raw.1`:
+
+- SSH login works as `root/admin1234`.
+- Local WSL `curl` to `http://10.0.87.132:80` failed, but SSH showed
+  `NanoKVM-Server` listening on `0.0.0.0:80`; API calls will be made from the
+  device itself through `localhost`.
+- Device kernel: `5.10.4-tag-`.
+- `/etc/os-release`: Buildroot `2023.11.2`.
+- `/kvmapp/version`: `1.0.5`.
+- `/etc/kvm/system-version.json`: `0.1.3-raw.1`.
+- `/boot/ver`: `2026-01-05-1_4_1.img`.
+- Processes before install:
+  - `/tmp/kvm_system/kvm_system`
+  - `/tmp/server/NanoKVM-Server`
+- `/etc/kvm/preview_updates` exists and contains `1`.
+
+Planned test:
+
+1. Authenticate against `http://127.0.0.1/api/auth/login`.
+2. Check `/api/system-update/check` and `/api/system-update/status`.
+3. Reuse or download the staged `0.1.4-raw.1` bundle.
+4. Run `/api/system-update/install`.
+5. Track `/data/hardened-system-raw-update.log`, API status, and reboot/SSH
+   reachability.
+
+Observed before install:
+
+- Initial `GET /api/system-update/*` returned `404`: the device had app version
+  `1.0.5`, but it was not the sysupgrade-capable app build.
+- Installed local sysupgrade-capable application bundle through the existing
+  offline application update endpoint:
+  `/data/hardened-nanokvm-kvmapp-1.0.5.tar.gz`
+  (`2c6ee4621548dee2b1ee927eceece958e8e0a199deef4785c3eaba435eee0d85`).
+- The restarted backend then exposed `/api/system-update/version`,
+  `/api/system-update/check`, `/api/system-update/status`, and raw update
+  strings.
+- `allow_raw_system_updates` was set to `true` in `/etc/kvm/server.yaml` for
+  this lab test.
+- Preview updates had to be disabled by removing `/etc/kvm/preview_updates`;
+  writing `0` to the file is not enough because the code treats file existence
+  as enabled.
+- Stable channel check succeeded:
+  - current: `0.1.3-raw.1`
+  - latest: `0.1.4-raw.1`
+  - update available: `true`
+- `POST /api/system-update/download` succeeded after about 5.5 minutes:
+  - staged version: `0.1.4-raw.1`
+  - channel: `stable`
+  - archive:
+    `hardened-nanokvm-system-0.1.4-raw.1.tar.gz`
+  - sha256:
+    `14a3654de1741c6beabea80d95a3647c990daf1e8a3b907a0158c5e91b3d5f83`
+  - `fileCount`: `2`
+  - `imageCount`: `2`
+  - `destructive`: `true`
+  - `requiresReboot`: `true`
+
+Notes:
+
+- The GUI/API progress stays at `download/verifying` for several minutes while
+  hashing/extracting the raw rootfs. Future UX should expose a more specific
+  phase and byte progress for this stage.
+- The current preview-channel fallback behavior can hide a newer stable system
+  update when preview metadata is valid but older. This should be fixed before
+  this feature is used outside lab testing.
+
+Install attempt result so far:
+
+- `POST /api/system-update/install` was started against staged `0.1.4-raw.1`.
+- The API client timed out after 120 seconds while the backend was still in
+  `install/extracting`; the backend continued the install.
+- Raw writer then started successfully:
+  - stopped NanoKVM runtime;
+  - prepared `/boot`;
+  - remounted `/` read-only with the normal remount path;
+  - started writing `ROOTFS` to `/dev/mmcblk0p2` at `10:31:40`.
+- Last observed raw log line before the SSH session stopped responding:
+  `writing ROOTFS to /dev/mmcblk0p2`.
+- After that, `10.0.87.132` did not return to SSH/HTTP during repeated probes;
+  `ssh` reported `No route to host` and HTTP timed out.
+
+Image contents confirmation:
+
+- The SD image and the raw system-update rootfs were built from the patched
+  Hardened rootfs, not from the stock SDK rootfs.
+- The rootfs includes full `/kvmapp`:
+  - Rust `server/NanoKVM-Server`;
+  - web UI assets;
+  - `/kvmapp/version` = `1.0.5`;
+  - `kvm_system` helper;
+  - runtime shared libraries under `server/dl_lib`;
+  - system init scripts and kernel modules;
+  - bundled system-update public key at
+    `/kvmapp/system/keys/system-update-signing.pub.pem`.
+- `scripts/validate-nanokvm-rootfs.sh` passed before publishing and reported:
+  `kvmapp version: 1.0.5`, `backend: rust`.
+- Legacy Go backend files are rejected by the package/rootfs validators and
+  should not be present in this build.
+
+Post-write device state:
+
+- The device did not come back on the old DHCP address `10.0.87.132`.
+- It reappeared as `10.0.87.55`.
+- SSH credentials after the raw rootfs write are `root/root`.
+- HTTP is not listening on the new address.
+- The raw system update appears to have been applied:
+  - `uname -a`: vendor `5.10.4-tag-`, build timestamp
+    `Mon Jun 29 11:59:04 EEST 2026`;
+  - `/etc/os-release`: Buildroot `2023.11.2` with SDK revision
+    `-gd88d58fec-dirty`;
+  - `/etc/kvm/system-version.json`: `0.1.4-raw.1`;
+  - `/kvmapp/version`: `1.0.5`;
+  - `/boot/ver`: `2026-06-29-12-08-d88d58.img`;
+  - `/etc/kvm/backend`: `rust`.
+- `/etc/kvm/pwd` is absent, so first web login setup would be expected if the
+  web backend started.
+- `ps` shows `/tmp/kvm_system/kvm_system`, but no running `NanoKVM-Server`.
+- `/tmp/nanokvm-watchdog.log` repeatedly reports that `NanoKVM-Server` is not
+  running.
+- Manual server start from `/kvmapp/server` exits with `Segmentation fault`.
+- The only userspace log before the crash is:
+  `[SAMPLE_COMM_SNS_ParseIni]-2204: Parse /mnt/data/sensor_cfg.ini`.
+- `dmesg` reports repeated `NanoKVM-Server` signal 11 crashes at bad address
+  `0x1a0` inside `libstdc++.so.6.0.28`.
+- Replacing bundled `/kvmapp/server/dl_lib/libsys.so` with the system
+  `/mnt/system/usr/lib/libsys.so` did not change the crash.
+
+Corrected diagnosis after comparing with working `10.0.87.133`:
+
+- The raw updater wrote the new boot/rootfs and included `/kvmapp`; this is not
+  an empty stock-image problem.
+- The web outage is caused by Rust backend startup crashing during native video
+  initialization.
+- The binary/runtime ABI mismatch hypothesis was tested and is not the current
+  root cause:
+  - `10.0.87.133` runs the same `NanoKVM-Server`, `libkvm.so`,
+    `libkvm_mmf.so`, `libsys.so`, and Buildroot `libstdc++.so.6.0.28` hashes;
+  - replacing `libsys.so` and temporarily bundling the MaixCDK `libstdc++`
+    variant on `10.0.87.55` did not fix the crash.
+- The confirmed difference is `/mnt/data` sensor configuration:
+  - broken `10.0.87.55` after the raw update had only
+    `sensor_cfg.ini.alpha` and `sensor_cfg.ini.beta`;
+  - working `10.0.87.133` has `sensor_cfg.ini.LT`,
+    `sensor_cfg.ini.OA`, `sensor_cfg.ini.SC035`, alpha/beta, and active
+    `sensor_cfg.ini` copied from the LT file;
+  - working active config is `LONTIUM_LT6911_2M_60FPS_8BIT`, bus `4`,
+    address `ff`, lane `2, 4, 3, 1, 0`, `mclk_en=0`, `fps=60`;
+  - its sha256 is
+    `26f3e80b1a05eb93b18a0d7e557851462f0bb04619cca902f5ade8abe66bb3c8`.
+- Copying that LT config to `10.0.87.55` fixed backend startup:
+  - `NanoKVM-Server` stayed running;
+  - port `80` listened on the device;
+  - device-local `GET http://127.0.0.1/api/health` returned
+    `{"backend":"rust","phase":"skeleton","status":"ok"}`.
+- Local WSL `curl` to `10.0.87.55:80` still failed even after the backend was
+  listening; this matches the earlier device-local-vs-host reachability quirk
+  seen on `10.0.87.132`.
+
+Fix applied locally:
+
+- Added bundled sensor configs under `/kvmapp/system/mnt-data`:
+  - `sensor_cfg.ini.LT`
+  - `sensor_cfg.ini.OA`
+  - `sensor_cfg.ini.SC035`
+  - `sensor_cfg.ini.alpha`
+  - `sensor_cfg.ini.beta`
+- Updated `S95nanokvm` to restore missing `/mnt/data/sensor_cfg.*` files from
+  `/kvmapp/system/mnt-data` and copy LT to active `/mnt/data/sensor_cfg.ini`
+  before starting the backend.
+- Updated `scripts/build-rust-sd-image.sh` to write bundled sensor configs
+  directly into rootfs `/mnt/data`, including active `sensor_cfg.ini` from LT.
+- Updated `scripts/validate-nanokvm-rootfs.sh` to fail builds missing the
+  bundled and rootfs LT sensor config.
+- Syntax checks passed:
+  - `sh -n kvmapp/system/init.d/S95nanokvm`
+  - `sh -n scripts/build-rust-sd-image.sh`
+  - `sh -n scripts/validate-nanokvm-rootfs.sh`

@@ -19,6 +19,8 @@ SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
 SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
 SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
 SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
+SENSOR_BUNDLE_DIR=/kvmapp/system/mnt-data
+SENSOR_DATA_DIR=/mnt/data
 
 wait_process_exit() {
     name="$1"
@@ -79,6 +81,27 @@ install_system_update_public_key() {
     if ! cmp -s "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"; then
         cp "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"
         chmod 0644 "$SYSTEM_UPDATE_PUBLIC_KEY"
+    fi
+}
+
+restore_sensor_configs() {
+    mkdir -p "$SENSOR_DATA_DIR"
+
+    if [ -d "$SENSOR_BUNDLE_DIR" ]; then
+        for name in sensor_cfg.ini.LT sensor_cfg.ini.OA sensor_cfg.ini.SC035 sensor_cfg.ini.alpha sensor_cfg.ini.beta; do
+            src="$SENSOR_BUNDLE_DIR/$name"
+            dst="$SENSOR_DATA_DIR/$name"
+            [ -s "$src" ] || continue
+            if [ ! -s "$dst" ]; then
+                cp "$src" "$dst"
+                chmod 0644 "$dst"
+            fi
+        done
+    fi
+
+    if [ -s "$SENSOR_DATA_DIR/sensor_cfg.ini.LT" ]; then
+        cp "$SENSOR_DATA_DIR/sensor_cfg.ini.LT" "$SENSOR_DATA_DIR/sensor_cfg.ini"
+        chmod 0644 "$SENSOR_DATA_DIR/sensor_cfg.ini"
     fi
 }
 
@@ -249,8 +272,7 @@ case "$1" in
 
     echo -n kvm > /boot/hostname.prefix
 
-    # Copy sensor config if the file exists
-    [ -f /mnt/data/sensor_cfg.ini.LT ] && cp /mnt/data/sensor_cfg.ini.LT /mnt/data/sensor_cfg.ini
+    restore_sensor_configs
 
     # Generate unique device key
     if [ -f /sys/class/cvi-base/base_uid ]; then
