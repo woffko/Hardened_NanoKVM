@@ -1,16 +1,20 @@
 # Rust Backend Status
 
-The Rust backend lives in `server-rust/`. It is a beta replacement for the
-privileged Go `NanoKVM-Server` process and keeps the existing NanoKVM runtime:
+The Rust backend lives in `server-rust/`. It is the shipped Hardened backend and
+replaces the legacy privileged Go `NanoKVM-Server` process while keeping the
+existing NanoKVM runtime:
 `kvm_system`, `libkvm.so`, USB gadget scripts, the Maix multimedia stack, and
 the React frontend.
 
-The backend is tested on real NanoKVM hardware at this stage. API parity is not
-complete, but the main browser workflows are now implemented deeply enough for
-interactive device testing.
+The backend is tested on real NanoKVM hardware. Compatibility testing against
+historical upstream behavior is still ongoing, but the main browser workflows
+are implemented deeply enough for interactive device testing.
 
-Current sysupgrade branch beta release target is `beta 2` / app version
-`2.0.0` from `feature/new-buildroot-sysupgrade-lab`.
+Current published channels:
+
+- app update: `2.0.7`;
+- raw system-update: `0.2.4-raw.1`, built from the beta `2.0.6` SD rootfs;
+- SD-card image: beta `2.0.6`.
 
 ## Build
 
@@ -80,7 +84,7 @@ The generated image installs:
 
 - Rust as the active `/kvmapp/server/NanoKVM-Server`.
 - Rust backend backup at `/kvmapp/backends/NanoKVM-Server.rust`.
-- `/etc/kvm/backend` with initial value `rust`.
+- `/etc/kvm/backend` compatibility marker with initial value `rust`.
 - Release validation rejects legacy Go backend files such as
   `/kvmapp/backends/NanoKVM-Server.go` and `/etc/kvm/scripts/switch-backend-go.sh`.
 
@@ -146,7 +150,8 @@ The generated image installs:
   pending/backup markers. `/api/system-update/confirm` writes a boot-good
   marker after basic health checks. `/api/system-update/rollback` restores the
   latest backup manually. These routes do not reboot automatically.
-- UI branding for Hardened NanoKVM and version `beta 2`.
+- UI branding for Hardened NanoKVM and app version display from
+  `/kvmapp/version`.
 - Guarded raw system-update switch in Check for Updates. Raw boot/rootfs writes
   stay disabled by default and require an explicit warning confirmation before
   `/api/system-update/install` can apply a destructive staged bundle.
@@ -175,7 +180,7 @@ The generated image installs:
 
 ## Known Issues And Remaining Work
 
-- Full API parity still needs route-by-route validation against historical
+- Full API compatibility still needs route-by-route validation against historical
   upstream behavior.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants.

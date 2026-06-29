@@ -70,18 +70,22 @@ Production stable/preview channel metadata must use
 `signature_algorithm: "sha256-rsa-pkcs1-v1_5"` and a non-`unsigned`
 `signature_key_id`.
 
-## Current Smoke Release
+## Current Published System Releases
 
-The current `hardened-system-stable` channel points to prerelease
-`hardened-system-0.1.0-dev.1`. This is a rootfs-only smoke bundle that installs
-`/etc/kvm/hardened-system-update-test` and does not require a reboot.
+The current `hardened-system-stable` channel points to lab raw release
+`hardened-system-0.2.4-raw.1`. It was built from the beta `2.0.6` Hardened SD
+image and contains validated boot/rootfs partition images plus matching channel
+metadata.
 
-It is intended to validate the sysupgrade plumbing, not to deliver real kernel
-or Buildroot security backports. It was signed with a temporary local test key;
-the matching public key is currently bundled under
+This channel is still lab-only. It is intended to validate the sysupgrade
+plumbing and SD-card recovery workflow, not to deliver real kernel or Buildroot
+security backports. The matching public key is bundled under
 `kvmapp/system/keys/system-update-signing.pub.pem`. Production use still needs a
 real release-key custody process before this channel should carry real
-kernel/rootfs security backports.
+kernel/rootfs security-backport payloads.
+
+Older smoke release `hardened-system-0.1.0-dev.1` only installed a harmless
+test marker. Revoked raw release `hardened-system-0.1.0-raw.1` must not be used.
 
 ## Bundle Layout
 

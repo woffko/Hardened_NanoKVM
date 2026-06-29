@@ -1,12 +1,15 @@
 # NanoKVM Backend API Inventory
 
-This document maps the current Rust backend surface in `server-rust/`. It is
-intended as a living parity checklist against the original Go `NanoKVM-Server`.
+This document maps the current Rust backend surface in `server-rust/`. It is a
+living compatibility checklist against the historical upstream Go
+`NanoKVM-Server` API shape. The Go backend is not shipped in current Hardened
+release artifacts.
 
 ## Runtime And Serving Model
 
 - Active backend binary on device: `/kvmapp/server/NanoKVM-Server`.
 - Rust backend source: `server-rust/`.
+- Legacy upstream Go source: `server/`, retained for reference only.
 - Static frontend path: configured `paths.web_root`, normally
   `/kvmapp/server/web`.
 - Config file: `/etc/kvm/server.yaml`.
@@ -76,7 +79,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST | `/api/vm/hostname` | Implemented. |
 | GET/POST | `/api/vm/web-title` | Implemented. |
 | GET/POST | `/api/vm/gpio` | Implemented. |
-| POST | `/api/vm/screen` | Implemented; writes Go-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
+| POST | `/api/vm/screen` | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
 | GET/POST | `/api/vm/device/virtual` | Implemented. |
 | GET/POST | `/api/vm/oled` | Implemented. |
 | GET | `/api/vm/hdmi` | Implemented. |
@@ -107,7 +110,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET | `/api/stream/mjpeg` | Implemented through `libkvm` with shared fanout. |
 | POST | `/api/stream/mjpeg/detect` | Implemented. |
 | POST | `/api/stream/mjpeg/detect/stop` | Implemented. |
-| GET | `/api/stream/h264/direct` | Implemented Go-compatible direct H.264 binary frame WebSocket. |
+| GET | `/api/stream/h264/direct` | Implemented NanoKVM-compatible direct H.264 binary frame WebSocket. |
 | GET | `/api/stream/h264` | Implemented H.264 WebRTC signaling and RTP sample streaming; needs more browser/ICE soak testing. |
 | GET | `/api/hid/shortcuts` | Implemented. |
 | POST/DELETE | `/api/hid/shortcut` | Implemented. |

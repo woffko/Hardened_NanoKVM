@@ -92,6 +92,9 @@ Root cause of login loop:
 - GUI update checks depend on those channel tags/assets.
 - README now has a dedicated `How Updates Work` section describing app updates
   versus raw system updates.
+- Security and backend docs should describe the Go backend as historical
+  upstream/reference context only. Current release artifacts are Rust-only and
+  validators reject legacy Go backend files and backend-switch scripts.
 
 ## Latest Fixes In Code
 

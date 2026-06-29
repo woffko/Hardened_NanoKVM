@@ -55,17 +55,19 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `images/rootfs.sd` to `/dev/mmcblk0p2`, sync, and reboot. This is for lab
   devices with SD-card recovery only and has no automatic rollback. Raw bundle
   tooling now rejects rootfs images that do not contain the Hardened NanoKVM
-  `/kvmapp`, `/etc/kvm`, init script, web assets, and backend-switching files.
+  `/kvmapp`, `/etc/kvm`, init script, web assets, and Rust-only backend files,
+  and do not contain legacy Go backend files or switch scripts.
 - `hardened-system-0.1.0-raw.1` is a revoked experimental raw release. It was
   built from the stock vendor SDK rootfs and must not be installed. Use a newer
   raw release produced from a validated Hardened SD image.
-- The first signed rootfs-only smoke release is published:
-  `hardened-system-0.1.0-dev.1`, with channel metadata on
-  `hardened-system-stable`. It was validated on `10.0.87.132` for
-  check/download/install/status/confirm/rollback and reboot sanity. This uses a
-  temporary local test signing key. Its public key is bundled in `kvmapp` and
-  installed to `/etc/kvm/system-update-signing.pub.pem` on service start, but
-  this is still not a production private-key custody process.
+- The first signed rootfs-only smoke release,
+  `hardened-system-0.1.0-dev.1`, validated the non-destructive
+  check/download/install/status/confirm/rollback flow on `10.0.87.132`. It is
+  now historical. The current stable system channel points to lab raw release
+  `hardened-system-0.2.4-raw.1`, built from the beta `2.0.6` Hardened SD image.
+  The bundled public key is installed from `kvmapp` to
+  `/etc/kvm/system-update-signing.pub.pem` on service start, but this is still
+  not a production private-key custody process.
 
 ## Implementation Order
 
@@ -205,7 +207,8 @@ the previous files.
 8. Rollback-on-bad-boot flow.
 9. Only after the known-good Hardened image path passes, repeat the same flow
    with SDK-derived images.
-10. Long video, HID, network, reboot, and backend-switching soak after update.
+10. Long video, HID, network, reboot, and Rust backend startup/restart soak
+   after update.
 
 ## Non-Goals For The First Version
 

@@ -1,13 +1,23 @@
 # NanoKVM Backend Security Risk Inventory
 
-This inventory drives the Rust rewrite hardening work. It combines the Go backend route review with the completed security scan artifacts under `/tmp/codex-security-scans/Hardened_NanoKVM/3de4a18eb42f_20260606T132630+0300`.
+This inventory started as the Rust rewrite hardening checklist. It combines a
+historical review of the upstream Go backend with the completed security scan
+artifacts under
+`/tmp/codex-security-scans/Hardened_NanoKVM/3de4a18eb42f_20260606T132630+0300`.
+
+Scope note: Go backend findings in this file are historical threat-model input
+for the rewrite. Current Hardened release artifacts are Rust-only: the legacy
+Go backend, backend switch scripts, and web backend selector are not shipped in
+`kvmapp` packages or generated SD-card images. Release validation rejects
+`NanoKVM-Server.go` and `switch-backend-go.sh`. The `server/` tree remains in
+the repository only as an upstream reference while compatibility is audited.
 
 ## Required Security Changes
 
-| Area | Existing Risk | Rust Rewrite Requirement | Initial Rust Status |
+| Area | Historical / Upstream Risk | Rust Rewrite Requirement | Current Rust Status |
 |---|---|---|---|
 | First boot auth | Missing `/etc/kvm/pwd` falls back to `admin/admin`. | No default credential; require explicit setup or device-unique initial secret. | Rust default is hardened: `security.allow_default_admin=false`. Fresh SD-card flashes expose a one-shot first-boot web setup flow while `/etc/kvm/pwd` is missing. Temporary isolated test devices can explicitly set `allow_default_admin=true` to seed `admin/admin` as an Argon2id hash. |
-| Password storage | Go stores bcrypt or legacy encrypted compatibility values. | Argon2id, unique salt, no plaintext. | Implemented in `auth/password.rs`. |
+| Password storage | The legacy Go/upstream implementation stores bcrypt or legacy encrypted compatibility values. | Argon2id, unique salt, no plaintext. | Implemented in `auth/password.rs`; Rust still verifies legacy bcrypt during migration. |
 | Session revocation | JWT is self-contained; logout rotates secret globally. | Opaque/session-id or JWT with jti revocation; logout revokes active session; password change revokes all user sessions. | Implemented in-memory opaque sessions. Persistence policy still needs device decision. |
 | CSRF | Cookie auth without CSRF token. | CSRF token for state-changing browser endpoints plus Origin/Referer checks. | Implemented. Middleware enforces `x-csrf-token` on protected POST/PUT/PATCH/DELETE and validates Origin/Referer when present. |
 | WebSocket Origin | Existing upgraders return true for every Origin. | Reject unexpected Origins for every WebSocket. | Implemented for HID, H.264 Direct, H.264 WebRTC, and terminal WebSockets. |
@@ -17,7 +27,7 @@ This inventory drives the Rust rewrite hardening work. It combines the Go backen
 | Shell commands | Many `sh -c` command strings. | Central allowlisted argv-only wrapper with timeout and bounded output. | Implemented in `system/command.rs` and used by migrated routes; continued audit required for new routes. |
 | Storage paths | Image mount/delete accept unsafe paths. | Enforce resolved `/data` containment and known image inventory. | Implemented for Rust storage and upload/delete/mount routes. |
 | SSRF | Image downloader fetches arbitrary URLs. | Destination allowlist/denylist, redirect checks, content validation. | Remote ISO download is disabled by default and guarded by URL, protocol, filename, size, redirect, destination, and ISO signature checks. Final production policy still needed. |
-| System updates | Kernel/rootfs updates can brick the device without rollback. | Separate signed system-update bundles with staging, backup, rollback, and boot health confirmation. | Artifact contract, GitHub channel metadata tooling, signed metadata enforcement, staging, guarded install, generated init-time rollback script, boot watchdog rollback, manual boot-good confirmation, and manual rollback are implemented. A signed rootfs-only smoke release was published and validated on `10.0.87.132`; real kernel/rootfs security-backport bundles and production key management are still pending. Current application updater replaces `kvmapp`, not kernel/rootfs. |
+| System updates | Kernel/rootfs updates can brick the device without rollback. | Separate signed system-update bundles with staging, backup, rollback, and boot health confirmation. | Artifact contract, GitHub channel metadata tooling, signed metadata enforcement, staging, guarded install, generated init-time rollback script, boot watchdog rollback, manual boot-good confirmation, and manual rollback are implemented. Current raw channel is lab-only `0.2.4-raw.1`, built from a validated Hardened SD image; `0.1.0-raw.1` is revoked because it used a stock SDK rootfs. Real kernel/rootfs security-backport payloads and production key management are still pending. Current application updater replaces `kvmapp`, not kernel/rootfs. |
 | Privilege model | Backend effectively root for all operations. | Prefer unprivileged backend plus helper; otherwise mark root-required operations. | First phase keeps root-compatible model; docs list root-required operations. |
 
 ## Root-Required Operations
@@ -35,7 +45,10 @@ These operations must remain behind narrow wrappers or a future privileged helpe
 
 ## Command Execution Inventory
 
-Current Go code contains shell or process execution in these areas:
+The historical upstream Go backend contained shell or process execution in
+these areas. They are retained here as reference points for Rust compatibility
+and hardening review; they are not an active shipped Go attack surface in
+current Hardened releases.
 
 - `server/service/vm/script.go`: script run via `sh -c`.
 - `server/service/vm/terminal.go`: `/bin/sh` PTY.
@@ -46,7 +59,8 @@ Current Go code contains shell or process execution in these areas:
 - `server/service/vm/ssh.go`, `mdns.go`, `swap.go`, `tls.go`, `virtual-device.go`, `hid/status.go`: fixed service/control commands.
 - `server/service/network/wol.go`: `ether-wake`.
 
-Rust migration rule: API modules must not spawn commands directly. They must call `system::command::run_allowed` or a narrower service helper.
+Rust rule: API modules must not spawn commands directly. They must call
+`system::command::run_allowed` or a narrower service helper.
 
 ## File And Archive Risk Inventory
 
@@ -67,14 +81,16 @@ Rust migration rule: API modules must not spawn commands directly. They must cal
 
 ## Follow-Up For Hardening
 
-1. Add signed metadata/artifact verification for `kvmapp` updates.
-2. Keep `security.allow_default_admin=false` for production use and rely on
+1. Keep `security.allow_default_admin=false` for production use and rely on
    first-boot setup for fresh SD-card flashes.
-3. Finish systematic Go API parity and error-semantics audit.
-4. Keep remote ISO download disabled by default until final allowlist/content
+2. Finish systematic compatibility and error-semantics audit against historical
+   upstream behavior where that behavior still matters to the UI or device
+   workflows.
+3. Keep remote ISO download disabled by default until final allowlist/content
    policy is accepted.
-5. Implement the Rust system-update installer for the existing GitHub release
-   contract, including signed manifests, staging, rollback, and boot health
-   checks.
+4. Test real kernel/rootfs security-backport payloads through the implemented
+   system-update path before publishing them outside lab devices.
+5. Define production release-key custody and rotation for application and
+   system-update metadata signing.
 6. Split root-required operations into a smaller privileged helper when the
    Rust backend behavior is stable enough.
