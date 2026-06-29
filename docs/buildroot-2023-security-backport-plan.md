@@ -91,6 +91,18 @@ Sipeed vendor tree first:
 This is the safest first proof because it stays within the same Buildroot
 release series. It should be built and boot-tested before larger updates.
 
+The helper script for this first track is:
+
+```sh
+BUILDROOT_UPSTREAM_REPO=/tmp/buildroot-security-probe \
+LICHEERV_NANO_SDK_DIR=/path/to/LicheeRV-Nano-Build \
+  scripts/apply-buildroot-2023-11-3-security-backports.sh
+```
+
+It applies only these official Buildroot package directories from
+`2023.11.2..2023.11.3`: `libopenssl`, `libcurl`, `python3`, `expat`, and
+`libxml2`.
+
 ### Track 2: Network-Facing Critical Stack
 
 After Track 1 boots:
