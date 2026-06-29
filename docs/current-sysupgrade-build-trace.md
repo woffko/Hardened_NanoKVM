@@ -629,3 +629,52 @@ Post-publish verification:
   `hardened-system-0.2.0-raw.1`.
 - Both downloaded metadata signatures verified with
   `kvmapp/system/keys/system-update-signing.pub.pem`.
+
+## 2026-06-29: Beta 2.0.1 App/System Patch
+
+Reason:
+
+- device `10.0.87.41` with Preview Updates enabled did not see the newer app
+  release because the preview channel metadata was stale;
+- USB gadget MAC addresses can change after reboot because `S03usbdev` did not
+  set deterministic NCM/RNDIS `dev_addr` and `host_addr` values;
+- app updates replace `/kvmapp`, while the boot-time USB gadget script is run
+  from `/etc/init.d`, so `S95nanokvm` now syncs the bundled `S03usbdev` into
+  `/etc/init.d` on startup.
+
+Device check before the 2.0.1 release:
+
+- `10.0.87.41` login: `admin/admin1234`
+- current app: `1.0.5`
+- visible app update after republishing preview channel metadata: `2.0.0`
+- current system: `0.1.4-raw.1`
+- visible system update: `0.2.0-raw.1`
+- device key: `c9cbd99715194c6c`
+
+Code changes staged for the 2.0.1 release:
+
+- application update checks compare preview and stable metadata and return the
+  newer semantic app version;
+- system update checks compare preview and stable metadata and return the newer
+  raw system version;
+- `S03usbdev` derives stable locally-administered USB MACs from `/device_key`
+  with fallbacks to `/etc/machine-id`, CPU serial, and a fixed seed;
+- SD image patching now installs the bundled `S03usbdev` into `/etc/init.d`;
+- rootfs validation now requires both bundled and boot-time `S03usbdev`.
+
+Validation before build:
+
+- `sh -n kvmapp/system/init.d/S03usbdev`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `sh -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/validate-nanokvm-rootfs.sh`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+
+Planned release tags:
+
+- app: `hardened-rust-beta-2.0.1`
+- system: `hardened-system-0.2.1-raw.1`
+- stable app latest: GitHub Releases latest points to app `2.0.1`
+- preview app latest: `hardened-rust-preview` will be updated to app `2.0.1`
+- stable and preview system metadata will be updated to `0.2.1-raw.1`

@@ -126,6 +126,13 @@ fi
   printf 'sif /etc/init.d/S95nanokvm mode 0100755\n'
   printf 'sif /etc/init.d/S95nanokvm uid 0\n'
   printf 'sif /etc/init.d/S95nanokvm gid 0\n'
+  if [ -f "$KVMAPP_DIR/system/init.d/S03usbdev" ]; then
+    printf 'rm /etc/init.d/S03usbdev\n'
+    printf 'write %s /etc/init.d/S03usbdev\n' "$KVMAPP_DIR/system/init.d/S03usbdev"
+    printf 'sif /etc/init.d/S03usbdev mode 0100755\n'
+    printf 'sif /etc/init.d/S03usbdev uid 0\n'
+    printf 'sif /etc/init.d/S03usbdev gid 0\n'
+  fi
 } > "$DEBUGFS_CMDS"
 
 echo "Updating rootfs with Hardened kvmapp..."

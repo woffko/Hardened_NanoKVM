@@ -160,7 +160,16 @@ pub async fn offline_update(
 async fn get_latest(preview: bool, config: &crate::config::Config) -> Result<LatestRelease> {
     if preview {
         match fetch_latest(GITHUB_PREVIEW_LATEST_JSON, config).await {
-            Ok(latest) => return Ok(latest),
+            Ok(preview_latest) => match fetch_latest(GITHUB_RELEASE_LATEST_JSON, config).await {
+                Ok(stable_latest) => return Ok(newer_release(preview_latest, stable_latest)),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to query stable release metadata, using preview"
+                    );
+                    return Ok(preview_latest);
+                }
+            },
             Err(err) => {
                 tracing::warn!(
                     error = %err,
@@ -171,6 +180,32 @@ async fn get_latest(preview: bool, config: &crate::config::Config) -> Result<Lat
     }
 
     fetch_latest(GITHUB_RELEASE_LATEST_JSON, config).await
+}
+
+fn newer_release(left: LatestRelease, right: LatestRelease) -> LatestRelease {
+    match compare_application_versions(&left.version, &right.version) {
+        Some(std::cmp::Ordering::Less) => right,
+        _ => left,
+    }
+}
+
+fn compare_application_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left = parse_application_version(left)?;
+    let right = parse_application_version(right)?;
+    Some(left.cmp(&right))
+}
+
+fn parse_application_version(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.');
+    let parsed = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(parsed)
 }
 
 async fn fetch_latest(url: &str, config: &crate::config::Config) -> Result<LatestRelease> {
@@ -840,6 +875,31 @@ mod tests {
             signature_key_id: "hardened-system-dev".to_string(),
         };
         assert!(validate_latest_release(&latest).is_ok());
+    }
+
+    #[test]
+    fn chooses_newer_stable_when_preview_is_stale() {
+        let sha512 = STANDARD.encode([42_u8; 64]);
+        let preview = LatestRelease {
+            version: "1.0.5".to_string(),
+            name: "hardened-nanokvm-kvmapp-1.0.5.tar.gz".to_string(),
+            sha512: sha512.clone(),
+            size: 1024,
+            url: "https://github.com/woffko/Hardened_NanoKVM/releases/download/preview/hardened-nanokvm-kvmapp-1.0.5.tar.gz".to_string(),
+            signature_algorithm: APP_UPDATE_SIGNATURE_ALGORITHM.to_string(),
+            signature_key_id: "hardened-system-dev".to_string(),
+        };
+        let stable = LatestRelease {
+            version: "2.0.0".to_string(),
+            name: "hardened-nanokvm-kvmapp-2.0.0.tar.gz".to_string(),
+            sha512,
+            size: 2048,
+            url: "https://github.com/woffko/Hardened_NanoKVM/releases/download/stable/hardened-nanokvm-kvmapp-2.0.0.tar.gz".to_string(),
+            signature_algorithm: APP_UPDATE_SIGNATURE_ALGORITHM.to_string(),
+            signature_key_id: "hardened-system-dev".to_string(),
+        };
+
+        assert_eq!(newer_release(preview, stable).version, "2.0.0");
     }
 
     #[test]

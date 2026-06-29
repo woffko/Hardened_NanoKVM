@@ -1,3 +1,14 @@
+## Hardened NanoKVM Beta 2.0.1 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed update checks when Preview Updates is enabled. A stale preview channel
+  can no longer hide a newer stable application or system update.
+* Added stable locally-administered MAC addresses for USB NCM/RNDIS gadget
+  functions, derived from the device key. `S95nanokvm` also syncs the bundled
+  `S03usbdev` boot script into `/etc/init.d` after app updates so the MAC fix
+  takes effect after the next reboot.
+
 ## Hardened NanoKVM Beta 2 (2026-06-29)
 
 ### Features

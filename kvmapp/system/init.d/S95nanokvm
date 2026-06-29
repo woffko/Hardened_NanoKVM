@@ -84,6 +84,22 @@ install_system_update_public_key() {
     fi
 }
 
+install_boot_script() {
+    name="$1"
+    src="/kvmapp/system/init.d/$name"
+    dst="/etc/init.d/$name"
+
+    [ -f "$src" ] || return
+    if ! cmp -s "$src" "$dst"; then
+        cp "$src" "$dst"
+        chmod 0755 "$dst"
+    fi
+}
+
+install_boot_scripts() {
+    install_boot_script S03usbdev
+}
+
 restore_sensor_configs() {
     mkdir -p "$SENSOR_DATA_DIR"
 
@@ -256,6 +272,7 @@ start_runtime() {
     cleanup_server_backups
     ensure_kvm_state_files
     install_system_update_public_key
+    install_boot_scripts
 
     cp -r /kvmapp/kvm_system /tmp/
     nohup /tmp/kvm_system/kvm_system >/tmp/kvm_system.log 2>&1 &

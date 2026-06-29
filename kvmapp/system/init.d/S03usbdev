@@ -1,6 +1,56 @@
 #!/bin/sh
 # kvmhwd Rev2.2
 
+stable_usb_mac_seed() {
+    for file in /device_key /etc/machine-id
+    do
+        if [ -s "$file" ]
+        then
+            seed=$(tr -cd 'A-Fa-f0-9' < "$file" | head -c 32)
+            if [ -n "$seed" ]
+            then
+                echo "$seed"
+                return
+            fi
+        fi
+    done
+
+    if [ -r /proc/cpuinfo ]
+    then
+        seed=$(sed -n 's/^[Ss]erial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | tr -cd 'A-Fa-f0-9' | head -c 32)
+        if [ -n "$seed" ]
+        then
+            echo "$seed"
+            return
+        fi
+    fi
+
+    echo 0123456789abcdef
+}
+
+make_usb_mac() {
+    prefix="$1"
+    label="$2"
+    seed=$(stable_usb_mac_seed)
+    hash=$(printf '%s:%s\n' "$seed" "$label" | sha256sum | awk '{print $1}')
+    if [ -z "$hash" ]
+    then
+        hash=0123456789abcdef
+    fi
+    printf '%s\n' "$hash" | sed "s/^\(..\)\(..\)\(..\)\(..\)\(..\).*/$prefix:\1:\2:\3:\4:\5/"
+}
+
+set_usb_function_macs() {
+    func="$1"
+    [ -d "$func" ] || return
+
+    dev_addr=$(make_usb_mac 02 "$func-dev")
+    host_addr=$(make_usb_mac 06 "$func-host")
+
+    [ -e "$func/dev_addr" ] && echo "$dev_addr" > "$func/dev_addr"
+    [ -e "$func/host_addr" ] && echo "$host_addr" > "$func/host_addr"
+}
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -42,12 +92,14 @@ start_usb_dev(){
     if [ -e /boot/usb.ncm ]
     then
         mkdir functions/ncm.usb0
+        set_usb_function_macs functions/ncm.usb0
         echo WINNCM > functions/ncm.usb0/os_desc/interface.ncm/compatible_id
         ln -s functions/ncm.usb0 configs/c.1/
     else
         if [ -e /boot/usb.rndis0 ]
         then
                 mkdir functions/rndis.usb0
+                set_usb_function_macs functions/rndis.usb0
                 echo e0 > functions/rndis.usb0/class
                 echo 01 > functions/rndis.usb0/subclass
                 echo 03 > functions/rndis.usb0/protocol
