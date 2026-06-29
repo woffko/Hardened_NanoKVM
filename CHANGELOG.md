@@ -1,3 +1,11 @@
+## Hardened NanoKVM Beta 2.0.2 (2026-06-29)
+
+### Bug Fixes
+
+* Added Rust-backend startup synchronization for `/etc/init.d/S03usbdev` and
+  `/etc/init.d/S95nanokvm`. This lets ordinary application updates install the
+  stable USB gadget MAC fix on already-flashed devices before the next reboot.
+
 ## Hardened NanoKVM Beta 2.0.1 (2026-06-29)
 
 ### Bug Fixes

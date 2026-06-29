@@ -12,6 +12,11 @@ use nanokvm_rust_server::{
     },
     state::AppState,
 };
+use std::{
+    fs, io,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -23,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::load()?;
     config.log_runtime_warnings();
+    install_runtime_boot_scripts();
     initialize_kvm();
 
     if config.proto == "https" {
@@ -32,6 +38,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn install_runtime_boot_scripts() {
+    for (src, dst) in [
+        ("/kvmapp/system/init.d/S03usbdev", "/etc/init.d/S03usbdev"),
+        ("/kvmapp/system/init.d/S95nanokvm", "/etc/init.d/S95nanokvm"),
+    ] {
+        match install_runtime_boot_script(Path::new(src), Path::new(dst)) {
+            Ok(true) => info!(source = src, target = dst, "installed runtime boot script"),
+            Ok(false) => {}
+            Err(err) => warn!(
+                source = src,
+                target = dst,
+                error = %err,
+                "failed to install runtime boot script"
+            ),
+        }
+    }
+}
+
+fn install_runtime_boot_script(src: &Path, dst: &Path) -> io::Result<bool> {
+    if !src.is_file() {
+        return Ok(false);
+    }
+
+    if let Ok(meta) = fs::symlink_metadata(dst) {
+        if !meta.file_type().is_file() {
+            return Err(io::Error::other("target exists but is not a regular file"));
+        }
+        if fs::read(src)? == fs::read(dst)? {
+            fs::set_permissions(dst, fs::Permissions::from_mode(0o755))?;
+            return Ok(false);
+        }
+    }
+
+    let temp = temp_boot_script_path(dst)?;
+    fs::copy(src, &temp)?;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&temp, dst)?;
+    Ok(true)
+}
+
+fn temp_boot_script_path(dst: &Path) -> io::Result<PathBuf> {
+    let file_name = dst
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("target has invalid file name"))?;
+    Ok(dst.with_file_name(format!(".{file_name}.tmp")))
 }
 
 fn initialize_kvm() {

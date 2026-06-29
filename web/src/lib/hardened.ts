@@ -1,6 +1,6 @@
 export const HARDENED_NAME = 'Hardened NanoKVM';
 export const HARDENED_SHORT_NAME = 'Hardened';
-export const HARDENED_VERSION = 'beta 2.0.1';
+export const HARDENED_VERSION = 'beta 2.0.2';
 export const HARDENED_LOGO_SRC = '/hardened-logo.png';
 
 export function formatHardenedVersion(version?: string) {
