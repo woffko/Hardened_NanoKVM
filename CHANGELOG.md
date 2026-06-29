@@ -1,3 +1,21 @@
+## Hardened NanoKVM Beta 2.0.5 (2026-06-29)
+
+### Features
+
+* Added full Manual network editing in Settings > Network > DNS. Manual mode
+  now edits wired IP address, subnet mask, router, and DNS servers, applies the
+  settings through the existing `S30eth` boot mechanism, and redirects the
+  browser to the configured address after apply.
+
+### Bug Fixes
+
+* Added a stable wired `eth0` MAC address mechanism. `S30eth` now creates and
+  reuses `/boot/eth.mac`, derived from the device key, before DHCP/static
+  configuration so DHCP leases do not move after every reboot.
+* App startup and `S95nanokvm` now sync the bundled `S30eth` into
+  `/etc/init.d`, and SD/raw-system validation now requires `S30eth` in both
+  `/kvmapp/system/init.d` and `/etc/init.d`.
+
 ## Hardened NanoKVM Beta 2.0.4 (2026-06-29)
 
 ### Bug Fixes

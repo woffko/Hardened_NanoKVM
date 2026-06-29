@@ -98,6 +98,7 @@ install_boot_script() {
 
 install_boot_scripts() {
     install_boot_script S03usbdev
+    install_boot_script S30eth
 }
 
 restore_sensor_configs() {

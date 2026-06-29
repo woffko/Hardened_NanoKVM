@@ -33,6 +33,7 @@ const DNS_MODE_FILE: &str = "/etc/kvm/network/dns.mode";
 const DNS_SERVERS_FILE: &str = "/etc/kvm/network/dns.servers";
 const BOOT_RESOLV_FILE: &str = "/boot/resolv.conf";
 const BOOT_RESOLV_BACKUP: &str = "/boot/resolv.conf.manual.bak";
+const BOOT_ETH_NODHCP_FILE: &str = "/boot/eth.nodhcp";
 const ETC_RESOLV_FILE: &str = "/etc/resolv.conf";
 const DHCP_RESOLV_FILE: &str = "/etc/resolv.conf.dhcp";
 const TMP_RESOLV_FILE: &str = "/tmp/resolv.conf";
@@ -40,6 +41,7 @@ const UDHCPC_HOOK_FILE: &str = "/usr/share/udhcpc/default.script.d/99-nanokvm-dn
 const UDHCPC_DNS_HOOK: &str =
     include_str!("../../../server/service/network/scripts/99-nanokvm-dns");
 const MAX_DNS_SERVERS: usize = 6;
+const DEFAULT_ETH_INTERFACE: &str = "eth0";
 
 #[derive(Debug, Deserialize)]
 pub struct WolReq {
@@ -64,6 +66,7 @@ pub struct DnsRsp {
     pub effective: Vec<String>,
     pub dhcp: Vec<String>,
     pub info: DnsInfo,
+    pub config: Option<StaticNetworkConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +74,14 @@ pub struct SetDnsReq {
     pub mode: String,
     #[serde(default)]
     pub servers: Vec<String>,
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default, rename = "subnetMask")]
+    pub subnet_mask: Option<String>,
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +101,15 @@ pub struct DnsInfo {
     pub gateway: String,
     #[serde(rename = "searchDomains")]
     pub search_domains: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct StaticNetworkConfig {
+    pub interface: String,
+    pub address: String,
+    #[serde(rename = "subnetMask")]
+    pub subnet_mask: String,
+    pub gateway: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,7 +207,12 @@ pub async fn set_wol_mac_name(Json(req): Json<SetWolMacNameReq>) -> Result<impl 
 }
 
 pub async fn get_dns() -> Result<impl IntoResponse> {
-    let mode = current_dns_mode();
+    let static_config = read_static_network_config().unwrap_or_default();
+    let mode = if static_config.is_some() {
+        DNS_MODE_MANUAL.to_string()
+    } else {
+        current_dns_mode()
+    };
     let mut servers = read_manual_dns_servers();
     if servers.is_empty() {
         servers = parse_resolv_conf(BOOT_RESOLV_FILE).unwrap_or_default();
@@ -206,13 +231,14 @@ pub async fn get_dns() -> Result<impl IntoResponse> {
         effective,
         dhcp: dhcp_config.servers,
         info: get_dns_info(),
+        config: static_config,
     })))
 }
 
 pub async fn set_dns(Json(req): Json<SetDnsReq>) -> Result<impl IntoResponse> {
     match req.mode.as_str() {
-        DNS_MODE_MANUAL => set_manual_dns(&req.servers)?,
-        DNS_MODE_DHCP => set_dhcp_dns()?,
+        DNS_MODE_MANUAL => set_manual_network(&req).await?,
+        DNS_MODE_DHCP => set_dhcp_network().await?,
         _ => return Err(AppError::BadRequest("invalid dns mode".to_string())),
     }
 
@@ -480,7 +506,54 @@ fn sanitize_wol_mac_name(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn set_manual_dns(servers: &[String]) -> Result<()> {
+async fn set_manual_network(req: &SetDnsReq) -> Result<()> {
+    let config = validate_static_network_config(req)?;
+    let normalized_dns = set_manual_dns(&req.servers)?;
+    write_static_network_config(&config)?;
+    restart_ethernet().await?;
+
+    // S30eth writes the gateway as a resolver after applying static Ethernet.
+    // Restore the explicitly selected DNS servers after the link comes back.
+    render_resolv_conf(ETC_RESOLV_FILE, &normalized_dns)?;
+    Ok(())
+}
+
+async fn set_dhcp_network() -> Result<()> {
+    fs::create_dir_all(DNS_CONFIG_DIR)?;
+    preserve_manual_dns_servers()?;
+    write_dns_mode(DNS_MODE_DHCP)?;
+    backup_and_remove_boot_resolv()?;
+    remove_file_if_exists(BOOT_ETH_NODHCP_FILE)?;
+    install_udhcpc_dns_hook()?;
+    restart_ethernet().await?;
+
+    let dhcp_config = read_dhcp_resolv_config(true).unwrap_or_else(|_| ResolvConfig::default());
+    if !dhcp_config.servers.is_empty() {
+        render_resolv_config(DHCP_RESOLV_FILE, &dhcp_config)?;
+        render_resolv_config(ETC_RESOLV_FILE, &dhcp_config)?;
+    }
+
+    Ok(())
+}
+
+async fn restart_ethernet() -> Result<()> {
+    let output = run_allowed(
+        AllowedCommand::ServiceEth,
+        ["restart"],
+        Duration::from_secs(20),
+    )
+    .await?;
+    if output.status != 0 {
+        return Err(AppError::Internal(command_error(
+            "failed to apply network settings",
+            output,
+        )));
+    }
+
+    Ok(())
+}
+
+fn set_manual_dns(servers: &[String]) -> Result<Vec<String>> {
     let normalized = validate_dns_servers(servers)?;
     if normalized.is_empty() {
         return Err(AppError::BadRequest("dns servers are required".to_string()));
@@ -501,24 +574,8 @@ fn set_manual_dns(servers: &[String]) -> Result<()> {
     )?;
     render_resolv_conf(BOOT_RESOLV_FILE, &normalized)?;
     render_resolv_conf(ETC_RESOLV_FILE, &normalized)?;
-    install_udhcpc_dns_hook()
-}
-
-fn set_dhcp_dns() -> Result<()> {
-    let dhcp_config = read_dhcp_resolv_config(can_fallback_effective_for_dhcp())?;
-    if dhcp_config.servers.is_empty() {
-        return Err(AppError::BadRequest(
-            "no dhcp dns is currently available".to_string(),
-        ));
-    }
-
-    fs::create_dir_all(DNS_CONFIG_DIR)?;
-    render_resolv_config(DHCP_RESOLV_FILE, &dhcp_config)?;
-    write_dns_mode(DNS_MODE_DHCP)?;
-    preserve_manual_dns_servers()?;
-    backup_and_remove_boot_resolv()?;
-    render_resolv_config(ETC_RESOLV_FILE, &dhcp_config)?;
-    install_udhcpc_dns_hook()
+    install_udhcpc_dns_hook()?;
+    Ok(normalized)
 }
 
 fn current_dns_mode() -> String {
@@ -805,6 +862,219 @@ fn get_ipv4_address_info(name: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+fn validate_static_network_config(req: &SetDnsReq) -> Result<StaticNetworkConfig> {
+    let interface = req
+        .interface
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ETH_INTERFACE);
+    if interface != DEFAULT_ETH_INTERFACE {
+        return Err(AppError::BadRequest(
+            "only eth0 can be configured manually".to_string(),
+        ));
+    }
+
+    let (address, prefix_from_address) = parse_static_address(
+        req.address
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("ip address is required".to_string()))?,
+    )?;
+    let (subnet_mask, prefix) =
+        validate_subnet_mask(req.subnet_mask.as_deref(), prefix_from_address)?;
+    let gateway = parse_required_ipv4(
+        req.gateway.as_deref(),
+        "router is required",
+        "invalid router address",
+    )?;
+    ensure_usable_host_address(address, "invalid ip address")?;
+    ensure_usable_host_address(gateway, "invalid router address")?;
+    ensure_same_subnet(address, gateway, subnet_mask)?;
+
+    Ok(StaticNetworkConfig {
+        interface: interface.to_string(),
+        address: address.to_string(),
+        subnet_mask: prefix_to_netmask(prefix).to_string(),
+        gateway: gateway.to_string(),
+    })
+}
+
+fn read_static_network_config() -> Result<Option<StaticNetworkConfig>> {
+    let content = match fs::read_to_string(BOOT_ETH_NODHCP_FILE) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    for line in content.lines() {
+        let line = strip_inline_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        return parse_static_network_line(line).map(Some);
+    }
+
+    Ok(None)
+}
+
+fn parse_static_network_line(line: &str) -> Result<StaticNetworkConfig> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.is_empty() {
+        return Err(AppError::BadRequest(
+            "static network config is empty".to_string(),
+        ));
+    }
+
+    let (address, prefix) = parse_static_address(fields[0])?;
+    let prefix = prefix.unwrap_or(16);
+    let gateway = if let Some(value) = fields.get(1) {
+        parse_required_ipv4(Some(value), "router is required", "invalid router address")?
+    } else {
+        default_gateway_for(address, prefix)
+    };
+    let subnet_mask = prefix_to_netmask(prefix);
+
+    Ok(StaticNetworkConfig {
+        interface: DEFAULT_ETH_INTERFACE.to_string(),
+        address: address.to_string(),
+        subnet_mask: subnet_mask.to_string(),
+        gateway: gateway.to_string(),
+    })
+}
+
+fn write_static_network_config(config: &StaticNetworkConfig) -> Result<()> {
+    let address: Ipv4Addr = config
+        .address
+        .parse()
+        .map_err(|_| AppError::BadRequest("invalid ip address".to_string()))?;
+    let subnet_mask: Ipv4Addr = config
+        .subnet_mask
+        .parse()
+        .map_err(|_| AppError::BadRequest("invalid subnet mask".to_string()))?;
+    let prefix = netmask_to_prefix(subnet_mask)
+        .ok_or_else(|| AppError::BadRequest("invalid subnet mask".to_string()))?;
+    let gateway: Ipv4Addr = config
+        .gateway
+        .parse()
+        .map_err(|_| AppError::BadRequest("invalid router address".to_string()))?;
+
+    write_file(
+        Path::new(BOOT_ETH_NODHCP_FILE),
+        format!("{address}/{prefix} {gateway}\n").as_bytes(),
+        0o644,
+    )
+}
+
+fn parse_static_address(value: &str) -> Result<(Ipv4Addr, Option<u8>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::BadRequest("ip address is required".to_string()));
+    }
+
+    let (addr, prefix) = if let Some((addr, prefix)) = value.split_once('/') {
+        let prefix = prefix
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| AppError::BadRequest("invalid network prefix".to_string()))?;
+        if !(1..=32).contains(&prefix) {
+            return Err(AppError::BadRequest("invalid network prefix".to_string()));
+        }
+        (addr.trim(), Some(prefix))
+    } else {
+        (value, None)
+    };
+
+    let address = addr
+        .parse::<Ipv4Addr>()
+        .map_err(|_| AppError::BadRequest("invalid ip address".to_string()))?;
+    Ok((address, prefix))
+}
+
+fn validate_subnet_mask(value: Option<&str>, prefix: Option<u8>) -> Result<(Ipv4Addr, u8)> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    match (value, prefix) {
+        (Some(mask), _) => {
+            let mask = mask
+                .parse::<Ipv4Addr>()
+                .map_err(|_| AppError::BadRequest("invalid subnet mask".to_string()))?;
+            let prefix = netmask_to_prefix(mask)
+                .ok_or_else(|| AppError::BadRequest("invalid subnet mask".to_string()))?;
+            if prefix == 0 {
+                return Err(AppError::BadRequest("invalid subnet mask".to_string()));
+            }
+            Ok((mask, prefix))
+        }
+        (None, Some(prefix)) => Ok((prefix_to_netmask(prefix), prefix)),
+        (None, None) => Err(AppError::BadRequest("subnet mask is required".to_string())),
+    }
+}
+
+fn parse_required_ipv4(
+    value: Option<&str>,
+    missing_message: &str,
+    invalid_message: &str,
+) -> Result<Ipv4Addr> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest(missing_message.to_string()))?;
+    value
+        .parse::<Ipv4Addr>()
+        .map_err(|_| AppError::BadRequest(invalid_message.to_string()))
+}
+
+fn ensure_usable_host_address(address: Ipv4Addr, message: &str) -> Result<()> {
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || address.octets() == [255, 255, 255, 255]
+    {
+        return Err(AppError::BadRequest(message.to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_same_subnet(address: Ipv4Addr, gateway: Ipv4Addr, subnet_mask: Ipv4Addr) -> Result<()> {
+    let mask = u32::from(subnet_mask);
+    if u32::from(address) & mask != u32::from(gateway) & mask {
+        return Err(AppError::BadRequest(
+            "router must be in the same subnet".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn netmask_to_prefix(mask: Ipv4Addr) -> Option<u8> {
+    let raw = u32::from(mask);
+    let prefix = raw.count_ones() as u8;
+    if raw == u32::from(prefix_to_netmask(prefix)) {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(mask)
+}
+
+fn default_gateway_for(address: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let mask = u32::from(prefix_to_netmask(prefix));
+    let ip = u32::from(address);
+    let mut gateway = (ip & mask) | 1;
+    if gateway == ip {
+        let broadcast = (ip & mask) | (!mask);
+        gateway = broadcast.saturating_sub(1);
+    }
+    Ipv4Addr::from(gateway)
 }
 
 fn render_resolv_conf(path: &str, servers: &[String]) -> Result<()> {

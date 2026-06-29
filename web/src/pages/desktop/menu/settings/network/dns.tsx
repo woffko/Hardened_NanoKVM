@@ -12,11 +12,19 @@ type DNSState = {
   servers: string[];
   dhcp: string[];
   info: DNSInfo;
+  config?: NetworkConfig;
 };
 
 type DNSInfo = {
   interface?: string;
   type?: string;
+  address?: string;
+  subnetMask?: string;
+  gateway?: string;
+};
+
+type NetworkConfig = {
+  interface?: string;
   address?: string;
   subnetMask?: string;
   gateway?: string;
@@ -67,6 +75,44 @@ function isValidIPv4(value: string) {
   });
 }
 
+function normalizeIPv4(value: string) {
+  return value.trim().split('/')[0].trim();
+}
+
+function isValidSubnetMask(value: string) {
+  if (!isValidIPv4(value)) return false;
+
+  const mask = ipv4ToNumber(value);
+  if (mask === null) return false;
+
+  let seenZero = false;
+  for (let bit = 31; bit >= 0; bit--) {
+    const isOne = (mask & (1 << bit)) !== 0;
+    if (!isOne) {
+      seenZero = true;
+    } else if (seenZero) {
+      return false;
+    }
+  }
+
+  return mask !== 0;
+}
+
+function ipv4ToNumber(value: string) {
+  if (!isValidIPv4(value)) return null;
+
+  return value.split('.').reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
+}
+
+function isSameSubnet(address: string, gateway: string, subnetMask: string) {
+  const ip = ipv4ToNumber(address);
+  const router = ipv4ToNumber(gateway);
+  const mask = ipv4ToNumber(subnetMask);
+  if (ip === null || router === null || mask === null) return false;
+
+  return (ip & mask) === (router & mask);
+}
+
 function isValidIPv6(value: string) {
   if (!value.includes(':')) return false;
 
@@ -76,6 +122,16 @@ function isValidIPv6(value: string) {
   } catch {
     return false;
   }
+}
+
+function buildRedirectURL(address: string) {
+  const target = normalizeIPv4(address);
+  const { protocol, port, pathname, search, hash } = window.location;
+  const defaultPort =
+    (protocol === 'http:' && port === '80') || (protocol === 'https:' && port === '443');
+  const portPart = port && !defaultPort ? `:${port}` : '';
+
+  return `${protocol}//${target}${portPart}${pathname}${search}${hash}`;
 }
 
 const Panel = ({
@@ -120,6 +176,41 @@ const InfoRow = ({
         <span className="max-w-[330px] break-all text-right text-sm text-neutral-500">
           {value || '-'}
         </span>
+      </div>
+    </div>
+  );
+};
+
+const EditableInfoRow = ({
+  label,
+  value,
+  placeholder,
+  status,
+  isLast = false,
+  onChange
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  status?: 'error';
+  isLast?: boolean;
+  onChange: (value: string) => void;
+}) => {
+  return (
+    <div className="px-4">
+      <div
+        className={`flex min-h-[52px] items-center justify-between gap-4 ${
+          isLast ? '' : 'border-b border-neutral-700/50'
+        }`}
+      >
+        <span className="shrink-0 text-sm text-neutral-300">{label}</span>
+        <Input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          status={status}
+          className="max-w-[260px]"
+        />
       </div>
     </div>
   );
@@ -203,6 +294,12 @@ export const DNS = () => {
   const [originalServers, setOriginalServers] = useState<string[]>([]);
   const [dhcp, setDHCP] = useState<string[]>([]);
   const [info, setInfo] = useState<DNSInfo>({});
+  const [address, setAddress] = useState('');
+  const [subnetMask, setSubnetMask] = useState('');
+  const [gateway, setGateway] = useState('');
+  const [originalAddress, setOriginalAddress] = useState('');
+  const [originalSubnetMask, setOriginalSubnetMask] = useState('');
+  const [originalGateway, setOriginalGateway] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -234,6 +331,17 @@ export const DNS = () => {
       setOriginalServers(fetchedServers);
       setDHCP(data.dhcp || []);
       setInfo(data.info || {});
+
+      const config = data.config || {};
+      const fetchedAddress = normalizeIPv4(config.address || data.info?.address || '');
+      const fetchedSubnetMask = config.subnetMask || data.info?.subnetMask || '';
+      const fetchedGateway = config.gateway || data.info?.gateway || '';
+      setAddress(fetchedAddress);
+      setSubnetMask(fetchedSubnetMask);
+      setGateway(fetchedGateway);
+      setOriginalAddress(fetchedAddress);
+      setOriginalSubnetMask(fetchedSubnetMask);
+      setOriginalGateway(fetchedGateway);
     } catch (err) {
       console.log(err);
     } finally {
@@ -258,9 +366,35 @@ export const DNS = () => {
       return;
     }
 
+    const normalizedAddress = normalizeIPv4(address);
+    const normalizedSubnetMask = subnetMask.trim();
+    const normalizedGateway = normalizeIPv4(gateway);
+    const hasValidManualNetwork =
+      mode !== 'manual' ||
+      (isValidIPv4(normalizedAddress) &&
+        isValidSubnetMask(normalizedSubnetMask) &&
+        isValidIPv4(normalizedGateway) &&
+        isSameSubnet(normalizedAddress, normalizedGateway, normalizedSubnetMask));
+    const redirectURL = mode === 'manual' ? buildRedirectURL(normalizedAddress) : '';
+    if (!hasValidManualNetwork) {
+      setError(t('settings.network.dns.invalidNetwork'));
+      return;
+    }
+
     setIsSaving(true);
     try {
-      const rsp = await api.setDNS(mode, mode === 'manual' ? normalized : []);
+      const rsp = await api.setDNS(
+        mode,
+        mode === 'manual' ? normalized : [],
+        mode === 'manual'
+          ? {
+              interface: info.interface || 'eth0',
+              address: normalizedAddress,
+              subnetMask: normalizedSubnetMask,
+              gateway: normalizedGateway
+            }
+          : undefined
+      );
       if (rsp.code !== 0) {
         setError(rsp.msg || t('settings.network.dns.saveFailed'));
         return;
@@ -269,11 +403,27 @@ export const DNS = () => {
       setServers(normalized);
       setOriginalServers(normalized);
       setOriginalMode(mode);
+      setAddress(normalizedAddress);
+      setSubnetMask(normalizedSubnetMask);
+      setGateway(normalizedGateway);
+      setOriginalAddress(normalizedAddress);
+      setOriginalSubnetMask(normalizedSubnetMask);
+      setOriginalGateway(normalizedGateway);
 
-      await getDNS(false);
-      setMessage(t('settings.network.dns.saved'));
+      if (mode === 'manual') {
+        setMessage(t('settings.network.dns.redirecting'));
+        window.setTimeout(() => window.location.assign(redirectURL), 1200);
+      } else {
+        await getDNS(false);
+        setMessage(t('settings.network.dns.saved'));
+      }
     } catch (err) {
       console.log(err);
+      if (mode === 'manual') {
+        setMessage(t('settings.network.dns.redirecting'));
+        window.setTimeout(() => window.location.assign(redirectURL), 1200);
+        return;
+      }
       setError(t('settings.network.dns.saveFailed'));
     } finally {
       setIsSaving(false);
@@ -303,16 +453,29 @@ export const DNS = () => {
   }
 
   const normalizedServers = normalizeServers(servers);
+  const normalizedAddress = normalizeIPv4(address);
+  const normalizedGateway = normalizeIPv4(gateway);
+  const trimmedSubnetMask = subnetMask.trim();
   const hasInvalidServer =
     mode === 'manual' &&
     servers.some((server) => {
       const val = normalizeServer(server);
       return val !== '' && !isValidIP(val);
     });
+  const hasInvalidNetwork =
+    mode === 'manual' &&
+    (!isValidIPv4(normalizedAddress) ||
+      !isValidSubnetMask(trimmedSubnetMask) ||
+      !isValidIPv4(normalizedGateway) ||
+      !isSameSubnet(normalizedAddress, normalizedGateway, trimmedSubnetMask));
   const isExceedMax = mode === 'manual' && normalizedServers.length > maxServers;
   const hasChanges =
     mode !== originalMode ||
-    normalizedServers.join(',') !== normalizeServers(originalServers).join(',');
+    normalizedServers.join(',') !== normalizeServers(originalServers).join(',') ||
+    (mode === 'manual' &&
+      (normalizedAddress !== originalAddress ||
+        trimmedSubnetMask !== originalSubnetMask ||
+        normalizedGateway !== originalGateway));
 
   const statusText = error || message || (hasChanges ? t('settings.network.dns.unsaved') : '');
   const statusColor = error ? 'text-red-400' : message ? 'text-green-400' : 'text-yellow-400/80';
@@ -350,9 +513,52 @@ export const DNS = () => {
       <div className="space-y-5">
         <Panel title={t('settings.network.dns.networkDetails')}>
           <InfoRow label={t('settings.network.dns.interface')} value={formatInterface(info)} />
-          <InfoRow label={t('settings.network.dns.ipAddress')} value={info.address} />
-          <InfoRow label={t('settings.network.dns.subnetMask')} value={info.subnetMask} />
-          <InfoRow label={t('settings.network.dns.router')} value={info.gateway} isLast />
+          {mode === 'manual' ? (
+            <>
+              <EditableInfoRow
+                label={t('settings.network.dns.ipAddress')}
+                value={address}
+                placeholder="10.0.87.44"
+                status={address.trim() && !isValidIPv4(normalizedAddress) ? 'error' : undefined}
+                onChange={(value) => {
+                  setAddress(value);
+                  setMessage('');
+                  setError('');
+                }}
+              />
+              <EditableInfoRow
+                label={t('settings.network.dns.subnetMask')}
+                value={subnetMask}
+                placeholder="255.255.255.0"
+                status={
+                  subnetMask.trim() && !isValidSubnetMask(trimmedSubnetMask) ? 'error' : undefined
+                }
+                onChange={(value) => {
+                  setSubnetMask(value);
+                  setMessage('');
+                  setError('');
+                }}
+              />
+              <EditableInfoRow
+                label={t('settings.network.dns.router')}
+                value={gateway}
+                placeholder="10.0.87.5"
+                status={gateway.trim() && !isValidIPv4(normalizedGateway) ? 'error' : undefined}
+                isLast
+                onChange={(value) => {
+                  setGateway(value);
+                  setMessage('');
+                  setError('');
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <InfoRow label={t('settings.network.dns.ipAddress')} value={info.address} />
+              <InfoRow label={t('settings.network.dns.subnetMask')} value={info.subnetMask} />
+              <InfoRow label={t('settings.network.dns.router')} value={info.gateway} isLast />
+            </>
+          )}
         </Panel>
 
         <Panel title={t('settings.network.dns.dnsServers')} description={serversDescription}>
@@ -402,6 +608,11 @@ export const DNS = () => {
                   {hasInvalidServer && (
                     <div className="text-xs text-red-400">{t('settings.network.dns.invalid')}</div>
                   )}
+                  {hasInvalidNetwork && (
+                    <div className="text-xs text-red-400">
+                      {t('settings.network.dns.invalidNetwork')}
+                    </div>
+                  )}
                   {isExceedMax && (
                     <div className="text-xs text-red-400">
                       {t('settings.network.dns.maxServers', { count: maxServers })}
@@ -426,11 +637,15 @@ export const DNS = () => {
             icon={message ? <CheckIcon size={14} /> : undefined}
             loading={isSaving}
             disabled={
-              isLoading || (!hasChanges && !hasInvalidServer) || hasInvalidServer || isExceedMax
+              isLoading ||
+              (!hasChanges && !hasInvalidServer && !hasInvalidNetwork) ||
+              hasInvalidServer ||
+              hasInvalidNetwork ||
+              isExceedMax
             }
             onClick={save}
           >
-            {t('settings.network.dns.save')}
+            {mode === 'manual' ? t('settings.network.dns.apply') : t('settings.network.dns.save')}
           </Button>
         </div>
       )}

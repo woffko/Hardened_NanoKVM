@@ -1,9 +1,82 @@
 #!/bin/sh
 
 RESERVE_INET="192.168.90.1/22"
+ETH_MAC_FILE="/boot/eth.mac"
 
 clean_line() {
     echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\r//g'
+}
+
+is_valid_mac() {
+    echo "$1" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
+}
+
+stable_eth_mac_seed() {
+    for file in /device_key /etc/machine-id
+    do
+        if [ -s "$file" ]
+        then
+            seed=$(tr -cd 'A-Fa-f0-9' < "$file" | head -c 32)
+            if [ -n "$seed" ]
+            then
+                echo "$seed"
+                return
+            fi
+        fi
+    done
+
+    if [ -r /proc/cpuinfo ]
+    then
+        seed=$(sed -n 's/^[Ss]erial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | tr -cd 'A-Fa-f0-9' | head -c 32)
+        if [ -n "$seed" ]
+        then
+            echo "$seed"
+            return
+        fi
+    fi
+
+    if [ -r /sys/class/net/eth0/address ]
+    then
+        seed=$(tr -cd 'A-Fa-f0-9' < /sys/class/net/eth0/address | head -c 12)
+        if [ -n "$seed" ]
+        then
+            echo "$seed"
+            return
+        fi
+    fi
+
+    echo 0123456789abcdef
+}
+
+make_eth_mac() {
+    seed=$(stable_eth_mac_seed)
+    hash=$(printf '%s:eth0\n' "$seed" | sha256sum | awk '{print $1}')
+    if [ -z "$hash" ]
+    then
+        hash=0123456789abcdef
+    fi
+    printf '%s\n' "$hash" | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*/02:\1:\2:\3:\4:\5/'
+}
+
+ensure_eth_mac() {
+    [ -e /sys/class/net/eth0/address ] || return
+
+    mac=""
+    if [ -s "$ETH_MAC_FILE" ]
+    then
+        mac=$(clean_line "$(cat "$ETH_MAC_FILE")")
+    fi
+
+    if ! is_valid_mac "$mac"
+    then
+        mac=$(make_eth_mac)
+        echo "$mac" > "$ETH_MAC_FILE" 2>/dev/null || true
+    fi
+
+    is_valid_mac "$mac" || return
+    ip link set dev eth0 down 2>/dev/null || true
+    ip link set dev eth0 address "$mac" 2>/dev/null || true
+    ip link set dev eth0 up 2>/dev/null || true
 }
 
 calc_gw() {
@@ -23,6 +96,7 @@ EOF
 }
 
 start() {
+    ensure_eth_mac
     ip addr flush dev eth0
     if [ -e /boot/eth.nodhcp ]; then
         while IFS= read -r line || [ -n "$line" ]; do

@@ -30,10 +30,10 @@ Security release builds are Rust-only: the legacy Go backend and backend switch
 scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **beta 2.0.4**.
+application version **beta 2.0.5**.
 
 The current public beta release is published from the `woffko` fork at
-[`hardened-rust-beta-2.0.4`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.4).
+[`hardened-rust-beta-2.0.5`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.5).
 
 ## Current Beta Status
 
@@ -52,7 +52,7 @@ NanoKVM device and harden one subsystem at a time.
 | HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
-| Network | WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
+| Network | WOL, full wired DHCP/manual IP/DNS settings, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
 | Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. |
 | SD image | `make sd-image` patches a trusted NanoKVM Rev1.4.2 base image with the current Hardened `kvmapp`; `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
 | System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Raw full-rootfs updates are lab-only and now require validated Hardened SD rootfs images. Real kernel/rootfs security payloads are still pending. |
@@ -71,6 +71,9 @@ NanoKVM device and harden one subsystem at a time.
 - Added Rust implementations for the main browser workflows: login, static UI,
   MJPEG, H.264 Direct, H.264 WebRTC signaling, HID, terminal, storage, network,
   Tailscale, scripts, and many VM settings routes.
+- Added full wired network editing from the web UI. Manual mode persists IP,
+  subnet mask, router, and DNS through the existing `S30eth` boot path and
+  keeps a stable `eth0` MAC in `/boot/eth.mac` so DHCP leases survive reboot.
 - Added shared video fanout for MJPEG and H.264 Direct, so multiple viewers do
   not multiply native capture reads. The web UI now defaults new sessions to
   H.264 Direct when HTTPS and WebCodecs are available, otherwise to H.264.

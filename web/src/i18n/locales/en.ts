@@ -432,9 +432,12 @@ const en = {
           manual: 'Manual',
           add: 'Add DNS',
           save: 'Save',
+          apply: 'Apply',
           invalid: 'Please enter a valid IP address',
+          invalidNetwork: 'Please enter a valid IP address, subnet mask, and router',
           noDhcp: 'No DHCP DNS is currently available',
           saved: 'DNS settings saved',
+          redirecting: 'Network settings saved. Opening the new address...',
           saveFailed: 'Failed to save DNS settings',
           unsaved: 'Unsaved changes',
           maxServers: 'Maximum {{count}} DNS servers allowed',
@@ -549,7 +552,8 @@ const en = {
           rollbackConfirmDesc:
             'This will restore files from the latest system-update backup. Reboot will be required.',
           staged: 'staged',
-          stagedDesc: 'The system update archive was downloaded and verified. You can install it now.',
+          stagedDesc:
+            'The system update archive was downloaded and verified. You can install it now.',
           refresh: 'Refresh',
           releaseNotes: 'Release Notes',
           base: 'Base',

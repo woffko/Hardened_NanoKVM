@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn install_runtime_boot_scripts() {
     for (src, dst) in [
         ("/kvmapp/system/init.d/S03usbdev", "/etc/init.d/S03usbdev"),
+        ("/kvmapp/system/init.d/S30eth", "/etc/init.d/S30eth"),
         ("/kvmapp/system/init.d/S95nanokvm", "/etc/init.d/S95nanokvm"),
     ] {
         match install_runtime_boot_script(Path::new(src), Path::new(dst)) {

@@ -982,3 +982,69 @@ Device check:
 - `10.0.87.133` app was then updated to `2.0.4`; final check reports
   app `current=2.0.4`, `latest=2.0.4`, staged system `0.2.2-raw.1`,
   and `progress=null`.
+
+## 2026-06-29: Local WIP Manual Network Settings and Stable eth0 MAC
+
+Scope:
+
+- no releases, no GitHub publication, no device writes in this step;
+- local working-tree changes only.
+
+Implemented locally:
+
+- Network/DNS settings Manual mode now edits full wired network settings:
+  IP address, subnet mask, router, and DNS servers.
+- The existing `POST /api/network/dns` endpoint now accepts optional
+  `interface`, `address`, `subnetMask`, and `gateway` fields when
+  `mode=manual`.
+- Manual mode persists static Ethernet config to `/boot/eth.nodhcp`, matching
+  the existing vendor `S30eth` boot mechanism.
+- Applying Manual mode restarts `/etc/init.d/S30eth`; if the browser loses the
+  HTTP response because the IP changed, the UI still redirects to the entered
+  address.
+- Switching back to DHCP removes `/boot/eth.nodhcp`, restarts `S30eth`, and
+  preserves the previous manual DNS list for later.
+- The Rust backend now syncs `/kvmapp/system/init.d/S30eth` into `/etc/init.d`
+  at startup, same as `S03usbdev` and `S95nanokvm`.
+- `S95nanokvm` also installs the bundled `S30eth` boot script.
+- `S30eth` now creates/uses `/boot/eth.mac` and applies that locally
+  administered MAC to `eth0` before DHCP/static configuration. This targets the
+  wired MAC changing on every reboot; USB gadget MACs were already handled by
+  `S03usbdev`.
+
+Validation:
+
+- `cargo fmt --check`: passed.
+- `cargo check`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web files: passed.
+- `sh -n kvmapp/system/init.d/S30eth`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+
+Initial mistaken device check:
+
+- `http://10.0.87.47/`: TCP connection refused.
+- `https://10.0.87.47/`: TCP connection refused.
+- `ssh root@10.0.87.47`: TCP connection refused.
+- Earlier ICMP ping from outside the sandbox succeeded, so the address is
+  reachable at IP level but no expected NanoKVM services are listening from
+  this environment.
+
+Corrected device diagnostic:
+
+- device is `10.0.87.48`, not `.47`;
+- HTTP is reachable, HTTPS is disabled/refused;
+- web login `admin/admin1234` succeeded;
+- SSH `root/admin1234` succeeded via askpass;
+- current app: `2.0.4`;
+- current system: `0.2.2-raw.1`, base `2026-06-29-12-08-d88d58.img`;
+- hostname: `secondary`;
+- `/api/network/dns` reports DHCP mode, `eth0`, `10.0.87.48/24`,
+  router/DNS `10.0.87.5`, search domain `int`;
+- installed `/etc/init.d/S30eth` and `/kvmapp/system/init.d/S30eth` do not
+  contain the local stable-eth0-MAC fix yet;
+- `/boot/eth.mac` is absent and `/boot/eth.nodhcp` is absent;
+- `/device_key` is `e192d5a315195372`, `/etc/machine-id` is empty;
+- current runtime `eth0` MAC is `e2:2e:7a:43:22:9c`;
+- the local WIP stable-MAC algorithm would derive `02:a1:a9:62:76:d7` for
+  this device from `/device_key`.

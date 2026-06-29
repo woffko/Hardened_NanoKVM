@@ -2,6 +2,13 @@ import { http } from '@/lib/http.ts';
 
 export type DNSMode = 'manual' | 'dhcp';
 
+export type NetworkConfig = {
+  interface?: string;
+  address?: string;
+  subnetMask?: string;
+  gateway?: string;
+};
+
 // wake on lan
 export function wol(mac: string) {
   const data = {
@@ -76,6 +83,6 @@ export function getDNS() {
   return http.get('/api/network/dns');
 }
 
-export function setDNS(mode: DNSMode, servers: string[]) {
-  return http.post('/api/network/dns', { mode, servers });
+export function setDNS(mode: DNSMode, servers: string[], config?: NetworkConfig) {
+  return http.post('/api/network/dns', { mode, servers, ...(config || {}) });
 }

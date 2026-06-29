@@ -133,6 +133,13 @@ fi
     printf 'sif /etc/init.d/S03usbdev uid 0\n'
     printf 'sif /etc/init.d/S03usbdev gid 0\n'
   fi
+  if [ -f "$KVMAPP_DIR/system/init.d/S30eth" ]; then
+    printf 'rm /etc/init.d/S30eth\n'
+    printf 'write %s /etc/init.d/S30eth\n' "$KVMAPP_DIR/system/init.d/S30eth"
+    printf 'sif /etc/init.d/S30eth mode 0100755\n'
+    printf 'sif /etc/init.d/S30eth uid 0\n'
+    printf 'sif /etc/init.d/S30eth gid 0\n'
+  fi
 } > "$DEBUGFS_CMDS"
 
 echo "Updating rootfs with Hardened kvmapp..."
