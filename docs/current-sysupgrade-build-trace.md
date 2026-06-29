@@ -678,3 +678,86 @@ Planned release tags:
 - stable app latest: GitHub Releases latest points to app `2.0.1`
 - preview app latest: `hardened-rust-preview` will be updated to app `2.0.1`
 - stable and preview system metadata will be updated to `0.2.1-raw.1`
+
+Build commands completed:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+corepack pnpm --dir web build
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+APP_VERSION=2.0.1 \
+ARTIFACT_NAME=hardened-nanokvm-kvmapp-2.0.1.tar.gz \
+KVM_SYSTEM_SOURCE=/home/w0w/Hardened_NanoKVM/build/kvmapp-rust/kvmapp/kvm_system/kvm_system \
+  scripts/package-rust-kvmapp.sh
+APP_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
+APP_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
+  scripts/create-update-metadata.sh \
+  2.0.1 \
+  hardened-rust-beta-2.0.1 \
+  build/artifacts/hardened-nanokvm-kvmapp-2.0.1.tar.gz \
+  build/artifacts/latest.json
+NANOKVM_BASE_IMAGE=/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img \
+SD_IMAGE_BASENAME=Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust \
+HARDENED_RELEASE_VERSION=2.0.1 \
+  make sd-image
+scripts/extract-sd-raw-images.sh \
+  build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust
+BASE_VERSION=2026-06-29-12-08-d88d58.img \
+KERNEL_VERSION=5.10.4-tag- \
+  scripts/create-raw-system-update-bundle.sh \
+  0.2.1-raw.1 \
+  sg2002-licheervnano-sd \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
+  build/system-updates
+SYSTEM_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
+SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
+  scripts/create-system-update-metadata.sh \
+  0.2.1-raw.1 \
+  hardened-system-0.2.1-raw.1 \
+  build/system-updates/hardened-nanokvm-system-0.2.1-raw.1.tar.gz \
+  build/system-updates/system-latest.json
+```
+
+Validation after build:
+
+- `scripts/verify-update-metadata.sh`: `Verified OK`.
+- `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+- `make sd-image` rootfs validation: passed.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.1.tar.gz` | `3c832e9a50ba83d645f1a20056ee75df5070cd74a55c7dd62cfeb3dbf251bf6d` |
+| App metadata | `build/artifacts/latest.json` | `713b9266bd143e109b42e4b666eaf66fff012f4476bc93a98d244536a43b4db8` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `2e96826aeebe331772469d1409fcf770db1fb7a1395702fe292f2fe892f8bafc` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `6e2eacac921b54d6fd5878196ac8b6c1244f244923dc5390f738152f3550c3b8` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `2a775f81de34ef126d5f491c467741f169269e994b993bdc316de1ef56c93282` |
+| SD/rootfs payload | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `d73b8d23989f7797deb96e73b0f0816054bed47f63877336c1315386b48e79cd` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.1-raw.1.tar.gz` | `aed90c1b63ab0c407f9154214b70defef3916da1220c51be6a1714eaf76f7a6d` |
+| System metadata | `build/system-updates/system-latest.json` | `65538d3972646ac3c682fa2b028689efb78e7e35df4adf290c8add0e2b67608e` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `9bf6c8a4ca282301ca9b69d2bbe5661eabbf7ea6a9880e9d13531fbe32218840` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `f21155c`
+- raw writes:
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+  - ROOTFS `/dev/mmcblk0p2`, payload sha256
+    `d73b8d23989f7797deb96e73b0f0816054bed47f63877336c1315386b48e79cd`
