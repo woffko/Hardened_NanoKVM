@@ -1224,3 +1224,57 @@ Device check:
 - `10.0.87.133` network DNS after correction:
   mode `manual`, servers/effective/DHCP all `10.0.87.5`, address
   `10.0.87.133/24`, gateway `10.0.87.5`.
+
+## 2026-06-29: Beta 2.0.7 App Auth-State Hotfix
+
+Reason:
+
+- `10.0.87.132` could log in successfully through the backend API, but the UI
+  immediately returned to the login screen;
+- protected API calls with the HttpOnly session cookie worked, so the backend
+  session was valid;
+- root cause was frontend auth state relying only on the JS-readable
+  `nano-kvm-csrf` cookie. After IP/protocol changes or stale browser state, the
+  CSRF cookie can be absent while the HttpOnly session cookie is still valid.
+
+Fix:
+
+- app version bumped to `2.0.7`;
+- `GET /api/auth/account` now returns the current session CSRF token and
+  expiry alongside the username;
+- `ProtectedRoute` now checks `/api/auth/account` with credentials before
+  redirecting to login when the CSRF cookie is missing. If the HttpOnly session
+  is still valid, it restores the CSRF cookie and lets the UI continue;
+- CSRF cookie writes/removes now explicitly use path `/` and `SameSite=Lax`.
+
+Validation:
+
+- `cargo fmt --check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web files: passed.
+- `git diff --check`: passed.
+- `10.0.87.132` was repaired directly with a local offline app update package.
+- After repair, `10.0.87.132` reports app `2.0.7`, and
+  `/api/auth/account` returns `username`, `csrfToken`, and `expiresAt`.
+- GitHub `latest.json` for app `2.0.7` downloaded successfully and its
+  signature verified.
+
+Generated app artifact:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.7.tar.gz` | `f890f71f5a022e141055e986c4f75ece2d52145b01aa634641ed570c33b5d7e2` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.7`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+
+Notes:
+
+- This was published as an app-only hotfix because the failure was in the
+  browser/backend auth contract, not in boot/rootfs. The existing raw system
+  channel remains at `0.2.4-raw.1`.
