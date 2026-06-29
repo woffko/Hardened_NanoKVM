@@ -877,3 +877,55 @@ Post-publish verification:
 - Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.2`.
 - Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
   `latest=0.2.2-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.3 Stale Staged System Update UI Fix
+
+Reason:
+
+- device `10.0.87.133` was on app `2.0.2` and system page showed an old
+  staged raw update `0.1.3-raw.1` with `Install`;
+- latest GitHub system metadata was already correct at `0.2.2-raw.1`;
+- the displayed error `forbidden: raw partition system updates are disabled`
+  was an old failed progress marker from pressing Install before raw updates
+  were enabled;
+- the UI did not compare staged archive/version/hash against latest metadata,
+  so stale staged packages could keep taking precedence over Download/Verify.
+
+Fix:
+
+- app version bumped to `2.0.3`;
+- system-update install progress records the staged version;
+- UI treats staged system updates as installable only when version, archive
+  name, and sha256 match the latest GitHub metadata;
+- if a newer system update exists, the failed/staged screen now offers
+  Download and Verify instead of Install for the stale staged package.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- app metadata signature verified locally and after GitHub publication:
+  `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.3.tar.gz` | `18270060fcdbebec6f1b9e69e5bab147a975d4e5f59a9448181d17ec27fbb160` |
+| App metadata | `build/artifacts/latest.json` | `81587eaa0edd0484e8c8548d4adeb11010af3d3b974dbd52196da81af41576fc` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `5f145fa6a2597c9676a1541397697cfcddf01595d7ce1eef6575a8a5f44c15f7` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.3`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System stable/preview remain at `0.2.2-raw.1`.
+
+Device check:
+
+- `10.0.87.133` app before installing `2.0.3`: `current=2.0.2`,
+  `latest=2.0.3`.
+- `10.0.87.133` system check: `current=0.0.0-stock`,
+  `latest=0.2.2-raw.1`, `updateAvailable=true`.
