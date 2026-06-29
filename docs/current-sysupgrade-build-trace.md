@@ -1048,3 +1048,87 @@ Corrected device diagnostic:
 - current runtime `eth0` MAC is `e2:2e:7a:43:22:9c`;
 - the local WIP stable-MAC algorithm would derive `02:a1:a9:62:76:d7` for
   this device from `/device_key`.
+
+## 2026-06-29: Beta 2.0.5 Network/MAC Fix Release
+
+Scope:
+
+- app release, raw system update, and SD-card image all include the Manual
+  network settings and stable `eth0` MAC fixes;
+- release was published from commit
+  `a154d2d Add manual network settings and stable eth0 MAC` on branch
+  `feature/new-buildroot-sysupgrade-lab`.
+
+Included fixes:
+
+- Settings > Network/DNS Manual mode can edit and apply wired IP address,
+  subnet mask, router, and DNS servers.
+- Manual network settings are stored in `/boot/eth.nodhcp` and applied through
+  `/etc/init.d/S30eth`.
+- Switching back to DHCP removes `/boot/eth.nodhcp` and restarts Ethernet.
+- `S30eth` now persists a locally administered `eth0` MAC in `/boot/eth.mac`
+  and applies it before DHCP/static configuration.
+- Rust backend syncs the bundled `S30eth` to `/etc/init.d/S30eth` at startup;
+  SD/raw rootfs validation now requires both bundled and installed copies.
+
+Validation before publication:
+
+- `cargo fmt --check`: passed.
+- `cargo test`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- `sh -n` for touched shell scripts: passed.
+- `git diff --check`: passed.
+- Rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.5`.
+- App and system update metadata signatures verified locally and after
+  downloading the published metadata from GitHub.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.5.tar.gz` | `2ede03a071755a62e3292e0e0929e0044ac0658b3ed27823df7467dd6b27b7ad` |
+
+Generated SD-card artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `c0cca617e4f87d3b4937f6c13c6e3da7ada4020218eb6a229a485e86ee6515f1` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `b7f285f02ce13fa876b7dd020662950f3b0f7acec571135a3752918e61317487` |
+| Rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `338b4debf369dc92e89a0dd9b72aec09783919bd1c7cfe4380748fa2c559b6cf` |
+
+Generated raw system update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.3-raw.1.tar.gz` | `744a187d818ef3fa96aeba1f08c3b51e1fd09f13a02c2d085e4a074fb8fb71cc` |
+
+Raw system manifest:
+
+- version: `0.2.3-raw.1`
+- target: `sg2002-licheervnano-sd`
+- base: `2026-06-29-12-08-d88d58.img`
+- kernel: `5.10.4-tag-`
+- source commit: `a154d2d`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.5`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.3-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Notes:
+
+- The raw manifest rootfs SHA differs from the SD rootfs validation image SHA
+  because `create-raw-system-update-bundle.sh` patches
+  `/etc/kvm/system-version.json` into the staged raw rootfs before packaging.
+- Post-publication GitHub REST tag checks later failed from the local
+  environment with DNS resolution errors for `api.github.com`; direct GitHub
+  download URLs for app/system metadata succeeded and both downloaded
+  signatures verified.
