@@ -792,3 +792,57 @@ Post-publish verification:
 - Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.1`.
 - Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
   `latest=0.2.1-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.2 Startup Boot-Script Sync
+
+Reason:
+
+- `2.0.1` fixed stable USB MAC generation in `S03usbdev`, but an ordinary
+  application update on an already-flashed device only replaces `/kvmapp`;
+- the boot-time scripts actually run from `/etc/init.d`, so devices with an old
+  `/etc/init.d/S95nanokvm` could install app `2.0.1` without copying the new
+  `S03usbdev` into `/etc/init.d`;
+- Rust backend startup now syncs `/kvmapp/system/init.d/S03usbdev` and
+  `/kvmapp/system/init.d/S95nanokvm` into `/etc/init.d` after an app update.
+
+Validation before build:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- `sh -n kvmapp/system/init.d/S03usbdev`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.2.tar.gz` | `ee9f23333510d59eafaa164f9cf8c1f77b247241ffea8261687a7206a7aad55b` |
+| App metadata | `build/artifacts/latest.json` | `da0eafa991b578c798396348c9d37ee6eb15a556a1120544ea1be76fad2f0d04` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `9996aaea2e1f4951fabb087597f8ef12fcc7001bc56da10450d47417b0fa9d51` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `c3c9f2fbbad5c9c608582cafe7c1325a2dadc41f7444d62917d8bc84eff96d2b` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `32dcd3d674fe2de0f3474867636423af5744551b3cdf029de161d8f3498fe016` |
+| SD/rootfs payload | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `c9aedd65788668ec7572217e446062fe06ce5cc995866e22e377e343def01f46` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.2-raw.1.tar.gz` | `b68cff2527b99baf23dd8970c19c082f14ccb40a69f9755d3877236ba3325c98` |
+| System metadata | `build/system-updates/system-latest.json` | `9e7698462c1f8503e76a505c664fdb20e56cd503a20edf8ab28c1b6c78bd1b5e` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `3fdaabd107b11e425900fb78731a37d621ba5af1ff3d4a3282502f6f26789aed` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `8dc8d31`
+- raw writes:
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+  - ROOTFS `/dev/mmcblk0p2`, payload sha256
+    `c9aedd65788668ec7572217e446062fe06ce5cc995866e22e377e343def01f46`
