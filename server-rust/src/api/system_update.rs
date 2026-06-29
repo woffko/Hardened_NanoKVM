@@ -555,6 +555,10 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
     let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
+    let staged_version = read_staged_update(&stage_dir)
+        .ok()
+        .flatten()
+        .map(|staged| staged.version);
     let config = Config::read().unwrap_or_else(|err| {
         tracing::warn!(error = %err, "failed to refresh config before system update install");
         (*state.config).clone()
@@ -564,10 +568,11 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
         SystemUpdateProgress::new(
             "install",
             "starting",
-            None,
+            staged_version.clone(),
             Some("starting system update install".to_string()),
         ),
     )?;
+    let install_error_version = staged_version.clone();
     let installed = match run_blocking_system_update_with_guard(
         "install staged system update",
         guard,
@@ -576,7 +581,12 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
             Err(err) => {
                 let _ = write_update_progress(
                     &stage_dir,
-                    SystemUpdateProgress::new("install", "failed", None, Some(err.to_string())),
+                    SystemUpdateProgress::new(
+                        "install",
+                        "failed",
+                        install_error_version,
+                        Some(err.to_string()),
+                    ),
                 );
                 Err(err)
             }
@@ -588,7 +598,12 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
         Err(err) => {
             let _ = write_update_progress(
                 &progress_stage_dir,
-                SystemUpdateProgress::new("install", "failed", None, Some(err.to_string())),
+                SystemUpdateProgress::new(
+                    "install",
+                    "failed",
+                    staged_version,
+                    Some(err.to_string()),
+                ),
             );
             return Err(err);
         }

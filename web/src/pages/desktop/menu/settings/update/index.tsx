@@ -414,6 +414,20 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     return `${value} B`;
   }
 
+  function stagedMatchesLatest(staged: SystemStagedUpdate | null, latest: SystemLatest | null) {
+    if (!staged || !latest) return true;
+
+    return (
+      staged.version === latest.version &&
+      staged.archiveName === latest.name &&
+      staged.sha256 === latest.sha256
+    );
+  }
+
+  const isStagedLatest = stagedMatchesLatest(systemStaged, systemLatest);
+  const canDownloadLatestSystemUpdate =
+    !!systemLatest && (!systemStaged || !isStagedLatest) && systemStatus !== 'downloading';
+
   return (
     <>
       <div className="text-base">{t('settings.update.title')}</div>
@@ -548,7 +562,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             />
           )}
 
-          {systemStatus === 'staged' && systemStaged && (
+          {systemStatus === 'staged' && systemStaged && isStagedLatest && (
             <Result
               status="success"
               icon={<CloudSyncOutlined />}
@@ -576,6 +590,33 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   onClick={confirmInstallSystemUpdate}
                 >
                   {t('settings.update.system.install')}
+                </Button>
+              ]}
+            />
+          )}
+
+          {systemStatus === 'staged' && systemStaged && !isStagedLatest && systemLatest && (
+            <Result
+              status="warning"
+              icon={<CloudSyncOutlined />}
+              title={`${systemStaged.version} -> ${systemLatest.version}`}
+              subTitle={t('settings.update.system.available')}
+              extra={[
+                systemLatest.releaseNotesUrl ? (
+                  <Button
+                    key="release"
+                    href={systemLatest.releaseNotesUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('settings.update.system.releaseNotes')}
+                  </Button>
+                ) : null,
+                <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                  {t('settings.update.system.downloadVerify')}
+                </Button>,
+                <Button key="refresh" onClick={checkSystemUpdates}>
+                  {t('settings.update.system.refresh')}
                 </Button>
               ]}
             />
@@ -663,7 +704,12 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 <Button key="refresh" onClick={checkSystemUpdates}>
                   {t('settings.update.system.refresh')}
                 </Button>,
-                systemStaged ? (
+                canDownloadLatestSystemUpdate ? (
+                  <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                    {t('settings.update.system.downloadVerify')}
+                  </Button>
+                ) : null,
+                systemStaged && isStagedLatest ? (
                   <Button
                     key="install"
                     type="primary"

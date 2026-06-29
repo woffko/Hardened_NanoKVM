@@ -1,3 +1,14 @@
+## Hardened NanoKVM Beta 2.0.3 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed the system-update UI after failed raw installs. A stale staged raw
+  update can no longer keep showing `Install` when a newer GitHub system update
+  is available.
+* System-update install progress now records the staged version, so old failed
+  progress from previous builds is easier to distinguish from the current
+  staged update.
+
 ## Hardened NanoKVM Beta 2.0.2 (2026-06-29)
 
 ### Bug Fixes
