@@ -7,9 +7,9 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app hotfix `2.0.11` prepared on top of raw channel
-  `0.2.6-raw.1` so raw updates preserve user settings before writing boot and
-  rootfs partitions.
+- Current work: app hotfix `2.0.11` plus raw/SD release `0.2.7-raw.1` so raw
+  updates preserve user settings before writing boot and rootfs partitions and
+  the raw image itself contains app `2.0.11`.
 - Recent commits when this handoff was updated:
   - `f23c39c Record fixed device IP update state`
   - `cbcb2fd Record beta 2.0.10 init-fix publication`
@@ -38,17 +38,17 @@ Detailed chronological build/update notes are in
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.6-raw.1`
+- Current raw system channel: `0.2.7-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.6-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.7-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.7-raw.1.tar.gz`
 - SHA256:
-  `fb1e2dea3ca1c044da7ad74210c3f119a5ca847a05d8ece50ec3bb6fb9f78bac`
-- Built from the beta `2.0.10` SD rootfs. Raw payload manifest source commit:
-  `2a9d02d`.
+  `e9d56782119c87693a24441e40ab053050aaca0786ecb041abc9503a21420b86`
+- Built from the beta `2.0.11` SD rootfs. Raw payload manifest source commit:
+  `a4a4123`.
 - Local `system-latest.json` metadata signature verified with the bundled test
   public key.
 - Published on GitHub and verified through `hardened-system-stable` and
@@ -56,11 +56,11 @@ Detailed chronological build/update notes are in
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.10`
+- Latest SD image built: beta `2.0.11`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_10_buildroot_2023_11_2_security_initfix_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_11_buildroot_2023_11_2_security_preserve_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `9f396d235cbe40c006e07c9938d7903c15b32f2fcea04f0eefe6c720558267b7`
+  `746d0ea45b1ba63c2042eb7429f6b29c2937e3891c2fd42f00db1f152d902cd5`
 
 ## Device State
 
@@ -72,9 +72,9 @@ Detailed chronological build/update notes are in
 - Previously appeared as DHCP `10.0.87.55`.
 - Last verified after app update:
   - `/api/health`: OK
-  - `/api/application/version`: `current=2.0.10`, `latest=2.0.10`
+  - `/api/application/version`: `current=2.0.11`, `latest=2.0.11`
   - `/api/system-update/check`: `current=0.2.5-raw.1`,
-    `latest=0.2.6-raw.1`, `updateAvailable=true`
+    `latest=0.2.7-raw.1`, `updateAvailable=true`
   - raw install has not been started yet.
 
 Root cause of login loop:
@@ -94,9 +94,9 @@ Root cause of login loop:
 - First account setup was required and was completed as `admin/admin1234`.
 - Last verified after app update:
   - `/api/health`: OK
-  - `/api/application/version`: `current=2.0.10`, `latest=2.0.10`
+  - `/api/application/version`: `current=2.0.11`, `latest=2.0.11`
   - `/api/system-update/check`: `current=0.2.5-raw.1`,
-    `latest=0.2.6-raw.1`, `updateAvailable=true`
+    `latest=0.2.7-raw.1`, `updateAvailable=true`
   - raw install has not been started yet.
 
 ## Important Implementation Notes
@@ -249,8 +249,7 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Publish and install app `2.0.11` on `10.0.87.132` and `10.0.87.133`.
-2. Only after both devices run `2.0.11`, run raw update to `0.2.6-raw.1` one
+1. Run raw update to `0.2.7-raw.1` one
    device at a time and confirm static IP/account/SSH settings survive reboot.
-3. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
-4. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.
+2. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
+3. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.

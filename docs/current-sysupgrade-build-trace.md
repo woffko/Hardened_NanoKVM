@@ -1551,3 +1551,46 @@ Device state before device update:
   `10.0.87.5`;
 - raw install has not been started. Install app `2.0.11` first, then test raw
   update one device at a time.
+
+Follow-up raw/SD rebuild:
+
+- Built a new SD image and raw system update with app `2.0.11` inside the
+  raw rootfs. This avoids downgrading `/kvmapp` back to `2.0.10` after a raw
+  write.
+- Raw system version: `0.2.7-raw.1`.
+- Base: `20260123_NanoKVM_Rev1_4_2.img`.
+- Kernel: `5.10.4-tag-`.
+- Manifest source commit: `a4a4123`.
+
+Generated raw/SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.7-raw.1.tar.gz` | `e9d56782119c87693a24441e40ab053050aaca0786ecb041abc9503a21420b86` |
+| System metadata | `build/system-updates/system-latest.json` | `71d9159e1878dd4d7d139bb4604cc633285b5f2ea34fa9d4ca4046e775450c21` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `91a2d2b33b1b9dc98f1ae3aed962563d93fb1e58d947912220eddcacae498d7c` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_11_buildroot_2023_11_2_security_preserve_Rev1_4_2_rust.img.xz` | `746d0ea45b1ba63c2042eb7429f6b29c2937e3891c2fd42f00db1f152d902cd5` |
+
+Validation:
+
+- `EXPECTED_KVMAPP_VERSION=2.0.11 scripts/validate-nanokvm-rootfs.sh .../rootfs.sd`: passed.
+- `scripts/verify-system-update-metadata.sh build/system-updates/system-latest.json ...`: passed.
+- Published GitHub `hardened-system-stable/system-latest.json`: version
+  `0.2.7-raw.1`, signature verified after download.
+
+Publication:
+
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.7-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device state after app update and raw channel publication:
+
+- `10.0.87.132`: app `2.0.11`, system `0.2.5-raw.1`, latest raw
+  `0.2.7-raw.1`, `updateAvailable=true`;
+- `10.0.87.133`: app `2.0.11`, system `0.2.5-raw.1`, latest raw
+  `0.2.7-raw.1`, `updateAvailable=true`;
+- raw install has still not been started.
