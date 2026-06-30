@@ -7,14 +7,13 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: replacement init-fix release `2.0.10` / `0.2.6-raw.1`
-  published after `2.0.9` / `0.2.5-raw.1` raw images were found broken.
+- Current work: app hotfix `2.0.11` prepared on top of raw channel
+  `0.2.6-raw.1` so raw updates preserve user settings before writing boot and
+  rootfs partitions.
 - Recent commits when this handoff was updated:
+  - `f23c39c Record fixed device IP update state`
+  - `cbcb2fd Record beta 2.0.10 init-fix publication`
   - `2a9d02d Fix raw image init script installation`
-  - `8f18209 Record beta 2.0.9 publication`
-  - `47aac13 Record beta 2.0.9 IPv6 artifacts`
-  - `59bc8dd Add explicit IPv6 network controls`
-  - `81d252f Record beta 2.0.8 publication`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -23,15 +22,16 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.10`
+- Current app release: `2.0.11`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.10`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.11`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.11.tar.gz`
 - SHA256:
-  `302e60f80f09ca0c29e876532d9fd0c69731733a05a253e2fb5ec2677f3be35e`
-- Includes the raw/SD init-script fix, explicit IPv6 controls, bundled DHCPv6
-  client, the `2.0.8` OLED helper fix, and the `2.0.7` login-loop fix.
+  `4872815fe377df02002b9e7de298663a8c8b96df7dbb573815572d07b06e732f`
+- Includes the raw updater setting-preservation fix, the raw/SD init-script
+  fix, explicit IPv6 controls, bundled DHCPv6 client, the `2.0.8` OLED helper
+  fix, and the `2.0.7` login-loop fix.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
@@ -103,6 +103,9 @@ Root cause of login loop:
 
 - App updates replace `/kvmapp` only.
 - Raw system updates write SD-card boot/rootfs partitions and are lab-only.
+- Raw system updates must be launched only from app `2.0.11` or newer. Older
+  app updaters write the raw boot/rootfs images without restoring user
+  settings.
 - Do not delete GitHub channel releases:
   - `hardened-rust-preview`
   - `hardened-system-preview`
@@ -115,6 +118,28 @@ Root cause of login loop:
   validators reject legacy Go backend files and backend-switch scripts.
 
 ## Latest Fixes In Code
+
+### `2.0.11`
+
+- Raw updater now preserves user configuration before raw partition writes and
+  restores it onto the new boot/rootfs before reboot.
+- Preserved boot files include static IPv4/DNS, IPv6 mode/config, stable MAC,
+  hostname prefix/name, USB gadget flags, Wi-Fi seed files, SSH one-shot flag,
+  and custom logo.
+- Preserved rootfs state includes `/etc/kvm` user settings, web account,
+  session secret, TLS certificate/key, terminal/session config, root/web
+  password files, SSH host keys, hostname/machine-id, `device_key`,
+  Tailscale/PicoClaw state, and installed optional Tailscale/PicoClaw runtime
+  binaries/init scripts.
+- The updater deliberately does not restore old sysupgrade state files such as
+  `system-version.json`, `system-update-pending.json`, rollback markers, or the
+  system-update public key. The new rootfs must keep its own version/key files
+  so the device reports the new system version after reboot.
+- Regression test added:
+  `raw_image_updater_preserves_user_configuration`.
+- Local validation:
+  - `cargo fmt`
+  - `cargo test` in `server-rust` passed: 116 tests.
 
 ### Current Live Issue: `2.0.9` / `0.2.5-raw.1`
 
@@ -224,8 +249,8 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. After the user restores/reboots `10.0.87.132`, install the fixed app and
-   validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
-2. Confirm devices see app `2.0.9` and raw `0.2.5-raw.1` through GUI update
-   checks.
-3. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.
+1. Publish and install app `2.0.11` on `10.0.87.132` and `10.0.87.133`.
+2. Only after both devices run `2.0.11`, run raw update to `0.2.6-raw.1` one
+   device at a time and confirm static IP/account/SSH settings survive reboot.
+3. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
+4. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.

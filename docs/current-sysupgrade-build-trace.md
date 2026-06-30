@@ -1483,3 +1483,62 @@ Notes:
 - This was published as an app-only hotfix because the failure was in the
   browser/backend auth contract, not in boot/rootfs. The existing raw system
   channel remains at `0.2.4-raw.1`.
+
+## 2026-06-30: Beta 2.0.11 Raw Updater Setting Preservation
+
+Reason:
+
+- Devices `10.0.87.132` and `10.0.87.133` were moved to static IPv4 through
+  `/boot/eth.nodhcp` before raw update testing.
+- The existing `2.0.10` raw updater writes boot/rootfs partitions directly and
+  would lose boot and rootfs user settings after a successful raw update.
+- Raw update testing must therefore install a safer app updater before writing
+  `0.2.6-raw.1`.
+
+Fix:
+
+- app version bumped to `2.0.11`;
+- generated raw updater script now preserves user state before raw `dd` writes:
+  - boot config: `eth.nodhcp`, `resolv.conf`, IPv6 mode/config, stable MAC,
+    hostname prefix/name, USB gadget flags, Wi-Fi seed files, SSH one-shot flag,
+    and custom logo;
+  - rootfs config: `/etc/kvm` user settings, web account, session secret, TLS
+    files, terminal/session config, root/web password files, SSH host keys,
+    hostname/machine-id, `device_key`, Tailscale/PicoClaw state, and optional
+    Tailscale/PicoClaw runtime binaries/init scripts;
+- restored rootfs directories are merged into the newly written rootfs instead
+  of replacing the new directories. This keeps the new system version and
+  bundled update key from the raw image;
+- old sysupgrade state files are deliberately excluded from preserved
+  `/etc/kvm`: `system-version.json`, pending/backup/boot-good/rollback
+  markers, and `system-update-signing.pub.pem`;
+- regression test added:
+  `raw_image_updater_preserves_user_configuration`.
+
+Validation:
+
+- `cargo fmt` in `server-rust`: passed.
+- `cargo test` in `server-rust`: passed, 116 tests.
+- RISC-V linked backend build:
+  `server-rust/scripts/build-linked-libkvm.sh`: passed.
+- App update metadata signature:
+  `scripts/verify-update-metadata.sh build/artifacts/latest.json build/artifacts/latest.json.sig ...`: passed.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.11.tar.gz` | `4872815fe377df02002b9e7de298663a8c8b96df7dbb573815572d07b06e732f` |
+| App metadata | `build/artifacts/latest.json` | `9678ff5e9b0fba96c40cc61c02213fec32d15153e9302074afa7b610fd826ac4` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `537be42a137b578958bb36a5c31b8be38ef263846d800561423cb23f8670404f` |
+
+Device state before publication:
+
+- `10.0.87.132`: app `2.0.10`, system `0.2.5-raw.1`, latest raw
+  `0.2.6-raw.1`, static IP set to `10.0.87.132/24` with gateway/DNS
+  `10.0.87.5`;
+- `10.0.87.133`: app `2.0.10`, system `0.2.5-raw.1`, latest raw
+  `0.2.6-raw.1`, static IP set to `10.0.87.133/24` with gateway/DNS
+  `10.0.87.5`;
+- raw install has not been started. Install app `2.0.11` first, then test raw
+  update one device at a time.

@@ -1357,6 +1357,8 @@ fn raw_image_updater_script(
     let progress = shell_quote_path(&stage_dir.join(SYSTEM_PROGRESS_RECORD))?;
     let progress_dir = shell_quote_path(stage_dir)?;
     let version = shell_quote(&manifest.version);
+    let boot_device = shell_quote_path(Path::new(RAW_BOOT_DEVICE))?;
+    let root_device = shell_quote_path(Path::new(RAW_ROOTFS_DEVICE))?;
     let started_at = pending.installed_at;
 
     let mut script = format!(
@@ -1367,8 +1369,14 @@ LOG={log}\n\
 PROGRESS={progress}\n\
 PROGRESS_DIR={progress_dir}\n\
 VERSION={version}\n\
+BOOT_DEVICE={boot_device}\n\
+ROOT_DEVICE={root_device}\n\
 STARTED_AT={started_at}\n\
 RAW_WRITE_STARTED=0\n\
+BOOT_PRESERVE_DIR=/tmp/hardened-boot-preserve\n\
+BOOT_TMP_MOUNT=/tmp/hardened-boot-preserve-mount\n\
+ROOT_PRESERVE_DIR=/tmp/hardened-root-preserve\n\
+ROOT_TMP_MOUNT=/tmp/hardened-root-preserve-mount\n\
 kmsg() {{\n\
   [ -w /dev/kmsg ] && $BB printf 'hardened-system-update: %s\\n' \"$1\" > /dev/kmsg || true\n\
 }}\n\
@@ -1429,6 +1437,161 @@ stop_update_runtime() {{\n\
   done\n\
   $BB rm -rf /tmp/kvm_system /tmp/server >/dev/null 2>&1 || true\n\
 }}\n\
+copy_boot_preserve_files() {{\n\
+  SRC_DIR=\"$1\"\n\
+  $BB mkdir -p \"$BOOT_PRESERVE_DIR\" >/dev/null 2>&1 || return\n\
+  for NAME in eth.nodhcp resolv.conf resolv.conf.manual.bak eth.mac eth.ipv6.mode eth.ipv6 hostname hostname.prefix usb.vid usb.pid usb.notwakeup usb.ncm usb.rndis0 usb.disk0 usb.disk0.ro disable_hid BIOS wifi.ssid wifi.pass wifi.nodhcp start_ssh_once logo.ico; do\n\
+    [ -e \"$SRC_DIR/$NAME\" ] || continue\n\
+    $BB cp -p \"$SRC_DIR/$NAME\" \"$BOOT_PRESERVE_DIR/$NAME\" >> \"$LOG\" 2>&1 || log \"failed to preserve boot file $NAME\"\n\
+  done\n\
+}}\n\
+preserve_boot_config() {{\n\
+  progress writing 'preserving boot configuration'\n\
+  log 'preserving boot configuration files'\n\
+  $BB rm -rf \"$BOOT_PRESERVE_DIR\" \"$BOOT_TMP_MOUNT\" >/dev/null 2>&1 || true\n\
+  if $BB grep -q ' /boot ' /proc/mounts >/dev/null 2>&1; then\n\
+    copy_boot_preserve_files /boot\n\
+    return\n\
+  fi\n\
+  $BB mkdir -p \"$BOOT_TMP_MOUNT\" >/dev/null 2>&1 || {{ log 'failed to create temporary boot mount'; return; }}\n\
+  if $BB mount -t vfat \"$BOOT_DEVICE\" \"$BOOT_TMP_MOUNT\" >> \"$LOG\" 2>&1; then\n\
+    copy_boot_preserve_files \"$BOOT_TMP_MOUNT\"\n\
+    $BB umount \"$BOOT_TMP_MOUNT\" >> \"$LOG\" 2>&1 || true\n\
+  else\n\
+    log 'boot partition was not mounted; no boot configuration could be preserved'\n\
+  fi\n\
+}}\n\
+restore_boot_config() {{\n\
+  [ -d \"$BOOT_PRESERVE_DIR\" ] || return\n\
+  $BB ls \"$BOOT_PRESERVE_DIR\" >/dev/null 2>&1 || return\n\
+  progress writing 'restoring boot configuration'\n\
+  log 'restoring boot configuration files'\n\
+  $BB rm -rf \"$BOOT_TMP_MOUNT\" >/dev/null 2>&1 || true\n\
+  $BB mkdir -p \"$BOOT_TMP_MOUNT\" >/dev/null 2>&1 || {{ log 'failed to create temporary boot restore mount'; return; }}\n\
+  if $BB mount -t vfat \"$BOOT_DEVICE\" \"$BOOT_TMP_MOUNT\" >> \"$LOG\" 2>&1; then\n\
+    for SRC in \"$BOOT_PRESERVE_DIR\"/*; do\n\
+      [ -e \"$SRC\" ] || continue\n\
+      NAME=$($BB basename \"$SRC\" 2>/dev/null || $BB echo '')\n\
+      [ -n \"$NAME\" ] || continue\n\
+      $BB cp -p \"$SRC\" \"$BOOT_TMP_MOUNT/$NAME\" >> \"$LOG\" 2>&1 || log \"failed to restore boot file $NAME\"\n\
+    done\n\
+    $BB sync\n\
+    $BB umount \"$BOOT_TMP_MOUNT\" >> \"$LOG\" 2>&1 || true\n\
+  else\n\
+    log 'new boot partition could not be mounted for restoring preserved config'\n\
+  fi\n\
+}}\n\
+preserve_path() {{\n\
+  SRC=\"$1\"\n\
+  DEST_ROOT=\"$2\"\n\
+  [ -e \"$SRC\" ] || return\n\
+  REL=${{SRC#/}}\n\
+  DEST=\"$DEST_ROOT/$REL\"\n\
+  DEST_DIR=${{DEST%/*}}\n\
+  $BB mkdir -p \"$DEST_DIR\" >/dev/null 2>&1 || {{ log \"failed to create preserve directory for $SRC\"; return; }}\n\
+  if [ -d \"$SRC\" ]; then\n\
+    $BB rm -rf \"$DEST\" >/dev/null 2>&1 || true\n\
+    $BB cp -a \"$SRC\" \"$DEST\" >> \"$LOG\" 2>&1 || log \"failed to preserve $SRC\"\n\
+  else\n\
+    $BB cp -p \"$SRC\" \"$DEST\" >> \"$LOG\" 2>&1 || log \"failed to preserve $SRC\"\n\
+  fi\n\
+}}\n\
+restore_path() {{\n\
+  REL=\"$1\"\n\
+  SRC=\"$ROOT_PRESERVE_DIR/$REL\"\n\
+  DEST=\"$ROOT_TMP_MOUNT/$REL\"\n\
+  [ -e \"$SRC\" ] || return\n\
+  DEST_DIR=${{DEST%/*}}\n\
+  $BB mkdir -p \"$DEST_DIR\" >/dev/null 2>&1 || {{ log \"failed to create restore directory for $REL\"; return; }}\n\
+  if [ -d \"$SRC\" ]; then\n\
+    $BB mkdir -p \"$DEST\" >/dev/null 2>&1 || {{ log \"failed to create restore directory /$REL\"; return; }}\n\
+    $BB cp -a \"$SRC/.\" \"$DEST/\" >> \"$LOG\" 2>&1 || log \"failed to restore /$REL\"\n\
+  else\n\
+    $BB rm -f \"$DEST\" >/dev/null 2>&1 || true\n\
+    $BB cp -p \"$SRC\" \"$DEST\" >> \"$LOG\" 2>&1 || log \"failed to restore /$REL\"\n\
+  fi\n\
+}}\n\
+drop_unsafe_preserved_kvm_state() {{\n\
+  KVM_DIR=\"$ROOT_PRESERVE_DIR/etc/kvm\"\n\
+  [ -d \"$KVM_DIR\" ] || return\n\
+  $BB rm -f \\\n\
+    \"$KVM_DIR/system-version.json\" \\\n\
+    \"$KVM_DIR/system-update-pending.json\" \\\n\
+    \"$KVM_DIR/system-update-last-backup.json\" \\\n\
+    \"$KVM_DIR/system-update-boot-good.json\" \\\n\
+    \"$KVM_DIR/system-update-rollback.sh\" \\\n\
+    \"$KVM_DIR/system-update-rollback-attempted\" \\\n\
+    \"$KVM_DIR/system-update-signing.pub.pem\" \\\n\
+    >/dev/null 2>&1 || true\n\
+}}\n\
+preserve_root_config() {{\n\
+  progress writing 'preserving rootfs configuration'\n\
+  log 'preserving rootfs configuration files'\n\
+  $BB rm -rf \"$ROOT_PRESERVE_DIR\" \"$ROOT_TMP_MOUNT\" >/dev/null 2>&1 || true\n\
+  for PATH_NAME in \\\n\
+    /etc/kvm \\\n\
+    /etc/ssh \\\n\
+    /etc/dropbear \\\n\
+    /etc/passwd \\\n\
+    /etc/shadow \\\n\
+    /etc/group \\\n\
+    /etc/gshadow \\\n\
+    /etc/hostname \\\n\
+    /etc/machine-id \\\n\
+    /etc/resolv.conf \\\n\
+    /device_key \\\n\
+    /root/.tailscale \\\n\
+    /root/.picoclaw \\\n\
+    /root/.picoclaw-cache \\\n\
+    /var/lib/tailscale \\\n\
+    /usr/bin/tailscale \\\n\
+    /usr/sbin/tailscaled \\\n\
+    /usr/bin/picoclaw \\\n\
+    /etc/init.d/S96picoclaw \\\n\
+    /etc/init.d/S98tailscaled \\\n\
+    /etc/GOMEMLIMIT; do\n\
+    preserve_path \"$PATH_NAME\" \"$ROOT_PRESERVE_DIR\"\n\
+  done\n\
+  drop_unsafe_preserved_kvm_state\n\
+}}\n\
+restore_root_config() {{\n\
+  [ -d \"$ROOT_PRESERVE_DIR\" ] || return\n\
+  $BB ls \"$ROOT_PRESERVE_DIR\" >/dev/null 2>&1 || return\n\
+  progress writing 'restoring rootfs configuration'\n\
+  log 'restoring rootfs configuration files'\n\
+  $BB rm -rf \"$ROOT_TMP_MOUNT\" >/dev/null 2>&1 || true\n\
+  $BB mkdir -p \"$ROOT_TMP_MOUNT\" >/dev/null 2>&1 || {{ log 'failed to create temporary rootfs restore mount'; return; }}\n\
+  if $BB mount -t ext4 \"$ROOT_DEVICE\" \"$ROOT_TMP_MOUNT\" >> \"$LOG\" 2>&1; then\n\
+    for REL in \\\n\
+      etc/kvm \\\n\
+      etc/ssh \\\n\
+      etc/dropbear \\\n\
+      etc/passwd \\\n\
+      etc/shadow \\\n\
+      etc/group \\\n\
+      etc/gshadow \\\n\
+      etc/hostname \\\n\
+      etc/machine-id \\\n\
+      etc/resolv.conf \\\n\
+      device_key \\\n\
+      root/.tailscale \\\n\
+      root/.picoclaw \\\n\
+      root/.picoclaw-cache \\\n\
+      var/lib/tailscale \\\n\
+      usr/bin/tailscale \\\n\
+      usr/sbin/tailscaled \\\n\
+      usr/bin/picoclaw \\\n\
+      etc/init.d/S96picoclaw \\\n\
+      etc/init.d/S98tailscaled \\\n\
+      etc/GOMEMLIMIT; do\n\
+      restore_path \"$REL\"\n\
+    done\n\
+    $BB sync\n\
+    $BB umount \"$ROOT_TMP_MOUNT\" >> \"$LOG\" 2>&1 || true\n\
+  else\n\
+    log 'new rootfs partition could not be mounted for restoring preserved config'\n\
+  fi\n\
+}}\n\
 prepare_boot_readonly() {{\n\
   if $BB grep -q ' /boot ' /proc/mounts >/dev/null 2>&1; then\n\
     log 'preparing /boot read-only'\n\
@@ -1470,6 +1633,8 @@ log 'raw system image update started'\n\
 $BB sleep 2\n\
 stop_update_runtime\n\
 $BB sync\n\
+preserve_boot_config\n\
+preserve_root_config\n\
 prepare_boot_readonly\n\
 force_root_readonly\n"
     );
@@ -1495,7 +1660,9 @@ $BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'
     }
 
     script.push_str(
-        "progress rebooting 'raw image write finished; rebooting'\n\
+        "restore_root_config\n\
+restore_boot_config\n\
+progress rebooting 'raw image write finished; rebooting'\n\
 log 'raw system image update finished; rebooting'\n\
 $BB sync\n\
 $BB sleep 2\n\
@@ -2933,6 +3100,42 @@ mod tests {
         }
     }
 
+    fn valid_raw_manifest() -> SystemManifest {
+        SystemManifest {
+            format: "hardened-nanokvm-system-update-v1".to_string(),
+            version: "0.1.0-raw.1".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            base_version: "2025-02-17-19-08-3649fe.img".to_string(),
+            kernel_version: "5.10.4-tag-hardened.1".to_string(),
+            source_commit: "abcdef1".to_string(),
+            created_utc: "2026-06-28T00:00:00Z".to_string(),
+            required_free_bytes: 2_147_483_648,
+            requires_reboot: true,
+            operations: vec![
+                "stage".to_string(),
+                "write-raw-devices".to_string(),
+                "reboot".to_string(),
+            ],
+            files: Vec::new(),
+            raw_images: vec![
+                SystemManifestRawImage {
+                    payload: "images/rootfs.sd".to_string(),
+                    device: RAW_ROOTFS_DEVICE.to_string(),
+                    label: "ROOTFS".to_string(),
+                    size: 1024,
+                    sha256: "a".repeat(64),
+                },
+                SystemManifestRawImage {
+                    payload: "images/boot.vfat".to_string(),
+                    device: RAW_BOOT_DEVICE.to_string(),
+                    label: "BOOT".to_string(),
+                    size: 1024,
+                    sha256: "b".repeat(64),
+                },
+            ],
+        }
+    }
+
     #[test]
     fn validates_system_latest_metadata() {
         let latest = valid_latest();
@@ -3112,6 +3315,41 @@ mod tests {
         stable.version = "0.2.0-raw.1".to_string();
 
         assert_eq!(newer_system_release(preview, stable).version, "0.2.0-raw.1");
+    }
+
+    #[test]
+    fn raw_image_updater_preserves_user_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage_dir = temp.path().join("system-update");
+        let payload_dir = temp.path().join("payload");
+        let manifest = valid_raw_manifest();
+        let pending = SystemPendingUpdate {
+            version: manifest.version.clone(),
+            target: manifest.target.clone(),
+            backup_id: "raw-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            file_count: manifest.raw_images.len(),
+        };
+
+        let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
+            .expect("raw updater script");
+
+        assert!(
+            script.contains("preserve_boot_config\npreserve_root_config\nprepare_boot_readonly")
+        );
+        assert!(script.contains("restore_root_config\nrestore_boot_config\nprogress rebooting"));
+        assert!(script.contains("eth.nodhcp"));
+        assert!(script.contains("eth.ipv6.mode"));
+        assert!(script.contains("/etc/kvm"));
+        assert!(script.contains("/etc/passwd"));
+        assert!(script.contains("/etc/shadow"));
+        assert!(script.contains("/etc/ssh"));
+        assert!(script.contains("/root/.tailscale"));
+        assert!(script.contains("/root/.picoclaw"));
+        assert!(script.contains("drop_unsafe_preserved_kvm_state"));
+        assert!(script.contains("$BB cp -a \"$SRC/.\" \"$DEST/\""));
+        assert!(!script.contains("$ROOT_TMP_MOUNT/etc/kvm/system-version.json"));
     }
 
     #[test]

@@ -186,6 +186,13 @@ the patched Hardened SD image. Do not point it at vendor SDK
 `rawimages/rootfs.sd`; that is a stock Buildroot rootfs without `/kvmapp`,
 `/etc/kvm`, NanoKVM init, or web assets.
 
+Raw partition updates overwrite boot and rootfs. The app updater used to launch
+them must preserve and restore user settings before reboot. Do not test or
+publish a raw update path from an app older than `2.0.11`, because those
+versions do not restore `/boot` network settings, `/etc/kvm` account/config
+state, SSH host keys, root password files, or extension state after the raw
+write.
+
 The guard rail is:
 
 ```sh
