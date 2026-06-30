@@ -22,6 +22,7 @@ fi
 IMAGE="$1"
 EXPECTED_BACKEND="${EXPECTED_BACKEND:-rust}"
 EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-}"
+BOOT_INIT_SCRIPTS="S00kmod S01fs S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S80dnsmasq S95nanokvm"
 
 [ -f "$IMAGE" ] || die "rootfs image does not exist: $IMAGE"
 command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
@@ -106,18 +107,17 @@ require_regular /kvmapp/version
 require_regular /kvmapp/server/NanoKVM-Server
 require_regular /kvmapp/backends/NanoKVM-Server.rust
 require_regular /kvmapp/kvm_system/kvm_system
-require_regular /kvmapp/system/init.d/S95nanokvm
-require_regular /kvmapp/system/init.d/S03usbdev
-require_regular /kvmapp/system/init.d/S30eth
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem
 require_regular /kvmapp/system/mnt-data/sensor_cfg.ini.LT
 require_regular /kvmapp/server/web/index.html
-require_regular /etc/init.d/S95nanokvm
-require_regular /etc/init.d/S03usbdev
-require_regular /etc/init.d/S30eth
 require_regular /etc/kvm/backend
 require_regular /mnt/data/sensor_cfg.ini.LT
 require_regular /mnt/data/sensor_cfg.ini
+
+for script in $BOOT_INIT_SCRIPTS; do
+  require_regular "/kvmapp/system/init.d/$script"
+  require_regular "/etc/init.d/$script"
+done
 
 reject_path /kvmapp/backends/NanoKVM-Server.go
 reject_path /kvmapp/server/NanoKVM-Server.go

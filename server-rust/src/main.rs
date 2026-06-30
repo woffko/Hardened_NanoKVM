@@ -21,6 +21,19 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
+const BOOT_INIT_SCRIPTS: &[&str] = &[
+    "S00kmod",
+    "S01fs",
+    "S03usbdev",
+    "S15kvmhwd",
+    "S30eth",
+    "S30wifi",
+    "S50avahi-daemon",
+    "S50sshd",
+    "S80dnsmasq",
+    "S95nanokvm",
+];
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
@@ -41,17 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn install_runtime_boot_scripts() {
-    for (src, dst) in [
-        ("/kvmapp/system/init.d/S03usbdev", "/etc/init.d/S03usbdev"),
-        ("/kvmapp/system/init.d/S30eth", "/etc/init.d/S30eth"),
-        ("/kvmapp/system/init.d/S95nanokvm", "/etc/init.d/S95nanokvm"),
-    ] {
-        match install_runtime_boot_script(Path::new(src), Path::new(dst)) {
-            Ok(true) => info!(source = src, target = dst, "installed runtime boot script"),
+    for script in BOOT_INIT_SCRIPTS {
+        let src = Path::new("/kvmapp/system/init.d").join(script);
+        let dst = Path::new("/etc/init.d").join(script);
+        match install_runtime_boot_script(&src, &dst) {
+            Ok(true) => info!(
+                source = %src.display(),
+                target = %dst.display(),
+                "installed runtime boot script"
+            ),
             Ok(false) => {}
             Err(err) => warn!(
-                source = src,
-                target = dst,
+                source = %src.display(),
+                target = %dst.display(),
                 error = %err,
                 "failed to install runtime boot script"
             ),

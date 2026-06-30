@@ -21,6 +21,7 @@ SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
 SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
 SENSOR_BUNDLE_DIR=/kvmapp/system/mnt-data
 SENSOR_DATA_DIR=/mnt/data
+BOOT_INIT_SCRIPTS="S00kmod S01fs S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S80dnsmasq S95nanokvm"
 
 wait_process_exit() {
     name="$1"
@@ -97,8 +98,9 @@ install_boot_script() {
 }
 
 install_boot_scripts() {
-    install_boot_script S03usbdev
-    install_boot_script S30eth
+    for name in $BOOT_INIT_SCRIPTS; do
+        install_boot_script "$name"
+    done
 }
 
 restore_sensor_configs() {

@@ -9,6 +9,18 @@ KVMAPP_DIR="${KVMAPP_DIR:-$BUILD_DIR/kvmapp-rust/kvmapp}"
 SENSOR_DATA_DIR="${SENSOR_DATA_DIR:-$KVMAPP_DIR/system/mnt-data}"
 VERSION="${HARDENED_RELEASE_VERSION:-alpha-0.1}"
 OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_Rev1_4_2_rust}"
+BOOT_INIT_SCRIPTS=(
+  S00kmod
+  S01fs
+  S03usbdev
+  S15kvmhwd
+  S30eth
+  S30wifi
+  S50avahi-daemon
+  S50sshd
+  S80dnsmasq
+  S95nanokvm
+)
 
 OUT_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.img"
 ROOTFS_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.rootfs.ext"
@@ -121,25 +133,15 @@ fi
     fi
   fi
 
-  printf 'rm /etc/init.d/S95nanokvm\n'
-  printf 'write %s /etc/init.d/S95nanokvm\n' "$KVMAPP_DIR/system/init.d/S95nanokvm"
-  printf 'sif /etc/init.d/S95nanokvm mode 0100755\n'
-  printf 'sif /etc/init.d/S95nanokvm uid 0\n'
-  printf 'sif /etc/init.d/S95nanokvm gid 0\n'
-  if [ -f "$KVMAPP_DIR/system/init.d/S03usbdev" ]; then
-    printf 'rm /etc/init.d/S03usbdev\n'
-    printf 'write %s /etc/init.d/S03usbdev\n' "$KVMAPP_DIR/system/init.d/S03usbdev"
-    printf 'sif /etc/init.d/S03usbdev mode 0100755\n'
-    printf 'sif /etc/init.d/S03usbdev uid 0\n'
-    printf 'sif /etc/init.d/S03usbdev gid 0\n'
-  fi
-  if [ -f "$KVMAPP_DIR/system/init.d/S30eth" ]; then
-    printf 'rm /etc/init.d/S30eth\n'
-    printf 'write %s /etc/init.d/S30eth\n' "$KVMAPP_DIR/system/init.d/S30eth"
-    printf 'sif /etc/init.d/S30eth mode 0100755\n'
-    printf 'sif /etc/init.d/S30eth uid 0\n'
-    printf 'sif /etc/init.d/S30eth gid 0\n'
-  fi
+  for script in "${BOOT_INIT_SCRIPTS[@]}"; do
+    script_path="$KVMAPP_DIR/system/init.d/$script"
+    [ -f "$script_path" ] || continue
+    printf 'rm /etc/init.d/%s\n' "$script"
+    printf 'write %s /etc/init.d/%s\n' "$script_path" "$script"
+    printf 'sif /etc/init.d/%s mode 0100755\n' "$script"
+    printf 'sif /etc/init.d/%s uid 0\n' "$script"
+    printf 'sif /etc/init.d/%s gid 0\n' "$script"
+  done
 } > "$DEBUGFS_CMDS"
 
 echo "Updating rootfs with Hardened kvmapp..."

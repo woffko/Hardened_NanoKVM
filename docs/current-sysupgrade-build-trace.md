@@ -3,6 +3,86 @@
 This file is the local handoff/trace for the active experimental system-update
 build. Keep it updated before long-running builds or risky device operations.
 
+## 2026-06-30: Replacement Init-Fix Release `2.0.10` / `0.2.6-raw.1`
+
+Reason:
+
+- app/raw `2.0.9` / `0.2.5-raw.1` shipped a broken raw rootfs for fresh boot;
+- the rootfs contained only the Hardened `/etc/init.d` overrides
+  `S03usbdev`, `S30eth`, and `S95nanokvm`;
+- stock boot also needs hardware/init scripts such as `S00kmod`, `S01fs`, and
+  `S15kvmhwd`;
+- without `S00kmod`, CVI/Sophgo modules were not loaded, `/dev/cvi-sys` and
+  `/dev/cvi-base` were missing, and the Rust backend could not initialize video
+  hardware before serving HTTP.
+
+Stock comparison:
+
+- original `20260123_NanoKVM_Rev1_4_2.img` `/etc/init.d` includes:
+  `S00kmod`, `S01fs`, `S03usbdev`, `S15kvmhwd`, `S30eth`, `S30wifi`,
+  `S50avahi-daemon`, `S50sshd`, `S80dnsmasq`, and `S95nanokvm`;
+- stock `/kvmapp/system/init.d` also includes `S03usbhid`, but stock
+  `/etc/init.d` does not, so Hardened must not auto-install `S03usbhid`.
+
+Implementation:
+
+- bumped `kvmapp/version` to `2.0.10`;
+- added a stock-compatible boot-safe init list to:
+  - Rust backend runtime self-healing sync;
+  - `kvmapp/system/init.d/S95nanokvm`;
+  - `scripts/build-rust-sd-image.sh`;
+  - `scripts/validate-nanokvm-rootfs.sh`;
+- validator now rejects a raw/SD rootfs missing `/etc/init.d/S00kmod` and the
+  rest of the required boot-safe scripts;
+- old `2.0.9` rootfs now fails validation as expected:
+  `missing required regular: /etc/init.d/S00kmod`.
+
+Live device repair:
+
+- `10.0.87.48` and `10.0.87.60` were reachable by SSH as `root/root`;
+- copied the boot-safe script list into `/etc/init.d` on both devices;
+- ran `S00kmod start` and restarted `S95nanokvm`;
+- both devices answered `/api/health` over HTTP from the host after repair.
+
+Validation:
+
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `bash -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/validate-nanokvm-rootfs.sh`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 115 tests.
+- App `latest.json` signature: verified OK.
+- System `system-latest.json` signature: verified OK.
+- New raw rootfs validator: passed.
+- New raw rootfs `/kvmapp/version`: `2.0.10`.
+- New raw rootfs `/etc/init.d` includes `S00kmod`, `S01fs`, `S15kvmhwd`, and
+  `S95nanokvm`; `S03usbhid` was not installed into `/etc/init.d`.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz` | `88830921bc615ea3fab5c8a3ccedc5c818c2ab09d89a433bdfeea0e826996b13` |
+| App metadata | `build/artifacts/latest.json` | `cb5d350d2ba3abe98adde8e7509173d4a5e90b9b010dd2e69e0f770d0afcaf78` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz` | `929ada4cb0078c1a33c490527225063c51d1a844ebfdfe47d427c9563a9fb8d2` |
+| System metadata | `build/system-updates/system-latest.json` | `9d14da3623876f51be169b0bae2d62a799d28aeb8be6bddc1a32f6e01c2f71f0` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_10_buildroot_2023_11_2_security_initfix_Rev1_4_2_rust.img.xz` | `9f396d235cbe40c006e07c9938d7903c15b32f2fcea04f0eefe6c720558267b7` |
+
+Publish plan:
+
+- create replacement app release `hardened-rust-beta-2.0.10`;
+- create replacement raw release `hardened-system-0.2.6-raw.1`;
+- update `hardened-rust-preview`, `hardened-system-stable`, and
+  `hardened-system-preview`;
+- mark `hardened-rust-beta-2.0.9` / `hardened-system-0.2.5-raw.1` as broken or
+  prerelease/deprecated so devices stop seeing them as current channels.
+
+Final manifest source:
+
+- App archive `MANIFEST.txt`: `source: 74e2500`.
+- Raw system manifest: `source_commit: 74e2500`.
+
 ## 2026-06-30: IPv6 Controls + DHCPv6 Client for App/Raw Rebuild
 
 Goal:

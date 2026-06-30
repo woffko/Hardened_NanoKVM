@@ -117,6 +117,48 @@ Root cause of login loop:
 
 ## Latest Fixes In Code
 
+### Current Live Issue: `2.0.9` / `0.2.5-raw.1`
+
+- Published app `2.0.9` and raw system `0.2.5-raw.1` should be treated as
+  broken until superseded.
+- Observed after raw update:
+  - devices still boot and get SSH;
+  - web UI does not answer because `NanoKVM-Server` starts before the vendor
+    CVI hardware modules are loaded;
+  - `/tmp/nanokvm-server.log` shows missing `/dev/cvi-sys`, `/dev/cvi-base`,
+    and `/proc/cvitek/vb`;
+  - `/etc/init.d` in the raw image only contained the Hardened overrides
+    `S03usbdev`, `S30eth`, and `S95nanokvm`.
+- Root cause:
+  - raw/SD build only installed three init scripts into `/etc/init.d`;
+  - original stock rootfs has required hardware boot scripts such as
+    `S00kmod`, `S01fs`, and `S15kvmhwd`;
+  - without those scripts, Sophgo/CVI modules and hardware detection do not run.
+- Upstream/stock comparison:
+  - `/kvmapp/system/init.d` contains `S03usbhid`;
+  - stock `/etc/init.d` does not include `S03usbhid`;
+  - therefore `S03usbhid` must remain available as an alternate HID-only mode
+    script but must not be auto-installed into `/etc/init.d`.
+- Device notes:
+  - `10.0.87.48`: reachable by SSH as `root/root`; manual
+    `/kvmapp/system/init.d/S00kmod start` plus `/etc/init.d/S95nanokvm restart`
+    restored HTTP for the current boot.
+  - `10.0.87.60`: reachable by SSH as `root/root` and shows the same missing
+    init script symptom; still needs the same temporary boot-script repair.
+- Required fix:
+  - define a stock-compatible boot-safe init script list;
+  - install `S00kmod`, `S01fs`, `S03usbdev`, `S15kvmhwd`, `S30eth`,
+    `S30wifi`, `S50avahi-daemon`, `S50sshd`, `S80dnsmasq`, and
+    `S95nanokvm`;
+  - leave base-rootfs services such as `S50ssdpd` to the base image unless a
+    later change deliberately replaces them;
+  - keep optional Hardened scripts `S96picoclaw` and `S98tailscaled` available
+    only if they are intentionally installed as services;
+  - do not auto-install `S03usbhid`;
+  - update SD/raw builder, runtime self-healing sync, and rootfs validator;
+  - publish a replacement app/raw/SD release and mark `2.0.9` as broken or
+    prerelease on GitHub rather than leaving it as a normal latest release.
+
 ### `2.0.9`
 
 - Adds explicit IPv6 controls under Settings > Network:
