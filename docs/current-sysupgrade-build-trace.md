@@ -38,22 +38,22 @@ Validation so far:
 - `corepack pnpm --dir web exec tsc --noEmit`: passed.
 - `corepack pnpm --dir web build`: passed.
 
-Generated artifacts before final publication rebuild:
+Final generated artifacts after commit `59bc8dd`:
 
 | Artifact | Path | SHA256 |
 | --- | --- | --- |
-| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz` | `6d48106d2ccfc151cfe240b0e6376cc0eddac68d3c8f76537f4b1df9c7ba8f38` |
-| App metadata | `build/artifacts/latest.json` | `f736bae4c00e0ff3a9b619e686f19209e41b48c2b28fb68e4bf511580dba4275` |
-| App metadata signature | `build/artifacts/latest.json.sig` | `e62d2814c0c3c2417476438d9819af7dace25a5b64179d63d58568b0798f6bdb` |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz` | `d64c3ba4f36a56e80bee7c254261e201bda17ee70a3a864abdfd001612382fb5` |
+| App metadata | `build/artifacts/latest.json` | `a779428aea93ea7c78f841be678e6b2ec96b8c71045e31111fb6916d4f134de2` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `5ab94cc012a9a4af6e3b5ad93e470b357347d537f92096421bf5d1ed879235b0` |
 | SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img` | `563292d151dcc2f9351954892b7b9775d9213ac89f34895893a042a68f96f3e1` |
 | Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img.xz` | `4534e7bef92077926ec12efd528166c05efea58f8822df77c0b40c735c08f1ce` |
 | SD/rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.rootfs.ext` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
 | Raw boot image | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/boot.vfat` | `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78` |
 | Raw rootfs before bundle patch | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/rootfs.sd` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
-| Raw rootfs inside bundle | `payload/images/rootfs.sd` | `0e634507fea92fb6f73e780d6ba0bff78d8c53e5f1f72f02bdb489f98b26ca92` |
-| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz` | `a985bde4a015968b04580c2c8893abbf5aa7d479a213a94e490a904e9f308111` |
-| System metadata | `build/system-updates/system-latest.json` | `9a5ef7fbb239d371fdf1cec250644b22b505dafe44f6b57e0dea486637607281` |
-| System metadata signature | `build/system-updates/system-latest.json.sig` | `092bea906d3bf57e7735c9b953d66a2801f193e61a461a0a1a23ed425f6e84de` |
+| Raw rootfs inside bundle | `payload/images/rootfs.sd` | `66df01ceb0d97a7d8cc8e7b16049b2d07009b6ea38b03349dcfe1e42f98fbf02` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz` | `1eb1e6a52cbde814d3b30629f3b63c6866d6acb2c6efcae3073ce7906f082dfb` |
+| System metadata | `build/system-updates/system-latest.json` | `95168b992519300db07b25220eb1cc03e3ada714ade8d495b465515dc7c96f36` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `b064a4dca34ac4ae3a69ec23b0e5499427263a5fb90e7c681ed3561af6587074` |
 
 Signature checks:
 
@@ -61,13 +61,10 @@ Signature checks:
 - `openssl dgst -sha256 -verify ... build/system-updates/system-latest.json`:
   verified OK.
 
-Note:
+Manifest source commit:
 
-- These artifacts were built before the source changes were committed, so the
-  app archive manifest and raw manifest currently report source commit
-  `81d252f`. Before GitHub publication, commit the source and rebuild at least
-  the app archive, app metadata, raw system bundle, and system metadata so
-  release manifests point at the final source commit.
+- App archive `MANIFEST.txt`: `source: 59bc8dd`.
+- Raw system manifest: `source_commit: 59bc8dd`.
 
 Device note:
 
@@ -81,11 +78,8 @@ Device note:
 
 Next steps:
 
-1. Commit the source changes.
-2. Rebuild app archive and raw bundle metadata so source manifests point at the
-   final commit.
-3. Publish the app release, raw system release, and channel metadata.
-4. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
+1. Publish the app release, raw system release, and channel metadata.
+2. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
    flow on hardware.
 
 ## 2026-06-29: Raw System Update With Buildroot 2023.11.3 Security Delta

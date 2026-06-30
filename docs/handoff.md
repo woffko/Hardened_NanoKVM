@@ -29,7 +29,7 @@ Detailed chronological build/update notes are in
 - Artifact:
   `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz`
 - SHA256:
-  `6d48106d2ccfc151cfe240b0e6376cc0eddac68d3c8f76537f4b1df9c7ba8f38`
+  `d64c3ba4f36a56e80bee7c254261e201bda17ee70a3a864abdfd001612382fb5`
 - Includes explicit IPv6 controls, bundled DHCPv6 client, the `2.0.8` OLED
   helper fix, and the `2.0.7` login-loop fix.
 - Local `latest.json` metadata signature verified with the bundled test public
@@ -45,9 +45,9 @@ Detailed chronological build/update notes are in
 - Artifact:
   `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz`
 - SHA256:
-  `a985bde4a015968b04580c2c8893abbf5aa7d479a213a94e490a904e9f308111`
+  `1eb1e6a52cbde814d3b30629f3b63c6866d6acb2c6efcae3073ce7906f082dfb`
 - Built from the beta `2.0.9` SD rootfs, with raw rootfs SHA
-  `0e634507fea92fb6f73e780d6ba0bff78d8c53e5f1f72f02` after
+  `66df01ceb0d97a7d8cc8e7b16049b2d07009b6ea38b03349dcfe1e42f98fbf02` after
   `/etc/kvm/system-version.json` is patched into the payload.
 - Local `system-latest.json` metadata signature verified with the bundled test
   public key.
