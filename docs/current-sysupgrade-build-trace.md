@@ -1523,6 +1523,8 @@ Validation:
   `server-rust/scripts/build-linked-libkvm.sh`: passed.
 - App update metadata signature:
   `scripts/verify-update-metadata.sh build/artifacts/latest.json build/artifacts/latest.json.sig ...`: passed.
+- Published GitHub `releases/latest/download/latest.json`: version `2.0.11`,
+  signature verified after download.
 
 Generated app artifacts:
 
@@ -1532,7 +1534,14 @@ Generated app artifacts:
 | App metadata | `build/artifacts/latest.json` | `9678ff5e9b0fba96c40cc61c02213fec32d15153e9302074afa7b610fd826ac4` |
 | App metadata signature | `build/artifacts/latest.json.sig` | `537be42a137b578958bb36a5c31b8be38ef263846d800561423cb23f8670404f` |
 
-Device state before publication:
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.11`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+
+Device state before device update:
 
 - `10.0.87.132`: app `2.0.10`, system `0.2.5-raw.1`, latest raw
   `0.2.6-raw.1`, static IP set to `10.0.87.132/24` with gateway/DNS
