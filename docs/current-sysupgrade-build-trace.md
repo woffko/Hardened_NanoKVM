@@ -1930,3 +1930,72 @@ Verification:
 - `/data` mounted from `/dev/mmcblk0p3`;
 - installed `S01fs` has the idempotent p3 check and only touches
   `/etc/kvm.disk0` when `/dev/mmcblk0p3` already exists.
+
+## 2026-06-30: Published Coherent `2.0.15` / `0.2.11-raw.1`
+
+Goal:
+
+- make the current app, raw system update, and SD-card image agree on the same
+  app payload and raw-system metadata;
+- publish `0.2.11-raw.1` after the idempotent `S01fs` fix;
+- split GUI labels so system-update version, base image, Buildroot release, and
+  security backport level are not confused.
+
+Implementation:
+
+- commit: `d9614b6 Clarify system update metadata display`;
+- app version: `2.0.15`;
+- raw system version: `0.2.11-raw.1`;
+- base image: `2026-06-29-12-08-d88d58.img`;
+- kernel string: `5.10.4-tag-`;
+- Buildroot release: `2023.11.2`;
+- security backport level: `Buildroot 2023.11.3 package backports`;
+- raw manifest source commit: `d9614b6`.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests.
+- `corepack pnpm --dir web build`: passed.
+- `bash -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/create-raw-system-update-bundle.sh`: passed.
+- `sh -n scripts/create-system-update-metadata.sh`: passed.
+- RISC-V backend binary verified with `file`; interpreter is
+  `/lib/ld-musl-riscv64xthead.so.1`.
+- SD rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.15` and
+  `EXPECTED_BACKEND=rust`.
+- Raw rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.15` and
+  `EXPECTED_BACKEND=rust`.
+- App `latest.json` signature verified locally and after GitHub download.
+- System `system-latest.json` signature verified locally and after GitHub
+  download.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` | `860a860424393a0e4e7ac6f3e855fde6ad55b686df50d6e4e5faf090300a8bf1` |
+| App metadata | `build/artifacts/latest.json` | `b02cfc4fd2ee606037599d2210384b6724c217a157e7c778793c0a7c7c137b50` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `3a719831e3d23a8d3b677ee8f55df0e24cb34a470ffd196f066e5fcecd2a5ed5` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.11-raw.1.tar.gz` | `f2033beb9453f1afc08552cc9ec5d311c5ca8945754890ea0116b2c0a61c25e8` |
+| System metadata | `build/system-updates/system-latest.json` | `2ccca00e01be1da0abd3d83e2cb6beef49894933b123af32e37781e51a864208` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `7252ad9fb65c28941d4a8e0f11c1515f0b4b94a782f8d4e8e2b2713a39061eb0` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_15_buildroot_2023_11_2_security_backports_datafix_Rev1_4_2_rust.img.xz` | `39c3fde0af70eb8ed9400c2da6257f0b2952c6929c6c8e45d932ac699afb614b` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.15`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.11-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+
+Release cleanup plan:
+
+- keep current release entries and update-channel releases;
+- keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
+  milestone unless stricter cleanup is requested;
+- delete old alpha/internal/broken/obsolete release entries from the GitHub
+  Releases UI only after preserving their status in `docs/release-archive.md`;
+- do not delete git tags during this cleanup.

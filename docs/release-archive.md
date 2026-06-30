@@ -1,0 +1,84 @@
+# Release Archive
+
+This file preserves release history even when obsolete GitHub release entries
+are removed from the public Releases page.
+
+Policy:
+
+- keep channel releases because GUI update checks depend on them;
+- keep the latest usable beta app release and matching raw/SD release visible;
+- remove old alpha/internal/broken release entries from the GitHub Releases UI
+  after their notes are captured here;
+- do not delete git tags unless explicitly doing a separate repository-history
+  cleanup.
+
+## Visible Releases
+
+| Tag | Status | Notes |
+| --- | --- | --- |
+| `hardened-rust-beta-2.0.15` | Current app beta | Rust-only app release, signed `latest.json`, includes idempotent data-partition init and GUI system metadata label cleanup. |
+| `hardened-system-0.2.11-raw.1` | Current raw/SD beta | Matching raw full-rootfs update and SD image with app `2.0.15`, base image `2026-06-29-12-08-d88d58.img`, Buildroot `2023.11.2`, security patch level `Buildroot 2023.11.3 package backports`. |
+| `hardened-system-stable` | Channel | Stable raw-system metadata channel. Keep this release. |
+| `hardened-rust-preview` | Channel | Preview app metadata channel. Keep this release while preview update support exists. |
+| `hardened-system-preview` | Channel | Preview raw-system metadata channel. Keep this release while preview update support exists. |
+| `hardened-rust-beta-1.0.5` | Historical milestone | First Rust-only security beta that removed the legacy Go backend from shipped artifacts. Can remain visible as a milestone. |
+
+## Internal Or Obsolete App Releases
+
+These releases were useful during bring-up, but are superseded by
+`hardened-rust-beta-2.0.15`. They can be removed from the GitHub Releases UI
+without losing the changelog history.
+
+| Tag | Archive status | Notes |
+| --- | --- | --- |
+| `hardened-rust-alpha-20260606` | Internal alpha | Early Rust backend archive. |
+| `hardened-rust-alpha-adminadmin-20260606` | Internal alpha | Temporary default-credential test archive. |
+| `hardened-rust-alpha-0.1-20260626` through `hardened-rust-alpha-0.1.9` | Internal alpha series | Early hardware/UI bring-up. Superseded by beta security releases. |
+| `hardened-rust-beta-1.0`, `1.0.1`, `1.0.2` | Obsolete beta 1 candidates | Superseded by `1.0.5`. |
+| `hardened-rust-sysupgrade-1.0.3`, `1.0.4`, `1.0.5` | Internal sysupgrade app builds | Lab channel while raw update plumbing was being separated from app latest metadata. |
+| `hardened-rust-beta-2` | Obsolete beta 2 candidate | First beta 2 line release; superseded by point releases. |
+| `hardened-rust-beta-2.0.1` | Obsolete | Preview fallback and stable USB gadget MAC work. |
+| `hardened-rust-beta-2.0.2` | Obsolete | App-side init script sync for existing devices. |
+| `hardened-rust-beta-2.0.3` | Obsolete | System-update stale-progress UI fix. |
+| `hardened-rust-beta-2.0.4` | Obsolete | Legacy failed-progress cleanup. |
+| `hardened-rust-beta-2.0.5` | Obsolete | Manual IPv4/DNS editing and stable Ethernet MAC support. |
+| `hardened-rust-beta-2.0.6` | Obsolete | Manual IP redirect and HTML no-store cache fix. |
+| `hardened-rust-beta-2.0.7` | Obsolete | Browser auth-state recovery after IP/protocol changes. |
+| `hardened-rust-beta-2.0.8` | Obsolete | OLED timeout helper fix. |
+| `hardened-rust-beta-2.0.9` | Broken beta | IPv6/DHCPv6 app build; matching raw rootfs missed required stock init scripts. Superseded by `2.0.10`. |
+| `hardened-rust-beta-2.0.10` | Obsolete | Init script repair release. |
+| `hardened-rust-beta-2.0.11` | Obsolete | Raw updater setting-preservation release. |
+| `hardened-rust-beta-2.0.12` | Obsolete | Compressed raw staging release. |
+| `hardened-rust-beta-2.0.13` | Internal lab | Intermediate app-only raw-staging hardening snapshot. |
+| `hardened-rust-beta-2.0.14` | Broken/lab | Data staging guard release; later found to still lack idempotent p3 first-boot protection. Superseded by `2.0.15`. |
+
+## Internal Or Obsolete System Releases
+
+These raw-system releases are lab artifacts. Old raw releases should not be
+installed unless a test explicitly needs to reproduce a historical failure.
+
+| Tag | Archive status | Notes |
+| --- | --- | --- |
+| `hardened-system-0.1.0-dev.1` | Internal smoke test | Non-destructive first system-update flow validation. |
+| `hardened-system-0.1.0-raw.1` | Revoked/broken | Built from stock SDK rootfs without Hardened `kvmapp`; must not be installed. |
+| `hardened-system-0.1.1-raw.1` through `hardened-system-0.1.5-raw.1` | Internal raw bring-up | Superseded by beta 2 raw releases. |
+| `hardened-system-0.2.0-raw.1` through `hardened-system-0.2.4-raw.1` | Obsolete raw beta | Early beta 2 raw images before the init-script and staging fixes. |
+| `hardened-system-0.2.5-raw.1` | Broken raw beta | Missing required stock init scripts in rootfs; superseded by `0.2.6-raw.1`. |
+| `hardened-system-0.2.6-raw.1` | Obsolete | Init script repair raw image. |
+| `hardened-system-0.2.7-raw.1` | Obsolete | Setting-preserving raw image, but uncompressed staging could exhaust rootfs-backed `/data`. |
+| `hardened-system-0.2.8-raw.1` | Obsolete | Compressed staging release. |
+| `hardened-system-0.2.9-raw.1` | Internal lab | Superseded by later data-staging guard work. |
+| `hardened-system-0.2.10-raw.1` | Broken/lab | Could trigger unsafe p3 first-boot formatting path after raw rootfs update. Superseded by `0.2.11-raw.1`. |
+
+## Cleanup Checklist
+
+When cleaning GitHub Releases:
+
+1. Verify `hardened-rust-beta-2.0.15` is the GitHub latest release and its
+   `latest.json` signature verifies.
+2. Verify `hardened-system-stable/system-latest.json` points to
+   `0.2.11-raw.1` and its signature verifies.
+3. Delete only obsolete release entries/assets from the GitHub Releases UI.
+4. Keep channel releases and current releases.
+5. Leave git tags intact unless a separate tag-cleanup task is explicitly
+   requested.

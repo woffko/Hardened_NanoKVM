@@ -7,10 +7,11 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app hotfix `2.0.15` after the `0.2.10-raw.1` lab update left
-  `10.0.87.132` without HTTP/SSH. The current fix makes `/data` partition init
-  idempotent and preserves `/etc/kvm.disk0` across raw rootfs writes.
+- Current work: published app `2.0.15` and coherent raw/SD release
+  `0.2.11-raw.1`, then clean old alpha/internal/broken GitHub release entries
+  while preserving release history in docs.
 - Recent commits when this handoff was updated:
+  - `d9614b6 Clarify system update metadata display`
   - `c2ee893 Make raw data partition handling idempotent`
   - `7891449 Harden raw system update staging`
   - `28161aa Support compressed raw system payloads`
@@ -22,36 +23,40 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current published app release: `2.0.14`
-- Current source version after follow-up fix: `2.0.15`
+- Current published app release: `2.0.15`
+- Current source version: `2.0.15`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.14`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.15`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.14.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz`
 - SHA256:
-  `d84a7b90f755f7afa835db00d59da8f545159e7858153c13790fcdf4c3b3e077`
+  `860a860424393a0e4e7ac6f3e855fde6ad55b686df50d6e4e5faf090300a8bf1`
 - Includes compressed raw payload support, raw updater setting preservation,
   raw staging-on-rootfs refusal, `/data` p3 mounting, explicit IPv6 controls,
   bundled DHCPv6 client, the `2.0.8` OLED helper fix, and the `2.0.7`
-  login-loop fix. Source `2.0.15` adds the follow-up idempotent p3 init guard
-  and `/etc/kvm.disk0` raw preservation.
+  login-loop fix. `2.0.15` adds the follow-up idempotent p3 init guard,
+  `/etc/kvm.disk0` raw preservation, and GUI system metadata label cleanup.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.10-raw.1`
+- Current raw system channel: `0.2.11-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.10-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.11-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.10-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.11-raw.1.tar.gz`
 - SHA256:
-  `00896816d05808223f4744493f79f26e934a021f571618b85e4debdfaf4ed26f`
-- Built from the beta `2.0.14` SD rootfs. Raw payload manifest source commit:
-  `7891449`.
+  `f2033beb9453f1afc08552cc9ec5d311c5ca8945754890ea0116b2c0a61c25e8`
+- Built from the beta `2.0.15` SD rootfs. Raw payload manifest source commit:
+  `d9614b6`.
+- Base image: `2026-06-29-12-08-d88d58.img`.
+- Kernel string: `5.10.4-tag-`.
+- Buildroot release shown by the rootfs: `2023.11.2`.
+- Security backport level: `Buildroot 2023.11.3 package backports`.
 - Raw payloads are staged as `images/rootfs.sd.gz` and `images/boot.vfat.gz`;
   manifest `required_free_bytes` is `671088640` bytes instead of the old 2 GiB
   lab value.
@@ -62,11 +67,25 @@ Detailed chronological build/update notes are in
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.14`
+- Latest SD image built: beta `2.0.15`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_14_buildroot_2023_11_2_security_datafix_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_15_buildroot_2023_11_2_security_backports_datafix_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `06eb09ff5ed7f48e1499c3d0b35e259380bdecc8b48800d945cc7c3f3e3e5bd7`
+  `39c3fde0af70eb8ed9400c2da6257f0b2952c6929c6c8e45d932ac699afb614b`
+
+### Release Cleanup
+
+- Preserve release history in `docs/release-archive.md`.
+- Keep GitHub channel releases:
+  - `hardened-rust-preview`
+  - `hardened-system-preview`
+  - `hardened-system-stable`
+- Keep current visible releases:
+  - `hardened-rust-beta-2.0.15`
+  - `hardened-system-0.2.11-raw.1`
+- Keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
+  milestone unless the user later asks for stricter cleanup.
+- Delete only obsolete GitHub release entries/assets, not git tags.
 
 ## Device State
 
@@ -279,14 +298,14 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Build and publish app `2.0.15` plus the next raw/SD release from commit
-   `c2ee893` or newer.
-2. Do not retry raw install from `0.2.10-raw.1`; it lacks the idempotent
+1. Clean obsolete/internal/broken GitHub release entries after confirming this
+   archive is pushed.
+2. Test app `2.0.15` and raw `0.2.11-raw.1` on one device before moving more
+   devices to the raw channel.
+3. Do not retry raw install from `0.2.10-raw.1`; it lacks the idempotent
    `/data` init guard and `/etc/kvm.disk0` preservation.
-3. Inspect or reflash `10.0.87.132`; after the `0.2.10-raw.1` attempt it no
-   longer answers HTTP/SSH and may need SD-card/serial diagnosis.
 4. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware after a
-   device is back on a known-good image.
+   device is on a known-good image.
 
 ## 2026-06-30: 2.0.14 / 0.2.10 Raw Update Lab State
 
@@ -407,7 +426,7 @@ Device recovery after the `0.2.10-raw.1` attempt:
   - HTTP `/api/health`: OK, Rust backend;
   - web login `admin/admin1234`: OK;
   - `/api/application/version`: current `2.0.15`, latest `2.0.14`
-    (because `2.0.15` is not published yet);
+    at the time of manual repair, before `2.0.15` was published;
   - `/api/system-update/status`: current `0.2.10-raw.1`, no staged/pending
     update;
   - `/api/vm/ssh`: enabled;
@@ -443,7 +462,7 @@ Second device recovery:
   - HTTP `/api/health`: OK, Rust backend;
   - web login `admin/admin1234`: OK;
   - `/api/application/version`: current `2.0.15`, latest `2.0.14`
-    (`2.0.15` still not published);
+    at the time of manual repair, before `2.0.15` was published;
   - `/api/system-update/status`: current `0.2.5-raw.1`, boot health healthy;
   - `/api/vm/ssh`: enabled;
   - `/api/network/dns`: static `10.0.87.133/24`, gateway/DNS `10.0.87.5`;

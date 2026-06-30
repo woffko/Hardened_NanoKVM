@@ -73,9 +73,16 @@ Production stable/preview channel metadata must use
 ## Current Published System Releases
 
 The current `hardened-system-stable` channel points to lab raw release
-`hardened-system-0.2.8-raw.1`. It was built from the beta `2.0.12` Hardened SD
-image and contains validated gzip-compressed boot/rootfs partition images plus
-matching channel metadata.
+`hardened-system-0.2.11-raw.1`. It was built from the beta `2.0.15` Hardened
+SD image and contains validated gzip-compressed boot/rootfs partition images
+plus matching channel metadata.
+
+The current metadata intentionally separates several version fields:
+
+- system update version: `0.2.11-raw.1`;
+- base image: `2026-06-29-12-08-d88d58.img`;
+- Buildroot release: `2023.11.2`;
+- security backport level: `Buildroot 2023.11.3 package backports`.
 
 This channel is still lab-only. It is intended to validate the sysupgrade
 plumbing and SD-card recovery workflow, not to deliver real kernel or Buildroot
@@ -86,6 +93,8 @@ kernel/rootfs security-backport payloads.
 
 Older smoke release `hardened-system-0.1.0-dev.1` only installed a harmless
 test marker. Revoked raw release `hardened-system-0.1.0-raw.1` must not be used.
+Broken raw releases `0.2.5-raw.1` and `0.2.10-raw.1` are preserved only in
+the historical release archive and must not be installed on test devices.
 
 ## Bundle Layout
 

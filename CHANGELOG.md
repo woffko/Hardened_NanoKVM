@@ -1,3 +1,80 @@
+## Hardened NanoKVM Beta 2.0.15 (2026-06-30)
+
+### Bug Fixes
+
+* Made data-partition initialization idempotent after raw rootfs writes.
+  `S01fs` now checks for an existing `/dev/mmcblk0p3` before creating or
+  formatting p3, then only restores `/etc/kvm.disk0` and mounts `/data`.
+* Preserved `/etc/kvm.disk0` during raw system updates so an updated rootfs
+  does not look like a first boot when a data partition already exists.
+
+### Changed
+
+* Rebuilt and published matching app, raw system-update, and SD-card artifacts:
+  app `2.0.15`, raw system `0.2.11-raw.1`.
+* Added explicit system-update metadata fields in the GUI: System update
+  version, Base image, Buildroot release, and Security backport level.
+* Published `0.2.11-raw.1` with security patch level
+  `Buildroot 2023.11.3 package backports` while keeping the proven vendor
+  Buildroot `2023.11.2` base label separate.
+
+## Hardened NanoKVM Beta 2.0.14 (2026-06-30)
+
+### Bug Fixes
+
+* Mounted `/dev/mmcblk0p3` on `/data` from `S01fs` before raw update staging.
+* Refused raw partition installs when the staged payload is on the same
+  filesystem as `/`, avoiding writes that would read from the partition being
+  overwritten.
+* Normalized failed raw-install progress records so the GUI no longer leaves a
+  stale reboot-required state after a writer stops before reboot.
+
+### Notes
+
+* Raw release `0.2.10-raw.1` is a lab/broken release. It staged correctly on a
+  device with `/data` mounted, but it still lacked the later idempotent p3 init
+  guard from `2.0.15` and must not be retried.
+
+## Hardened NanoKVM Beta 2.0.13 (2026-06-30)
+
+### Notes
+
+* Internal app-only lab snapshot during raw-staging hardening. It was
+  superseded by `2.0.14` and is preserved only in the release archive.
+
+## Hardened NanoKVM Beta 2.0.12 (2026-06-30)
+
+### Bug Fixes
+
+* Added gzip-compressed raw boot/rootfs payload support for system updates.
+  The updater now validates compressed payloads and streams `gzip -dc`
+  directly to `/dev/mmcblk0p1` and `/dev/mmcblk0p2`.
+* Reduced raw staging free-space requirements by keeping raw images compressed
+  in `/data/.hardened-kvmcache/system-update`.
+
+## Hardened NanoKVM Beta 2.0.11 (2026-06-30)
+
+### Bug Fixes
+
+* Preserved user/device state before raw partition writes and restored it onto
+  the new rootfs/boot partition before reboot.
+* Preserved static IPv4/DNS, IPv6 files, stable MAC, hostname, SSH host keys,
+  web account/session state, TLS files, device key, and optional
+  Tailscale/PicoClaw runtime state.
+* Excluded old sysupgrade state files from restore so the newly installed raw
+  system keeps its own version metadata and update public key.
+
+## Hardened NanoKVM Beta 2.0.10 (2026-06-30)
+
+### Bug Fixes
+
+* Rebuilt the raw rootfs with the stock-compatible boot init script set.
+  `2.0.9 / 0.2.5-raw.1` missed required scripts such as `S00kmod`, `S01fs`,
+  and `S15kvmhwd`, which could leave video hardware devices unavailable after
+  boot.
+* Added release validation that rejects raw/SD rootfs images missing the
+  required boot-safe init scripts.
+
 ## Hardened NanoKVM Beta 2.0.9 (2026-06-30)
 
 ### Features
