@@ -382,3 +382,34 @@ Follow-up source fix:
   - `cargo fmt --manifest-path server-rust/Cargo.toml`: passed;
   - `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
     plus 2 main tests.
+
+Device recovery after the `0.2.10-raw.1` attempt:
+
+- `10.0.87.132` reappeared through DHCP as `10.0.87.44`.
+- The device was first-setup only; web login returned
+  `password setup required`, so the account was recreated as
+  `admin/admin1234`.
+- Scripts API diagnostics showed:
+  - app `2.0.14`;
+  - system `0.2.10-raw.1`;
+  - hostname `kvm-48ad`;
+  - `/boot/eth.nodhcp` empty;
+  - `/data` mounted from p3, but `/tmp/data-mount.log` showed p3 had been
+    formatted during boot;
+  - SSH was disabled, but `/etc/init.d/S50sshd permanent_on` from a script
+    started it successfully.
+- App `2.0.15` was manually copied to `/kvmapp`; `S01fs`, `S30eth`, and
+  `S95nanokvm` were copied to `/etc/init.d`.
+- Static network was restored:
+  - `/boot/eth.nodhcp`: `10.0.87.132/24 10.0.87.5`;
+  - DNS mode manual with server `10.0.87.5`.
+- Final verified state:
+  - HTTP `/api/health`: OK, Rust backend;
+  - web login `admin/admin1234`: OK;
+  - `/api/application/version`: current `2.0.15`, latest `2.0.14`
+    (because `2.0.15` is not published yet);
+  - `/api/system-update/status`: current `0.2.10-raw.1`, no staged/pending
+    update;
+  - `/api/vm/ssh`: enabled;
+  - `/api/network/dns`: `10.0.87.132/24`, gateway/DNS `10.0.87.5`.
+- Second device search was paused by request until after this recovery.

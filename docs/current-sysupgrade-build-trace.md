@@ -1825,3 +1825,65 @@ Next:
 2. Build and publish the next raw/SD release from commit `c2ee893` or newer.
 3. Do not retry raw installation from `0.2.10-raw.1`.
 4. Restore or inspect `10.0.87.132` before another live raw attempt.
+
+## 2026-06-30: Recovered Former `.132` After Raw `0.2.10`
+
+Device discovery:
+
+- The former `10.0.87.132` was found at DHCP address `10.0.87.44`.
+- `10.0.87.44` exposed NanoKVM HTTP:
+  `/api/health` returned Rust backend status.
+- Web login initially failed with `password setup required`; first setup was
+  recreated as `admin/admin1234`.
+
+Diagnostics through Scripts API:
+
+- hostname: `kvm-48ad`;
+- app: `2.0.14`;
+- system: `0.2.10-raw.1`;
+- `/boot/eth.nodhcp`: empty;
+- `/boot/eth.mac`: `02:17:54:27:05:a7`;
+- `/data`: mounted from `/dev/mmcblk0p3`;
+- `/tmp/data-mount.log`: showed `mkfs.exfat` had formatted p3 during boot,
+  confirming the first-boot marker loss bug;
+- `/etc/kvm.disk0`: present after boot;
+- `/api/vm/ssh`: disabled;
+- `/etc/init.d/S50sshd permanent_on` run from Scripts API started SSH.
+
+Manual repair:
+
+- copied local `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` to the
+  device;
+- extracted it and copied `/kvmapp`;
+- copied fixed init scripts into boot locations:
+  - `/etc/init.d/S01fs`;
+  - `/etc/init.d/S30eth`;
+  - `/etc/init.d/S95nanokvm`;
+- removed `/etc/kvm/ssh_stop`;
+- restored static network:
+  - `/boot/eth.nodhcp`: `10.0.87.132/24 10.0.87.5`;
+  - `/etc/kvm/network/dns.mode`: `manual`;
+  - `/etc/kvm/network/dns.servers`: `10.0.87.5`;
+  - `/etc/resolv.conf`: `nameserver 10.0.87.5`;
+- restarted networking and NanoKVM service.
+
+Final verified state:
+
+- `10.0.87.132` responds to ICMP, SSH 22, and HTTP 80;
+- `/api/health`: OK, Rust backend;
+- web login `admin/admin1234`: OK;
+- `/api/application/version`: current `2.0.15`, latest `2.0.14`;
+- `/api/system-update/status`: current `0.2.10-raw.1`, no staged/pending
+  update;
+- `/api/vm/ssh`: enabled;
+- `/api/network/dns`: static `10.0.87.132/24`, gateway `10.0.87.5`, DNS
+  `10.0.87.5`;
+- `/boot`, `/data`, and rootfs are mounted.
+
+Second-device search:
+
+- paused by user request until after this recovery;
+- known open ports from a broad `10.0.87.0/24` scan included
+  `10.0.87.40`, `10.0.87.87`, `10.0.87.88`, `10.0.87.89`, `10.0.87.128`,
+  `10.0.87.187`, and `10.0.87.188`, but they were not investigated further
+  after `.132` recovery resumed.
