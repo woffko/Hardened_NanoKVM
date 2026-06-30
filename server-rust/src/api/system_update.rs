@@ -1608,6 +1608,7 @@ preserve_root_config() {{\n\
     /etc/shadow \\\n\
     /etc/group \\\n\
     /etc/gshadow \\\n\
+    /etc/kvm.disk0 \\\n\
     /etc/hostname \\\n\
     /etc/machine-id \\\n\
     /etc/resolv.conf \\\n\
@@ -1642,6 +1643,7 @@ restore_root_config() {{\n\
       etc/shadow \\\n\
       etc/group \\\n\
       etc/gshadow \\\n\
+      etc/kvm.disk0 \\\n\
       etc/hostname \\\n\
       etc/machine-id \\\n\
       etc/resolv.conf \\\n\
@@ -3542,6 +3544,8 @@ mod tests {
         assert!(script.contains("/etc/passwd"));
         assert!(script.contains("/etc/shadow"));
         assert!(script.contains("/etc/ssh"));
+        assert!(script.contains("/etc/kvm.disk0"));
+        assert!(script.contains("etc/kvm.disk0"));
         assert!(script.contains("/root/.tailscale"));
         assert!(script.contains("/root/.picoclaw"));
         assert!(script.contains("drop_unsafe_preserved_kvm_state"));

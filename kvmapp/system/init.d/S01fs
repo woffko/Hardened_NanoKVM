@@ -26,6 +26,44 @@ then
                 return 1
         }
 
+        wait_for_data_device() {
+                i=0
+                while [ "$i" -lt 5 ]
+                do
+                        [ -e "$DATA_DEVICE" ] && return 0
+                        i=$((i + 1))
+                        sleep 1
+                done
+
+                return 1
+        }
+
+        ensure_data_partition() {
+                [ -e /boot/usb.disk0 ] || return 0
+
+                if [ -e "$DATA_DEVICE" ]
+                then
+                        touch /etc/kvm.disk0
+                        return 0
+                fi
+
+                echo "creating $DATA_DEVICE" >> "$DATA_LOG"
+                parted -s /dev/mmcblk0 "mkpart primary 8193MB 100%" >> "$DATA_LOG" 2>&1 || {
+                        echo "failed to create $DATA_DEVICE" >> "$DATA_LOG"
+                        return 1
+                }
+
+                if ! wait_for_data_device
+                then
+                        echo "$DATA_DEVICE did not appear after partition create" >> "$DATA_LOG"
+                        return 1
+                fi
+
+                mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || true
+                touch /etc/kvm.disk0
+                return 0
+        }
+
                 # use all sdcard free space for data
                 parted -s /dev/mmcblk0 "resizepart 2 -0"
                 echo "yes
@@ -42,19 +80,7 @@ then
         mount -t configfs configfs /sys/kernel/config
         mount -t debugfs debugfs /sys/kernel/debug
 
-        if [ -e /boot/usb.disk0 ]
-        then
-                if [ ! -e /etc/kvm.disk0 ]
-                then
-                        touch /etc/kvm.disk0
-                        # use all sdcard free space for data
-                        parted -s /dev/mmcblk0 "mkpart primary 8193MB 100%"
-                        sleep 1
-                        # resize data filesystem
-                        mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || true
-                fi
-        fi
-
+        ensure_data_partition || true
         mount_data_partition || true
 
         echo "OK"
