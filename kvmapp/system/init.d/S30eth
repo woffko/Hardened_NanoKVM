@@ -2,6 +2,10 @@
 
 RESERVE_INET="192.168.90.1/22"
 ETH_MAC_FILE="/boot/eth.mac"
+IPV6_MODE_FILE="/boot/eth.ipv6.mode"
+IPV6_CONFIG_FILE="/boot/eth.ipv6"
+UDHCPC6_PID_FILE="/run/udhcpc6.eth0.pid"
+UDHCPC6_SCRIPT="/kvmapp/system/network/udhcpc6.script"
 
 clean_line() {
     echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\r//g'
@@ -79,6 +83,134 @@ ensure_eth_mac() {
     ip link set dev eth0 up 2>/dev/null || true
 }
 
+write_ipv6_conf() {
+    name="$1"
+    value="$2"
+    path="/proc/sys/net/ipv6/conf/eth0/$name"
+    [ -e "$path" ] && echo "$value" > "$path" 2>/dev/null || true
+}
+
+read_ipv6_mode() {
+    mode=""
+    [ -s "$IPV6_MODE_FILE" ] && mode=$(clean_line "$(cat "$IPV6_MODE_FILE")")
+    case "$mode" in
+        slaac|dhcpv6|manual|disabled) echo "$mode" ;;
+        *) echo disabled ;;
+    esac
+}
+
+stop_dhcpv6() {
+    if [ -e "$UDHCPC6_PID_FILE" ]; then
+        kill "$(cat "$UDHCPC6_PID_FILE")" 2>/dev/null || true
+        rm -f "$UDHCPC6_PID_FILE"
+    fi
+    killall udhcpc6 2>/dev/null || true
+}
+
+find_udhcpc6() {
+    for path in /kvmapp/system/bin/udhcpc6 /usr/sbin/udhcpc6 /sbin/udhcpc6 /usr/bin/udhcpc6 /bin/udhcpc6
+    do
+        [ -x "$path" ] && echo "$path" && return 0
+    done
+    return 1
+}
+
+ensure_ipv6_drop_rule() {
+    command -v ip6tables >/dev/null 2>&1 || return
+    ip6tables -C INPUT -i eth0 -j DROP 2>/dev/null || \
+        ip6tables -I INPUT 1 -i eth0 -j DROP 2>/dev/null || true
+}
+
+remove_ipv6_drop_rule() {
+    command -v ip6tables >/dev/null 2>&1 || return
+    while ip6tables -D INPUT -i eth0 -j DROP 2>/dev/null
+    do
+        :
+    done
+}
+
+enable_ipv6_base() {
+    [ -d /proc/sys/net/ipv6/conf/eth0 ] || return 1
+    write_ipv6_conf disable_ipv6 0
+    remove_ipv6_drop_rule
+    return 0
+}
+
+flush_ipv6_global() {
+    ip -6 addr flush dev eth0 scope global 2>/dev/null || true
+}
+
+apply_ipv6_disabled() {
+    stop_dhcpv6
+    write_ipv6_conf accept_ra 0
+    write_ipv6_conf autoconf 0
+    flush_ipv6_global
+    write_ipv6_conf disable_ipv6 1
+    ensure_ipv6_drop_rule
+}
+
+apply_ipv6_slaac() {
+    stop_dhcpv6
+    enable_ipv6_base || return 0
+    write_ipv6_conf accept_ra 2
+    write_ipv6_conf autoconf 1
+    flush_ipv6_global
+}
+
+apply_ipv6_dhcpv6() {
+    stop_dhcpv6
+    enable_ipv6_base || return 0
+    write_ipv6_conf accept_ra 2
+    write_ipv6_conf autoconf 0
+    flush_ipv6_global
+
+    client=$(find_udhcpc6) || {
+        echo "udhcpc6 not found; DHCPv6 mode cannot start" >&2
+        return 0
+    }
+    if [ ! -x "$UDHCPC6_SCRIPT" ]; then
+        echo "udhcpc6 hook not found; DHCPv6 mode cannot start safely" >&2
+        return 0
+    fi
+    "$client" -i eth0 -s "$UDHCPC6_SCRIPT" -t 10 -T 1 -A 5 -b -p "$UDHCPC6_PID_FILE" >/dev/null 2>&1 &
+}
+
+apply_ipv6_manual() {
+    stop_dhcpv6
+    enable_ipv6_base || return 0
+    write_ipv6_conf accept_ra 0
+    write_ipv6_conf autoconf 0
+    flush_ipv6_global
+
+    [ -s "$IPV6_CONFIG_FILE" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=$(clean_line "$line")
+        [ -z "$line" ] && continue
+        set -- $line
+        inet="$1"
+        gw="$2"
+        [ -n "$inet" ] || continue
+        case "$inet" in
+            */*) ;;
+            *) inet="$inet/64" ;;
+        esac
+        ip -6 addr add "$inet" dev eth0 2>/dev/null || true
+        if [ -n "$gw" ]; then
+            ip -6 route replace default via "$gw" dev eth0 2>/dev/null || true
+        fi
+        break
+    done < "$IPV6_CONFIG_FILE"
+}
+
+apply_ipv6() {
+    case "$(read_ipv6_mode)" in
+        slaac) apply_ipv6_slaac ;;
+        dhcpv6) apply_ipv6_dhcpv6 ;;
+        manual) apply_ipv6_manual ;;
+        disabled|*) apply_ipv6_disabled ;;
+    esac
+}
+
 calc_gw() {
     addr="$1"
     netid="$2"
@@ -97,7 +229,7 @@ EOF
 
 start() {
     ensure_eth_mac
-    ip addr flush dev eth0
+    ip -4 addr flush dev eth0
     if [ -e /boot/eth.nodhcp ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             line=$(clean_line "$line")
@@ -130,9 +262,9 @@ start() {
             break
         done < /boot/eth.nodhcp
 
-        ip a show dev eth0 | grep inet > /dev/null || {
+        ip a show dev eth0 | grep 'inet ' > /dev/null || {
             udhcpc -i eth0 -t 3 -T 1 -A 5 -b -p /run/udhcpc.eth0.pid &>/dev/null
-            ip a show dev eth0 | grep inet > /dev/null
+            ip a show dev eth0 | grep 'inet ' > /dev/null
         } || {
             inet=$RESERVE_INET
             addr=${inet%/*}
@@ -141,12 +273,16 @@ start() {
     else
         udhcpc -i eth0 -t 10 -T 1 -A 5 -b -p /run/udhcpc.eth0.pid &
     fi
+
+    apply_ipv6
 }
 
 stop() {
-    [ ! -e "/run/udhcpc.eth0.pid" ] && exit 1
-    kill "$(cat /run/udhcpc.eth0.pid)"
-    rm /run/udhcpc.eth0.pid
+    if [ -e "/run/udhcpc.eth0.pid" ]; then
+        kill "$(cat /run/udhcpc.eth0.pid)" 2>/dev/null || true
+        rm -f /run/udhcpc.eth0.pid
+    fi
+    stop_dhcpv6
 }
 
 case "$1" in

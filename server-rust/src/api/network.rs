@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -42,6 +42,20 @@ const UDHCPC_DNS_HOOK: &str =
     include_str!("../../../server/service/network/scripts/99-nanokvm-dns");
 const MAX_DNS_SERVERS: usize = 6;
 const DEFAULT_ETH_INTERFACE: &str = "eth0";
+const IPV6_MODE_DISABLED: &str = "disabled";
+const IPV6_MODE_SLAAC: &str = "slaac";
+const IPV6_MODE_DHCPV6: &str = "dhcpv6";
+const IPV6_MODE_MANUAL: &str = "manual";
+const IPV6_MODE_FILE: &str = "/boot/eth.ipv6.mode";
+const IPV6_CONFIG_FILE: &str = "/boot/eth.ipv6";
+const DHCPV6_SCRIPT_FILE: &str = "/kvmapp/system/network/udhcpc6.script";
+const DHCPV6_CLIENT_PATHS: &[&str] = &[
+    "/kvmapp/system/bin/udhcpc6",
+    "/usr/sbin/udhcpc6",
+    "/sbin/udhcpc6",
+    "/usr/bin/udhcpc6",
+    "/bin/udhcpc6",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct WolReq {
@@ -110,6 +124,51 @@ pub struct StaticNetworkConfig {
     #[serde(rename = "subnetMask")]
     pub subnet_mask: String,
     pub gateway: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Ipv6Rsp {
+    pub mode: String,
+    pub enabled: bool,
+    pub active: bool,
+    #[serde(rename = "clientAvailable")]
+    pub client_available: bool,
+    #[serde(rename = "clientPath")]
+    pub client_path: String,
+    pub addresses: Vec<Ipv6AddressInfo>,
+    pub gateway: String,
+    pub config: Option<Ipv6StaticConfig>,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Ipv6AddressInfo {
+    pub interface: String,
+    pub address: String,
+    pub prefix: u8,
+    pub scope: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct Ipv6StaticConfig {
+    pub interface: String,
+    pub address: String,
+    pub prefix: u8,
+    pub gateway: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetIpv6Req {
+    pub mode: String,
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<u8>,
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +300,62 @@ pub async fn set_dns(Json(req): Json<SetDnsReq>) -> Result<impl IntoResponse> {
         DNS_MODE_DHCP => set_dhcp_network().await?,
         _ => return Err(AppError::BadRequest("invalid dns mode".to_string())),
     }
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+pub async fn get_ipv6() -> Result<impl IntoResponse> {
+    let mode = current_ipv6_mode();
+    let addresses = get_ipv6_addresses(DEFAULT_ETH_INTERFACE);
+    let active = ipv6_interface_enabled(DEFAULT_ETH_INTERFACE) && !addresses.is_empty();
+    let (client_available, client_path) = dhcpv6_client_status();
+    let gateway = get_default_ipv6_gateway(DEFAULT_ETH_INTERFACE).await;
+    let config = read_ipv6_static_config().unwrap_or_default();
+    let message = ipv6_status_message(&mode, active, client_available);
+
+    Ok(Json(ApiResponse::ok(Ipv6Rsp {
+        enabled: mode != IPV6_MODE_DISABLED,
+        mode,
+        active,
+        client_available,
+        client_path,
+        addresses,
+        gateway,
+        config,
+        status: message.0,
+        message: message.1,
+    })))
+}
+
+pub async fn set_ipv6(Json(req): Json<SetIpv6Req>) -> Result<impl IntoResponse> {
+    let mode = normalize_ipv6_mode(&req.mode)?;
+
+    match mode.as_str() {
+        IPV6_MODE_DISABLED | IPV6_MODE_SLAAC => {
+            remove_file_if_exists(IPV6_CONFIG_FILE)?;
+        }
+        IPV6_MODE_DHCPV6 => {
+            if !dhcpv6_client_status().0 {
+                return Err(AppError::BadRequest(
+                    "DHCPv6 client is not installed; install the matching raw system update first"
+                        .to_string(),
+                ));
+            }
+            remove_file_if_exists(IPV6_CONFIG_FILE)?;
+        }
+        IPV6_MODE_MANUAL => {
+            let config = validate_ipv6_static_config(&req)?;
+            write_ipv6_static_config(&config)?;
+        }
+        _ => unreachable!("validated IPv6 mode"),
+    }
+
+    write_file(
+        Path::new(IPV6_MODE_FILE),
+        format!("{mode}\n").as_bytes(),
+        0o644,
+    )?;
+    restart_ethernet().await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -1077,6 +1192,314 @@ fn default_gateway_for(address: Ipv4Addr, prefix: u8) -> Ipv4Addr {
     Ipv4Addr::from(gateway)
 }
 
+fn normalize_ipv6_mode(mode: &str) -> Result<String> {
+    let mode = mode.trim().to_ascii_lowercase();
+    match mode.as_str() {
+        IPV6_MODE_DISABLED | IPV6_MODE_SLAAC | IPV6_MODE_DHCPV6 | IPV6_MODE_MANUAL => Ok(mode),
+        _ => Err(AppError::BadRequest("invalid IPv6 mode".to_string())),
+    }
+}
+
+fn current_ipv6_mode() -> String {
+    fs::read_to_string(IPV6_MODE_FILE)
+        .ok()
+        .and_then(|mode| normalize_ipv6_mode(&mode).ok())
+        .unwrap_or_else(|| IPV6_MODE_DISABLED.to_string())
+}
+
+fn validate_ipv6_static_config(req: &SetIpv6Req) -> Result<Ipv6StaticConfig> {
+    let interface = req
+        .interface
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ETH_INTERFACE);
+    if interface != DEFAULT_ETH_INTERFACE {
+        return Err(AppError::BadRequest(
+            "only eth0 can be configured manually".to_string(),
+        ));
+    }
+
+    let (address, prefix_from_address) = parse_ipv6_address_with_prefix(
+        req.address
+            .as_deref()
+            .ok_or_else(|| AppError::BadRequest("IPv6 address is required".to_string()))?,
+    )?;
+    let prefix = req
+        .prefix
+        .or(prefix_from_address)
+        .ok_or_else(|| AppError::BadRequest("IPv6 prefix is required".to_string()))?;
+    if !(1..=128).contains(&prefix) {
+        return Err(AppError::BadRequest("invalid IPv6 prefix".to_string()));
+    }
+
+    let gateway = parse_required_ipv6(
+        req.gateway.as_deref(),
+        "IPv6 router is required",
+        "invalid IPv6 router address",
+    )?;
+    ensure_usable_ipv6_address(address, "invalid IPv6 address")?;
+    if is_ipv6_link_local(address) {
+        return Err(AppError::BadRequest(
+            "manual IPv6 address must not be link-local".to_string(),
+        ));
+    }
+    ensure_usable_ipv6_address(gateway, "invalid IPv6 router address")?;
+
+    Ok(Ipv6StaticConfig {
+        interface: interface.to_string(),
+        address: address.to_string(),
+        prefix,
+        gateway: gateway.to_string(),
+    })
+}
+
+fn parse_ipv6_address_with_prefix(value: &str) -> Result<(Ipv6Addr, Option<u8>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::BadRequest("IPv6 address is required".to_string()));
+    }
+
+    let (addr, prefix) = if let Some((addr, prefix)) = value.split_once('/') {
+        let prefix = prefix
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| AppError::BadRequest("invalid IPv6 prefix".to_string()))?;
+        if !(1..=128).contains(&prefix) {
+            return Err(AppError::BadRequest("invalid IPv6 prefix".to_string()));
+        }
+        (addr.trim(), Some(prefix))
+    } else {
+        (value, None)
+    };
+
+    let address = addr
+        .parse::<Ipv6Addr>()
+        .map_err(|_| AppError::BadRequest("invalid IPv6 address".to_string()))?;
+    Ok((address, prefix))
+}
+
+fn parse_required_ipv6(
+    value: Option<&str>,
+    missing_message: &str,
+    invalid_message: &str,
+) -> Result<Ipv6Addr> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest(missing_message.to_string()))?;
+    value
+        .parse::<Ipv6Addr>()
+        .map_err(|_| AppError::BadRequest(invalid_message.to_string()))
+}
+
+fn ensure_usable_ipv6_address(address: Ipv6Addr, message: &str) -> Result<()> {
+    if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
+        return Err(AppError::BadRequest(message.to_string()));
+    }
+    Ok(())
+}
+
+fn read_ipv6_static_config() -> Result<Option<Ipv6StaticConfig>> {
+    let content = match fs::read_to_string(IPV6_CONFIG_FILE) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    for line in content.lines() {
+        let line = strip_inline_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        return parse_ipv6_static_line(line).map(Some);
+    }
+
+    Ok(None)
+}
+
+fn parse_ipv6_static_line(line: &str) -> Result<Ipv6StaticConfig> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 2 {
+        return Err(AppError::BadRequest(
+            "static IPv6 config requires address and router".to_string(),
+        ));
+    }
+
+    let (address, prefix) = parse_ipv6_address_with_prefix(fields[0])?;
+    let prefix = prefix.unwrap_or(64);
+    let gateway = fields[1]
+        .parse::<Ipv6Addr>()
+        .map_err(|_| AppError::BadRequest("invalid IPv6 router address".to_string()))?;
+
+    Ok(Ipv6StaticConfig {
+        interface: DEFAULT_ETH_INTERFACE.to_string(),
+        address: address.to_string(),
+        prefix,
+        gateway: gateway.to_string(),
+    })
+}
+
+fn write_ipv6_static_config(config: &Ipv6StaticConfig) -> Result<()> {
+    let address = config
+        .address
+        .parse::<Ipv6Addr>()
+        .map_err(|_| AppError::BadRequest("invalid IPv6 address".to_string()))?;
+    let gateway = config
+        .gateway
+        .parse::<Ipv6Addr>()
+        .map_err(|_| AppError::BadRequest("invalid IPv6 router address".to_string()))?;
+
+    write_file(
+        Path::new(IPV6_CONFIG_FILE),
+        format!("{address}/{} {gateway}\n", config.prefix).as_bytes(),
+        0o644,
+    )
+}
+
+fn get_ipv6_addresses(interface: &str) -> Vec<Ipv6AddressInfo> {
+    let Ok(addrs) = getifaddrs() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for iface in addrs {
+        if iface.interface_name != interface {
+            continue;
+        }
+        if !iface.flags.contains(InterfaceFlags::IFF_UP) {
+            continue;
+        }
+
+        let Some(address) = iface
+            .address
+            .and_then(|address| address.as_sockaddr_in6().cloned())
+        else {
+            continue;
+        };
+        let ip = address.ip();
+        if ip.is_loopback() {
+            continue;
+        }
+        let prefix = iface
+            .netmask
+            .and_then(|mask| mask.as_sockaddr_in6().cloned())
+            .map(|mask| ipv6_prefix_len(mask.ip()))
+            .unwrap_or(128);
+        let key = format!("{ip}/{prefix}");
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(Ipv6AddressInfo {
+            interface: iface.interface_name,
+            address: ip.to_string(),
+            prefix,
+            scope: ipv6_scope(ip).to_string(),
+        });
+    }
+
+    out
+}
+
+fn ipv6_prefix_len(mask: Ipv6Addr) -> u8 {
+    mask.octets()
+        .iter()
+        .map(|byte| byte.count_ones() as u8)
+        .sum()
+}
+
+fn ipv6_scope(address: Ipv6Addr) -> &'static str {
+    if is_ipv6_link_local(address) {
+        "link"
+    } else if is_ipv6_unique_local(address) {
+        "private"
+    } else {
+        "global"
+    }
+}
+
+fn is_ipv6_link_local(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn is_ipv6_unique_local(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xfe00) == 0xfc00
+}
+
+fn ipv6_interface_enabled(interface: &str) -> bool {
+    let path = format!("/proc/sys/net/ipv6/conf/{interface}/disable_ipv6");
+    fs::read_to_string(path)
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false)
+}
+
+fn dhcpv6_client_status() -> (bool, String) {
+    if !path_exists(DHCPV6_SCRIPT_FILE) {
+        return (false, String::new());
+    }
+    for path in DHCPV6_CLIENT_PATHS {
+        if path_exists(path) {
+            return (true, (*path).to_string());
+        }
+    }
+    (false, String::new())
+}
+
+async fn get_default_ipv6_gateway(interface: &str) -> String {
+    let output = run_allowed(
+        AllowedCommand::Ip,
+        ["-6", "route", "show", "default", "dev", interface],
+        Duration::from_secs(2),
+    )
+    .await;
+    let Ok(output) = output else {
+        return String::new();
+    };
+    if output.status != 0 {
+        return String::new();
+    }
+    parse_default_ipv6_gateway(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_default_ipv6_gateway(output: &str) -> String {
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first().copied() != Some("default") {
+            continue;
+        }
+        if let Some(index) = fields.iter().position(|field| *field == "via") {
+            if let Some(gateway) = fields.get(index + 1) {
+                return (*gateway).to_string();
+            }
+        }
+        return line.to_string();
+    }
+    String::new()
+}
+
+fn ipv6_status_message(mode: &str, active: bool, client_available: bool) -> (String, String) {
+    match mode {
+        IPV6_MODE_DISABLED if active => (
+            "needs-apply".to_string(),
+            "IPv6 is active but configured as disabled; apply settings or reboot".to_string(),
+        ),
+        IPV6_MODE_DISABLED => ("disabled".to_string(), "IPv6 is disabled".to_string()),
+        IPV6_MODE_DHCPV6 if !client_available => (
+            "client-missing".to_string(),
+            "DHCPv6 client is not installed".to_string(),
+        ),
+        IPV6_MODE_SLAAC | IPV6_MODE_DHCPV6 | IPV6_MODE_MANUAL if active => {
+            ("active".to_string(), "IPv6 is active".to_string())
+        }
+        IPV6_MODE_SLAAC | IPV6_MODE_DHCPV6 | IPV6_MODE_MANUAL => (
+            "waiting".to_string(),
+            "IPv6 is enabled, waiting for an address".to_string(),
+        ),
+        _ => ("unknown".to_string(), String::new()),
+    }
+}
+
 fn render_resolv_conf(path: &str, servers: &[String]) -> Result<()> {
     render_resolv_config(
         path,
@@ -1291,6 +1714,43 @@ mod tests {
     fn rejects_invalid_dns_servers() {
         assert!(normalize_dns_servers(["1.1.1.1", "1.1.1.1"]).is_ok());
         assert!(normalize_dns_servers(["999.1.1.1"]).is_err());
+    }
+
+    #[test]
+    fn validates_ipv6_modes() {
+        assert_eq!(normalize_ipv6_mode(" SLAAC\n").unwrap(), IPV6_MODE_SLAAC);
+        assert_eq!(normalize_ipv6_mode("dhcpv6").unwrap(), IPV6_MODE_DHCPV6);
+        assert!(normalize_ipv6_mode("router-advertisements").is_err());
+    }
+
+    #[test]
+    fn validates_manual_ipv6_config() {
+        let config = validate_ipv6_static_config(&SetIpv6Req {
+            mode: IPV6_MODE_MANUAL.to_string(),
+            interface: Some(DEFAULT_ETH_INTERFACE.to_string()),
+            address: Some("fd00:1234:abcd:2::132/64".to_string()),
+            prefix: None,
+            gateway: Some("fe80::1".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(config.address, "fd00:1234:abcd:2::132");
+        assert_eq!(config.prefix, 64);
+        assert_eq!(config.gateway, "fe80::1");
+    }
+
+    #[test]
+    fn rejects_link_local_manual_ipv6_address() {
+        assert!(
+            validate_ipv6_static_config(&SetIpv6Req {
+                mode: IPV6_MODE_MANUAL.to_string(),
+                interface: None,
+                address: Some("fe80::1234".to_string()),
+                prefix: Some(64),
+                gateway: Some("fe80::1".to_string()),
+            })
+            .is_err()
+        );
     }
 
     #[test]

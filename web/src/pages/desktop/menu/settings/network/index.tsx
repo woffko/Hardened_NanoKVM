@@ -2,6 +2,7 @@ import { Divider } from 'antd';
 import { useTranslation } from 'react-i18next';
 
 import { DNS } from './dns.tsx';
+import { IPv6 } from './ipv6.tsx';
 import { Tls } from './tls.tsx';
 import { Wifi } from './wifi.tsx';
 
@@ -20,7 +21,10 @@ export const Network = () => {
 
       <Divider className="opacity-50" style={{ margin: '32px 0' }} />
 
-      <DNS />
+      <div className="flex flex-col space-y-8">
+        <DNS />
+        <IPv6 />
+      </div>
     </>
   );
 };

@@ -1009,17 +1009,30 @@ fn get_ips() -> Vec<IpInfo> {
         let Some(kind) = interface_type(&iface.interface_name) else {
             continue;
         };
-        if seen.contains(&iface.interface_name) {
-            continue;
-        }
         let Some(address) = iface.address else {
             continue;
         };
         let Some(ipv4) = address.as_sockaddr_in().map(|addr| addr.ip()) else {
+            if let Some(ipv6) = address.as_sockaddr_in6().map(|addr| addr.ip()) {
+                if ipv6.is_loopback() {
+                    continue;
+                }
+                if !seen.insert(format!("{}-ipv6-{ipv6}", iface.interface_name)) {
+                    continue;
+                }
+                ips.push(IpInfo {
+                    name: iface.interface_name,
+                    addr: ipv6.to_string(),
+                    version: "IPv6".to_string(),
+                    kind: kind.to_string(),
+                });
+            }
             continue;
         };
 
-        seen.insert(iface.interface_name.clone());
+        if !seen.insert(format!("{}-ipv4-{ipv4}", iface.interface_name)) {
+            continue;
+        }
         ips.push(IpInfo {
             name: iface.interface_name,
             addr: ipv4.to_string(),

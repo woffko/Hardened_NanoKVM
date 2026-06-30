@@ -73,7 +73,7 @@ Production stable/preview channel metadata must use
 ## Current Published System Releases
 
 The current `hardened-system-stable` channel points to lab raw release
-`hardened-system-0.2.4-raw.1`. It was built from the beta `2.0.6` Hardened SD
+`hardened-system-0.2.5-raw.1`. It was built from the beta `2.0.9` Hardened SD
 image and contains validated boot/rootfs partition images plus matching channel
 metadata.
 

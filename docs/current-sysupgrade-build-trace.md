@@ -3,6 +3,91 @@
 This file is the local handoff/trace for the active experimental system-update
 build. Keep it updated before long-running builds or risky device operations.
 
+## 2026-06-30: IPv6 Controls + DHCPv6 Client for App/Raw Rebuild
+
+Goal:
+
+- add explicit IPv6 control in the Hardened GUI instead of allowing IPv6 to run
+  implicitly in the background;
+- default IPv6 to Disabled on Hardened-managed devices;
+- support SLAAC, DHCPv6, and Manual IPv6 modes for local networks that need
+  managed IPv6;
+- include the same IPv6 stack in the app archive, raw system-update bundle, and
+  SD-card image.
+
+Implementation status:
+
+- app version bumped locally to `2.0.9`;
+- added `GET/POST /api/network/ipv6` in the Rust backend;
+- added Settings > Network > IPv6 panel with Disabled/SLAAC/DHCPv6/Manual;
+- added `/boot/eth.ipv6.mode` and `/boot/eth.ipv6` persistence;
+- `S30eth` now applies IPv4 and IPv6 separately and defaults missing IPv6 mode
+  to Disabled;
+- bundled RISC-V BusyBox `udhcpc6` at `/kvmapp/system/bin/udhcpc6`;
+- added `/kvmapp/system/network/udhcpc6.script`, a DHCPv6 hook that avoids the
+  stock script's IPv4 reset behavior.
+
+Validation so far:
+
+- `sh -n kvmapp/system/init.d/S30eth`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `sh -n kvmapp/system/network/udhcpc6.script`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 115 tests.
+- `corepack pnpm --dir web exec tsc --noEmit`: passed.
+- `corepack pnpm --dir web build`: passed.
+
+Generated artifacts before final publication rebuild:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz` | `6d48106d2ccfc151cfe240b0e6376cc0eddac68d3c8f76537f4b1df9c7ba8f38` |
+| App metadata | `build/artifacts/latest.json` | `f736bae4c00e0ff3a9b619e686f19209e41b48c2b28fb68e4bf511580dba4275` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `e62d2814c0c3c2417476438d9819af7dace25a5b64179d63d58568b0798f6bdb` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img` | `563292d151dcc2f9351954892b7b9775d9213ac89f34895893a042a68f96f3e1` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img.xz` | `4534e7bef92077926ec12efd528166c05efea58f8822df77c0b40c735c08f1ce` |
+| SD/rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.rootfs.ext` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
+| Raw boot image | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/boot.vfat` | `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78` |
+| Raw rootfs before bundle patch | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/rootfs.sd` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
+| Raw rootfs inside bundle | `payload/images/rootfs.sd` | `0e634507fea92fb6f73e780d6ba0bff78d8c53e5f1f72f02bdb489f98b26ca92` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz` | `a985bde4a015968b04580c2c8893abbf5aa7d479a213a94e490a904e9f308111` |
+| System metadata | `build/system-updates/system-latest.json` | `9a5ef7fbb239d371fdf1cec250644b22b505dafe44f6b57e0dea486637607281` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `092bea906d3bf57e7735c9b953d66a2801f193e61a461a0a1a23ed425f6e84de` |
+
+Signature checks:
+
+- `openssl dgst -sha256 -verify ... build/artifacts/latest.json`: verified OK.
+- `openssl dgst -sha256 -verify ... build/system-updates/system-latest.json`:
+  verified OK.
+
+Note:
+
+- These artifacts were built before the source changes were committed, so the
+  app archive manifest and raw manifest currently report source commit
+  `81d252f`. Before GitHub publication, commit the source and rebuild at least
+  the app archive, app metadata, raw system bundle, and system metadata so
+  release manifests point at the final source commit.
+
+Device note:
+
+- On `10.0.87.132`, pre-fix Disabled and SLAAC tests worked.
+- A pre-fix DHCPv6 test used the stock BusyBox udhcpc hook, which reset IPv4
+  on `deconfig`; HTTP/SSH then became unreachable (`No route to host`/connect
+  failure).
+- Do not repeat DHCPv6 device testing until the fixed `S30eth`,
+  `/kvmapp/system/bin/udhcpc6`, and `/kvmapp/system/network/udhcpc6.script`
+  are installed on the device after it is restored/rebooted.
+
+Next steps:
+
+1. Commit the source changes.
+2. Rebuild app archive and raw bundle metadata so source manifests point at the
+   final commit.
+3. Publish the app release, raw system release, and channel metadata.
+4. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
+   flow on hardware.
+
 ## 2026-06-29: Raw System Update With Buildroot 2023.11.3 Security Delta
 
 Goal:

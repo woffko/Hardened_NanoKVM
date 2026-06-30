@@ -1,3 +1,30 @@
+## Hardened NanoKVM Beta 2.0.9 (2026-06-30)
+
+### Features
+
+* Added explicit IPv6 controls under Settings > Network. The wired interface
+  now supports Disabled, SLAAC, DHCPv6, and Manual IPv6 modes from the GUI.
+* IPv6 is disabled by default when no Hardened IPv6 mode has been configured,
+  preventing hidden IPv6 exposure on networks that advertise IPv6 automatically.
+* Bundled a small `udhcpc6` client for DHCPv6 mode. The DHCPv6 client uses a
+  Hardened hook script that only manages IPv6/DNS state and does not reset the
+  active IPv4 web/SSH connection.
+
+### Bug Fixes
+
+* The IPv6 panel now shows an Apply action when the desired mode is already
+  Disabled but IPv6 is still active, so app-updated devices can apply the new
+  default without toggling through another mode.
+
+## Hardened NanoKVM Beta 2.0.8 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed OLED sleep timers of 5 minutes and higher by shipping a rebuilt
+  `kvm_system` helper with 32-bit timeout parsing. Earlier builds parsed the
+  configured timeout into an 8-bit value, causing larger timer values to wrap
+  and turn the display off too early.
+
 ## Hardened NanoKVM Beta 2.0.7 (2026-06-29)
 
 ### Bug Fixes

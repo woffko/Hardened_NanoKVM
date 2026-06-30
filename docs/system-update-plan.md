@@ -64,7 +64,7 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `hardened-system-0.1.0-dev.1`, validated the non-destructive
   check/download/install/status/confirm/rollback flow on `10.0.87.132`. It is
   now historical. The current stable system channel points to lab raw release
-  `hardened-system-0.2.4-raw.1`, built from the beta `2.0.6` Hardened SD image.
+  `hardened-system-0.2.5-raw.1`, built from the beta `2.0.9` Hardened SD image.
   The bundled public key is installed from `kvmapp` to
   `/etc/kvm/system-update-signing.pub.pem` on service start, but this is still
   not a production private-key custody process.

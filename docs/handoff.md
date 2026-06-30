@@ -1,19 +1,20 @@
 # Hardened NanoKVM Handoff
 
-Last updated: 2026-06-29
+Last updated: 2026-06-30
 
 ## Repository State
 
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Recent commits when this handoff was created:
+- Current uncommitted work: IPv6 GUI/API/init support for app `2.0.9` plus
+  matching raw/SD rebuild artifacts.
+- Recent commits when this handoff was updated:
+  - `81d252f Record beta 2.0.8 publication`
+  - `ef1e770 Document beta 2.0.8 OLED helper fix`
   - `10392e8 Fix OLED sleep timeout overflow`
   - `c496b67 Clarify Rust-only security documentation`
   - `24cfb02 Refresh README release status and handoff`
-  - `b3ec117 Recover web auth state from active session`
-  - `66a8dae Document application and raw system updates`
-  - `219af6d Record beta 2.0.6 release artifacts`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -22,34 +23,42 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.8`
+- Current app release: `2.0.9`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.8`
-- Published as app-only hotfix.
-- Fixes OLED sleep timers of 5 minutes and higher by shipping a rebuilt
-  `kvm_system` helper with 32-bit timeout parsing.
-- Includes the `2.0.7` login-loop fix after IP/protocol changes or stale
-  browser auth state.
-- GitHub `latest.json` and `hardened-rust-preview/latest.json` were downloaded
-  after publication and stable metadata signature verified.
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.9`
+- Artifact:
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz`
+- SHA256:
+  `6d48106d2ccfc151cfe240b0e6376cc0eddac68d3c8f76537f4b1df9c7ba8f38`
+- Includes explicit IPv6 controls, bundled DHCPv6 client, the `2.0.8` OLED
+  helper fix, and the `2.0.7` login-loop fix.
+- Local `latest.json` metadata signature verified with the bundled test public
+  key.
 
 ### Raw System Release
 
-- Current raw system channel remains: `0.2.4-raw.1`
+- Current raw system channel: `0.2.5-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.4-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.5-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
-- This raw release was built together with app `2.0.6`, not `2.0.8`.
-- No raw/SD rebuild has been made yet for `2.0.8`.
+- Artifact:
+  `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz`
+- SHA256:
+  `a985bde4a015968b04580c2c8893abbf5aa7d479a213a94e490a904e9f308111`
+- Built from the beta `2.0.9` SD rootfs, with raw rootfs SHA
+  `0e634507fea92fb6f73e780d6ba0bff78d8c53e5f1f72f02` after
+  `/etc/kvm/system-version.json` is patched into the payload.
+- Local `system-latest.json` metadata signature verified with the bundled test
+  public key.
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.6`
+- Latest SD image built: beta `2.0.9`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `338df3e1477984892986f3e7ae5ce491bf0cb2001d827863bd5212fd8e8f3752`
+  `4534e7bef92077926ec12efd528166c05efea58f8822df77c0b40c735c08f1ce`
 
 ## Device State
 
@@ -85,7 +94,7 @@ Root cause of login loop:
   - address: `10.0.87.133/24`
   - gateway: `10.0.87.5`
   - DNS/effective/DHCP: `10.0.87.5`
-- After app `2.0.8` is published, it should see `2.0.8`; verify before
+- After app `2.0.9` is published, it should see `2.0.9`; verify before
   installing anything.
 
 ## Important Implementation Notes
@@ -104,6 +113,36 @@ Root cause of login loop:
   validators reject legacy Go backend files and backend-switch scripts.
 
 ## Latest Fixes In Code
+
+### `2.0.9`
+
+- Adds explicit IPv6 controls under Settings > Network:
+  - Disabled;
+  - SLAAC;
+  - DHCPv6;
+  - Manual IPv6 address/prefix/router.
+- IPv6 defaults to Disabled when `/boot/eth.ipv6.mode` is missing.
+- `S30eth` applies IPv6 separately from IPv4 and uses `ip -4 addr flush` so
+  IPv6 settings do not erase IPv4 state and vice versa.
+- A bundled BusyBox `udhcpc6` client was added at
+  `/kvmapp/system/bin/udhcpc6`.
+- DHCPv6 uses `/kvmapp/system/network/udhcpc6.script`, a Hardened hook that
+  only manages IPv6/DNS and does not call the stock `udhcpc` script that resets
+  `eth0` to `0.0.0.0`.
+- Backend route: `GET/POST /api/network/ipv6`.
+- GUI shows an Apply button for `needs-apply`, e.g. when desired mode is
+  Disabled but IPv6 is still active after an app update.
+- Local checks passed:
+  - `sh -n kvmapp/system/init.d/S30eth`
+  - `sh -n kvmapp/system/init.d/S95nanokvm`
+  - `sh -n kvmapp/system/network/udhcpc6.script`
+  - `cargo fmt --manifest-path server-rust/Cargo.toml`
+  - `cargo check --manifest-path server-rust/Cargo.toml`
+  - `corepack pnpm --dir web exec tsc --noEmit`
+- Device `10.0.87.132` was tested before the DHCPv6 hook fix. The stock
+  DHCPv6 script reset IPv4 and made the device unreachable by HTTP/SSH. After
+  the local fix, repeat device validation only after the user restores/reboots
+  the device.
 
 ### `2.0.8`
 
@@ -141,12 +180,11 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Verify devices see app `2.0.8` through GUI update checks, then install on a
-   test device and confirm OLED timers 5/10/30/60 min behave correctly.
-2. Decide whether to build a matching raw system/SD release for app `2.0.8`.
-3. If raw/SD is rebuilt, bump raw system version from `0.2.4-raw.1` to the next
-   value and update `hardened-system-stable`.
-4. Continue testing Manual network changes across HTTP/HTTPS and browser cache
-   states.
-5. Keep updating `docs/current-sysupgrade-build-trace.md` with release hashes
-   and device checks.
+1. Publish/push the `2.0.9` app release, `0.2.5-raw.1` system release, and
+   channel metadata once GitHub connectivity is available.
+2. After the user restores/reboots `10.0.87.132`, install the fixed app and
+   validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
+3. Confirm devices see app `2.0.9` and raw `0.2.5-raw.1` through GUI update
+   checks.
+4. Keep updating `docs/current-sysupgrade-build-trace.md` with publication
+   verification and device checks.

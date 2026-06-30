@@ -146,6 +146,10 @@ pub fn build(state: AppState) -> Router {
             "/api/network/dns",
             get(network::get_dns).post(network::set_dns),
         )
+        .route(
+            "/api/network/ipv6",
+            get(network::get_ipv6).post(network::set_ipv6),
+        )
         .route("/api/network/wifi", get(network::get_wifi))
         .route("/api/network/wifi/connect", post(network::connect_wifi))
         .route(

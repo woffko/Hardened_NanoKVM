@@ -1,11 +1,19 @@
 import { http } from '@/lib/http.ts';
 
 export type DNSMode = 'manual' | 'dhcp';
+export type IPv6Mode = 'disabled' | 'slaac' | 'dhcpv6' | 'manual';
 
 export type NetworkConfig = {
   interface?: string;
   address?: string;
   subnetMask?: string;
+  gateway?: string;
+};
+
+export type IPv6Config = {
+  interface?: string;
+  address?: string;
+  prefix?: number;
   gateway?: string;
 };
 
@@ -85,4 +93,12 @@ export function getDNS() {
 
 export function setDNS(mode: DNSMode, servers: string[], config?: NetworkConfig) {
   return http.post('/api/network/dns', { mode, servers, ...(config || {}) });
+}
+
+export function getIPv6() {
+  return http.get('/api/network/ipv6');
+}
+
+export function setIPv6(mode: IPv6Mode, config?: IPv6Config) {
+  return http.post('/api/network/ipv6', { mode, ...(config || {}) });
 }

@@ -450,6 +450,31 @@ const en = {
           subnetMask: 'Subnet Mask',
           router: 'Router',
           none: 'None'
+        },
+        ipv6: {
+          title: 'IPv6',
+          description: 'Configure IPv6 addressing for the wired interface',
+          disabled: 'Disabled',
+          slaac: 'SLAAC',
+          dhcpv6: 'DHCPv6',
+          manual: 'Manual',
+          apply: 'Apply',
+          status: 'IPv6 Status',
+          interface: 'Interface',
+          state: 'State',
+          router: 'Router',
+          addresses: 'Addresses',
+          dhcpv6Client: 'DHCPv6 Client',
+          notInstalled: 'Not installed',
+          manualSettings: 'Manual IPv6',
+          ipAddress: 'IPv6 Address',
+          prefix: 'Prefix',
+          invalidManual: 'Please enter a valid IPv6 address, prefix, and router',
+          clientMissing: 'DHCPv6 client is not installed. Install the matching raw system update first.',
+          saved: 'IPv6 settings saved',
+          saveFailed: 'Failed to save IPv6 settings',
+          loadFailed: 'Failed to load IPv6 settings',
+          unsaved: 'Unsaved changes'
         }
       },
       tailscale: {

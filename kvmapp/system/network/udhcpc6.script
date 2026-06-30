@@ -1,0 +1,49 @@
+#!/bin/sh
+
+[ -z "$1" ] && echo "Error: should be called from udhcpc6" && exit 1
+[ -n "$interface" ] || interface=eth0
+
+ACTION="$1"
+TAG="$interface-dhcpv6"
+RESOLV_CONF="/etc/resolv.conf"
+[ -e /boot/resolv.conf ] && RESOLV_CONF="/etc/resolv.conf.dhcp6"
+[ -e "$RESOLV_CONF" ] || touch "$RESOLV_CONF"
+
+remove_dns() {
+    tmp=$(mktemp)
+    grep -vE "# $TAG\$" "$RESOLV_CONF" > "$tmp" 2>/dev/null || true
+    cat "$tmp" > "$RESOLV_CONF"
+    rm -f "$tmp"
+}
+
+write_dns() {
+    remove_dns
+
+    if [ -n "$search" ]; then
+        echo "search $search # $TAG" >> "$RESOLV_CONF"
+    elif [ -n "$domain" ]; then
+        echo "search $domain # $TAG" >> "$RESOLV_CONF"
+    fi
+
+    for server in $dns
+    do
+        echo "nameserver $server # $TAG" >> "$RESOLV_CONF"
+    done
+}
+
+case "$ACTION" in
+    deconfig)
+        # Do not touch IPv4 here. The stock udhcpc script resets eth0 to
+        # 0.0.0.0 on deconfig, which breaks the active web/SSH session.
+        remove_dns
+        ;;
+    bound|renew)
+        if [ -n "$ipv6" ]; then
+            ip -6 addr replace "$ipv6/128" dev "$interface" 2>/dev/null || \
+                ip -6 addr add "$ipv6/128" dev "$interface" 2>/dev/null || true
+        fi
+        [ -n "$dns" ] && write_dns
+        ;;
+esac
+
+exit 0

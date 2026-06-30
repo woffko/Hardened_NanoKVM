@@ -458,6 +458,31 @@ const ru = {
           subnetMask: 'Маска подсети',
           router: 'Маршрутизатор',
           none: 'Нет'
+        },
+        ipv6: {
+          title: 'IPv6',
+          description: 'Настройка IPv6 для проводного интерфейса',
+          disabled: 'Отключен',
+          slaac: 'SLAAC',
+          dhcpv6: 'DHCPv6',
+          manual: 'Вручную',
+          apply: 'Применить',
+          status: 'Состояние IPv6',
+          interface: 'Интерфейс',
+          state: 'Состояние',
+          router: 'Маршрутизатор',
+          addresses: 'Адреса',
+          dhcpv6Client: 'DHCPv6-клиент',
+          notInstalled: 'Не установлен',
+          manualSettings: 'Ручной IPv6',
+          ipAddress: 'IPv6-адрес',
+          prefix: 'Префикс',
+          invalidManual: 'Введите допустимый IPv6-адрес, префикс и маршрутизатор',
+          clientMissing: 'DHCPv6-клиент не установлен. Сначала установите соответствующее raw-обновление системы.',
+          saved: 'Настройки IPv6 сохранены',
+          saveFailed: 'Не удалось сохранить настройки IPv6',
+          loadFailed: 'Не удалось загрузить настройки IPv6',
+          unsaved: 'Несохраненные изменения'
         }
       },
       tailscale: {
