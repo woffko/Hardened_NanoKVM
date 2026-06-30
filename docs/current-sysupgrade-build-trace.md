@@ -63,25 +63,36 @@ Generated artifacts:
 
 | Artifact | Path | SHA256 |
 | --- | --- | --- |
-| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz` | `88830921bc615ea3fab5c8a3ccedc5c818c2ab09d89a433bdfeea0e826996b13` |
-| App metadata | `build/artifacts/latest.json` | `cb5d350d2ba3abe98adde8e7509173d4a5e90b9b010dd2e69e0f770d0afcaf78` |
-| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz` | `929ada4cb0078c1a33c490527225063c51d1a844ebfdfe47d427c9563a9fb8d2` |
-| System metadata | `build/system-updates/system-latest.json` | `9d14da3623876f51be169b0bae2d62a799d28aeb8be6bddc1a32f6e01c2f71f0` |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz` | `302e60f80f09ca0c29e876532d9fd0c69731733a05a253e2fb5ec2677f3be35e` |
+| App metadata | `build/artifacts/latest.json` | `497d5c41c0ab5324198372c4dbbc669041e7625c55b37dcf9eedd6abdf150822` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz` | `fb1e2dea3ca1c044da7ad74210c3f119a5ca847a05d8ece50ec3bb6fb9f78bac` |
+| System metadata | `build/system-updates/system-latest.json` | `086fc6b1a3b8f85fdbcae4de108fc567f40d037f7b0c6fc5115cec53fb8ef5e7` |
 | Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_10_buildroot_2023_11_2_security_initfix_Rev1_4_2_rust.img.xz` | `9f396d235cbe40c006e07c9938d7903c15b32f2fcea04f0eefe6c720558267b7` |
 
-Publish plan:
+Publication:
 
-- create replacement app release `hardened-rust-beta-2.0.10`;
-- create replacement raw release `hardened-system-0.2.6-raw.1`;
-- update `hardened-rust-preview`, `hardened-system-stable`, and
-  `hardened-system-preview`;
-- mark `hardened-rust-beta-2.0.9` / `hardened-system-0.2.5-raw.1` as broken or
-  prerelease/deprecated so devices stop seeing them as current channels.
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.10`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.6-raw.1`
+- Updated channels:
+  - `hardened-rust-preview`;
+  - `hardened-system-stable`;
+  - `hardened-system-preview`.
+- Deprecated/broken releases:
+  - `hardened-rust-beta-2.0.9`;
+  - `hardened-system-0.2.5-raw.1`.
+- GitHub verification:
+  - `releases/latest/download/latest.json` returns app `2.0.10`;
+  - `hardened-system-stable/system-latest.json` returns system
+    `0.2.6-raw.1`;
+  - downloaded app and system metadata signatures verify OK with the bundled
+    public key.
 
 Final manifest source:
 
-- App archive `MANIFEST.txt`: `source: 74e2500`.
-- Raw system manifest: `source_commit: 74e2500`.
+- App archive `MANIFEST.txt`: `source: 2a9d02d`.
+- Raw system manifest: `source_commit: 2a9d02d`.
 
 ## 2026-06-30: IPv6 Controls + DHCPv6 Client for App/Raw Rebuild
 

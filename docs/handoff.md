@@ -7,14 +7,14 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current uncommitted work: IPv6 GUI/API/init support for app `2.0.9` plus
-  matching raw/SD rebuild artifacts.
+- Current work: replacement init-fix release `2.0.10` / `0.2.6-raw.1`
+  published after `2.0.9` / `0.2.5-raw.1` raw images were found broken.
 - Recent commits when this handoff was updated:
+  - `2a9d02d Fix raw image init script installation`
+  - `8f18209 Record beta 2.0.9 publication`
+  - `47aac13 Record beta 2.0.9 IPv6 artifacts`
+  - `59bc8dd Add explicit IPv6 network controls`
   - `81d252f Record beta 2.0.8 publication`
-  - `ef1e770 Document beta 2.0.8 OLED helper fix`
-  - `10392e8 Fix OLED sleep timeout overflow`
-  - `c496b67 Clarify Rust-only security documentation`
-  - `24cfb02 Refresh README release status and handoff`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -23,33 +23,32 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.9`
+- Current app release: `2.0.10`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.9`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.10`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz`
 - SHA256:
-  `d64c3ba4f36a56e80bee7c254261e201bda17ee70a3a864abdfd001612382fb5`
-- Includes explicit IPv6 controls, bundled DHCPv6 client, the `2.0.8` OLED
-  helper fix, and the `2.0.7` login-loop fix.
+  `302e60f80f09ca0c29e876532d9fd0c69731733a05a253e2fb5ec2677f3be35e`
+- Includes the raw/SD init-script fix, explicit IPv6 controls, bundled DHCPv6
+  client, the `2.0.8` OLED helper fix, and the `2.0.7` login-loop fix.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.5-raw.1`
+- Current raw system channel: `0.2.6-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.5-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.6-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz`
 - SHA256:
-  `1eb1e6a52cbde814d3b30629f3b63c6866d6acb2c6efcae3073ce7906f082dfb`
-- Built from the beta `2.0.9` SD rootfs, with raw rootfs SHA
-  `66df01ceb0d97a7d8cc8e7b16049b2d07009b6ea38b03349dcfe1e42f98fbf02` after
-  `/etc/kvm/system-version.json` is patched into the payload.
+  `fb1e2dea3ca1c044da7ad74210c3f119a5ca847a05d8ece50ec3bb6fb9f78bac`
+- Built from the beta `2.0.10` SD rootfs. Raw payload manifest source commit:
+  `2a9d02d`.
 - Local `system-latest.json` metadata signature verified with the bundled test
   public key.
 - Published on GitHub and verified through `hardened-system-stable` and
@@ -57,11 +56,11 @@ Detailed chronological build/update notes are in
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.9`
+- Latest SD image built: beta `2.0.10`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_10_buildroot_2023_11_2_security_initfix_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `4534e7bef92077926ec12efd528166c05efea58f8822df77c0b40c735c08f1ce`
+  `9f396d235cbe40c006e07c9938d7903c15b32f2fcea04f0eefe6c720558267b7`
 
 ## Device State
 
