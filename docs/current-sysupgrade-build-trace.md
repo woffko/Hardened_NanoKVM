@@ -88,6 +88,17 @@ Publication:
     `0.2.6-raw.1`;
   - downloaded app and system metadata signatures verify OK with the bundled
     public key.
+- Device IP stabilization before further updates:
+  - first device moved from DHCP `10.0.87.55` to static
+    `10.0.87.132/24`, gateway/DNS `10.0.87.5`;
+  - second device moved from DHCP `10.0.87.42` to static
+    `10.0.87.133/24`, gateway/DNS `10.0.87.5`;
+  - both devices answer `/api/health` on the fixed addresses;
+  - both devices were app-updated to `2.0.10` through `/api/application/update`;
+  - both devices report app `current=2.0.10`, `latest=2.0.10`;
+  - both devices still report raw system `current=0.2.5-raw.1` and see
+    `latest=0.2.6-raw.1`, `updateAvailable=true`;
+  - raw partition install was not started during this step.
 
 Final manifest source:
 

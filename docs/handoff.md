@@ -67,15 +67,15 @@ Detailed chronological build/update notes are in
 ### `10.0.87.132`
 
 - Web: `admin/admin1234`
-- SSH was previously expected as `root/admin1234`, but host key changed during
-  testing; use a temporary known-hosts file or clear the entry before SSH.
-- Directly repaired with local offline app update package `2.0.7`.
-- Last verified:
+- Static IPv4 was set through `/boot/eth.nodhcp`:
+  `10.0.87.132/24 10.0.87.5`; DNS is `10.0.87.5`.
+- Previously appeared as DHCP `10.0.87.55`.
+- Last verified after app update:
   - `/api/health`: OK
-  - `/api/vm/info`: `application=2.0.7`
-  - `/api/application/version`: `current=2.0.7`, `latest=2.0.7`
-  - `/api/auth/account` returns `username`, `csrfToken`, and `expiresAt`
-- User confirmed GUI works after this fix.
+  - `/api/application/version`: `current=2.0.10`, `latest=2.0.10`
+  - `/api/system-update/check`: `current=0.2.5-raw.1`,
+    `latest=0.2.6-raw.1`, `updateAvailable=true`
+  - raw install has not been started yet.
 
 Root cause of login loop:
 
@@ -87,17 +87,17 @@ Root cause of login loop:
 
 ### `10.0.87.133`
 
-- Web password used during latest diagnostics: `admin/admin1234`
-- App was last observed as `2.0.5` before `2.0.7` publication.
-- DNS was corrected from bad manual value `10.0.77.133` to local router/DNS
-  `10.0.87.5`.
-- Last verified network state:
-  - mode: `manual`
-  - address: `10.0.87.133/24`
-  - gateway: `10.0.87.5`
-  - DNS/effective/DHCP: `10.0.87.5`
-- After app `2.0.9` is published, it should see `2.0.9`; verify before
-  installing anything.
+- Web: `admin/admin1234`
+- Static IPv4 was set through `/boot/eth.nodhcp`:
+  `10.0.87.133/24 10.0.87.5`; DNS is `10.0.87.5`.
+- Previously appeared as DHCP `10.0.87.42`.
+- First account setup was required and was completed as `admin/admin1234`.
+- Last verified after app update:
+  - `/api/health`: OK
+  - `/api/application/version`: `current=2.0.10`, `latest=2.0.10`
+  - `/api/system-update/check`: `current=0.2.5-raw.1`,
+    `latest=0.2.6-raw.1`, `updateAvailable=true`
+  - raw install has not been started yet.
 
 ## Important Implementation Notes
 
