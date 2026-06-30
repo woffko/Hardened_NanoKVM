@@ -1712,3 +1712,116 @@ Next:
 2. On `10.0.87.132`, download and install `0.2.8-raw.1` from GUI/API.
 3. Confirm post-reboot version, static IP, web account, SSH account, and boot
    health.
+
+## 2026-06-30: Data Staging Guard Release `2.0.14` / `0.2.10-raw.1`
+
+Reason:
+
+- Device `10.0.87.132` had `/dev/mmcblk0p3` as an exFAT partition, but `/data`
+  was not mounted from p3.
+- The system update cache therefore landed on rootfs under
+  `/data/.hardened-kvmcache/system-update`, which is unsafe for raw writes.
+- Raw updater must not read rootfs payloads from the same rootfs partition that
+  it is about to overwrite.
+
+Implementation:
+
+- app version bumped to `2.0.14`;
+- `S01fs` mounts `/dev/mmcblk0p3` on `/data` with explicit `exfat` and retries;
+- raw install refuses to start when the staged payload directory is on the same
+  filesystem as `/`;
+- raw progress normalization marks a stopped raw writer as failed instead of
+  leaving stale reboot-required progress;
+- raw fail path clears markers before write-start failures and reboots if
+  runtime services had already been stopped.
+
+Build warning discovered during this step:
+
+- `make rust-kvmapp` without `RUST_TARGET` produced an x86-64 host binary;
+- the correct `2.0.14` build used:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+  APP_VERSION=2.0.14 \
+  scripts/package-rust-kvmapp.sh
+```
+
+Validation:
+
+- `file build/kvmapp-rust/kvmapp/server/NanoKVM-Server` reported RISC-V with
+  interpreter `/lib/ld-musl-riscv64xthead.so.1`;
+- `sh -n kvmapp/system/init.d/S01fs`: passed;
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed;
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests;
+- rootfs validator passed with `EXPECTED_KVMAPP_VERSION=2.0.14`;
+- app and system metadata signatures verified locally and after GitHub
+  publication.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.14.tar.gz` | `d84a7b90f755f7afa835db00d59da8f545159e7858153c13790fcdf4c3b3e077` |
+| App metadata | `build/artifacts/latest.json` | `bc1025ffc47333c256e83781396e9552f321ce13f7422c2a3b0523f75b8e2b76` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `a94fdfb5ea1b7764692751180df58efbd05f53c92ee187b4cc20ca6b0a5655a2` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.10-raw.1.tar.gz` | `00896816d05808223f4744493f79f26e934a021f571618b85e4debdfaf4ed26f` |
+| System metadata | `build/system-updates/system-latest.json` | `5269546e182bb055f3e46daa93e31ae5ca06628d732be861d1d7d96111c4b1e7` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `f5875d664da6b2e1d5e25e7fc99b7d9e76b3e0119e431ff0023b74d0ee86e0a6` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_14_buildroot_2023_11_2_security_datafix_Rev1_4_2_rust.img.xz` | `06eb09ff5ed7f48e1499c3d0b35e259380bdecc8b48800d945cc7c3f3e3e5bd7` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.14`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.10-raw.1`
+- App preview channel and system stable/preview channels were updated.
+
+Device `10.0.87.132` result:
+
+- app was manually repaired to correct RISC-V `2.0.14` after the accidental
+  x86-64 archive was installed;
+- `/data` p3 mounted correctly before staging;
+- `0.2.10-raw.1` download/stage succeeded and used `/data` p3;
+- install endpoint returned HTTP 200 with pending `raw-1782829729`;
+- after reboot/drop, the device later had no HTTP/SSH access. Later checks from
+  the host reported route/port failures, so diagnosis requires physical SD
+  inspection, serial, or reflashing.
+
+## 2026-06-30: Follow-up Data Partition Init Fix `2.0.15`
+
+Reason:
+
+- `0.2.10-raw.1` still allowed a dangerous first-boot path after a raw rootfs
+  write.
+- `/etc/kvm.disk0` lives on rootfs and was not preserved. If missing after raw
+  update while `/boot/usb.disk0` exists, `S01fs` could treat the boot as first
+  initialization and attempt to create/format p3 again.
+
+Implementation:
+
+- commit: `c2ee893 Make raw data partition handling idempotent`;
+- app version bumped to `2.0.15`;
+- `S01fs` now checks the real block device first:
+  - if `/dev/mmcblk0p3` exists, it only touches `/etc/kvm.disk0` and mounts
+    `/data`;
+  - it creates and formats p3 only when `/dev/mmcblk0p3` is absent;
+  - partition creation waits for the device node before `mkfs.exfat`.
+- raw updater now preserves and restores `/etc/kvm.disk0`.
+
+Validation:
+
+- `sh -n kvmapp/system/init.d/S01fs`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests.
+
+Next:
+
+1. Build and publish app `2.0.15`.
+2. Build and publish the next raw/SD release from commit `c2ee893` or newer.
+3. Do not retry raw installation from `0.2.10-raw.1`.
+4. Restore or inspect `10.0.87.132` before another live raw attempt.

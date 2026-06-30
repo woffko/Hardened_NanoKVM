@@ -39,8 +39,17 @@ libc.so
 libgcc_s.so or libgcc_s.so.1
 ```
 
-The current repo copy already keeps this under `server-rust/sysroot/lib` on the
-build machine used for releases.
+If the active checkout does not have `server-rust/sysroot/lib`, point the build
+at the known-good extracted NanoKVM sysroot explicitly:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+```
+
+Do not run `make rust-kvmapp` unless `RUST_TARGET` is explicitly set. Without
+that environment variable it can package an x86-64 host binary that installs
+successfully but fails on the device with `Exec format error`.
 
 ## Build And Package Kvmapp
 
@@ -67,6 +76,7 @@ The binary should be a dynamic RISC-V executable using the NanoKVM loader:
 
 ```sh
 file server-rust/target/riscv64gc-unknown-linux-musl/release/nanokvm-rust-server
+file build/kvmapp-rust/kvmapp/server/NanoKVM-Server
 ```
 
 Expected shape:
@@ -75,6 +85,9 @@ Expected shape:
 ELF 64-bit LSB pie executable, UCB RISC-V, dynamically linked,
 interpreter /lib/ld-musl-riscv64xthead.so.1
 ```
+
+If `file build/kvmapp-rust/kvmapp/server/NanoKVM-Server` reports `x86-64`, stop
+and rebuild before publishing or installing the archive.
 
 ## Manual Device Install
 

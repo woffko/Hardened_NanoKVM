@@ -7,14 +7,13 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app hotfix `2.0.12` plus raw/SD release `0.2.8-raw.1` so raw
-  updates can stage gzip-compressed boot/rootfs payloads, preserve user
-  settings before writing boot/rootfs partitions, and keep app `2.0.12` inside
-  the raw image.
+- Current work: app hotfix `2.0.15` after the `0.2.10-raw.1` lab update left
+  `10.0.87.132` without HTTP/SSH. The current fix makes `/data` partition init
+  idempotent and preserves `/etc/kvm.disk0` across raw rootfs writes.
 - Recent commits when this handoff was updated:
+  - `c2ee893 Make raw data partition handling idempotent`
+  - `7891449 Harden raw system update staging`
   - `28161aa Support compressed raw system payloads`
-  - `fafe8d3 Record beta 2.0.11 system release`
-  - `a4a4123 Record beta 2.0.11 publication`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -23,34 +22,36 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.12`
+- Current published app release: `2.0.14`
+- Current source version after follow-up fix: `2.0.15`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.12`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.14`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.12.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.14.tar.gz`
 - SHA256:
-  `bc971f57b43b560ed61d537bcef39a8fcbda49237e847e1457e93dc3283fc8f6`
-- Includes compressed raw payload support, the raw updater
-  setting-preservation fix, the raw/SD init-script fix, explicit IPv6 controls,
+  `d84a7b90f755f7afa835db00d59da8f545159e7858153c13790fcdf4c3b3e077`
+- Includes compressed raw payload support, raw updater setting preservation,
+  raw staging-on-rootfs refusal, `/data` p3 mounting, explicit IPv6 controls,
   bundled DHCPv6 client, the `2.0.8` OLED helper fix, and the `2.0.7`
-  login-loop fix.
+  login-loop fix. Source `2.0.15` adds the follow-up idempotent p3 init guard
+  and `/etc/kvm.disk0` raw preservation.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.8-raw.1`
+- Current raw system channel: `0.2.10-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.8-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.10-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.8-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.10-raw.1.tar.gz`
 - SHA256:
-  `8455bdce09bce0a4a39188eddf97f4658ea509e9b906806b9445c5d78784b175`
-- Built from the beta `2.0.12` SD rootfs. Raw payload manifest source commit:
-  `28161aa`.
+  `00896816d05808223f4744493f79f26e934a021f571618b85e4debdfaf4ed26f`
+- Built from the beta `2.0.14` SD rootfs. Raw payload manifest source commit:
+  `7891449`.
 - Raw payloads are staged as `images/rootfs.sd.gz` and `images/boot.vfat.gz`;
   manifest `required_free_bytes` is `671088640` bytes instead of the old 2 GiB
   lab value.
@@ -61,11 +62,11 @@ Detailed chronological build/update notes are in
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.12`
+- Latest SD image built: beta `2.0.14`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_12_buildroot_2023_11_2_security_compressed_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_14_buildroot_2023_11_2_security_datafix_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `619a9f13c6b3bd196faeb412107bf39062098071da28950e927de8e29cfff2e5`
+  `06eb09ff5ed7f48e1499c3d0b35e259380bdecc8b48800d945cc7c3f3e3e5bd7`
 
 ## Device State
 
@@ -278,8 +279,106 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Install app `2.0.12` on `10.0.87.132` and `10.0.87.133`.
-2. Run compressed raw update to `0.2.8-raw.1` on `10.0.87.132` first and
-   confirm static IP/account/SSH settings survive reboot.
-3. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
-4. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.
+1. Build and publish app `2.0.15` plus the next raw/SD release from commit
+   `c2ee893` or newer.
+2. Do not retry raw install from `0.2.10-raw.1`; it lacks the idempotent
+   `/data` init guard and `/etc/kvm.disk0` preservation.
+3. Inspect or reflash `10.0.87.132`; after the `0.2.10-raw.1` attempt it no
+   longer answers HTTP/SSH and may need SD-card/serial diagnosis.
+4. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware after a
+   device is back on a known-good image.
+
+## 2026-06-30: 2.0.14 / 0.2.10 Raw Update Lab State
+
+Current branch:
+
+- `feature/new-buildroot-sysupgrade-lab`
+- latest pushed commit: `7891449 Harden raw system update staging`
+
+Implemented and pushed:
+
+- app `2.0.14`;
+- raw system update `0.2.10-raw.1`;
+- SD image
+  `Hardened_NanoKVM_beta_2_0_14_buildroot_2023_11_2_security_datafix_Rev1_4_2_rust.img.xz`.
+
+Important fix details:
+
+- Raw install now refuses to start if the staged payload directory is on the
+  root filesystem. On these devices `/data` must be mounted from
+  `/dev/mmcblk0p3`; staging on `/dev/mmcblk0p2` is unsafe because rootfs would
+  be read while it is being overwritten.
+- `S01fs` now mounts `/dev/mmcblk0p3` on `/data` with explicit `exfat` and
+  retries. First-time `mkfs.exfat` is no longer launched in the background.
+- Raw writer status now marks a stopped raw writer as failed instead of leaving
+  an indefinite stale reboot-required state.
+- Raw writer stops more runtime services before the rootfs read-only remount
+  attempt and reboots cleanly on pre-write failure after services were stopped.
+
+Build note:
+
+- Do not run `make rust-kvmapp` without `RUST_TARGET`; it builds an x86-64 host
+  binary and causes `Exec format error` on NanoKVM.
+- In this checkout, `server-rust/sysroot/lib` is missing. The working RISC-V
+  build command used for `2.0.14` was:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+  APP_VERSION=2.0.14 \
+  scripts/package-rust-kvmapp.sh
+```
+
+Published artifacts:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.14`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.10-raw.1`
+- System stable channel now reports `0.2.10-raw.1`.
+- `.132` device confirmed it could query GitHub and see latest
+  `0.2.10-raw.1`.
+
+Device `10.0.87.132` before raw install:
+
+- app manually restored to correct RISC-V `2.0.14`;
+- `/data` mounted from `/dev/mmcblk0p3`;
+- rootfs free space about 698 MiB;
+- `/data` free space about 20.7 GiB;
+- system status clean: no staged, pending, or progress before downloading
+  `0.2.10`.
+
+Raw update attempt on `10.0.87.132`:
+
+- download/stage of `0.2.10-raw.1` succeeded;
+- staged cache was about 541 MiB on `/data` p3;
+- install endpoint returned HTTP 200 with pending `raw-1782829729`;
+- device then dropped SSH/HTTP, later responded to ICMP at `10.0.87.132`, but
+  ports 22 and 80 remained refused for several minutes.
+
+Current blocker:
+
+- `10.0.87.132` appears to boot far enough for network/ICMP, but SSH and web do
+  not start after raw `0.2.10` install.
+- No SSH access is currently available, so next diagnosis likely needs physical
+  SD-card inspection or another device/serial path.
+- Most likely areas to inspect on the written card:
+  - `/etc/init.d/S01fs`, `/etc/init.d/S50sshd`, `/etc/init.d/S95nanokvm`;
+  - `/etc/kvm` preserved state, especially SSH stop flags and raw pending files;
+  - `/data` p3 contents and whether it mounts during boot;
+  - `/tmp` logs are unavailable after reboot, so inspect persistent files only.
+
+Follow-up source fix:
+
+- commit `c2ee893 Make raw data partition handling idempotent`;
+- app version bumped to `2.0.15`;
+- `S01fs` now creates/formats p3 only when `/dev/mmcblk0p3` is actually absent;
+- if `/dev/mmcblk0p3` already exists, `S01fs` only restores
+  `/etc/kvm.disk0` and mounts `/data`;
+- raw updater now preserves/restores `/etc/kvm.disk0`;
+- validation:
+  - `sh -n kvmapp/system/init.d/S01fs`: passed;
+  - `cargo fmt --manifest-path server-rust/Cargo.toml`: passed;
+  - `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+    plus 2 main tests.
