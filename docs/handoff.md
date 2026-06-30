@@ -34,6 +34,7 @@ Detailed chronological build/update notes are in
   helper fix, and the `2.0.7` login-loop fix.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
+- Published on GitHub and verified through `releases/latest/download/latest.json`.
 
 ### Raw System Release
 
@@ -51,6 +52,8 @@ Detailed chronological build/update notes are in
   `/etc/kvm/system-version.json` is patched into the payload.
 - Local `system-latest.json` metadata signature verified with the bundled test
   public key.
+- Published on GitHub and verified through `hardened-system-stable` and
+  `hardened-system-preview` metadata.
 
 ### SD Image
 
@@ -180,11 +183,8 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Publish/push the `2.0.9` app release, `0.2.5-raw.1` system release, and
-   channel metadata once GitHub connectivity is available.
-2. After the user restores/reboots `10.0.87.132`, install the fixed app and
+1. After the user restores/reboots `10.0.87.132`, install the fixed app and
    validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
-3. Confirm devices see app `2.0.9` and raw `0.2.5-raw.1` through GUI update
+2. Confirm devices see app `2.0.9` and raw `0.2.5-raw.1` through GUI update
    checks.
-4. Keep updating `docs/current-sysupgrade-build-trace.md` with publication
-   verification and device checks.
+3. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.

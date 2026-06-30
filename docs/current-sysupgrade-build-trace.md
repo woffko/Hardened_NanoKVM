@@ -78,9 +78,33 @@ Device note:
 
 Next steps:
 
-1. Publish the app release, raw system release, and channel metadata.
-2. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
+1. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
    flow on hardware.
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.9`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.5-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Post-publication verification:
+
+- All five release tags point at commit
+  `47aac135a0f0aa533c5325b3f9d2b6831d26f71c`.
+- Published `latest.json` and `system-latest.json` signatures verify OK with
+  the bundled test public key.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app `2.0.9`.
+- `hardened-rust-preview/latest.json` returns app `2.0.9`.
+- `hardened-system-preview/system-latest.json` returns raw system
+  `0.2.5-raw.1`.
 
 ## 2026-06-29: Raw System Update With Buildroot 2023.11.3 Security Delta
 
