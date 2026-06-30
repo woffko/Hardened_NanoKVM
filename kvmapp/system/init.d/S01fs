@@ -2,6 +2,30 @@
 
 if [ "$1" = "start" ]
 then
+        DATA_DEVICE=/dev/mmcblk0p3
+        DATA_MOUNT=/data
+        DATA_LOG=/tmp/data-mount.log
+
+        mount_data_partition() {
+                [ -e "$DATA_DEVICE" ] || return 0
+                mkdir -p "$DATA_MOUNT"
+                grep -q " $DATA_MOUNT " /proc/mounts && return 0
+
+                i=0
+                while [ "$i" -lt 5 ]
+                do
+                        if mount -t exfat "$DATA_DEVICE" "$DATA_MOUNT" >> "$DATA_LOG" 2>&1
+                        then
+                                return 0
+                        fi
+                        i=$((i + 1))
+                        sleep 1
+                done
+
+                echo "failed to mount $DATA_DEVICE on $DATA_MOUNT" >> "$DATA_LOG"
+                return 1
+        }
+
                 # use all sdcard free space for data
                 parted -s /dev/mmcblk0 "resizepart 2 -0"
                 echo "yes
@@ -27,16 +51,11 @@ then
                         parted -s /dev/mmcblk0 "mkpart primary 8193MB 100%"
                         sleep 1
                         # resize data filesystem
-                        (mkfs.exfat /dev/mmcblk0p3) &
-                        sleep 1
+                        mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || true
                 fi
         fi
 
-        if [ -e /dev/mmcblk0p3 ]
-        then
-                mkdir -p /data
-                mount /dev/mmcblk0p3 /data
-        fi
+        mount_data_partition || true
 
         echo "OK"
 fi

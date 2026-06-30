@@ -8,7 +8,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     os::unix::{
-        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -1266,6 +1266,7 @@ fn install_raw_image_update(
     for image in &manifest.raw_images {
         validate_raw_image_payload(payload_dir, image)?;
     }
+    ensure_raw_payloads_are_not_on_rootfs(payload_dir)?;
     write_raw_install_marker(manifest, &pending)?;
     write_update_progress(
         stage_dir,
@@ -1280,6 +1281,21 @@ fn install_raw_image_update(
     sync_filesystems();
 
     Ok(pending)
+}
+
+fn ensure_raw_payloads_are_not_on_rootfs(payload_dir: &Path) -> Result<()> {
+    let root_dev = fs::metadata("/")
+        .map_err(|err| AppError::Internal(format!("stat root filesystem: {err}")))?
+        .dev();
+    let payload_dev = fs::metadata(payload_dir)
+        .map_err(|err| AppError::Internal(format!("stat system update payload directory: {err}")))?
+        .dev();
+    if root_dev == payload_dev {
+        return Err(AppError::BadRequest(
+            "raw system update staging is on rootfs; mount the /data partition first".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemManifestRawImage> {
@@ -1399,6 +1415,7 @@ BOOT_DEVICE={boot_device}\n\
 ROOT_DEVICE={root_device}\n\
 STARTED_AT={started_at}\n\
 RAW_WRITE_STARTED=0\n\
+SERVICES_STOPPED=0\n\
 BOOT_PRESERVE_DIR=/tmp/hardened-boot-preserve\n\
 BOOT_TMP_MOUNT=/tmp/hardened-boot-preserve-mount\n\
 ROOT_PRESERVE_DIR=/tmp/hardened-root-preserve\n\
@@ -1426,6 +1443,13 @@ fail() {{\n\
     exit 1\n\
   fi\n\
   $BB rm -f {raw_marker} {pending_file} >/dev/null 2>&1 || true\n\
+  if [ \"$SERVICES_STOPPED\" = \"1\" ]; then\n\
+    log 'runtime services were stopped; rebooting to recover cleanly'\n\
+    $BB sync\n\
+    $BB sleep 2\n\
+    $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
+    exit 1\n\
+  fi\n\
   $BB mount -o remount,rw / >/dev/null 2>&1 || true\n\
   /etc/init.d/S95nanokvm start >/dev/null 2>&1 || true\n\
   exit 1\n\
@@ -1442,6 +1466,25 @@ root_is_ro() {{\n\
 }}\n\
 stop_update_runtime() {{\n\
   log 'stopping NanoKVM runtime'\n\
+  SERVICES_STOPPED=1\n\
+  for INIT in \\\n\
+    /etc/init.d/S98tailscaled \\\n\
+    /etc/init.d/S96picoclaw \\\n\
+    /etc/init.d/S95nanokvm \\\n\
+    /etc/init.d/S80dnsmasq \\\n\
+    /etc/init.d/S50sshd \\\n\
+    /etc/init.d/S50ssdpd \\\n\
+    /etc/init.d/S50ser2net \\\n\
+    /etc/init.d/S50avahi-daemon \\\n\
+    /etc/init.d/S49ntp \\\n\
+    /etc/init.d/S40bluetoothd \\\n\
+    /etc/init.d/S30dbus \\\n\
+    /etc/init.d/S21haveged \\\n\
+    /etc/init.d/S10udev \\\n\
+    /etc/init.d/S02klogd \\\n\
+    /etc/init.d/S01syslogd; do\n\
+    [ -x \"$INIT\" ] && \"$INIT\" stop >> \"$LOG\" 2>&1 || true\n\
+  done\n\
   /etc/init.d/S95nanokvm stop >> \"$LOG\" 2>&1 || true\n\
   for PID_FILE in /tmp/nanokvm-watchdog.pid /tmp/system-update-watchdog.pid; do\n\
     if [ -f \"$PID_FILE\" ]; then\n\
@@ -1450,11 +1493,13 @@ stop_update_runtime() {{\n\
       $BB rm -f \"$PID_FILE\" >/dev/null 2>&1 || true\n\
     fi\n\
   done\n\
-  $BB killall NanoKVM-Server >/dev/null 2>&1 || true\n\
-  $BB killall kvm_system >/dev/null 2>&1 || true\n\
+  for NAME in NanoKVM-Server kvm_system tailscaled picoclaw dnsmasq sshd ssdpd avahi-daemon ntpd bluetoothd dbus-daemon haveged input-event-daemon udevd syslogd klogd; do\n\
+    $BB killall \"$NAME\" >/dev/null 2>&1 || true\n\
+  done\n\
   $BB sleep 1\n\
-  $BB killall -9 NanoKVM-Server >/dev/null 2>&1 || true\n\
-  $BB killall -9 kvm_system >/dev/null 2>&1 || true\n\
+  for NAME in NanoKVM-Server kvm_system tailscaled picoclaw dnsmasq sshd ssdpd avahi-daemon ntpd bluetoothd dbus-daemon haveged input-event-daemon udevd syslogd klogd; do\n\
+    $BB killall -9 \"$NAME\" >/dev/null 2>&1 || true\n\
+  done\n\
   for PROC in /proc/[0-9]*; do\n\
     PID=${{PROC##*/}}\n\
     CMD=$($BB tr '\\0' ' ' < \"$PROC/cmdline\" 2>/dev/null || true)\n\
@@ -2631,6 +2676,23 @@ fn read_normalized_update_progress(
 
     let lock_active = update_lock_active();
     let now = now_unix_seconds();
+    let raw_install_stopped = progress.operation == "install"
+        && progress.is_active()
+        && pending
+            .map(|pending| {
+                pending.backup_id.starts_with("raw-")
+                    && !(current.version == pending.version && current.target == pending.target)
+            })
+            .unwrap_or(false)
+        && !raw_writer_active();
+    if raw_install_stopped {
+        progress.phase = "failed".to_string();
+        progress.updated_at = now;
+        progress.message = Some("raw system update writer stopped before reboot".to_string());
+        let _ = write_update_progress(stage_dir, progress.clone());
+        return Some(progress);
+    }
+
     let stale = progress
         .updated_at
         .checked_add(60 * 60)
@@ -2688,6 +2750,35 @@ fn update_lock_active() -> bool {
         .lock()
         .map(|is_updating| *is_updating)
         .unwrap_or(false)
+}
+
+fn raw_writer_active() -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+
+        let cmdline_path = entry.path().join("cmdline");
+        let Ok(cmdline) = fs::read(cmdline_path) else {
+            continue;
+        };
+        if cmdline
+            .windows(SYSTEM_RAW_INSTALL_RUN_DIR.len())
+            .any(|window| window == SYSTEM_RAW_INSTALL_RUN_DIR.as_bytes())
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn raw_pending_marker_is_stale(
