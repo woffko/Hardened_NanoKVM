@@ -62,6 +62,8 @@ const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-atte
 const SYSTEM_RAW_INSTALL_MARKER: &str = "/data/hardened-system-raw-update-pending.json";
 const SYSTEM_RAW_INSTALL_RUN_DIR: &str = "/tmp/hardened-system-raw-update";
 const SYSTEM_RAW_INSTALL_LOG: &str = "/data/hardened-system-raw-update.log";
+const SYSTEM_RAW_RUNTIME_LOADER: &str = "ld-musl-system-update.so.1";
+const SYSTEM_RAW_RUNTIME_LIBC: &str = "libc.so";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
 
@@ -429,15 +431,27 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
         .map(|record| rollback_info(&record));
 
     match read_staged_update(&stage_dir) {
-        Ok(staged) => Ok(Json(ApiResponse::ok(SystemStatusRsp {
-            current,
-            staged,
-            pending,
-            boot_health,
-            rollback,
-            progress,
-            error: None,
-        }))),
+        Ok(mut staged) => {
+            if pending.is_none()
+                && progress.is_none()
+                && staged
+                    .as_ref()
+                    .map(|staged| staged_matches_current_system(staged, &current))
+                    .unwrap_or(false)
+            {
+                staged = None;
+            }
+
+            Ok(Json(ApiResponse::ok(SystemStatusRsp {
+                current,
+                staged,
+                pending,
+                boot_health,
+                rollback,
+                progress,
+                error: None,
+            })))
+        }
         Err(err) => {
             tracing::warn!(error = %err, "failed to read staged system update");
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
@@ -1338,6 +1352,18 @@ fn launch_raw_image_updater(
     fs::copy(&busybox_src, &busybox_dst)?;
     fs::set_permissions(&busybox_dst, fs::Permissions::from_mode(0o755))?;
 
+    let loader_src = find_musl_loader()?;
+    let loader_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LOADER);
+    fs::copy(&loader_src, &loader_dst)?;
+    fs::set_permissions(&loader_dst, fs::Permissions::from_mode(0o755))?;
+
+    let libc_src = Path::new("/lib/libc.so");
+    if libc_src.is_file() {
+        let libc_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LIBC);
+        fs::copy(libc_src, &libc_dst)?;
+        fs::set_permissions(&libc_dst, fs::Permissions::from_mode(0o755))?;
+    }
+
     let script_path = run_dir.join("run.sh");
     let script = raw_image_updater_script(stage_dir, manifest, payload_dir, pending)?;
     fs::write(&script_path, script)?;
@@ -1353,8 +1379,11 @@ fn launch_raw_image_updater(
         .open(SYSTEM_RAW_INSTALL_LOG)?;
     let stderr = stdout.try_clone()?;
 
-    let mut command = Command::new(&busybox_dst);
+    let mut command = Command::new(&loader_dst);
     command
+        .arg("--library-path")
+        .arg(run_dir)
+        .arg(&busybox_dst)
         .arg("sh")
         .arg(&script_path)
         .current_dir(run_dir)
@@ -1400,13 +1429,49 @@ fn find_busybox_binary() -> Result<PathBuf> {
     ))
 }
 
+fn find_musl_loader() -> Result<PathBuf> {
+    for candidate in [
+        "/lib/ld-musl-riscv64v0p7_xthead.so.1",
+        "/lib/ld-musl-riscv64xthead.so.1",
+        "/lib/ld-musl-riscv64.so.1",
+    ] {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir("/lib") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("ld-musl-riscv64") && name.ends_with(".so.1") && path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(AppError::Internal(
+        "musl loader is required for raw system updates".to_string(),
+    ))
+}
+
 fn raw_image_updater_script(
     stage_dir: &Path,
     manifest: &SystemManifest,
     payload_dir: &Path,
     pending: &SystemPendingUpdate,
 ) -> Result<String> {
-    let busybox = shell_quote_path(&Path::new(SYSTEM_RAW_INSTALL_RUN_DIR).join("busybox"))?;
+    let busybox_path = Path::new(SYSTEM_RAW_INSTALL_RUN_DIR).join("busybox");
+    let loader_path = Path::new(SYSTEM_RAW_INSTALL_RUN_DIR).join(SYSTEM_RAW_RUNTIME_LOADER);
+    let busybox = shell_quote(&format!(
+        "{} --library-path {} {}",
+        path_arg(&loader_path)?,
+        SYSTEM_RAW_INSTALL_RUN_DIR,
+        path_arg(&busybox_path)?
+    ));
     let log = shell_quote_path(Path::new(SYSTEM_RAW_INSTALL_LOG))?;
     let progress = shell_quote_path(&stage_dir.join(SYSTEM_PROGRESS_RECORD))?;
     let progress_dir = shell_quote_path(stage_dir)?;
@@ -1430,9 +1495,10 @@ ROOT_DEVICE={root_device}\n\
 STARTED_AT={started_at}\n\
 RAW_WRITE_STARTED=0\n\
 SERVICES_STOPPED=0\n\
-BOOT_PRESERVE_DIR=/tmp/hardened-boot-preserve\n\
+RAW_PRESERVE_DIR=\"$PROGRESS_DIR/preserve\"\n\
+BOOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/boot\"\n\
 BOOT_TMP_MOUNT=/tmp/hardened-boot-preserve-mount\n\
-ROOT_PRESERVE_DIR=/tmp/hardened-root-preserve\n\
+ROOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/root\"\n\
 ROOT_TMP_MOUNT=/tmp/hardened-root-preserve-mount\n\
 kmsg() {{\n\
   [ -w /dev/kmsg ] && $BB printf 'hardened-system-update: %s\\n' \"$1\" > /dev/kmsg || true\n\
@@ -2377,6 +2443,10 @@ fn staged_summary(record: &SystemStageRecord) -> SystemStagedUpdate {
         image_count,
         destructive: image_count > 0,
     }
+}
+
+fn staged_matches_current_system(staged: &SystemStagedUpdate, current: &SystemVersion) -> bool {
+    staged.version == current.version && staged.target == current.target
 }
 
 fn validate_payload_path(path: &str) -> Result<()> {
@@ -3565,6 +3635,12 @@ mod tests {
         let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
             .expect("raw updater script");
 
+        assert!(script.contains("ld-musl-system-update.so.1 --library-path"));
+        assert!(script.contains("RAW_PRESERVE_DIR=\"$PROGRESS_DIR/preserve\""));
+        assert!(script.contains("BOOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/boot\""));
+        assert!(script.contains("ROOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/root\""));
+        assert!(!script.contains("BOOT_PRESERVE_DIR=/tmp/hardened-boot-preserve"));
+        assert!(!script.contains("ROOT_PRESERVE_DIR=/tmp/hardened-root-preserve"));
         assert!(
             script.contains("preserve_boot_config\npreserve_root_config\nprepare_boot_readonly")
         );
@@ -3585,6 +3661,31 @@ mod tests {
         assert!(script.contains("/etc/kvm/system-update-pending.json"));
         assert!(script.contains("$BB cp -a \"$SRC/.\" \"$DEST/\""));
         assert!(!script.contains("$ROOT_TMP_MOUNT/etc/kvm/system-version.json"));
+    }
+
+    #[test]
+    fn staged_update_matches_current_system_when_same_version_and_target() {
+        let record = SystemStageRecord {
+            staged_at: 123,
+            latest: valid_latest(),
+            manifest: valid_raw_manifest(),
+        };
+        let staged = staged_summary(&record);
+        let mut current = SystemVersion {
+            version: staged.version.clone(),
+            target: staged.target.clone(),
+            base_version: String::new(),
+            kernel_version: String::new(),
+            rootfs_version: String::new(),
+            security_patch_level: None,
+            model: String::new(),
+            hardware_version: String::new(),
+            source: "test".to_string(),
+        };
+
+        assert!(staged_matches_current_system(&staged, &current));
+        current.version = "0.0.0-stock".to_string();
+        assert!(!staged_matches_current_system(&staged, &current));
     }
 
     #[test]

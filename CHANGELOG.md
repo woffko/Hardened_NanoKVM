@@ -1,3 +1,23 @@
+## Hardened NanoKVM Beta 2.0.16 (2026-06-30)
+
+### Bug Fixes
+
+* Fixed the raw system-update writer so it no longer depends on the rootfs
+  loader/libc after it starts overwriting `/dev/mmcblk0p2`. The writer now
+  copies BusyBox, the musl loader, and libc into its tmpfs run directory and
+  launches BusyBox through the copied loader with a local library path.
+* Moved raw-update preserved boot/rootfs state from `/tmp` to the `/data`
+  staging directory, avoiding tmpfs exhaustion while preserving optional large
+  runtime files.
+* Hid a stale staged raw-system cache from the GUI when its version already
+  matches the installed system and there is no pending install or active
+  progress record.
+
+### Notes
+
+* This fix was installed manually on `10.0.87.132` for live validation after
+  raw `0.2.11-raw.1` required a manual power-cycle.
+
 ## Hardened NanoKVM Beta 2.0.15 (2026-06-30)
 
 ### Bug Fixes

@@ -7,9 +7,11 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: published app `2.0.15` and coherent raw/SD release
-  `0.2.11-raw.1`, then clean old alpha/internal/broken GitHub release entries
-  while preserving release history in docs.
+- Current work: app `2.0.16` raw-updater fix after live `0.2.11-raw.1`
+  testing on `10.0.87.132` showed the raw writer did not reboot by itself.
+  The device booted after manual power-cycle and `0.2.11-raw.1` was confirmed
+  healthy, but the writer log showed it stopped during ROOTFS streaming before
+  boot partition write/reboot.
 - Recent commits when this handoff was updated:
   - `d9614b6 Clarify system update metadata display`
   - `c2ee893 Make raw data partition handling idempotent`
@@ -86,6 +88,43 @@ Detailed chronological build/update notes are in
 - Keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
   milestone unless the user later asks for stricter cleanup.
 - Delete only obsolete GitHub release entries/assets, not git tags.
+
+### Current Raw Reboot Fix
+
+- Live device: `10.0.87.132`.
+- User installed raw `0.2.11-raw.1` from the GUI.
+- During install, ICMP stayed alive for a while but HTTP/HTTPS/SSH were closed
+  because the raw writer had already stopped runtime services.
+- No automatic reboot happened. The user power-cycled the device manually.
+- After manual power-cycle, the device booted and the user confirmed the update
+  in the GUI.
+- Verified on device after power-cycle:
+  - `/kvmapp/version`: `2.0.15`;
+  - `/etc/kvm/system-version.json`: `0.2.11-raw.1`;
+  - `/data` mounted from `/dev/mmcblk0p3`;
+  - `/etc/kvm/system-update-boot-good.json` confirms healthy boot.
+- `/data/hardened-system-raw-update.log` root cause:
+  - writer stopped services;
+  - preserved config;
+  - remounted rootfs read-only;
+  - started `streaming compressed ROOTFS to /dev/mmcblk0p2`;
+  - then emitted repeated `Segmentation fault`;
+  - it never logged `ROOTFS image write finished`,
+    `raw system image update finished; rebooting`, or boot image write.
+- Confirmed secondary symptom: `/dev/mmcblk0p1` SHA256 did not match the
+  manifest boot image hash, so boot was not rewritten.
+- Likely root cause: the writer copied BusyBox to `/tmp`, but BusyBox is
+  dynamically linked and still used musl loader/libc from the rootfs being
+  overwritten. After `/dev/mmcblk0p2` changed, later tool invocations crashed.
+- Additional issue: preserve state was under `/tmp` and copying large optional
+  files such as `/usr/sbin/tailscaled` could hit tmpfs space limits.
+- Fix in progress for app `2.0.16`:
+  - copy BusyBox, musl loader, and libc into
+    `/tmp/hardened-system-raw-update`;
+  - launch the writer through the copied loader with
+    `--library-path /tmp/hardened-system-raw-update`;
+  - keep preserved boot/rootfs config under the staging directory on `/data`,
+    not under `/tmp`.
 
 ## Device State
 

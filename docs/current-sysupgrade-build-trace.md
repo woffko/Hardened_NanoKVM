@@ -2033,3 +2033,62 @@ Post-cleanup verification:
   `0.2.11-raw.1`.
 - App metadata signature verified OK.
 - System metadata signature verified OK.
+
+## 2026-06-30: `.132` Raw `0.2.11` Did Not Auto-Reboot
+
+Live test:
+
+- Device: `10.0.87.132`.
+- User installed raw `0.2.11-raw.1` from the GUI.
+- GUI kept spinning after runtime services stopped.
+- HTTP/HTTPS/SSH were closed, but local ICMP still answered.
+- User power-cycled the device manually.
+- Device booted successfully after power-cycle and the user confirmed the raw
+  update in the GUI.
+
+Post-boot device state:
+
+- `/kvmapp/version`: `2.0.15`;
+- `/etc/kvm/system-version.json`: `0.2.11-raw.1`;
+- `/etc/os-release`: Buildroot `2023.11.2`, `VERSION=-gd88d58fec-dirty`;
+- `/data`: mounted from `/dev/mmcblk0p3`;
+- `/etc/kvm/system-update-boot-good.json`: healthy and confirmed.
+
+Raw writer log:
+
+```text
+2026-06-30 18:46:04 raw system image update started
+2026-06-30 18:46:06 stopping NanoKVM runtime
+2026-06-30 18:46:09 preserving boot configuration files
+2026-06-30 18:46:09 preserving rootfs configuration files
+cp: write error: No space left on device
+2026-06-30 18:46:12 failed to preserve /usr/sbin/tailscaled
+2026-06-30 18:46:12 preparing /boot read-only
+2026-06-30 18:46:12 attempting rootfs read-only remount
+2026-06-30 18:46:12 rootfs is read-only after normal remount
+2026-06-30 18:46:12 testing compressed ROOTFS payload
+2026-06-30 18:47:41 streaming compressed ROOTFS to /dev/mmcblk0p2
+Segmentation fault
+...
+```
+
+Findings:
+
+- The log never reached `ROOTFS image write finished`, boot image write, or
+  `raw system image update finished; rebooting`.
+- `/dev/mmcblk0p1` SHA256 after boot did not match the `0.2.11-raw.1`
+  manifest boot image hash, so boot was not rewritten.
+- The raw writer copied BusyBox into `/tmp`, but BusyBox is dynamically linked.
+  It still depended on the rootfs musl loader/libc while `/dev/mmcblk0p2` was
+  being overwritten. Later tool invocations crashed with `Segmentation fault`,
+  so the writer did not call reboot.
+- Preserve state was also in `/tmp`; copying optional large files can exhaust
+  tmpfs before raw write.
+
+Fix started as app `2.0.16`:
+
+- copy BusyBox, musl loader, and libc into the raw update run directory;
+- launch the writer through the copied loader and `--library-path` so post-write
+  utility calls do not depend on the overwritten rootfs;
+- store preserved boot/rootfs configuration under the `/data` staging directory
+  instead of `/tmp`.
