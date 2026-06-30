@@ -8,7 +8,9 @@ Last updated: 2026-06-29
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
 - Recent commits when this handoff was created:
-  - `2c92ca8 Record beta 2.0.7 auth hotfix`
+  - `10392e8 Fix OLED sleep timeout overflow`
+  - `c496b67 Clarify Rust-only security documentation`
+  - `24cfb02 Refresh README release status and handoff`
   - `b3ec117 Recover web auth state from active session`
   - `66a8dae Document application and raw system updates`
   - `219af6d Record beta 2.0.6 release artifacts`
@@ -20,12 +22,16 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.7`
+- Current app release: `2.0.8`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.7`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.8`
 - Published as app-only hotfix.
-- Fixes login loop after IP/protocol changes or stale browser auth state.
-- GitHub `latest.json` was downloaded after publication and signature verified.
+- Fixes OLED sleep timers of 5 minutes and higher by shipping a rebuilt
+  `kvm_system` helper with 32-bit timeout parsing.
+- Includes the `2.0.7` login-loop fix after IP/protocol changes or stale
+  browser auth state.
+- GitHub `latest.json` should be downloaded after publication and signature
+  verified.
 
 ### Raw System Release
 
@@ -34,8 +40,8 @@ Detailed chronological build/update notes are in
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.4-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
-- This raw release was built together with app `2.0.6`, not `2.0.7`.
-- No raw/SD rebuild has been made yet for `2.0.7`.
+- This raw release was built together with app `2.0.6`, not `2.0.8`.
+- No raw/SD rebuild has been made yet for `2.0.8`.
 
 ### SD Image
 
@@ -79,7 +85,8 @@ Root cause of login loop:
   - address: `10.0.87.133/24`
   - gateway: `10.0.87.5`
   - DNS/effective/DHCP: `10.0.87.5`
-- It should now see app `2.0.7`, but verify before installing anything.
+- After app `2.0.8` is published, it should see `2.0.8`; verify before
+  installing anything.
 
 ## Important Implementation Notes
 
@@ -98,7 +105,7 @@ Root cause of login loop:
 
 ## Latest Fixes In Code
 
-### OLED sleep source fix
+### `2.0.8`
 
 - Root cause: `kvm_system` parsed `/etc/kvm/oled_sleep` into `uint8_t`, so UI
   values of 300 seconds and higher overflowed before the sleep comparison.
@@ -106,9 +113,10 @@ Root cause of login loop:
   and `support/sg2002/kvm_system/main/include/config.h`: OLED sleep is now
   parsed into a 32-bit value, the input buffer is terminated, and values above
   one day fall back to the default.
-- This is not fixed on devices until `kvm_system` is rebuilt with MaixCDK and
-  packaged as `/kvmapp/kvm_system/kvm_system`; a normal Rust-only app package
-  that reuses the old helper binary will still have the bug.
+- Local MaixCDK build now produces
+  `support/sg2002/kvm_system/dist/kvm_system_release/kvm_system`.
+- Package `build/artifacts/hardened-nanokvm-kvmapp-2.0.8.tar.gz` was built
+  with `KVM_SYSTEM_SOURCE` pointing at that rebuilt helper.
 
 ### `2.0.7`
 
@@ -133,8 +141,8 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Verify `10.0.87.133` sees app `2.0.7` and update it through GUI.
-2. Decide whether to build a matching raw system/SD release for app `2.0.7`.
+1. Publish app `2.0.8` and verify devices see it through GUI update checks.
+2. Decide whether to build a matching raw system/SD release for app `2.0.8`.
 3. If raw/SD is rebuilt, bump raw system version from `0.2.4-raw.1` to the next
    value and update `hardened-system-stable`.
 4. Continue testing Manual network changes across HTTP/HTTPS and browser cache
