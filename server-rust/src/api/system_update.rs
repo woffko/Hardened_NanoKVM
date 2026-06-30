@@ -7,7 +7,10 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    os::unix::{
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{LazyLock, Mutex},
@@ -1320,13 +1323,28 @@ fn launch_raw_image_updater(
         .open(SYSTEM_RAW_INSTALL_LOG)?;
     let stderr = stdout.try_clone()?;
 
-    Command::new(&busybox_dst)
+    let mut command = Command::new(&busybox_dst);
+    command
         .arg("sh")
         .arg(&script_path)
         .current_dir(run_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::from(stderr));
+
+    // libkvm/CVI file descriptors are not guaranteed to be CLOEXEC. If the
+    // raw updater inherits them, it can keep device files and sockets open
+    // after NanoKVM is stopped and make the read-only remount unreliable.
+    unsafe {
+        command.pre_exec(|| {
+            for fd in 3..1024 {
+                nix::libc::close(fd);
+            }
+            Ok(())
+        });
+    }
+
+    command
         .spawn()
         .map_err(|err| AppError::Internal(format!("failed to launch raw image updater: {err}")))?;
 
@@ -1365,6 +1383,8 @@ fn raw_image_updater_script(
     let version = shell_quote(&manifest.version);
     let boot_device = shell_quote_path(Path::new(RAW_BOOT_DEVICE))?;
     let root_device = shell_quote_path(Path::new(RAW_ROOTFS_DEVICE))?;
+    let raw_marker = shell_quote_path(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
+    let pending_file = shell_quote_path(Path::new(SYSTEM_PENDING_FILE))?;
     let started_at = pending.installed_at;
 
     let mut script = format!(
@@ -1405,6 +1425,7 @@ fail() {{\n\
     $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
     exit 1\n\
   fi\n\
+  $BB rm -f {raw_marker} {pending_file} >/dev/null 2>&1 || true\n\
   $BB mount -o remount,rw / >/dev/null 2>&1 || true\n\
   /etc/init.d/S95nanokvm start >/dev/null 2>&1 || true\n\
   exit 1\n\
@@ -3433,6 +3454,9 @@ mod tests {
         assert!(script.contains("/root/.tailscale"));
         assert!(script.contains("/root/.picoclaw"));
         assert!(script.contains("drop_unsafe_preserved_kvm_state"));
+        assert!(script.contains("$BB rm -f"));
+        assert!(script.contains("/data/hardened-system-raw-update-pending.json"));
+        assert!(script.contains("/etc/kvm/system-update-pending.json"));
         assert!(script.contains("$BB cp -a \"$SRC/.\" \"$DEST/\""));
         assert!(!script.contains("$ROOT_TMP_MOUNT/etc/kvm/system-version.json"));
     }
