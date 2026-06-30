@@ -1887,3 +1887,46 @@ Second-device search:
   `10.0.87.40`, `10.0.87.87`, `10.0.87.88`, `10.0.87.89`, `10.0.87.128`,
   `10.0.87.187`, and `10.0.87.188`, but they were not investigated further
   after `.132` recovery resumed.
+
+## 2026-06-30: Recovered Second Device `.133`
+
+Discovery:
+
+- `10.0.87.133` reappeared with ICMP, SSH 22, and HTTP 80 available.
+- `/api/health` returned Rust backend status.
+- Web login `admin/admin1234` worked.
+
+Initial state:
+
+- app `2.0.13`;
+- system `0.2.5-raw.1`;
+- raw update toggle disabled;
+- SSH enabled;
+- static network already configured as `10.0.87.133/24`, gateway/DNS
+  `10.0.87.5`.
+
+Manual repair:
+
+- copied local `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` to
+  `/tmp`;
+- archive hash on device matched
+  `778fb544b5672644c68cc85e72f2849f938101d6547aa4a6134b95eeedbae12b`;
+- BusyBox `tar -z` is unsupported and `tar -a` failed on this image; extraction
+  works with `gzip -dc hardened-nanokvm-kvmapp-2.0.15.tar.gz | tar -xf - -C /tmp/kvmapp-2.0.15`;
+- replaced `/kvmapp`;
+- copied `S01fs`, `S30eth`, and `S95nanokvm` from `/kvmapp/system/init.d` to
+  `/etc/init.d`;
+- restored static network files for `10.0.87.133/24` and DNS `10.0.87.5`;
+- ensured SSH remains enabled.
+
+Verification:
+
+- reboot was issued and the device returned on `10.0.87.133`;
+- `/api/health`: OK, Rust backend;
+- `/api/application/version`: current `2.0.15`, latest `2.0.14`;
+- `/api/system-update/status`: current `0.2.5-raw.1`, boot health healthy;
+- `/api/vm/ssh`: enabled;
+- `/api/network/dns`: static `10.0.87.133/24`, gateway/DNS `10.0.87.5`;
+- `/data` mounted from `/dev/mmcblk0p3`;
+- installed `S01fs` has the idempotent p3 check and only touches
+  `/etc/kvm.disk0` when `/dev/mmcblk0p3` already exists.

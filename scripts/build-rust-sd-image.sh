@@ -8,6 +8,11 @@ BASE_IMAGE="${NANOKVM_BASE_IMAGE:-$OUT_DIR/20260123_NanoKVM_Rev1_4_2.img}"
 KVMAPP_DIR="${KVMAPP_DIR:-$BUILD_DIR/kvmapp-rust/kvmapp}"
 SENSOR_DATA_DIR="${SENSOR_DATA_DIR:-$KVMAPP_DIR/system/mnt-data}"
 VERSION="${HARDENED_RELEASE_VERSION:-alpha-0.1}"
+SYSTEM_VERSION="${HARDENED_SYSTEM_VERSION:-}"
+SYSTEM_TARGET="${HARDENED_SYSTEM_TARGET:-sg2002-licheervnano-sd}"
+SYSTEM_BASE_VERSION="${HARDENED_SYSTEM_BASE_VERSION:-}"
+SYSTEM_KERNEL_VERSION="${HARDENED_SYSTEM_KERNEL_VERSION:-}"
+SYSTEM_SECURITY_PATCH_LEVEL="${HARDENED_SYSTEM_SECURITY_PATCH_LEVEL:-}"
 OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_Rev1_4_2_rust}"
 BOOT_INIT_SCRIPTS=(
   S00kmod
@@ -25,6 +30,7 @@ BOOT_INIT_SCRIPTS=(
 OUT_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.img"
 ROOTFS_IMAGE="$OUT_DIR/$OUTPUT_BASENAME.rootfs.ext"
 STATE_FILE="$OUT_DIR/$OUTPUT_BASENAME.backend-state"
+SYSTEM_VERSION_FILE="$OUT_DIR/$OUTPUT_BASENAME.system-version.json"
 DEBUGFS_CMDS="$OUT_DIR/$OUTPUT_BASENAME.debugfs.cmd"
 FSTAB_FILE="$OUT_DIR/$OUTPUT_BASENAME.fstab"
 
@@ -64,6 +70,19 @@ echo "Extracting rootfs partition..."
 dd if="$OUT_IMAGE" of="$ROOTFS_IMAGE" bs=512 skip="$ROOTFS_START" count="$ROOTFS_SECTORS" status=none
 
 printf 'rust\n' > "$STATE_FILE"
+if [ -n "$SYSTEM_VERSION" ]; then
+  {
+    printf '{\n'
+    printf '  "version": "%s",\n' "$SYSTEM_VERSION"
+    printf '  "target": "%s",\n' "$SYSTEM_TARGET"
+    printf '  "base_version": "%s",\n' "$SYSTEM_BASE_VERSION"
+    printf '  "kernel_version": "%s"' "$SYSTEM_KERNEL_VERSION"
+    if [ -n "$SYSTEM_SECURITY_PATCH_LEVEL" ]; then
+      printf ',\n  "security_patch_level": "%s"' "$SYSTEM_SECURITY_PATCH_LEVEL"
+    fi
+    printf '\n}\n'
+  } > "$SYSTEM_VERSION_FILE"
+fi
 
 debugfs -R "dump /etc/fstab $FSTAB_FILE" "$ROOTFS_IMAGE" >/dev/null 2>&1 || : > "$FSTAB_FILE"
 if ! grep -Eq '^[[:space:]]*[^#]+[[:space:]]+/data[[:space:]]+' "$FSTAB_FILE"; then
@@ -111,6 +130,14 @@ fi
   printf 'sif /etc/kvm/backend gid 0\n'
   printf 'rm /etc/kvm/scripts/switch-backend-go.sh\n'
   printf 'rm /etc/kvm/scripts/switch-backend-rust.sh\n'
+
+  if [ -n "$SYSTEM_VERSION" ]; then
+    printf 'rm /etc/kvm/system-version.json\n'
+    printf 'write %s /etc/kvm/system-version.json\n' "$SYSTEM_VERSION_FILE"
+    printf 'sif /etc/kvm/system-version.json mode 0100644\n'
+    printf 'sif /etc/kvm/system-version.json uid 0\n'
+    printf 'sif /etc/kvm/system-version.json gid 0\n'
+  fi
 
   if [ -d "$SENSOR_DATA_DIR" ]; then
     printf 'mkdir /mnt\n'

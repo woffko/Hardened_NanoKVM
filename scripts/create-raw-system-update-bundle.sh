@@ -7,6 +7,7 @@ usage() {
   echo "environment:" >&2
   echo "  BASE_VERSION=<current base image marker>" >&2
   echo "  KERNEL_VERSION=<kernel version after update>" >&2
+  echo "  SECURITY_PATCH_LEVEL=<optional security patch/backport label>" >&2
   echo "  RAW_IMAGE_COMPRESSION=gzip|none (default: gzip)" >&2
   echo "  REQUIRED_FREE_BYTES=<bytes required on staging filesystem>" >&2
   echo "  BUNDLE_NAME=<archive filename>" >&2
@@ -63,7 +64,13 @@ patch_rootfs_image() {
   {
     printf '{\n'
     printf '  "version": "%s",\n' "$VERSION"
-    printf '  "target": "%s"\n' "$TARGET"
+    printf '  "target": "%s",\n' "$TARGET"
+    printf '  "base_version": "%s",\n' "$BASE_VERSION"
+    printf '  "kernel_version": "%s"' "$KERNEL_VERSION"
+    if [ -n "$SECURITY_PATCH_LEVEL" ]; then
+      printf ',\n  "security_patch_level": "%s"' "$SECURITY_PATCH_LEVEL"
+    fi
+    printf '\n'
     printf '}\n'
   } > "$version_file"
 
@@ -103,6 +110,7 @@ validate_token "target" "$TARGET"
 
 BASE_VERSION="${BASE_VERSION:-unknown}"
 KERNEL_VERSION="${KERNEL_VERSION:-unknown}"
+SECURITY_PATCH_LEVEL="${SECURITY_PATCH_LEVEL:-}"
 RAW_IMAGE_COMPRESSION="${RAW_IMAGE_COMPRESSION:-gzip}"
 REQUIRED_FREE_BYTES="${REQUIRED_FREE_BYTES:-2147483648}"
 BUNDLE_NAME="${BUNDLE_NAME:-hardened-nanokvm-system-$VERSION.tar.gz}"
@@ -115,6 +123,14 @@ esac
 case "$REQUIRED_FREE_BYTES" in
   "" | *[!0-9]*) die "invalid REQUIRED_FREE_BYTES: $REQUIRED_FREE_BYTES" ;;
 esac
+
+if [ -n "$SECURITY_PATCH_LEVEL" ]; then
+  case "$SECURITY_PATCH_LEVEL" in
+    .* | *..* | *.) die "invalid SECURITY_PATCH_LEVEL: $SECURITY_PATCH_LEVEL" ;;
+  esac
+  printf '%s' "$SECURITY_PATCH_LEVEL" | grep -Eq '^[A-Za-z0-9._+:/ -]+$' ||
+    die "invalid SECURITY_PATCH_LEVEL: $SECURITY_PATCH_LEVEL"
+fi
 
 case "$BUNDLE_NAME" in
   hardened-nanokvm-system-*.tar.gz) ;;
@@ -157,6 +173,9 @@ MANIFEST="$STAGE_DIR/manifest.json"
   printf '  "target": "%s",\n' "$TARGET"
   printf '  "base_version": "%s",\n' "$BASE_VERSION"
   printf '  "kernel_version": "%s",\n' "$KERNEL_VERSION"
+  if [ -n "$SECURITY_PATCH_LEVEL" ]; then
+    printf '  "security_patch_level": "%s",\n' "$SECURITY_PATCH_LEVEL"
+  fi
   printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
   printf '  "created_utc": "%s",\n' "$CREATED_UTC"
   printf '  "required_free_bytes": %s,\n' "$REQUIRED_FREE_BYTES"

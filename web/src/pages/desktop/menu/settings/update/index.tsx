@@ -737,14 +737,25 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
           {systemCurrent && (
             <div className="space-y-2 px-2 pb-2">
-              {versionLine(t('settings.update.system.base'), systemCurrent.baseVersion)}
+              {versionLine(t('settings.update.system.systemVersion'), systemCurrent.version)}
+              {versionLine(t('settings.update.system.baseImage'), systemCurrent.baseVersion)}
+              {versionLine(t('settings.update.system.buildrootRelease'), systemCurrent.rootfsVersion)}
+              {systemCurrent.securityPatchLevel &&
+                versionLine(
+                  t('settings.update.system.securityPatchLevel'),
+                  systemCurrent.securityPatchLevel
+                )}
               {versionLine(t('settings.update.system.kernel'), systemCurrent.kernelVersion)}
-              {versionLine(t('settings.update.system.rootfs'), systemCurrent.rootfsVersion)}
               {versionLine(t('settings.update.system.target'), systemCurrent.target)}
               {systemLatest &&
                 versionLine(t('settings.update.system.latestTarget'), systemLatest.target)}
               {systemStaged &&
                 versionLine(t('settings.update.system.stagedVersion'), systemStaged.version)}
+              {systemStaged?.securityPatchLevel &&
+                versionLine(
+                  t('settings.update.system.stagedSecurityPatchLevel'),
+                  systemStaged.securityPatchLevel
+                )}
               {systemStaged &&
                 versionLine(t('settings.update.system.archive'), systemStaged.archiveName)}
               {systemStaged &&
