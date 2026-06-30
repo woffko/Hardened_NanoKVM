@@ -7,6 +7,7 @@ usage() {
   echo "environment:" >&2
   echo "  BASE_VERSION=<current base image marker>" >&2
   echo "  KERNEL_VERSION=<kernel version after update>" >&2
+  echo "  RAW_IMAGE_COMPRESSION=gzip|none (default: gzip)" >&2
   echo "  REQUIRED_FREE_BYTES=<bytes required on staging filesystem>" >&2
   echo "  BUNDLE_NAME=<archive filename>" >&2
   exit 1
@@ -31,11 +32,20 @@ json_image() {
   label="$1"
   payload="$2"
   device="$3"
-  file="$4"
-  size=$(wc -c < "$file" | tr -d ' ')
-  sha256=$(sha256sum "$file" | awk '{print $1}')
-  printf '    {"payload": "%s", "device": "%s", "label": "%s", "size": %s, "sha256": "%s"}' \
-    "$payload" "$device" "$label" "$size" "$sha256"
+  raw_file="$4"
+  stored_file="$5"
+  compression="$6"
+  size=$(wc -c < "$raw_file" | tr -d ' ')
+  sha256=$(sha256sum "$raw_file" | awk '{print $1}')
+  if [ "$compression" = "gzip" ]; then
+    compressed_size=$(wc -c < "$stored_file" | tr -d ' ')
+    compressed_sha256=$(sha256sum "$stored_file" | awk '{print $1}')
+    printf '    {"payload": "%s", "device": "%s", "label": "%s", "size": %s, "sha256": "%s", "compression": "gzip", "compressed_size": %s, "compressed_sha256": "%s"}' \
+      "$payload" "$device" "$label" "$size" "$sha256" "$compressed_size" "$compressed_sha256"
+  else
+    printf '    {"payload": "%s", "device": "%s", "label": "%s", "size": %s, "sha256": "%s"}' \
+      "$payload" "$device" "$label" "$size" "$sha256"
+  fi
 }
 
 patch_rootfs_image() {
@@ -93,8 +103,14 @@ validate_token "target" "$TARGET"
 
 BASE_VERSION="${BASE_VERSION:-unknown}"
 KERNEL_VERSION="${KERNEL_VERSION:-unknown}"
+RAW_IMAGE_COMPRESSION="${RAW_IMAGE_COMPRESSION:-gzip}"
 REQUIRED_FREE_BYTES="${REQUIRED_FREE_BYTES:-2147483648}"
 BUNDLE_NAME="${BUNDLE_NAME:-hardened-nanokvm-system-$VERSION.tar.gz}"
+
+case "$RAW_IMAGE_COMPRESSION" in
+  gzip | none) ;;
+  *) die "invalid RAW_IMAGE_COMPRESSION: $RAW_IMAGE_COMPRESSION" ;;
+esac
 
 case "$REQUIRED_FREE_BYTES" in
   "" | *[!0-9]*) die "invalid REQUIRED_FREE_BYTES: $REQUIRED_FREE_BYTES" ;;
@@ -108,11 +124,27 @@ esac
 STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hardened-raw-system-update.XXXXXX")
 trap 'rm -rf "$STAGE_DIR"' EXIT INT TERM
 
-mkdir -p "$STAGE_DIR/payload/images" "$OUT_DIR"
-cp -f "$BOOT_IMAGE" "$STAGE_DIR/payload/images/boot.vfat"
-cp -f "$ROOTFS_IMAGE" "$STAGE_DIR/payload/images/rootfs.sd"
-patch_rootfs_image "$STAGE_DIR/payload/images/rootfs.sd"
-"$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$STAGE_DIR/payload/images/rootfs.sd" >/dev/null
+mkdir -p "$STAGE_DIR/payload/images" "$STAGE_DIR/raw" "$OUT_DIR"
+cp -f "$BOOT_IMAGE" "$STAGE_DIR/raw/boot.vfat"
+cp -f "$ROOTFS_IMAGE" "$STAGE_DIR/raw/rootfs.sd"
+patch_rootfs_image "$STAGE_DIR/raw/rootfs.sd"
+"$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$STAGE_DIR/raw/rootfs.sd" >/dev/null
+
+if [ "$RAW_IMAGE_COMPRESSION" = "gzip" ]; then
+  gzip -n -c "$STAGE_DIR/raw/boot.vfat" > "$STAGE_DIR/payload/images/boot.vfat.gz"
+  gzip -n -c "$STAGE_DIR/raw/rootfs.sd" > "$STAGE_DIR/payload/images/rootfs.sd.gz"
+  BOOT_PAYLOAD="images/boot.vfat.gz"
+  ROOTFS_PAYLOAD="images/rootfs.sd.gz"
+  BOOT_STORED="$STAGE_DIR/payload/images/boot.vfat.gz"
+  ROOTFS_STORED="$STAGE_DIR/payload/images/rootfs.sd.gz"
+else
+  cp -f "$STAGE_DIR/raw/boot.vfat" "$STAGE_DIR/payload/images/boot.vfat"
+  cp -f "$STAGE_DIR/raw/rootfs.sd" "$STAGE_DIR/payload/images/rootfs.sd"
+  BOOT_PAYLOAD="images/boot.vfat"
+  ROOTFS_PAYLOAD="images/rootfs.sd"
+  BOOT_STORED="$STAGE_DIR/payload/images/boot.vfat"
+  ROOTFS_STORED="$STAGE_DIR/payload/images/rootfs.sd"
+fi
 
 CREATED_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 SOURCE_COMMIT=$(git -C "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)" rev-parse --short HEAD 2>/dev/null || printf unknown)
@@ -132,9 +164,9 @@ MANIFEST="$STAGE_DIR/manifest.json"
   printf '  "operations": ["stage", "write-raw-devices", "sync", "reboot", "manual-recovery-only"],\n'
   printf '  "files": [],\n'
   printf '  "raw_images": [\n'
-  json_image "ROOTFS" "images/rootfs.sd" "/dev/mmcblk0p2" "$STAGE_DIR/payload/images/rootfs.sd"
+  json_image "ROOTFS" "$ROOTFS_PAYLOAD" "/dev/mmcblk0p2" "$STAGE_DIR/raw/rootfs.sd" "$ROOTFS_STORED" "$RAW_IMAGE_COMPRESSION"
   printf ',\n'
-  json_image "BOOT" "images/boot.vfat" "/dev/mmcblk0p1" "$STAGE_DIR/payload/images/boot.vfat"
+  json_image "BOOT" "$BOOT_PAYLOAD" "/dev/mmcblk0p1" "$STAGE_DIR/raw/boot.vfat" "$BOOT_STORED" "$RAW_IMAGE_COMPRESSION"
   printf '\n  ]\n'
   printf '}\n'
 } > "$MANIFEST"

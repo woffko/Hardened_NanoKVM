@@ -278,6 +278,12 @@ struct SystemManifestRawImage {
     label: String,
     size: u64,
     sha256: String,
+    #[serde(default)]
+    compression: Option<String>,
+    #[serde(default, alias = "compressed_size")]
+    compressed_size: Option<u64>,
+    #[serde(default, alias = "compressed_sha256")]
+    compressed_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1644,18 +1650,39 @@ force_root_readonly\n"
         let payload = shell_quote_path(&payload)?;
         let device = shell_quote_path(Path::new(&image.device))?;
         let message = format!("writing {}", image.label);
-        script.push_str(&format!(
-            "progress writing {}\n\
+        if raw_image_is_gzip(image) {
+            script.push_str(&format!(
+                "progress writing {}\n\
+log 'testing compressed {} payload'\n\
+$BB gzip -t {} >> \"$LOG\" 2>&1 || fail 'failed to verify compressed {}'\n\
+log 'streaming compressed {} to {}'\n\
+RAW_WRITE_STARTED=1\n\
+$BB gzip -dc {} > {} || fail 'failed to write {}'\n\
+$BB sync\n",
+                shell_quote(&message),
+                image.label,
+                payload,
+                image.label,
+                image.label,
+                image.device,
+                payload,
+                device,
+                image.label
+            ));
+        } else {
+            script.push_str(&format!(
+                "progress writing {}\n\
 log 'writing {} to {}'\n\
 RAW_WRITE_STARTED=1\n\
 $BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'\n",
-            shell_quote(&message),
-            image.label,
-            image.device,
-            payload,
-            device,
-            image.label
-        ));
+                shell_quote(&message),
+                image.label,
+                image.device,
+                payload,
+                device,
+                image.label
+            ));
+        }
         script.push_str(&format!("log '{} image write finished'\n", image.label));
     }
 
@@ -1676,7 +1703,8 @@ fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage
     validate_raw_image_manifest(image)?;
     let payload = safe_payload_join(payload_dir, &image.payload)?;
     let metadata = fs::metadata(&payload)?;
-    if metadata.len() != image.size {
+    let expected_size = raw_image_payload_stored_size(image)?;
+    if metadata.len() != expected_size {
         return Err(AppError::BadRequest(format!(
             "system update raw image size mismatch: {}",
             image.payload
@@ -2000,7 +2028,8 @@ fn validate_system_manifest(
         }
 
         let metadata = fs::metadata(&payload_path)?;
-        if metadata.len() != image.size {
+        let expected_size = raw_image_payload_stored_size(image)?;
+        if metadata.len() != expected_size {
             return Err(AppError::BadRequest(format!(
                 "system update raw image size mismatch: {}",
                 image.payload
@@ -2312,17 +2341,67 @@ fn validate_raw_image_manifest(image: &SystemManifestRawImage) -> Result<()> {
         ));
     }
 
+    match image.compression.as_deref() {
+        None => {
+            if image.compressed_size.is_some() || image.compressed_sha256.is_some() {
+                return Err(AppError::BadRequest(
+                    "compressed raw image fields require compression".to_string(),
+                ));
+            }
+        }
+        Some("gzip") => {
+            if !image.payload.ends_with(".gz") {
+                return Err(AppError::BadRequest(
+                    "gzip raw image payload must end with .gz".to_string(),
+                ));
+            }
+            let compressed_size = image.compressed_size.ok_or_else(|| {
+                AppError::BadRequest("missing compressed raw image size".to_string())
+            })?;
+            if compressed_size == 0 || compressed_size > MAX_SYSTEM_UPDATE_BYTES {
+                return Err(AppError::BadRequest(
+                    "invalid compressed raw image size".to_string(),
+                ));
+            }
+            let compressed_sha256 = image.compressed_sha256.as_deref().ok_or_else(|| {
+                AppError::BadRequest("missing compressed raw image sha256".to_string())
+            })?;
+            validate_sha256_hex(compressed_sha256)?;
+        }
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "unsupported raw image compression".to_string(),
+            ));
+        }
+    }
+
     match (
         image.label.as_str(),
         image.payload.as_str(),
         image.device.as_str(),
     ) {
         ("BOOT", "images/boot.vfat", RAW_BOOT_DEVICE) => Ok(()),
+        ("BOOT", "images/boot.vfat.gz", RAW_BOOT_DEVICE) => Ok(()),
         ("ROOTFS", "images/rootfs.sd", RAW_ROOTFS_DEVICE) => Ok(()),
+        ("ROOTFS", "images/rootfs.sd.gz", RAW_ROOTFS_DEVICE) => Ok(()),
         _ => Err(AppError::BadRequest(
             "unsupported system update raw image target".to_string(),
         )),
     }
+}
+
+fn raw_image_payload_stored_size(image: &SystemManifestRawImage) -> Result<u64> {
+    if image.compression.as_deref() == Some("gzip") {
+        image
+            .compressed_size
+            .ok_or_else(|| AppError::BadRequest("missing compressed raw image size".to_string()))
+    } else {
+        Ok(image.size)
+    }
+}
+
+fn raw_image_is_gzip(image: &SystemManifestRawImage) -> bool {
+    image.compression.as_deref() == Some("gzip")
 }
 
 fn install_path_for_payload(payload: &str) -> Result<String> {
@@ -3124,6 +3203,9 @@ mod tests {
                     label: "ROOTFS".to_string(),
                     size: 1024,
                     sha256: "a".repeat(64),
+                    compression: None,
+                    compressed_size: None,
+                    compressed_sha256: None,
                 },
                 SystemManifestRawImage {
                     payload: "images/boot.vfat".to_string(),
@@ -3131,6 +3213,9 @@ mod tests {
                     label: "BOOT".to_string(),
                     size: 1024,
                     sha256: "b".repeat(64),
+                    compression: None,
+                    compressed_size: None,
+                    compressed_sha256: None,
                 },
             ],
         }
@@ -3353,6 +3438,38 @@ mod tests {
     }
 
     #[test]
+    fn raw_image_updater_streams_compressed_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage_dir = temp.path().join("system-update");
+        let payload_dir = temp.path().join("payload");
+        let mut manifest = valid_raw_manifest();
+        manifest.raw_images[0].payload = "images/rootfs.sd.gz".to_string();
+        manifest.raw_images[0].compression = Some("gzip".to_string());
+        manifest.raw_images[0].compressed_size = Some(512);
+        manifest.raw_images[0].compressed_sha256 = Some("c".repeat(64));
+        manifest.raw_images[1].payload = "images/boot.vfat.gz".to_string();
+        manifest.raw_images[1].compression = Some("gzip".to_string());
+        manifest.raw_images[1].compressed_size = Some(256);
+        manifest.raw_images[1].compressed_sha256 = Some("d".repeat(64));
+        let pending = SystemPendingUpdate {
+            version: manifest.version.clone(),
+            target: manifest.target.clone(),
+            backup_id: "raw-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            file_count: manifest.raw_images.len(),
+        };
+
+        let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
+            .expect("raw updater script");
+
+        assert!(script.contains("$BB gzip -t"));
+        assert!(script.contains("$BB gzip -dc"));
+        assert!(script.contains("images/rootfs.sd.gz"));
+        assert!(script.contains("images/boot.vfat.gz"));
+    }
+
+    #[test]
     fn validates_manifest_payload_tree() {
         let temp = tempfile::tempdir().unwrap();
         let payload_dir = temp.path().join("payload");
@@ -3464,6 +3581,52 @@ mod tests {
                 label: "ROOTFS".to_string(),
                 size: fs::metadata(&file).unwrap().len(),
                 sha256: hashes.sha256,
+                compression: None,
+                compressed_size: None,
+                compressed_sha256: None,
+            }],
+        };
+
+        validate_system_manifest(&manifest, &valid_latest(), &payload_dir).unwrap();
+    }
+
+    #[test]
+    fn validates_compressed_raw_image_manifest_payload_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload_dir = temp.path().join("payload");
+        let raw_file = temp.path().join("rootfs.sd");
+        let file = payload_dir.join("images/rootfs.sd.gz");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&raw_file, vec![1_u8; 1024]).unwrap();
+        fs::write(&file, b"compressed rootfs image").unwrap();
+        let raw_hashes = hash_file(&raw_file).unwrap();
+        let stored_hashes = hash_file(&file).unwrap();
+
+        let manifest = SystemManifest {
+            format: "hardened-nanokvm-system-update-v1".to_string(),
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            base_version: "2025-02-17-19-08-3649fe.img".to_string(),
+            kernel_version: "5.10.4-tag-hardened.1".to_string(),
+            source_commit: "abcdef1".to_string(),
+            created_utc: "2026-06-28T00:00:00Z".to_string(),
+            required_free_bytes: 805_306_368,
+            requires_reboot: true,
+            operations: vec![
+                "stage".to_string(),
+                "write-raw-devices".to_string(),
+                "reboot".to_string(),
+            ],
+            files: Vec::new(),
+            raw_images: vec![SystemManifestRawImage {
+                payload: "images/rootfs.sd.gz".to_string(),
+                device: RAW_ROOTFS_DEVICE.to_string(),
+                label: "ROOTFS".to_string(),
+                size: fs::metadata(&raw_file).unwrap().len(),
+                sha256: raw_hashes.sha256,
+                compression: Some("gzip".to_string()),
+                compressed_size: Some(fs::metadata(&file).unwrap().len()),
+                compressed_sha256: Some(stored_hashes.sha256),
             }],
         };
 
@@ -3501,6 +3664,9 @@ mod tests {
                 label: "ROOTFS".to_string(),
                 size: fs::metadata(&file).unwrap().len(),
                 sha256: hashes.sha256,
+                compression: None,
+                compressed_size: None,
+                compressed_sha256: None,
             }],
         };
 
