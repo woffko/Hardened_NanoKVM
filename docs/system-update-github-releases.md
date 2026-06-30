@@ -73,9 +73,9 @@ Production stable/preview channel metadata must use
 ## Current Published System Releases
 
 The current `hardened-system-stable` channel points to lab raw release
-`hardened-system-0.2.5-raw.1`. It was built from the beta `2.0.9` Hardened SD
-image and contains validated boot/rootfs partition images plus matching channel
-metadata.
+`hardened-system-0.2.8-raw.1`. It was built from the beta `2.0.12` Hardened SD
+image and contains validated gzip-compressed boot/rootfs partition images plus
+matching channel metadata.
 
 This channel is still lab-only. It is intended to validate the sysupgrade
 plumbing and SD-card recovery workflow, not to deliver real kernel or Buildroot
@@ -103,6 +103,8 @@ payload/
   images/
     boot.vfat
     rootfs.sd
+    boot.vfat.gz
+    rootfs.sd.gz
 ```
 
 The backend must install only known paths:
@@ -114,16 +116,22 @@ The backend must install only known paths:
   `/kvmapp`, and `/root/.kvmcache`.
 - Experimental raw partition bundles may instead list `raw_images` for exactly
   `payload/images/boot.vfat -> /dev/mmcblk0p1` and
-  `payload/images/rootfs.sd -> /dev/mmcblk0p2`. This path is disabled unless
-  `security.allow_raw_system_updates: true` is set on the device.
+  `payload/images/rootfs.sd -> /dev/mmcblk0p2`, or the gzip-compressed
+  equivalents `payload/images/boot.vfat.gz` and
+  `payload/images/rootfs.sd.gz`. Current releases use gzip payloads so the
+  extracted staging tree does not need to hold a full uncompressed rootfs image.
+  This path is disabled unless `security.allow_raw_system_updates: true` is set
+  on the device.
 
 The archive must not contain arbitrary scripts. Installer behavior is fixed in
 the Rust backend: verify, stage, back up, install known paths, mark pending,
 reboot, health-check, then mark boot-good or roll back.
 
 Raw partition bundles are different: they write verified block images directly
-to the SD-card boot/rootfs partitions, sync, and reboot. They do not have
-automatic rollback; failed boots require manual SD-card recovery.
+to the SD-card boot/rootfs partitions, sync, and reboot. For gzip raw payloads,
+the updater validates the compressed files with `gzip -t` and streams `gzip -dc`
+directly to the block devices. They do not have automatic rollback; failed boots
+require manual SD-card recovery.
 
 ## Manifest Contract
 

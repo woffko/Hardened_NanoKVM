@@ -7,13 +7,14 @@ Last updated: 2026-06-30
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app hotfix `2.0.11` plus raw/SD release `0.2.7-raw.1` so raw
-  updates preserve user settings before writing boot and rootfs partitions and
-  the raw image itself contains app `2.0.11`.
+- Current work: app hotfix `2.0.12` plus raw/SD release `0.2.8-raw.1` so raw
+  updates can stage gzip-compressed boot/rootfs payloads, preserve user
+  settings before writing boot/rootfs partitions, and keep app `2.0.12` inside
+  the raw image.
 - Recent commits when this handoff was updated:
-  - `f23c39c Record fixed device IP update state`
-  - `cbcb2fd Record beta 2.0.10 init-fix publication`
-  - `2a9d02d Fix raw image init script installation`
+  - `28161aa Support compressed raw system payloads`
+  - `fafe8d3 Record beta 2.0.11 system release`
+  - `a4a4123 Record beta 2.0.11 publication`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -22,33 +23,37 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current app release: `2.0.11`
+- Current app release: `2.0.12`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.11`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.12`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.11.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.12.tar.gz`
 - SHA256:
-  `4872815fe377df02002b9e7de298663a8c8b96df7dbb573815572d07b06e732f`
-- Includes the raw updater setting-preservation fix, the raw/SD init-script
-  fix, explicit IPv6 controls, bundled DHCPv6 client, the `2.0.8` OLED helper
-  fix, and the `2.0.7` login-loop fix.
+  `bc971f57b43b560ed61d537bcef39a8fcbda49237e847e1457e93dc3283fc8f6`
+- Includes compressed raw payload support, the raw updater
+  setting-preservation fix, the raw/SD init-script fix, explicit IPv6 controls,
+  bundled DHCPv6 client, the `2.0.8` OLED helper fix, and the `2.0.7`
+  login-loop fix.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.7-raw.1`
+- Current raw system channel: `0.2.8-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.7-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.8-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.7-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.8-raw.1.tar.gz`
 - SHA256:
-  `e9d56782119c87693a24441e40ab053050aaca0786ecb041abc9503a21420b86`
-- Built from the beta `2.0.11` SD rootfs. Raw payload manifest source commit:
-  `a4a4123`.
+  `8455bdce09bce0a4a39188eddf97f4658ea509e9b906806b9445c5d78784b175`
+- Built from the beta `2.0.12` SD rootfs. Raw payload manifest source commit:
+  `28161aa`.
+- Raw payloads are staged as `images/rootfs.sd.gz` and `images/boot.vfat.gz`;
+  manifest `required_free_bytes` is `671088640` bytes instead of the old 2 GiB
+  lab value.
 - Local `system-latest.json` metadata signature verified with the bundled test
   public key.
 - Published on GitHub and verified through `hardened-system-stable` and
@@ -56,11 +61,11 @@ Detailed chronological build/update notes are in
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.11`
+- Latest SD image built: beta `2.0.12`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_11_buildroot_2023_11_2_security_preserve_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_12_buildroot_2023_11_2_security_compressed_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `746d0ea45b1ba63c2042eb7429f6b29c2937e3891c2fd42f00db1f152d902cd5`
+  `619a9f13c6b3bd196faeb412107bf39062098071da28950e927de8e29cfff2e5`
 
 ## Device State
 
@@ -70,12 +75,16 @@ Detailed chronological build/update notes are in
 - Static IPv4 was set through `/boot/eth.nodhcp`:
   `10.0.87.132/24 10.0.87.5`; DNS is `10.0.87.5`.
 - Previously appeared as DHCP `10.0.87.55`.
-- Last verified after app update:
+- Last verified before compressed raw update test:
   - `/api/health`: OK
-  - `/api/application/version`: `current=2.0.11`, `latest=2.0.11`
+  - `/api/application/version`: `current=2.0.11`, latest app channel now
+    `2.0.12`
   - `/api/system-update/check`: `current=0.2.5-raw.1`,
-    `latest=0.2.7-raw.1`, `updateAvailable=true`
-  - raw install has not been started yet.
+    latest raw channel now `0.2.8-raw.1`, `updateAvailable=true`
+  - first raw download of `0.2.7-raw.1` failed before install because the
+    uncompressed staged rootfs exhausted rootfs space; only
+    `/data/.hardened-kvmcache/system-update` was removed afterward.
+  - raw install has not been started yet for `0.2.8-raw.1`.
 
 Root cause of login loop:
 
@@ -92,17 +101,21 @@ Root cause of login loop:
   `10.0.87.133/24 10.0.87.5`; DNS is `10.0.87.5`.
 - Previously appeared as DHCP `10.0.87.42`.
 - First account setup was required and was completed as `admin/admin1234`.
-- Last verified after app update:
+- Last verified before compressed raw update test:
   - `/api/health`: OK
-  - `/api/application/version`: `current=2.0.11`, `latest=2.0.11`
+  - `/api/application/version`: `current=2.0.11`, latest app channel now
+    `2.0.12`
   - `/api/system-update/check`: `current=0.2.5-raw.1`,
-    `latest=0.2.7-raw.1`, `updateAvailable=true`
+    latest raw channel now `0.2.8-raw.1`, `updateAvailable=true`
   - raw install has not been started yet.
 
 ## Important Implementation Notes
 
 - App updates replace `/kvmapp` only.
 - Raw system updates write SD-card boot/rootfs partitions and are lab-only.
+- Raw system updates must be launched only from app `2.0.12` or newer for
+  compressed raw payloads. Older `2.0.11` app updaters preserve settings but do
+  not understand `images/rootfs.sd.gz`.
 - Raw system updates must be launched only from app `2.0.11` or newer. Older
   app updaters write the raw boot/rootfs images without restoring user
   settings.
@@ -118,6 +131,22 @@ Root cause of login loop:
   validators reject legacy Go backend files and backend-switch scripts.
 
 ## Latest Fixes In Code
+
+### `2.0.12`
+
+- Raw system manifests now support gzip-compressed raw partition payloads:
+  `images/rootfs.sd.gz` and `images/boot.vfat.gz`.
+- Raw updater validates compressed payloads with `gzip -t` and streams
+  `gzip -dc` directly to `/dev/mmcblk0p2` and `/dev/mmcblk0p1`.
+- Raw bundle builder emits uncompressed image size/hash plus compressed
+  stored size/hash fields.
+- This fixes the observed `No space left on device` staging failure on
+  `10.0.87.132` where `/data` was not mounted separately and rootfs had only
+  about 698 MiB free after cleaning the failed staging cache.
+- Local validation:
+  - `sh -n scripts/create-raw-system-update-bundle.sh`
+  - `cargo fmt`
+  - `cargo test` in `server-rust` passed: 116 lib tests and 2 main tests.
 
 ### `2.0.11`
 
@@ -249,7 +278,8 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Run raw update to `0.2.7-raw.1` one
-   device at a time and confirm static IP/account/SSH settings survive reboot.
-2. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
-3. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.
+1. Install app `2.0.12` on `10.0.87.132` and `10.0.87.133`.
+2. Run compressed raw update to `0.2.8-raw.1` on `10.0.87.132` first and
+   confirm static IP/account/SSH settings survive reboot.
+3. Validate IPv6 Disabled, SLAAC, DHCPv6, and Manual modes on hardware.
+4. Keep updating `docs/current-sysupgrade-build-trace.md` with device checks.

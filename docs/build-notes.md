@@ -175,7 +175,9 @@ make sd-image HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
 make raw-system-update-images HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
 make raw-system-update-bundle \
   HARDENED_RELEASE_VERSION="$(cat kvmapp/version)" \
-  SYSTEM_UPDATE_VERSION="<system-version>"
+  SYSTEM_UPDATE_VERSION="<system-version>" \
+  RAW_IMAGE_COMPRESSION=gzip \
+  REQUIRED_FREE_BYTES=671088640
 ```
 
 `scripts/extract-sd-raw-images.sh` accepts either `.img` or `.img.xz`; compressed
@@ -188,10 +190,18 @@ the patched Hardened SD image. Do not point it at vendor SDK
 
 Raw partition updates overwrite boot and rootfs. The app updater used to launch
 them must preserve and restore user settings before reboot. Do not test or
-publish a raw update path from an app older than `2.0.11`, because those
-versions do not restore `/boot` network settings, `/etc/kvm` account/config
-state, SSH host keys, root password files, or extension state after the raw
-write.
+publish a raw update path from an app older than `2.0.12` when the bundle uses
+gzip payloads, because older app versions do not understand
+`images/rootfs.sd.gz`. Do not publish a raw update path from an app older than
+`2.0.11` even for uncompressed payloads, because those versions do not restore
+`/boot` network settings, `/etc/kvm` account/config state, SSH host keys, root
+password files, or extension state after the raw write.
+
+Current raw bundles should use the default gzip payload mode. The updater keeps
+`rootfs.sd.gz` and `boot.vfat.gz` compressed in the extracted staging tree and
+streams them directly to `/dev/mmcblk0p2` and `/dev/mmcblk0p1`; this avoids
+requiring enough `/data` or rootfs free space to hold an additional full 1.5GB
+rootfs image.
 
 The guard rail is:
 

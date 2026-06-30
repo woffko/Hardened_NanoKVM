@@ -51,12 +51,15 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   automatically roll back a pending update when boot health fails.
 - Experimental raw boot/rootfs partition bundles are implemented behind
   `security.allow_raw_system_updates`. They can be staged through the same GUI,
-  write only `images/boot.vfat` to `/dev/mmcblk0p1` and
-  `images/rootfs.sd` to `/dev/mmcblk0p2`, sync, and reboot. This is for lab
-  devices with SD-card recovery only and has no automatic rollback. Raw bundle
-  tooling now rejects rootfs images that do not contain the Hardened NanoKVM
-  `/kvmapp`, `/etc/kvm`, init script, web assets, and Rust-only backend files,
-  and do not contain legacy Go backend files or switch scripts.
+  write only `images/boot.vfat` or `images/boot.vfat.gz` to `/dev/mmcblk0p1`
+  and `images/rootfs.sd` or `images/rootfs.sd.gz` to `/dev/mmcblk0p2`, sync,
+  and reboot. Current raw releases use gzip-compressed payloads and stream them
+  directly to the block devices to avoid extracting a full 1.5GB rootfs into
+  the staging filesystem. This is for lab devices with SD-card recovery only
+  and has no automatic rollback. Raw bundle tooling now rejects rootfs images
+  that do not contain the Hardened NanoKVM `/kvmapp`, `/etc/kvm`, init script,
+  web assets, and Rust-only backend files, and do not contain legacy Go backend
+  files or switch scripts.
 - `hardened-system-0.1.0-raw.1` is a revoked experimental raw release. It was
   built from the stock vendor SDK rootfs and must not be installed. Use a newer
   raw release produced from a validated Hardened SD image.
@@ -64,7 +67,8 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `hardened-system-0.1.0-dev.1`, validated the non-destructive
   check/download/install/status/confirm/rollback flow on `10.0.87.132`. It is
   now historical. The current stable system channel points to lab raw release
-  `hardened-system-0.2.5-raw.1`, built from the beta `2.0.9` Hardened SD image.
+  `hardened-system-0.2.8-raw.1`, built from the beta `2.0.12` Hardened SD
+  image.
   The bundled public key is installed from `kvmapp` to
   `/etc/kvm/system-update-signing.pub.pem` on service start, but this is still
   not a production private-key custody process.
@@ -93,8 +97,9 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - `manifest.json` with version, target hardware revision, base/kernel
      version, required free space, file hashes, backup paths, and reboot flag;
    - payload for kernel, dtb, modules, and known system files;
-   - optional experimental raw `boot.vfat`/`rootfs.sd` image entries gated by
-     device config for lab-only partition flashing;
+   - optional experimental raw `boot.vfat`/`rootfs.sd` image entries, including
+     gzip-compressed `.gz` variants, gated by device config for lab-only
+     partition flashing;
    - fixed installer operations controlled by the backend, not arbitrary scripts
      from the archive.
 

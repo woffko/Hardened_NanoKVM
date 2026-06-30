@@ -1594,3 +1594,121 @@ Device state after app update and raw channel publication:
 - `10.0.87.133`: app `2.0.11`, system `0.2.5-raw.1`, latest raw
   `0.2.7-raw.1`, `updateAvailable=true`;
 - raw install has still not been started.
+
+## 2026-06-30: Beta 2.0.12 Compressed Raw Staging
+
+Reason:
+
+- First raw download test on `10.0.87.132` for `0.2.7-raw.1` failed before
+  install with `No space left on device (os error 28)`.
+- On the device, `/data` was not mounted as a separate filesystem; the raw
+  update cache lived on rootfs:
+  `/data/.hardened-kvmcache/system-update`.
+- Failed staging had left the downloaded archive plus extracted raw payloads:
+  roughly 775 MiB under `system-update`, including about 503 MiB under
+  `extract/payload` at the time it failed.
+- Only the failed update cache was removed:
+  `/data/.hardened-kvmcache/system-update`. Device settings were not removed.
+  After cleanup, rootfs had about 698 MiB free.
+
+Fix:
+
+- app version bumped to `2.0.12`;
+- raw manifest schema now supports gzip-compressed raw image payloads:
+  - `compression: "gzip"`;
+  - `compressed_size`;
+  - `compressed_sha256`;
+- uncompressed image `size` and `sha256` remain in the manifest for traceability
+  and target-device-size validation;
+- `validate_system_manifest` and install-time raw payload validation compare the
+  staged file size against `compressed_size` for gzip payloads;
+- generated raw updater script validates compressed payloads with `gzip -t` and
+  streams `gzip -dc` directly to the target block device;
+- `scripts/create-raw-system-update-bundle.sh` now defaults to
+  `RAW_IMAGE_COMPRESSION=gzip` and writes `images/rootfs.sd.gz` plus
+  `images/boot.vfat.gz`;
+- `required_free_bytes` for the `0.2.8-raw.1` release was set to `671088640`
+  bytes, matching the compressed-staging design instead of the old 2 GiB lab
+  value.
+
+Validation:
+
+- `sh -n scripts/create-raw-system-update-bundle.sh`: passed.
+- `cargo fmt` in `server-rust`: passed.
+- `cargo test` in `server-rust`: passed, 116 lib tests plus 2 main tests.
+- RISC-V linked backend build:
+  `server-rust/scripts/build-linked-libkvm.sh`: passed.
+- App update metadata signature:
+  `scripts/verify-update-metadata.sh build/artifacts/latest.json build/artifacts/latest.json.sig ...`: passed.
+- Rootfs validator:
+  `EXPECTED_KVMAPP_VERSION=2.0.12 scripts/validate-nanokvm-rootfs.sh .../rootfs.sd`: passed.
+- System update metadata signature:
+  `scripts/verify-system-update-metadata.sh build/system-updates/system-latest.json ...`: passed.
+- GitHub app latest/preview metadata both return version `2.0.12`; signature
+  verified after download.
+- GitHub system stable/preview metadata both return version `0.2.8-raw.1`;
+  signature verified after download.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.12.tar.gz` | `bc971f57b43b560ed61d537bcef39a8fcbda49237e847e1457e93dc3283fc8f6` |
+| App metadata | `build/artifacts/latest.json` | `782e2999f6ec843ed2ef5d456f0e011701d5cb6b2cb6bb272e505614a6a4d97e` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `bd8191eb44eb19ccb72e5acaa70abed6d088a6566cad3b20cc022e037d9fb316` |
+
+Generated raw/SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.8-raw.1.tar.gz` | `8455bdce09bce0a4a39188eddf97f4658ea509e9b906806b9445c5d78784b175` |
+| System metadata | `build/system-updates/system-latest.json` | `8b322955bb5553980c524fe25c5d3e16a14e5e1b0213c59c5a1b5848194237f1` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `086829f4065bf7154bb2923e31c225b6436e710d9a31ef918a059e41a90c94d3` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_12_buildroot_2023_11_2_security_compressed_Rev1_4_2_rust.img.xz` | `619a9f13c6b3bd196faeb412107bf39062098071da28950e927de8e29cfff2e5` |
+
+Compressed raw manifest details:
+
+- `version`: `0.2.8-raw.1`
+- `source_commit`: `28161aa`
+- rootfs payload: `images/rootfs.sd.gz`
+  - uncompressed size: `1610612736`
+  - compressed size: `276921128`
+  - uncompressed SHA256:
+    `d71494bc56b65fd1635aad671bdeb6d27f6993c84d95bf94db9dd6a4cf130417`
+  - compressed SHA256:
+    `24d579bca655d5e17b985ea35a9b45920303573729e883628c4110658810af2f`
+- boot payload: `images/boot.vfat.gz`
+  - uncompressed size: `16777216`
+  - compressed size: `7734967`
+  - uncompressed SHA256:
+    `804df51d6cfffdacbae250cfaae2074855de6ee6b56af4f134c5f89da97f158f`
+  - compressed SHA256:
+    `e1ecaa68cbfa86db51d1af596257a40c881cd6795769c9d0dcbe904f97e69a4d`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.12`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.8-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device state before compressed raw install:
+
+- `10.0.87.132`: app `2.0.11`, system `0.2.5-raw.1`, latest app now
+  `2.0.12`, latest raw now `0.2.8-raw.1`; failed `0.2.7-raw.1` staging cache
+  was removed, raw install was not started.
+- `10.0.87.133`: app `2.0.11`, system `0.2.5-raw.1`, latest app now
+  `2.0.12`, latest raw now `0.2.8-raw.1`; raw install has not been started.
+
+Next:
+
+1. Install app `2.0.12` on both devices.
+2. On `10.0.87.132`, download and install `0.2.8-raw.1` from GUI/API.
+3. Confirm post-reboot version, static IP, web account, SSH account, and boot
+   health.

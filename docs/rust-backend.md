@@ -12,9 +12,10 @@ are implemented deeply enough for interactive device testing.
 
 Current published channels:
 
-- app update: `2.0.9`;
-- raw system-update: `0.2.5-raw.1`, built from the beta `2.0.9` SD rootfs;
-- SD-card image: beta `2.0.9`.
+- app update: `2.0.12`;
+- raw system-update: `0.2.8-raw.1`, built from the beta `2.0.12` SD rootfs
+  with gzip-compressed raw payload staging;
+- SD-card image: beta `2.0.12`.
 
 ## Build
 

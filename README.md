@@ -30,13 +30,13 @@ Security release builds are Rust-only: the legacy Go backend and backend switch
 scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
 The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **beta 2.0.9**.
+application version **beta 2.0.12**.
 
 The current public beta release is published from the `woffko` fork at
-[`hardened-rust-beta-2.0.9`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.9).
+[`hardened-rust-beta-2.0.12`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.12).
 
-The latest application release is **2.0.9**. The latest raw system-update and
-SD-card artifacts are the matching **2.0.9 / 0.2.5-raw.1** builds.
+The latest application release is **2.0.12**. The latest raw system-update and
+SD-card artifacts are the matching **2.0.12 / 0.2.8-raw.1** builds.
 
 ## Current Beta Status
 
@@ -56,9 +56,9 @@ NanoKVM device and harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, full wired DHCP/manual IP/DNS settings, explicit IPv6 Disabled/SLAAC/DHCPv6/Manual controls, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current app channel: `2.0.9`. |
-| SD image | Latest published SD image is beta `2.0.9`, built by patching a trusted NanoKVM Rev1.4.2 base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
-| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.5-raw.1`, built from the beta `2.0.9` SD rootfs. Raw full-rootfs updates are lab-only. Real kernel/rootfs security payloads are still pending. |
+| Updates | Beta online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current app channel: `2.0.12`. |
+| SD image | Latest published SD image is beta `2.0.12`, built by patching a trusted NanoKVM Rev1.4.2 base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds, but a verified stock SDK image is not established yet. |
+| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded install, manual boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.8-raw.1`, built from the beta `2.0.12` SD rootfs. Raw full-rootfs updates are lab-only; current raw payloads are stored gzip-compressed and streamed to the SD-card block devices during install. Real kernel/rootfs security payloads are still pending. |
 
 ## How Updates Work
 
@@ -91,8 +91,8 @@ https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
 ```
 
 The metadata points to a versioned app archive such as
-`hardened-nanokvm-kvmapp-2.0.9.tar.gz` on a release tag such as
-`hardened-rust-beta-2.0.9`. The device verifies signed metadata and the archive
+`hardened-nanokvm-kvmapp-2.0.12.tar.gz` on a release tag such as
+`hardened-rust-beta-2.0.12`. The device verifies signed metadata and the archive
 sha512 before installing. The preview toggle uses the `hardened-rust-preview`
 channel metadata, but it still installs the versioned archive named by that
 metadata.
@@ -105,8 +105,10 @@ uploaded from the browser instead of downloaded from GitHub.
 Raw system updates are different. They are full partition-image updates for the
 SD card and currently target the NanoKVM SD layout:
 
-- raw rootfs image for `/dev/mmcblk0p2`;
-- raw boot image for `/dev/mmcblk0p1`;
+- raw rootfs image for `/dev/mmcblk0p2`, currently stored as
+  `payload/images/rootfs.sd.gz`;
+- raw boot image for `/dev/mmcblk0p1`, currently stored as
+  `payload/images/boot.vfat.gz`;
 - metadata describing the target board, expected image hashes, base image,
   kernel string, required free space, and source commit.
 
@@ -127,7 +129,7 @@ https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-sta
 ```
 
 That channel metadata points to a versioned raw system release such as
-`hardened-system-0.2.5-raw.1`, which contains:
+`hardened-system-0.2.8-raw.1`, which contains:
 
 - `hardened-nanokvm-system-<version>.tar.gz`;
 - `system-latest.json` and signature files;
@@ -135,30 +137,33 @@ That channel metadata points to a versioned raw system release such as
 - the matching application archive for traceability.
 
 The device downloads the raw archive into `/data/.hardened-kvmcache`, verifies
-the signed metadata and payload hashes, stages the update, and then runs the
-guarded install step. After a raw install, the device must reboot. The user then
-confirms a good boot in the GUI; if a pending boot is not confirmed, the
-watchdog/rollback path is designed to restore the previous staged system state
-where possible.
+the signed metadata and payload shape, stages the update, and then runs the
+guarded install step. For current raw releases, the rootfs and boot images stay
+gzip-compressed while staged and are streamed directly to `/dev/mmcblk0p2` and
+`/dev/mmcblk0p1` during install. After a raw install, the device must reboot.
+The user then confirms a good boot in the GUI; if a pending boot is not
+confirmed, the watchdog/rollback path is designed to restore the previous staged
+system state where possible.
 
 ### Current Published Channels
 
 The channels can intentionally move independently:
 
-- Application stable/latest: `2.0.9`, tag `hardened-rust-beta-2.0.9`.
+- Application stable/latest: `2.0.12`, tag `hardened-rust-beta-2.0.12`.
 - Application preview: `hardened-rust-preview`, currently also points to
-  `2.0.9`.
-- Raw system stable: `0.2.5-raw.1`, tag
-  `hardened-system-0.2.5-raw.1`.
+  `2.0.12`.
+- Raw system stable: `0.2.8-raw.1`, tag
+  `hardened-system-0.2.8-raw.1`.
 - Raw system preview: `hardened-system-preview`, currently points to the same
   raw metadata as stable.
-- Latest published SD image: beta `2.0.9`, matching raw system
-  `0.2.5-raw.1`.
+- Latest published SD image: beta `2.0.12`, matching raw system
+  `0.2.8-raw.1`.
 
-An app-only hotfix can be newer than the raw/SD image. For beta `2.0.9`, the
+An app-only hotfix can be newer than the raw/SD image. For beta `2.0.12`, the
 application, raw system update, and SD image were rebuilt together so the raw
-rootfs includes the same IPv6 controls, DHCPv6 client, OLED timer fix, and
-browser auth-state recovery as the app update.
+rootfs includes the same compressed raw-update support, setting-preserving raw
+installer, IPv6 controls, DHCPv6 client, OLED timer fix, and browser auth-state
+recovery as the app update.
 
 ### Which Update Should Be Used?
 
