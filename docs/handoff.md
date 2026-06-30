@@ -13,10 +13,10 @@ Last updated: 2026-06-30
   healthy, but the writer log showed it stopped during ROOTFS streaming before
   boot partition write/reboot.
 - Recent commits when this handoff was updated:
+  - `fe27048 Fix raw updater runtime isolation`
+  - `f20082c Record GitHub release cleanup`
+  - `d379d04 Document current releases and archive old ones`
   - `d9614b6 Clarify system update metadata display`
-  - `c2ee893 Make raw data partition handling idempotent`
-  - `7891449 Harden raw system update staging`
-  - `28161aa Support compressed raw system payloads`
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -25,22 +25,30 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current published app release: `2.0.15`
-- Current source version: `2.0.15`
+- Current published app release: `2.0.16`
+- Current source version: `2.0.16`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.15`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.16`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.16.tar.gz`
 - SHA256:
-  `860a860424393a0e4e7ac6f3e855fde6ad55b686df50d6e4e5faf090300a8bf1`
-- Includes compressed raw payload support, raw updater setting preservation,
-  raw staging-on-rootfs refusal, `/data` p3 mounting, explicit IPv6 controls,
-  bundled DHCPv6 client, the `2.0.8` OLED helper fix, and the `2.0.7`
-  login-loop fix. `2.0.15` adds the follow-up idempotent p3 init guard,
-  `/etc/kvm.disk0` raw preservation, and GUI system metadata label cleanup.
+  `c42e8cee626006a9cef4a444b0ae0c03adab052207fa3ac824ae7d41858046ae`
+- Includes the `2.0.15` compressed raw payload support, raw updater setting
+  preservation, raw staging-on-rootfs refusal, `/data` p3 mounting, explicit
+  IPv6 controls, bundled DHCPv6 client, OLED helper fix, login-loop fix,
+  idempotent p3 init guard, `/etc/kvm.disk0` raw preservation, and GUI system
+  metadata label cleanup. `2.0.16` adds raw-updater runtime isolation by
+  copying BusyBox, musl loader, and libc before rootfs overwrite, moves raw
+  preserve state from `/tmp` to `/data`, and hides stale staged raw-update
+  metadata after a manually completed raw update.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
 - Published on GitHub and verified through `releases/latest/download/latest.json`.
+- Verified on `10.0.87.132` from the device itself:
+  `/api/application/version` reports `current=2.0.16`, `latest=2.0.16`;
+  `/api/system-update/status` reports `staged=null`;
+  `/api/system-update/check` reports `updateAvailable=false` for
+  `0.2.11-raw.1`.
 
 ### Raw System Release
 
@@ -83,6 +91,7 @@ Detailed chronological build/update notes are in
   - `hardened-system-preview`
   - `hardened-system-stable`
 - Keep current visible releases:
+  - `hardened-rust-beta-2.0.16`
   - `hardened-rust-beta-2.0.15`
   - `hardened-system-0.2.11-raw.1`
 - Keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
@@ -118,7 +127,7 @@ Detailed chronological build/update notes are in
   overwritten. After `/dev/mmcblk0p2` changed, later tool invocations crashed.
 - Additional issue: preserve state was under `/tmp` and copying large optional
   files such as `/usr/sbin/tailscaled` could hit tmpfs space limits.
-- Fix in progress for app `2.0.16`:
+- Fixed in app `2.0.16`:
   - copy BusyBox, musl loader, and libc into
     `/tmp/hardened-system-raw-update`;
   - launch the writer through the copied loader with

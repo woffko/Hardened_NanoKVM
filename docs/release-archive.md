@@ -16,7 +16,8 @@ Policy:
 
 | Tag | Status | Notes |
 | --- | --- | --- |
-| `hardened-rust-beta-2.0.15` | Current app beta | Rust-only app release, signed `latest.json`, includes idempotent data-partition init and GUI system metadata label cleanup. |
+| `hardened-rust-beta-2.0.16` | Current app beta | App-only hotfix with raw-updater runtime isolation, `/data` raw preserve state, and stale staged metadata cleanup after completed raw updates. |
+| `hardened-rust-beta-2.0.15` | Previous app beta | Rust-only app release, signed `latest.json`, includes idempotent data-partition init and GUI system metadata label cleanup. |
 | `hardened-system-0.2.11-raw.1` | Current raw/SD beta | Matching raw full-rootfs update and SD image with app `2.0.15`, base image `2026-06-29-12-08-d88d58.img`, Buildroot `2023.11.2`, security patch level `Buildroot 2023.11.3 package backports`. |
 | `hardened-system-stable` | Channel | Stable raw-system metadata channel. Keep this release. |
 | `hardened-rust-preview` | Channel | Preview app metadata channel. Keep this release while preview update support exists. |
@@ -26,7 +27,7 @@ Policy:
 ## Internal Or Obsolete App Releases
 
 These releases were useful during bring-up, but are superseded by
-`hardened-rust-beta-2.0.15`. They can be removed from the GitHub Releases UI
+`hardened-rust-beta-2.0.16`. They can be removed from the GitHub Releases UI
 without losing the changelog history.
 
 | Tag | Archive status | Notes |
