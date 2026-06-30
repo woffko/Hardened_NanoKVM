@@ -72,7 +72,10 @@ installed unless a test explicitly needs to reproduce a historical failure.
 
 ## Cleanup Checklist
 
-When cleaning GitHub Releases:
+Cleanup was executed on 2026-06-30. The GitHub Releases page was reduced to
+the visible releases listed above. Historical git tags were left intact.
+
+When repeating GitHub Releases cleanup:
 
 1. Verify `hardened-rust-beta-2.0.15` is the GitHub latest release and its
    `latest.json` signature verifies.

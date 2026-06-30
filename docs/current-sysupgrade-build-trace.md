@@ -1999,3 +1999,37 @@ Release cleanup plan:
 - delete old alpha/internal/broken/obsolete release entries from the GitHub
   Releases UI only after preserving their status in `docs/release-archive.md`;
 - do not delete git tags during this cleanup.
+
+## 2026-06-30: GitHub Release List Cleanup
+
+Scope:
+
+- deleted obsolete GitHub release entries/assets only;
+- did not delete git tags;
+- preserved historical/internal/broken release notes in
+  `docs/release-archive.md`.
+
+Result:
+
+- removed 51 old release entries:
+  - all alpha release entries;
+  - beta 1 candidates before `1.0.5`;
+  - internal `hardened-rust-sysupgrade-*` release entries;
+  - obsolete/broken beta 2 app release entries through `2.0.14`;
+  - obsolete/broken raw system release entries through `0.2.10-raw.1`;
+- remaining GitHub release entries:
+  - `hardened-rust-beta-1.0.5`;
+  - `hardened-rust-beta-2.0.15`;
+  - `hardened-rust-preview`;
+  - `hardened-system-0.2.11-raw.1`;
+  - `hardened-system-preview`;
+  - `hardened-system-stable`.
+
+Post-cleanup verification:
+
+- GitHub API returned exactly the 6 remaining releases listed above.
+- `releases/latest/download/latest.json` still returns app `2.0.15`.
+- `hardened-system-stable/system-latest.json` still returns system
+  `0.2.11-raw.1`.
+- App metadata signature verified OK.
+- System metadata signature verified OK.
