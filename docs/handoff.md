@@ -30,8 +30,8 @@ Detailed chronological build/update notes are in
   `kvm_system` helper with 32-bit timeout parsing.
 - Includes the `2.0.7` login-loop fix after IP/protocol changes or stale
   browser auth state.
-- GitHub `latest.json` should be downloaded after publication and signature
-  verified.
+- GitHub `latest.json` and `hardened-rust-preview/latest.json` were downloaded
+  after publication and stable metadata signature verified.
 
 ### Raw System Release
 
@@ -141,7 +141,8 @@ Root cause of login loop:
 
 ## Suggested Next Steps
 
-1. Publish app `2.0.8` and verify devices see it through GUI update checks.
+1. Verify devices see app `2.0.8` through GUI update checks, then install on a
+   test device and confirm OLED timers 5/10/30/60 min behave correctly.
 2. Decide whether to build a matching raw system/SD release for app `2.0.8`.
 3. If raw/SD is rebuilt, bump raw system version from `0.2.4-raw.1` to the next
    value and update `hardened-system-stable`.
