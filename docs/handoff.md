@@ -98,6 +98,18 @@ Root cause of login loop:
 
 ## Latest Fixes In Code
 
+### OLED sleep source fix
+
+- Root cause: `kvm_system` parsed `/etc/kvm/oled_sleep` into `uint8_t`, so UI
+  values of 300 seconds and higher overflowed before the sleep comparison.
+- Source fix is in `support/sg2002/kvm_system/main/lib/oled_ui/oled_ui.cpp`
+  and `support/sg2002/kvm_system/main/include/config.h`: OLED sleep is now
+  parsed into a 32-bit value, the input buffer is terminated, and values above
+  one day fall back to the default.
+- This is not fixed on devices until `kvm_system` is rebuilt with MaixCDK and
+  packaged as `/kvmapp/kvm_system/kvm_system`; a normal Rust-only app package
+  that reuses the old helper binary will still have the bug.
+
 ### `2.0.7`
 
 - `server-rust/src/api/account.rs`

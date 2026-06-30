@@ -36,6 +36,7 @@
 #define WIFI_CONNECTION_DELAY 		5000
 #define OLED_SLEEP_DELAY_MIN 		10
 #define OLED_SLEEP_DELAY_DEFAULT 	30
+#define OLED_SLEEP_DELAY_MAX 		86400
 #define KVM_WD_COUNT_MAX			10
 #define RM_Watchdog_times			60
 
@@ -95,7 +96,7 @@ typedef struct {
 	int8_t type = -1;				// cat /kvmapp/kvm/type
 	int8_t now_fps = -1;			// cat /kvmapp/kvm/now_fps
 	int16_t qlty = -1;				// cat /kvmapp/kvm/qlty
-    uint16_t oled_sleep_param = 0;
+    uint32_t oled_sleep_param = 0;
     uint8_t oled_sleep_state = 0;	// 0:wakeup; 1:sleep;
 	uint64_t oled_sleep_start = 0;
 	uint64_t ue_patch_state = 0;
