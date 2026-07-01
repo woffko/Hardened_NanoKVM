@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
-    api::stream,
+    api::{stream, system_firewall},
     auth::compat_crypto::decode_frontend_password,
     config::Config,
     error::ApiResponse,
@@ -967,6 +967,7 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
         config.cert.crt = TLS_CERT_FILE.to_string();
         config.cert.key = TLS_KEY_FILE.to_string();
     } else {
+        system_firewall::force_baseline_mode().await?;
         config.proto = "http".to_string();
     }
     config.write()?;
@@ -975,7 +976,7 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
         time::sleep(Duration::from_millis(100)).await;
         match run_allowed(
             AllowedCommand::ServiceNanokvmRestart,
-            ["restart"],
+            ["restart-server"],
             Duration::from_secs(10),
         )
         .await

@@ -132,6 +132,15 @@ start_server_runtime() {
     nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
 }
 
+restart_server_runtime() {
+    stop_watchdog
+    killall NanoKVM-Server 2>/dev/null
+    wait_process_exit NanoKVM-Server
+    rm -rf /tmp/server 2>/dev/null
+    start_server_runtime
+    start_watchdog
+}
+
 health_check() {
     if command -v curl >/dev/null 2>&1; then
         curl -kfsS --max-time 3 https://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
@@ -379,9 +388,15 @@ case "$1" in
     sync
     echo "OK"
    ;;
+
+  restart-server)
+    restart_server_runtime
+    sync
+    echo "OK"
+   ;;
     
   *)
-    echo "Usage: $0 {start|stop|restart}"
+    echo "Usage: $0 {start|stop|restart|restart-server}"
     exit 1
   ;;
 esac

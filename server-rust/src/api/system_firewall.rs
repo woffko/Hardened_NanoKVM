@@ -101,6 +101,15 @@ pub fn paranoid_blocked_message() -> &'static str {
     PARANOID_BLOCKED_MESSAGE
 }
 
+pub async fn force_baseline_mode() -> Result<()> {
+    let baseline = FirewallConfig {
+        mode: MODE_BASELINE.to_string(),
+    };
+    write_config(&baseline)?;
+    remove_file_if_exists(PENDING_FILE)?;
+    apply_firewall().await
+}
+
 pub async fn get_status() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(build_status().await?)))
 }

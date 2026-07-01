@@ -7,9 +7,9 @@ Last updated: 2026-07-01
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app `2.0.19` and raw system update `0.2.15-raw.1` are built,
-  published, and live-validated on `10.0.87.132` after fixing two raw-update
-  issues:
+- Last published raw/system baseline: app `2.0.19` and raw system update
+  `0.2.15-raw.1` are built, published, and live-validated on `10.0.87.132`
+  after fixing two raw-update issues:
   - root configuration restore must be deferred to first boot because the live
     rootfs cannot be mounted again while it is `/`;
   - reboot after raw writes must use kernel sysrq because the live rootfs has
@@ -21,6 +21,8 @@ Last updated: 2026-07-01
   - `61d04b1 Document 2.0.16 app release verification`
 - `main` changelog was also updated and pushed as commit
   `80d32fa Update changelog for beta 2 releases`.
+- Current unreleased work: app `2.0.20` system settings, syslog/time/firewall
+  controls, Restricted firewall mode, and HTTPS/firewall toggle fixes.
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -153,6 +155,18 @@ Detailed chronological build/update notes are in
     22, UDP/123, UDP/514, DHCP, established traffic, loopback, and IPv6
     control traffic;
   - restored `.132` to `mode=baseline` after the test.
+- HTTPS/firewall follow-up:
+  - disabling HTTPS now calls the firewall baseline reset before the backend
+    restart, so HTTP access is not left behind Restricted or Paranoid rules;
+  - TLS toggles now call `/etc/init.d/S95nanokvm restart-server`, which restarts
+    only `NanoKVM-Server` and leaves `kvm_system` running;
+  - live validation on `10.0.87.132` started from `mode=restricted` and
+    `proto=https`;
+  - disabling HTTPS changed `/etc/kvm/firewall.json` to `{"mode":"baseline"}`,
+    changed `server.yaml` to `proto: http`, and HTTP health passed;
+  - enabling HTTPS changed `server.yaml` back to `proto: https` and HTTPS
+    health passed;
+  - `kvm_system` stayed on PID `1638` through both TLS toggles.
 - Device validation on `10.0.87.132`:
   - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
   - `/kvmapp/version` reports `2.0.20`;

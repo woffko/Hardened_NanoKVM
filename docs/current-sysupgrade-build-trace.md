@@ -2275,3 +2275,45 @@ Live validation on `10.0.87.132`:
   - outbound syslog UDP/514;
   - DHCP, loopback, established traffic, and IPv6 control traffic.
 - Restored `.132` to `mode=baseline` after validation.
+
+## 2026-07-01 - HTTPS toggle and firewall fallback fix
+
+Problem:
+
+- If HTTPS was disabled while a restrictive firewall mode was configured, the
+  device could be left serving HTTP while the firewall still blocked ordinary
+  access.
+- Toggling HTTPS used the full `S95nanokvm restart` path. That path stops and
+  restarts `kvm_system`, which can wedge the HDMI/video pipeline and produce
+  `No HDMI signal` until reboot.
+
+Fix:
+
+- Added `S95nanokvm restart-server`, which restarts only `NanoKVM-Server` and
+  leaves `kvm_system` untouched.
+- Changed `/api/vm/tls` to use `restart-server` instead of full service
+  restart.
+- Changed HTTPS disable path to force managed firewall mode back to `baseline`
+  before writing `proto: http`.
+
+Validation on `10.0.87.132`:
+
+- Installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`.
+- Before test:
+  - `kvm_system` PID: `1638`;
+  - `NanoKVM-Server` PID: `1654`;
+  - firewall: `mode=restricted effective=restricted https=enabled`;
+  - server config: `proto: https`.
+- Disabled HTTPS through HTTPS API:
+  - HTTP health passed;
+  - firewall changed to `mode=baseline effective=baseline https=disabled`;
+  - `/etc/kvm/firewall.json` contained `{"mode":"baseline"}`;
+  - server config changed to `proto: http`;
+  - `kvm_system` PID remained `1638`;
+  - `NanoKVM-Server` restarted to PID `2136`.
+- Enabled HTTPS through HTTP API:
+  - HTTPS health passed;
+  - firewall stayed `mode=baseline effective=baseline https=enabled`;
+  - server config changed to `proto: https`;
+  - `kvm_system` PID remained `1638`;
+  - `NanoKVM-Server` restarted to PID `2470`.

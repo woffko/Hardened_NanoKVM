@@ -23,6 +23,15 @@
   DHCP, established connections, and essential IPv6 control traffic while
   blocking other inbound/outbound traffic.
 
+### Bug Fixes
+
+* Disabling HTTPS now forces the managed firewall back to `baseline` before the
+  backend is restarted, so HTTP access is not stranded behind Restricted or
+  Paranoid rules.
+* HTTPS enable/disable now restarts only the Rust web backend. The video helper
+  process stays running, avoiding the HDMI capture loss that could appear until
+  a full device reboot.
+
 ### Notes
 
 * The local log viewer keeps the active log buffer under `/tmp` to avoid
