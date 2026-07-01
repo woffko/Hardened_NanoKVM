@@ -72,14 +72,14 @@ Production stable/preview channel metadata must use
 
 ## Current Published System Releases
 
-The current `hardened-system-stable` channel points to lab raw release
-`hardened-system-0.2.15-raw.1`. It was built from the beta `2.0.19` Hardened
-SD image and contains validated gzip-compressed boot/rootfs partition images
-plus matching channel metadata.
+The current `hardened-system-stable` channel points to the RC3 raw payload
+`0.2.17-raw.1`, published with the `hardened-rust-rc3` full release. It was
+built from the RC3 `2.0.25` Hardened SD image and contains gzip-compressed
+boot/rootfs partition images plus matching channel metadata.
 
 The current metadata intentionally separates several version fields:
 
-- system update version: `0.2.15-raw.1`;
+- system update version: `0.2.17-raw.1`;
 - base image: `2026-06-29-12-08-d88d58.img`;
 - Buildroot release: `2023.11.2`;
 - security backport level: `Buildroot 2023.11.3 package backports`.

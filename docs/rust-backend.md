@@ -12,12 +12,11 @@ are implemented deeply enough for interactive device testing.
 
 Current published channels:
 
-- app update: `2.0.24`, tag `hardened-rust-2.0.24`;
-- current source/test build: `2.0.25`, installed and smoke-tested on hardware
-  but not published as the stable GitHub latest release;
-- raw system-update: `0.2.15-raw.1`, built from the beta `2.0.19` SD rootfs
+- app update: `2.0.25 RC3`, tag `hardened-rust-rc3`;
+- current source/test build: `2.0.25`, installed and smoke-tested on hardware;
+- raw system-update: `0.2.17-raw.1`, built from the RC3 `2.0.25` SD rootfs
   with gzip-compressed raw payload staging and sysrq reboot after raw writes;
-- SD-card image: beta `2.0.19` / `0.2.15-raw.1`.
+- SD-card image: RC3 `2.0.25` / `0.2.17-raw.1`.
 
 ## Build
 
@@ -156,8 +155,9 @@ For end-user flashing instructions, see
   pending/backup markers. `/api/system-update/confirm` writes a boot-good
   marker after basic health checks. `/api/system-update/rollback` restores the
   latest backup manually. These routes do not reboot automatically.
-- UI branding for Hardened NanoKVM and app version display from
-  `/kvmapp/version`.
+- UI branding for Hardened NanoKVM, About-page app version display from
+  `/kvmapp/version`, and an unauthenticated current-version endpoint used by
+  the login screen.
 - Guarded raw system-update switch in Check for Updates. Raw boot/rootfs writes
   stay disabled by default and require an explicit warning confirmation before
   `/api/system-update/install` can apply a destructive staged bundle.
@@ -190,12 +190,10 @@ For end-user flashing instructions, see
   upstream behavior.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants.
-- Video setting changes need more route-by-route stress testing. Reproduced
-  boot/runtime failures have been tied to stale runtime artifacts: duplicate
-  init scripts and old `web.*` backup directories copied into `/tmp/server`.
-  The current `S95nanokvm` disables stale autostarts, removes known stale web
-  backup directories, and was verified through reboot, login, MJPEG, and H.264
-  Direct streaming on the test device.
+- Video setting changes need more route-by-route stress testing. The current
+  app preserves the selected MJPEG/H.264 Direct/H.264 WebRTC mode across page
+  loads, and protocol changes intentionally reboot the device instead of
+  partially restarting the video stack.
 - First-boot/account setup needs continued product testing on fresh SD-card
   flashes.
 - Remote ISO download needs a final production policy before it should be

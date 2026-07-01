@@ -1,4 +1,7 @@
-## Hardened NanoKVM 2.0.25 Test Build (2026-07-01)
+## Hardened NanoKVM 2.0.25 RC3 (2026-07-01)
+
+Full release candidate with matching application, raw system-update, and
+SD-card image artifacts.
 
 ### Bug Fixes
 
@@ -8,6 +11,22 @@
   migration from legacy boolean auto-hide values.
 * Fixed the login screen firmware version by loading the current local
   `/kvmapp/version` through a public lightweight API endpoint.
+
+### Changes
+
+* Published the app updater channel as `2.0.25` on tag `hardened-rust-rc3`.
+* Rebuilt the full raw system-update and SD-card image line as
+  `0.2.17-raw.1`, keeping the Buildroot `2023.11.2` base label and the
+  `Buildroot 2023.11.3 package backports` security-backport baseline.
+* Kept Network settings under `Settings > System > Network` from RC2 and
+  refined the Network page layout: IPv4 settings now have their own heading,
+  DNS settings moved to the bottom with a separate DNS heading, and DNS inputs
+  accept IPv6 resolvers.
+* Added complete Estonian and Finnish locale files, Swedish and Norwegian
+  language aliases, and filled the new Network/IPv6/TLS reboot strings across
+  existing locales.
+* Updated the GitHub Pages project page for the RC3 release and removed the
+  large logo from the page chrome.
 
 ## Hardened NanoKVM 2.0.24 Test Build (2026-07-01)
 
@@ -79,8 +98,8 @@ settings, managed firewall modes, and HTTPS/firewall recovery.
 * Added online-update blocking notices when Paranoid mode is active, because
   outbound traffic to GitHub is intentionally blocked in that mode.
 * Made Paranoid mode exit explicit in the GUI: the firewall page now always
-  shows a visible **Disable Paranoid** action in the red Paranoid alert and a
-  dedicated mode button while Paranoid is configured or active.
+  shows a visible **Disable Paranoid** action while Paranoid is configured or
+  active.
 * Added Restricted Firewall mode, allowing HTTPS, SSH, DNS, NTP, remote syslog,
   online updates, WebRTC/ICE UDP, DHCP, established connections, and essential
   IPv6 control traffic while blocking other inbound/outbound traffic.
