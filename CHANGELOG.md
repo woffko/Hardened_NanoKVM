@@ -1,3 +1,12 @@
+## Hardened NanoKVM 2.0.22 Test Build (2026-07-01)
+
+### Changes
+
+* Added an explicit video-stream drain before HTTP/HTTPS protocol toggles.
+  Active MJPEG, H.264 Direct, and H.264 WebRTC clients are closed before the
+  Rust web backend restarts, so the browser can reconnect cleanly on the new
+  protocol.
+
 ## Hardened NanoKVM 2.0.21 RC2 (2026-07-01)
 
 Release candidate focused on settings navigation cleanup and matching

@@ -960,6 +960,9 @@ pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<im
 }
 
 pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>> {
+    stream::drain_video_streams("TLS protocol update");
+    time::sleep(Duration::from_millis(250)).await;
+
     let mut config = Config::read()?;
     if req.enabled {
         tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
