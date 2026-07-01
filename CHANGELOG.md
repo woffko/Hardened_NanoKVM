@@ -1,3 +1,277 @@
+## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
+
+### Bug Fixes
+
+* Fixed raw system-update reboot after writing the rootfs and boot partitions.
+  The raw writer no longer relies on launching `reboot` from the overwritten
+  live rootfs; it requests reboot through kernel sysrq after sync/remount.
+* Fixed first-boot raw restore for preserved files located directly under `/`,
+  including `/device_key`.
+* Supersedes `2.0.18` / `0.2.14-raw.1`, where live testing showed the device
+  could keep responding to ICMP with SSH/HTTP stopped if reboot did not happen
+  after raw writes.
+
+## Hardened NanoKVM Beta 2.0.18 (2026-07-01)
+
+### Bug Fixes
+
+* Fixed raw system-update root configuration restore. The raw writer no longer
+  tries to mount the newly written rootfs while the old rootfs is still mounted
+  as `/`; preserved root configuration is restored by `S01fs` on the first boot
+  after the raw update, before SSH and the web backend start.
+* Restored preserved file permissions after copying root configuration back
+  from the exFAT `/data` staging area, including `/etc/shadow`, `/etc/kvm/pwd`,
+  session secrets, and SSH host private keys.
+* Added automatic system-update confirmation after boot health succeeds. This
+  handles both file-based pending updates and raw update pending markers stored
+  under `/data`.
+
+### Notes
+
+* Live raw update `0.2.13-raw.1` on `10.0.87.132` successfully wrote rootfs and
+  boot and rebooted, but showed the old restore bug in
+  `/data/hardened-system-raw-update.log`: `mount ... Resource busy`. This
+  release fixes that path for the next raw build.
+
+## Hardened NanoKVM Beta 2.0.17 (2026-07-01)
+
+### Bug Fixes
+
+* Avoided forcing `sync_all()` on large raw system-update payload files while
+  staging archives on `/data`. This prevents the NanoKVM from rebooting or
+  dropping the backend during the `download/verifying` phase on exFAT-backed
+  staging storage.
+
+### Notes
+
+* Raw system release `0.2.12-raw.1` contained app `2.0.16`, but live testing on
+  `10.0.87.132` showed the app updater could reboot during staging before raw
+  install started. It is superseded by the matching `2.0.17` / `0.2.13-raw.1`
+  build.
+
+## Hardened NanoKVM Beta 2.0.16 (2026-06-30)
+
+### Bug Fixes
+
+* Fixed the raw system-update writer so it no longer depends on the rootfs
+  loader/libc after it starts overwriting `/dev/mmcblk0p2`. The writer now
+  copies BusyBox, the musl loader, and libc into its tmpfs run directory and
+  launches BusyBox through the copied loader with a local library path.
+* Moved raw-update preserved boot/rootfs state from `/tmp` to the `/data`
+  staging directory, avoiding tmpfs exhaustion while preserving optional large
+  runtime files.
+* Hid a stale staged raw-system cache from the GUI when its version already
+  matches the installed system and there is no pending install or active
+  progress record.
+
+### Notes
+
+* This fix was installed manually on `10.0.87.132` for live validation after
+  raw `0.2.11-raw.1` required a manual power-cycle.
+
+## Hardened NanoKVM Beta 2.0.15 (2026-06-30)
+
+### Bug Fixes
+
+* Made data-partition initialization idempotent after raw rootfs writes.
+  `S01fs` now checks for an existing `/dev/mmcblk0p3` before creating or
+  formatting p3, then only restores `/etc/kvm.disk0` and mounts `/data`.
+* Preserved `/etc/kvm.disk0` during raw system updates so an updated rootfs
+  does not look like a first boot when a data partition already exists.
+
+### Changed
+
+* Rebuilt and published matching app, raw system-update, and SD-card artifacts:
+  app `2.0.15`, raw system `0.2.11-raw.1`.
+* Added explicit system-update metadata fields in the GUI: System update
+  version, Base image, Buildroot release, and Security backport level.
+* Published `0.2.11-raw.1` with security patch level
+  `Buildroot 2023.11.3 package backports` while keeping the proven vendor
+  Buildroot `2023.11.2` base label separate.
+
+## Hardened NanoKVM Beta 2.0.14 (2026-06-30)
+
+### Bug Fixes
+
+* Mounted `/dev/mmcblk0p3` on `/data` from `S01fs` before raw update staging.
+* Refused raw partition installs when the staged payload is on the same
+  filesystem as `/`, avoiding writes that would read from the partition being
+  overwritten.
+* Normalized failed raw-install progress records so the GUI no longer leaves a
+  stale reboot-required state after a writer stops before reboot.
+
+### Notes
+
+* Raw release `0.2.10-raw.1` is a lab/broken release. It staged correctly on a
+  device with `/data` mounted, but it still lacked the later idempotent p3 init
+  guard from `2.0.15` and must not be retried.
+
+## Hardened NanoKVM Beta 2.0.13 (2026-06-30)
+
+### Notes
+
+* Internal app-only lab snapshot during raw-staging hardening. It was
+  superseded by `2.0.14` and is preserved only in the release archive.
+
+## Hardened NanoKVM Beta 2.0.12 (2026-06-30)
+
+### Bug Fixes
+
+* Added gzip-compressed raw boot/rootfs payload support for system updates.
+  The updater now validates compressed payloads and streams `gzip -dc`
+  directly to `/dev/mmcblk0p1` and `/dev/mmcblk0p2`.
+* Reduced raw staging free-space requirements by keeping raw images compressed
+  in `/data/.hardened-kvmcache/system-update`.
+
+## Hardened NanoKVM Beta 2.0.11 (2026-06-30)
+
+### Bug Fixes
+
+* Preserved user/device state before raw partition writes and restored it onto
+  the new rootfs/boot partition before reboot.
+* Preserved static IPv4/DNS, IPv6 files, stable MAC, hostname, SSH host keys,
+  web account/session state, TLS files, device key, and optional
+  Tailscale/PicoClaw runtime state.
+* Excluded old sysupgrade state files from restore so the newly installed raw
+  system keeps its own version metadata and update public key.
+
+## Hardened NanoKVM Beta 2.0.10 (2026-06-30)
+
+### Bug Fixes
+
+* Rebuilt the raw rootfs with the stock-compatible boot init script set.
+  `2.0.9 / 0.2.5-raw.1` missed required scripts such as `S00kmod`, `S01fs`,
+  and `S15kvmhwd`, which could leave video hardware devices unavailable after
+  boot.
+* Added release validation that rejects raw/SD rootfs images missing the
+  required boot-safe init scripts.
+
+## Hardened NanoKVM Beta 2.0.9 (2026-06-30)
+
+### Features
+
+* Added explicit IPv6 controls under Settings > Network. The wired interface
+  now supports Disabled, SLAAC, DHCPv6, and Manual IPv6 modes from the GUI.
+* IPv6 is disabled by default when no Hardened IPv6 mode has been configured,
+  preventing hidden IPv6 exposure on networks that advertise IPv6 automatically.
+* Bundled a small `udhcpc6` client for DHCPv6 mode. The DHCPv6 client uses a
+  Hardened hook script that only manages IPv6/DNS state and does not reset the
+  active IPv4 web/SSH connection.
+
+### Bug Fixes
+
+* The IPv6 panel now shows an Apply action when the desired mode is already
+  Disabled but IPv6 is still active, so app-updated devices can apply the new
+  default without toggling through another mode.
+
+## Hardened NanoKVM Beta 2.0.8 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed OLED sleep timers of 5 minutes and higher by shipping a rebuilt
+  `kvm_system` helper with 32-bit timeout parsing. Earlier builds parsed the
+  configured timeout into an 8-bit value, causing larger timer values to wrap
+  and turn the display off too early.
+
+## Hardened NanoKVM Beta 2.0.7 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed a login-loop after IP/protocol changes or stale browser cookies. The
+  web UI can now recover its CSRF cookie from the protected account endpoint
+  when the HttpOnly session cookie is still valid.
+* The CSRF cookie is now written and removed explicitly at path `/`, avoiding
+  route-specific cookie state after hash-route navigation.
+
+## Hardened NanoKVM Beta 2.0.6 (2026-06-29)
+
+### Bug Fixes
+
+* Made Manual network Apply schedule the browser redirect before waiting for
+  the network-setting POST to finish, so changing the device IP still moves the
+  browser to the target address if the request is interrupted by the Ethernet
+  restart.
+* Added `Cache-Control: no-store` to the HTML shell responses. This avoids old
+  browsers reusing a stale React bundle after an application update, which can
+  leave the UI stuck on the login screen until site data or cache is cleared.
+
+## Hardened NanoKVM Beta 2.0.5 (2026-06-29)
+
+### Features
+
+* Added full Manual network editing in Settings > Network > DNS. Manual mode
+  now edits wired IP address, subnet mask, router, and DNS servers, applies the
+  settings through the existing `S30eth` boot mechanism, and redirects the
+  browser to the configured address after apply.
+
+### Bug Fixes
+
+* Added a stable wired `eth0` MAC address mechanism. `S30eth` now creates and
+  reuses `/boot/eth.mac`, derived from the device key, before DHCP/static
+  configuration so DHCP leases do not move after every reboot.
+* App startup and `S95nanokvm` now sync the bundled `S30eth` into
+  `/etc/init.d`, and SD/raw-system validation now requires `S30eth` in both
+  `/kvmapp/system/init.d` and `/etc/init.d`.
+
+## Hardened NanoKVM Beta 2.0.4 (2026-06-29)
+
+### Bug Fixes
+
+* Cleared legacy `install/failed` system-update progress records without a
+  staged version. These records were left by older app builds after pressing
+  Install while raw system updates were disabled.
+* Hid stale failed-progress messages when a newer system update is available
+  for Download and Verify.
+
+## Hardened NanoKVM Beta 2.0.3 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed the system-update UI after failed raw installs. A stale staged raw
+  update can no longer keep showing `Install` when a newer GitHub system update
+  is available.
+* System-update install progress now records the staged version, so old failed
+  progress from previous builds is easier to distinguish from the current
+  staged update.
+
+## Hardened NanoKVM Beta 2.0.2 (2026-06-29)
+
+### Bug Fixes
+
+* Added Rust-backend startup synchronization for `/etc/init.d/S03usbdev` and
+  `/etc/init.d/S95nanokvm`. This lets ordinary application updates install the
+  stable USB gadget MAC fix on already-flashed devices before the next reboot.
+
+## Hardened NanoKVM Beta 2.0.1 (2026-06-29)
+
+### Bug Fixes
+
+* Fixed update checks when Preview Updates is enabled. A stale preview channel
+  can no longer hide a newer stable application or system update.
+* Added stable locally-administered MAC addresses for USB NCM/RNDIS gadget
+  functions, derived from the device key. `S95nanokvm` also syncs the bundled
+  `S03usbdev` boot script into `/etc/init.d` after app updates so the MAC fix
+  takes effect after the next reboot.
+
+## Hardened NanoKVM Beta 2 (2026-06-29)
+
+### Features
+
+* Added a guarded **Allow raw system updates** switch directly to the
+  Check for Updates screen. Enabling it shows a recovery warning before raw
+  boot/rootfs writes are allowed.
+* Prepared the beta 2 release line to ship the latest Rust-only application,
+  SD-card image, and GUI-installable raw system-update bundle from the same
+  integrated sysupgrade build.
+
+### Changed
+
+* Raised the application update version to `2.0.0`; the web UI displays this
+  release as `beta 2`.
+* System raw update installs now re-read `/etc/kvm/server.yaml` immediately
+  before install, so enabling raw updates in the GUI works without restarting
+  the backend.
+
 ## Hardened NanoKVM 1.0.5 Beta Security (2026-06-29)
 
 ### Security
@@ -19,6 +293,30 @@
 
 * Removed the Settings > Device > Advanced backend switch from the web UI.
 * Raised the displayed application version to `beta - 1.0.5`.
+
+## Hardened NanoKVM 1.0.4 Beta Sysupgrade (2026-06-29)
+
+### Bug Fixes
+
+* Added rootfs content validation for experimental raw system-update releases so
+  stock vendor SDK rootfs images without Hardened NanoKVM files are rejected
+  before packaging.
+* Changed raw system-update build defaults to extract boot/rootfs from the
+  patched Hardened SD image instead of vendor SDK stock artifacts.
+* Made the SSH setting idempotent and state-based. Re-enabling an already
+  running SSH service now reports `enabled: true` instead of letting the GUI
+  switch appear to bounce back to disabled.
+* Hardened raw partition install diagnostics and failure handling around
+  read-only rootfs remounts.
+* Fixed system-update preview channel handling. System update check/download
+  now respects the same Preview Updates flag as application updates.
+
+### Documentation
+
+* Marked `hardened-system-0.1.0-raw.1` as a revoked experimental raw release
+  and documented the correct SD/raw release build flow.
+* Recorded that SDK-derived raw images should be tested only after a fresh
+  known-good Hardened SD image from this sysupgrade branch passes end-to-end.
 
 ## Hardened NanoKVM 1.0.2 Beta (2026-06-28)
 
