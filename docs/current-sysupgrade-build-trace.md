@@ -2092,3 +2092,87 @@ Fix started as app `2.0.16`:
   utility calls do not depend on the overwritten rootfs;
 - store preserved boot/rootfs configuration under the `/data` staging directory
   instead of `/tmp`.
+
+## 2026-07-01: Raw Restore, Auto-Confirm, and Sysrq Reboot Fixes
+
+Summary:
+
+- App `2.0.17` / raw `0.2.13-raw.1` fixed the `/data` staging path by avoiding
+  forced `sync_all()` on large raw archive entries. Live staging on
+  `10.0.87.132` completed successfully.
+- Raw `0.2.13-raw.1` wrote rootfs and boot and rebooted, but root config
+  restore failed before reboot:
+  `mount ... /tmp/hardened-root-preserve-mount failed: Resource busy`.
+- App `2.0.18` / raw `0.2.14-raw.1` deferred root config restore to `S01fs`
+  on first boot and added automatic system-update confirm once backend health
+  succeeds.
+- Live `0.2.14-raw.1` validation on `10.0.87.132` succeeded:
+  - system version became `0.2.14-raw.1`;
+  - app version became `2.0.18`;
+  - log showed `restoring preserved root configuration after raw system update
+    boot` and `preserved root configuration restore finished`;
+  - watchdog log showed `pending system update auto-confirmed`.
+- That live test also showed a minor root-level preserve bug:
+  `failed to create restore directory for /device_key`.
+- App `2.0.19` / raw `0.2.15-raw.1` fixes root-level restore paths and changes
+  post-write reboot to kernel sysrq (`s`, `u`, `b`) so reboot no longer depends
+  on executing `/bin/reboot` from the overwritten live rootfs.
+
+Commits:
+
+- `41bdfc1 Fix large raw update staging`
+- `02086e0 Fix raw update root restore and auto-confirm`
+- `9094820 Fix raw update reboot path`
+- `80d32fa Update changelog for beta 2 releases` on `main`
+
+Published releases:
+
+- App `2.0.19`:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.19`
+- Raw system `0.2.15-raw.1`:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.15-raw.1`
+- Stable channels:
+  - `hardened-rust-preview/latest.json` reports app `2.0.19`;
+  - `hardened-system-stable/system-latest.json` reports raw `0.2.15-raw.1`.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.19.tar.gz` | `6d4e0243cb53855a57baf79e01abc715446a21f926b036709fd9c4b032598b74` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.15-raw.1.tar.gz` | `a99b0b98f6d1132025ae6bf6c8f125b426ebe1f150f09e7b76f7f6062a039ff3` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_19_buildroot_2023_11_2_security_backports_sysrqreboot_Rev1_4_2_rust.img.xz` | `83fd6a3409e101324348363e16c4f0edae538ee274931921e67d34b8054231f0` |
+
+Validation already completed:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 117 lib tests
+  plus 2 main tests.
+- `cargo test --manifest-path server-rust/Cargo.toml raw_image_updater`:
+  passed.
+- `corepack pnpm --dir web build`: passed.
+- `sh -n kvmapp/system/init.d/S01fs`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- SD and raw rootfs validation both passed with
+  `EXPECTED_BACKEND=rust EXPECTED_KVMAPP_VERSION=2.0.19`.
+- App and system metadata signatures verified locally.
+- GitHub channel metadata verified after publish.
+
+Live test completed on `10.0.87.132`:
+
+- Device was updated to app `2.0.19`.
+- Device staged raw `0.2.15-raw.1`.
+- Raw install was started and returned backup id `raw-1782880745`.
+- During the raw-write window, ICMP stayed alive and HTTP was stopped. This is
+  expected while runtime services are stopped.
+- Device returned without manual intervention.
+- Final verification:
+  - `/api/health`: OK, Rust backend;
+  - `/api/application/version`: `current=2.0.19`, `latest=2.0.19`;
+  - `/kvmapp/version`: `2.0.19`;
+  - `/etc/kvm/system-version.json`: `0.2.15-raw.1`;
+  - `/api/system-update/status`: `current=0.2.15-raw.1`, `staged=null`,
+    `pending=null`, `progress=null`;
+  - raw update log included rootfs/boot write completion, deferred root restore,
+    and first-boot preserve restore without the old `/device_key` restore
+    directory error;
+  - watchdog log included `pending system update auto-confirmed`.

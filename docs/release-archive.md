@@ -16,9 +16,8 @@ Policy:
 
 | Tag | Status | Notes |
 | --- | --- | --- |
-| `hardened-rust-beta-2.0.16` | Current app beta | App-only hotfix with raw-updater runtime isolation, `/data` raw preserve state, and stale staged metadata cleanup after completed raw updates. |
-| `hardened-rust-beta-2.0.15` | Previous app beta | Rust-only app release, signed `latest.json`, includes idempotent data-partition init and GUI system metadata label cleanup. |
-| `hardened-system-0.2.11-raw.1` | Current raw/SD beta | Matching raw full-rootfs update and SD image with app `2.0.15`, base image `2026-06-29-12-08-d88d58.img`, Buildroot `2023.11.2`, security patch level `Buildroot 2023.11.3 package backports`. |
+| `hardened-rust-beta-2.0.19` | Current app beta | Raw-update sysrq reboot fix, root-level preserve restore fix, deferred first-boot root restore, and automatic post-boot confirm. |
+| `hardened-system-0.2.15-raw.1` | Current raw/SD beta | Matching raw full-rootfs update and SD image with app `2.0.19`, base image `2026-06-29-12-08-d88d58.img`, Buildroot `2023.11.2`, security patch level `Buildroot 2023.11.3 package backports`. Live-validated on `10.0.87.132`. |
 | `hardened-system-stable` | Channel | Stable raw-system metadata channel. Keep this release. |
 | `hardened-rust-preview` | Channel | Preview app metadata channel. Keep this release while preview update support exists. |
 | `hardened-system-preview` | Channel | Preview raw-system metadata channel. Keep this release while preview update support exists. |
@@ -27,7 +26,7 @@ Policy:
 ## Internal Or Obsolete App Releases
 
 These releases were useful during bring-up, but are superseded by
-`hardened-rust-beta-2.0.16`. They can be removed from the GitHub Releases UI
+`hardened-rust-beta-2.0.19`. They can be removed from the GitHub Releases UI
 without losing the changelog history.
 
 | Tag | Archive status | Notes |
@@ -52,6 +51,10 @@ without losing the changelog history.
 | `hardened-rust-beta-2.0.12` | Obsolete | Compressed raw staging release. |
 | `hardened-rust-beta-2.0.13` | Internal lab | Intermediate app-only raw-staging hardening snapshot. |
 | `hardened-rust-beta-2.0.14` | Broken/lab | Data staging guard release; later found to still lack idempotent p3 first-boot protection. Superseded by `2.0.15`. |
+| `hardened-rust-beta-2.0.15` | Obsolete | Coherent app/raw/SD build with idempotent data-partition init and GUI system metadata label cleanup. Superseded by later raw-update reliability fixes. |
+| `hardened-rust-beta-2.0.16` | Obsolete | Raw-updater runtime isolation and `/data` raw preserve state. Superseded by `2.0.19`. |
+| `hardened-rust-beta-2.0.17` | Obsolete | Large raw staging fix for exFAT-backed `/data`. Superseded by `2.0.19`. |
+| `hardened-rust-beta-2.0.18` | Obsolete | Deferred first-boot root restore and auto-confirm. Superseded by `2.0.19` because reboot after raw writes still depended on the overwritten live rootfs. |
 
 ## Internal Or Obsolete System Releases
 
@@ -70,18 +73,24 @@ installed unless a test explicitly needs to reproduce a historical failure.
 | `hardened-system-0.2.8-raw.1` | Obsolete | Compressed staging release. |
 | `hardened-system-0.2.9-raw.1` | Internal lab | Superseded by later data-staging guard work. |
 | `hardened-system-0.2.10-raw.1` | Broken/lab | Could trigger unsafe p3 first-boot formatting path after raw rootfs update. Superseded by `0.2.11-raw.1`. |
+| `hardened-system-0.2.11-raw.1` | Obsolete | Coherent raw/SD build after idempotent data-partition fix; live test showed raw writer could crash before reboot due to dynamic runtime dependency. |
+| `hardened-system-0.2.12-raw.1` | Obsolete | Runtime-isolated raw writer build; live staging could still fail during large `/data` archive sync. |
+| `hardened-system-0.2.13-raw.1` | Obsolete | Large staging fix; live install wrote rootfs/boot and rebooted, but root config restore before reboot failed with `Resource busy`. |
+| `hardened-system-0.2.14-raw.1` | Obsolete | Deferred first-boot root restore and auto-confirm; live test succeeded but found root-level `/device_key` restore issue and unreliable post-write reboot path. |
 
 ## Cleanup Checklist
 
-Cleanup was executed on 2026-06-30. The GitHub Releases page was reduced to
-the visible releases listed above. Historical git tags were left intact.
+Cleanup was executed on 2026-06-30 and historical git tags were left intact.
+Later 2.0.17-2.0.19 / 0.2.13-0.2.15 validation releases were published after
+that cleanup, so the GitHub Releases page may temporarily contain obsolete
+entries listed above until the next cleanup pass.
 
 When repeating GitHub Releases cleanup:
 
-1. Verify `hardened-rust-beta-2.0.15` is the GitHub latest release and its
+1. Verify `hardened-rust-beta-2.0.19` is the GitHub latest release and its
    `latest.json` signature verifies.
 2. Verify `hardened-system-stable/system-latest.json` points to
-   `0.2.11-raw.1` and its signature verifies.
+   `0.2.15-raw.1` and its signature verifies.
 3. Delete only obsolete release entries/assets from the GitHub Releases UI.
 4. Keep channel releases and current releases.
 5. Leave git tags intact unless a separate tag-cleanup task is explicitly

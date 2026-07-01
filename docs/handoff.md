@@ -1,22 +1,26 @@
 # Hardened NanoKVM Handoff
 
-Last updated: 2026-06-30
+Last updated: 2026-07-01
 
 ## Repository State
 
 - Local repo: `/home/w0w/Hardened_NanoKVM-new-buildroot`
 - GitHub repo: `woffko/Hardened_NanoKVM`
 - Active branch: `feature/new-buildroot-sysupgrade-lab`
-- Current work: app `2.0.16` raw-updater fix after live `0.2.11-raw.1`
-  testing on `10.0.87.132` showed the raw writer did not reboot by itself.
-  The device booted after manual power-cycle and `0.2.11-raw.1` was confirmed
-  healthy, but the writer log showed it stopped during ROOTFS streaming before
-  boot partition write/reboot.
+- Current work: app `2.0.19` and raw system update `0.2.15-raw.1` are built,
+  published, and live-validated on `10.0.87.132` after fixing two raw-update
+  issues:
+  - root configuration restore must be deferred to first boot because the live
+    rootfs cannot be mounted again while it is `/`;
+  - reboot after raw writes must use kernel sysrq because the live rootfs has
+    already been overwritten.
 - Recent commits when this handoff was updated:
-  - `fe27048 Fix raw updater runtime isolation`
-  - `f20082c Record GitHub release cleanup`
-  - `d379d04 Document current releases and archive old ones`
-  - `d9614b6 Clarify system update metadata display`
+  - `9094820 Fix raw update reboot path`
+  - `02086e0 Fix raw update root restore and auto-confirm`
+  - `41bdfc1 Fix large raw update staging`
+  - `61d04b1 Document 2.0.16 app release verification`
+- `main` changelog was also updated and pushed as commit
+  `80d32fa Update changelog for beta 2 releases`.
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -25,44 +29,41 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current published app release: `2.0.16`
-- Current source version: `2.0.16`
+- Current published app release: `2.0.19`
+- Current source version: `2.0.19`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.16`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.19`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.16.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.19.tar.gz`
 - SHA256:
-  `c42e8cee626006a9cef4a444b0ae0c03adab052207fa3ac824ae7d41858046ae`
+  `6d4e0243cb53855a57baf79e01abc715446a21f926b036709fd9c4b032598b74`
 - Includes the `2.0.15` compressed raw payload support, raw updater setting
   preservation, raw staging-on-rootfs refusal, `/data` p3 mounting, explicit
   IPv6 controls, bundled DHCPv6 client, OLED helper fix, login-loop fix,
-  idempotent p3 init guard, `/etc/kvm.disk0` raw preservation, and GUI system
-  metadata label cleanup. `2.0.16` adds raw-updater runtime isolation by
-  copying BusyBox, musl loader, and libc before rootfs overwrite, moves raw
-  preserve state from `/tmp` to `/data`, and hides stale staged raw-update
-  metadata after a manually completed raw update.
+  idempotent p3 init guard, `/etc/kvm.disk0` raw preservation, GUI system
+  metadata label cleanup, raw-updater runtime isolation, `/data`-backed raw
+  preserve state, large raw staging fixes, deferred root configuration restore
+  on first boot, automatic post-boot confirm, root-level preserve restore
+  fixes, and sysrq reboot after raw boot/rootfs writes.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
-- Published on GitHub and verified through `releases/latest/download/latest.json`.
+- Published on GitHub and verified through `hardened-rust-preview/latest.json`.
 - Verified on `10.0.87.132` from the device itself:
-  `/api/application/version` reports `current=2.0.16`, `latest=2.0.16`;
-  `/api/system-update/status` reports `staged=null`;
-  `/api/system-update/check` reports `updateAvailable=false` for
-  `0.2.11-raw.1`.
+  `/api/application/version` reports `current=2.0.19`, `latest=2.0.19`.
 
 ### Raw System Release
 
-- Current raw system channel: `0.2.11-raw.1`
+- Current raw system channel: `0.2.15-raw.1`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.11-raw.1`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.15-raw.1`
 - Stable channel tag:
   `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
 - Artifact:
-  `build/system-updates/hardened-nanokvm-system-0.2.11-raw.1.tar.gz`
+  `build/system-updates/hardened-nanokvm-system-0.2.15-raw.1.tar.gz`
 - SHA256:
-  `f2033beb9453f1afc08552cc9ec5d311c5ca8945754890ea0116b2c0a61c25e8`
-- Built from the beta `2.0.15` SD rootfs. Raw payload manifest source commit:
-  `d9614b6`.
+  `a99b0b98f6d1132025ae6bf6c8f125b426ebe1f150f09e7b76f7f6062a039ff3`
+- Built from the beta `2.0.19` SD rootfs. Raw payload manifest source commit:
+  `9094820`.
 - Base image: `2026-06-29-12-08-d88d58.img`.
 - Kernel string: `5.10.4-tag-`.
 - Buildroot release shown by the rootfs: `2023.11.2`.
@@ -74,14 +75,17 @@ Detailed chronological build/update notes are in
   public key.
 - Published on GitHub and verified through `hardened-system-stable` and
   `hardened-system-preview` metadata.
+- Verified on `10.0.87.132` from the device itself:
+  `/api/system-update/status` reports `current=0.2.15-raw.1`, with
+  `staged=null`, `pending=null`, and `progress=null`.
 
 ### SD Image
 
-- Latest SD image built: beta `2.0.15`
+- Latest SD image built: beta `2.0.19`
 - File name:
-  `Hardened_NanoKVM_beta_2_0_15_buildroot_2023_11_2_security_backports_datafix_Rev1_4_2_rust.img.xz`
+  `Hardened_NanoKVM_beta_2_0_19_buildroot_2023_11_2_security_backports_sysrqreboot_Rev1_4_2_rust.img.xz`
 - SHA256:
-  `39c3fde0af70eb8ed9400c2da6257f0b2952c6929c6c8e45d932ac699afb614b`
+  `83fd6a3409e101324348363e16c4f0edae538ee274931921e67d34b8054231f0`
 
 ### Release Cleanup
 
@@ -91,9 +95,8 @@ Detailed chronological build/update notes are in
   - `hardened-system-preview`
   - `hardened-system-stable`
 - Keep current visible releases:
-  - `hardened-rust-beta-2.0.16`
-  - `hardened-rust-beta-2.0.15`
-  - `hardened-system-0.2.11-raw.1`
+  - `hardened-rust-beta-2.0.19`
+  - `hardened-system-0.2.15-raw.1`
 - Keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
   milestone unless the user later asks for stricter cleanup.
 - Delete only obsolete GitHub release entries/assets, not git tags.
@@ -134,6 +137,44 @@ Detailed chronological build/update notes are in
     `--library-path /tmp/hardened-system-raw-update`;
   - keep preserved boot/rootfs config under the staging directory on `/data`,
     not under `/tmp`.
+
+### 2026-07-01 Raw Update Status
+
+- App `2.0.17` fixed raw staging on `/data` by avoiding forced `sync_all()` on
+  large archive members.
+- Raw `0.2.13-raw.1` installed on `10.0.87.132`, wrote rootfs/boot, and
+  rebooted, but its writer tried to mount `/dev/mmcblk0p2` for restore while
+  the old rootfs was still `/`. Log symptom:
+  `mount ... /tmp/hardened-root-preserve-mount failed: Resource busy`.
+- App `2.0.18` / raw `0.2.14-raw.1` deferred root restore to `S01fs` on first
+  boot and added automatic confirm after backend health succeeds.
+- Live `0.2.14-raw.1` validation on `10.0.87.132`:
+  - `/kvmapp/version`: `2.0.18`;
+  - `/etc/kvm/system-version.json`: `0.2.14-raw.1`;
+  - `/data/hardened-system-raw-update.log` contained
+    `restoring preserved root configuration after raw system update boot` and
+    `preserved root configuration restore finished`;
+  - `/tmp/system-update-watchdog.log` contained
+    `pending system update auto-confirmed`.
+- Minor restore bug found in that same log: preserved root-level files such as
+  `/device_key` used an empty destination directory and logged
+  `failed to create restore directory for /device_key`.
+- App `2.0.19` / raw `0.2.15-raw.1` fixes the `/device_key` restore path and
+  changes post-write reboot to kernel sysrq (`s`, `u`, `b`) instead of relying
+  on launching `reboot` from the already overwritten live rootfs.
+- `10.0.87.132` was updated to app `2.0.19`, staged raw `0.2.15-raw.1`, and
+  completed raw install with backup id `raw-1782880745`.
+- Final `10.0.87.132` state:
+  - `/kvmapp/version`: `2.0.19`;
+  - `/etc/kvm/system-version.json`: `0.2.15-raw.1`;
+  - `/api/system-update/status`: `staged=null`, `pending=null`,
+    `progress=null`;
+  - `/data/hardened-system-raw-update.log` showed rootfs/boot writes,
+    deferred root restore, and first-boot preserve restore without the old
+    `/device_key` restore-directory error;
+  - `/tmp/system-update-watchdog.log` showed
+    `pending system update auto-confirmed`.
+- Do not touch `10.0.87.133`; the user was manually testing that device.
 
 ## Device State
 
