@@ -11,7 +11,7 @@
       name="google-site-verification"
       content="8S4VCTY99VqIJ3lK7OZJqoMgtbUIvAi5t5Wkb0em4ek"
     />
-    <!-- pages-build: 2026-07-01T17:33Z -->
+    <!-- pages-build: 2026-07-01T18:10Z -->
     <title>Hardened NanoKVM</title>
     <style>
       :root {
@@ -82,12 +82,6 @@
         font-weight: 700;
       }
 
-      .brand img {
-        width: 44px;
-        height: 28px;
-        object-fit: contain;
-      }
-
       .nav-links {
         display: flex;
         flex-wrap: wrap;
@@ -112,8 +106,8 @@
         inset: 0;
         background:
           linear-gradient(90deg, rgba(16, 18, 17, 0.96), rgba(16, 18, 17, 0.62)),
-          url("assets/hardened-logo.png") right 8% center / min(720px, 58vw) auto
-            no-repeat;
+          url("https://wiki.sipeed.com/hardware/assets/NanoKVM/introduce/NanoKVM_3.png")
+            right 8% center / min(640px, 52vw) auto no-repeat;
         opacity: 0.98;
       }
 
@@ -333,12 +327,13 @@
         .hero::before {
           background:
             linear-gradient(180deg, rgba(16, 18, 17, 0.82), rgba(16, 18, 17, 0.98)),
-            url("assets/hardened-logo.png") center 22px / min(520px, 92vw) auto
+            url("https://wiki.sipeed.com/hardware/assets/NanoKVM/introduce/NanoKVM_3.png")
+              center 22px / min(520px, 92vw) auto
               no-repeat;
         }
 
         .hero-content {
-          padding-top: 220px;
+          padding-top: 260px;
         }
 
         h1 {
@@ -366,7 +361,6 @@
     <header>
       <nav class="shell nav" aria-label="Primary">
         <a class="brand" href="https://woffko.github.io/Hardened_NanoKVM/">
-          <img src="assets/hardened-logo.png" alt="" />
           <span>Hardened NanoKVM</span>
         </a>
         <div class="nav-links">
@@ -401,11 +395,11 @@
     <aside class="shell status-row" aria-label="Current project status">
       <div class="status">
         <strong>App channel</strong>
-        <span>Published release: 2.0.24. Current hardware test build: 2.0.25.</span>
+        <span>Latest full RC: 2.0.25 RC3.</span>
       </div>
       <div class="status">
         <strong>System channel</strong>
-        <span>Raw/SD baseline: 0.2.15-raw.1 with Buildroot package security backports.</span>
+        <span>Raw/SD baseline: 0.2.17-raw.1 with Buildroot package security backports.</span>
       </div>
       <div class="status">
         <strong>Release state</strong>
@@ -485,8 +479,8 @@
               boot, rootfs, kernel, or the base Buildroot system.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-2.0.24"
-            >hardened-rust-2.0.24</a
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3"
+            >hardened-rust-rc3</a
           >
         </article>
         <article class="release">
@@ -499,8 +493,8 @@
           </div>
           <a
             class="tag"
-            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.15-raw.1"
-            >0.2.15-raw.1</a
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3"
+            >0.2.17-raw.1</a
           >
         </article>
         <article class="release">
