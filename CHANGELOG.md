@@ -1,3 +1,113 @@
+## Hardened NanoKVM 2.0.25 Test Build (2026-07-01)
+
+### Bug Fixes
+
+* Fixed desktop startup so the saved H.264/WebRTC or H.264 Direct video mode is
+  preserved instead of being reset to MJPEG.
+* Preserved the Appearance menu display mode across updates, including
+  migration from legacy boolean auto-hide values.
+* Fixed the login screen firmware version by loading the current local
+  `/kvmapp/version` through a public lightweight API endpoint.
+
+## Hardened NanoKVM 2.0.24 Test Build (2026-07-01)
+
+### Changes
+
+* Reverted the experimental video-stream drain and desktop pre-sync changes from
+  `2.0.22`/`2.0.23`, returning MJPEG, H.264 Direct, and H.264 WebRTC behavior
+  to the tested `2.0.21` path.
+* Changed HTTP/HTTPS protocol switching to save the new protocol and reboot the
+  NanoKVM device instead of restarting only the web backend.
+* Added a confirmation warning for protocol changes. After confirmation, the UI
+  starts a 30-second redirect timer to the new `http://` or `https://` address.
+
+## Hardened NanoKVM 2.0.23 Test Build (2026-07-01)
+
+### Changes
+
+* Fixed the H.264/MJPEG mode switch path after `2.0.22` could leave the device
+  in H.264 safe mode. The desktop UI now synchronizes the backend capture mode
+  before mounting a video stream, and the backend drains active video clients
+  before applying a real MJPEG/H.264 type change.
+
+## Hardened NanoKVM 2.0.22 Test Build (2026-07-01)
+
+### Changes
+
+* Added an explicit video-stream drain before HTTP/HTTPS protocol toggles.
+  Active MJPEG, H.264 Direct, and H.264 WebRTC clients are closed before the
+  Rust web backend restarts, so the browser can reconnect cleanly on the new
+  protocol.
+
+## Hardened NanoKVM 2.0.21 RC2 (2026-07-01)
+
+Release candidate focused on settings navigation cleanup and matching
+application/raw/SD-card artifacts.
+
+### Changes
+
+* Moved Network settings into `Settings > System > Network` and removed the
+  top-level Network item from the Settings sidebar.
+* Updated HTTPS-related UI tips to point to the new Network location.
+* Updated Restricted Firewall mode rules and UI text so WebRTC/ICE UDP and DNS
+  are explicitly allowed and documented.
+* Stopped forcing a Rust backend restart when switching between MJPEG and H.264
+  modes; HTTPS changes still restart only the web backend.
+* Hardened `S95nanokvm` restart handling so the backend can fall back to the
+  persistent `/kvmapp/server` copy when `/tmp` is low and reboots only when the
+  vendor video process cannot be stopped cleanly.
+
+## Hardened NanoKVM 2.0.20 RC1 (2026-07-01)
+
+Release candidate focused on Rust-only operation, system observability, time
+settings, managed firewall modes, and HTTPS/firewall recovery.
+
+### Features
+
+* Added `Settings > System Log` with UDP remote syslog forwarding, local
+  tmpfs-backed log viewing, kernel log viewing, and a test log action.
+* Added web login audit events to syslog for successful logins, failed
+  credentials, and lockout events.
+* Added `Settings > System` as the home for system-level controls. `System Log`
+  now lives inside this section.
+* Added `Settings > System > Time` with timezone selection, NTP enable/disable,
+  editable NTP servers, router/default server shortcuts, and manual sync.
+* Added `Settings > System > Firewall` with a read-only iptables/ip6tables/nft
+  rules viewer and guarded Restricted/Paranoid modes.
+* Added managed baseline firewall initialization through `S40firewall`, replacing
+  the older hardcoded iptables setup in `S95nanokvm`.
+* Added online-update blocking notices when Paranoid mode is active, because
+  outbound traffic to GitHub is intentionally blocked in that mode.
+* Made Paranoid mode exit explicit in the GUI: the firewall page now always
+  shows a visible **Disable Paranoid** action in the red Paranoid alert and a
+  dedicated mode button while Paranoid is configured or active.
+* Added Restricted Firewall mode, allowing HTTPS, SSH, DNS, NTP, remote syslog,
+  online updates, WebRTC/ICE UDP, DHCP, established connections, and essential
+  IPv6 control traffic while blocking other inbound/outbound traffic.
+
+### Bug Fixes
+
+* Disabling HTTPS now forces the managed firewall back to `baseline` before the
+  backend is restarted, so HTTP access is not stranded behind Restricted or
+  Paranoid rules.
+* HTTPS enable/disable now restarts only the Rust web backend. The video helper
+  process stays running, avoiding the HDMI capture loss that could appear until
+  a full device reboot.
+
+### Notes
+
+* The local log viewer keeps the active log buffer under `/tmp` to avoid
+  steady SD-card writes. Only syslog configuration is persisted.
+* Remote forwarding uses BusyBox `syslogd -R`, so the initial transport is UDP.
+* NTP remains enabled by default and uses public `pool.ntp.org` servers unless
+  the user changes the server list.
+* Paranoid firewall mode is available only after HTTPS is enabled and verified
+  locally. It allows inbound HTTPS plus loopback, established traffic, DHCP, and
+  essential IPv6 control traffic; other inbound and outbound traffic is dropped.
+* Restricted firewall mode also requires HTTPS. Unlike Paranoid, it keeps
+  outbound HTTPS/DNS available for online updates and permits SSH/NTP/syslog
+  and WebRTC/ICE UDP operation.
+
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 
 ### Bug Fixes

@@ -21,10 +21,11 @@ SD-card images. Install those through the web GUI updater instead.
 - Pick the target disk carefully. A wrong disk name can overwrite your computer
   drive.
 
-Current release note: RC1 is an application/backend/UI release. The latest
-published full SD-card image currently remains the validated
-`0.2.15-raw.1` system image from the beta 2.0.19 line. After flashing that
-image, use the web GUI application updater to install the latest RC app release.
+Current release note: the latest application releases after beta 2.0.19 are
+app/backend/UI-only releases. The latest published full SD-card image currently
+remains the validated `0.2.15-raw.1` system image from the beta 2.0.19 line.
+After flashing that image, use the web GUI application updater to install the
+latest app release.
 
 ## Windows: Balena Etcher
 
@@ -44,7 +45,8 @@ images and reduces the chance of selecting the wrong disk.
 
 On a fresh Hardened image, open the device in a browser and complete the
 first-boot account setup. If you flashed an older beta SD image first, update
-the application to the latest RC through **Settings > Check for Updates**.
+the application to the latest app release through **Settings > Check for
+Updates**.
 
 ## Linux
 

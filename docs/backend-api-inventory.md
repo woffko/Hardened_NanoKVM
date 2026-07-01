@@ -53,6 +53,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method | Path | Rust Status |
 |---|---|---|
+| GET | `/api/application/current-version` | Implemented as an unauthenticated lightweight endpoint for the login screen; reads only the local `/kvmapp/version` and does not query GitHub release metadata. |
 | GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. When Paranoid firewall mode is active, returns the current version with a blocked update message instead of opening outbound GitHub traffic. |
 | POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. Blocked while Paranoid firewall mode is active. |
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |

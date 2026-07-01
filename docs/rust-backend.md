@@ -12,7 +12,9 @@ are implemented deeply enough for interactive device testing.
 
 Current published channels:
 
-- app update: `2.0.20 RC1`, tag `hardened-rust-rc1`;
+- app update: `2.0.24`, tag `hardened-rust-2.0.24`;
+- current source/test build: `2.0.25`, installed and smoke-tested on hardware
+  but not published as the stable GitHub latest release;
 - raw system-update: `0.2.15-raw.1`, built from the beta `2.0.19` SD rootfs
   with gzip-compressed raw payload staging and sysrq reboot after raw writes;
 - SD-card image: beta `2.0.19` / `0.2.15-raw.1`.
