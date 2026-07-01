@@ -75,7 +75,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method | Path | Rust Status |
 |---|---|---|
 | GET/POST | `/api/system-log/config` | Implemented in app `2.0.20`; persists `/etc/kvm/syslog.json`, renders `/etc/default/syslogd` and `/etc/default/klogd`, restarts BusyBox `syslogd`/`klogd`, keeps local logs in tmpfs at `/tmp/hardened-syslog/messages`, and supports UDP remote syslog forwarding. |
-| GET | `/api/system-log/messages` | Implemented; returns bounded tail output for `kind=system` from the tmpfs syslog file, `kind=kernel` from the current `dmesg` ring buffer, or `kind=backend` from `/tmp/nanokvm-server.log`, with line count clamped to 1-1000. |
+| GET | `/api/system-log/messages` | Implemented; GUI uses the unified `kind=system` tmpfs syslog tail. Hidden/debug reads remain for `kind=kernel` from the current `dmesg` ring buffer and `kind=backend` from `/tmp/nanokvm-server.log`. Line count is clamped to 1-1000. |
 | POST | `/api/system-log/test` | Implemented; emits a test syslog message through `/dev/log` so local and remote forwarding paths can be verified. |
 
 ### VM, Device, And Settings

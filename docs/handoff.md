@@ -30,16 +30,17 @@ Detailed chronological build/update notes are in
 - Source version bumped to `2.0.20`; release is not published yet.
 - Implemented `Settings > System Log`:
   - UDP remote syslog forwarding via BusyBox `syslogd -R`;
-  - local system log viewer backed by `/tmp/hardened-syslog/messages`
+  - a single `System Log` viewer backed by `/tmp/hardened-syslog/messages`
     (`tmpfs`, no steady SD-card writes);
-  - kernel log viewer using the current `dmesg` ring buffer;
-  - backend log viewer for `/tmp/nanokvm-server.log`;
   - configurable priority, RAM buffer size, rotations, compact output,
     timestamp stripping, and klogd console level;
   - `Send test log` action.
 - Added backend APIs:
   - `GET/POST /api/system-log/config`;
-  - `GET /api/system-log/messages?kind=system|kernel|backend&lines=...`;
+  - `GET /api/system-log/messages?kind=system&lines=...`;
+  - hidden/debug API support remains for `kind=kernel` and `kind=backend`,
+    but those tabs were removed from the GUI because klogd already mirrors
+    kernel messages into syslog and the separate views looked redundant;
   - `POST /api/system-log/test`.
 - Added web-login audit entries to syslog through `/dev/log`:
   - success;
@@ -66,7 +67,7 @@ Detailed chronological build/update notes are in
   - `GET /api/system-log/messages?kind=kernel` returns `dmesg` output;
   - invalid and successful web logins appear as `hardened-nanokvm-auth`
     syslog events.
-- Follow-up validation after adding the `Backend` viewer:
+- Follow-up validation before simplifying the viewer:
   - rebuilt linked RISC-V backend and reinstalled the `2.0.20` package on
     `10.0.87.132`;
   - `/api/system-log/messages?kind=backend` returns
@@ -75,6 +76,8 @@ Detailed chronological build/update notes are in
     includes web login audit entries;
   - `/api/system-log/messages?kind=kernel` returns current `dmesg` ring-buffer
     output.
+- Latest GUI change: removed the separate `Kernel (dmesg)` and `Backend` tabs;
+  the visible viewer now shows only the unified tmpfs syslog stream.
 - Observed follow-up: `/etc/inittab` respawns a `getty` for missing
   `/dev/ttyGS0`, producing repeated `auth.err getty[...]` entries. It is
   unrelated to the new syslog feature but should be cleaned before enabling

@@ -512,11 +512,8 @@ const en = {
           consoleLevel: 'Console level'
         },
         viewer: {
-          title: 'Log Viewer',
+          title: 'System Log',
           refresh: 'Refresh',
-          system: 'System (syslog)',
-          kernel: 'Kernel (dmesg)',
-          backend: 'Backend',
           empty: 'No log entries',
           truncated: 'Only the latest log data is shown.',
           lines: '{{count}} lines'

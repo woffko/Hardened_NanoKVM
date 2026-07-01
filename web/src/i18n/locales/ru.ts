@@ -520,11 +520,8 @@ const ru = {
           consoleLevel: 'Уровень консоли'
         },
         viewer: {
-          title: 'Просмотр логов',
+          title: 'System Log',
           refresh: 'Обновить',
-          system: 'Системный (syslog)',
-          kernel: 'Ядро (dmesg)',
-          backend: 'Backend',
           empty: 'Записей нет',
           truncated: 'Показана только последняя часть лога.',
           lines: '{{count}} строк'

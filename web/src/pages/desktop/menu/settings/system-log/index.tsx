@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Alert, Button, Divider, Input, InputNumber, Select, Switch, Tabs, message } from 'antd';
+import { Alert, Button, Divider, Input, InputNumber, Select, Switch, message } from 'antd';
 import { RefreshCwIcon, SaveIcon, SendIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/system-log.ts';
-import type { SystemLogConfig, SystemLogKind } from '@/api/system-log.ts';
+import type { SystemLogConfig } from '@/api/system-log.ts';
 
 const defaultConfig: SystemLogConfig = {
   remoteEnabled: false,
@@ -25,7 +25,6 @@ export const SystemLog = () => {
 
   const [config, setConfig] = useState<SystemLogConfig>(defaultConfig);
   const [localLogFile, setLocalLogFile] = useState('/tmp/hardened-syslog/messages');
-  const [activeLog, setActiveLog] = useState<SystemLogKind>('system');
   const [lineCount, setLineCount] = useState(200);
   const [content, setContent] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -45,7 +44,7 @@ export const SystemLog = () => {
 
   useEffect(() => {
     loadConfig();
-    refreshLog('system', 200);
+    refreshLog(200);
   }, []);
 
   function patchConfig(patch: Partial<SystemLogConfig>) {
@@ -91,7 +90,7 @@ export const SystemLog = () => {
 
       message.success(t('settings.systemLog.saved'));
       if (rsp.data?.config) setConfig({ ...defaultConfig, ...rsp.data.config });
-      refreshLog(activeLog, lineCount);
+      refreshLog(lineCount);
     } catch (err) {
       console.log(err);
       message.error(t('settings.systemLog.saveFailed'));
@@ -100,10 +99,10 @@ export const SystemLog = () => {
     }
   }
 
-  async function refreshLog(kind = activeLog, lines = lineCount) {
+  async function refreshLog(lines = lineCount) {
     setIsLogLoading(true);
     try {
-      const rsp = await api.getMessages(kind, lines);
+      const rsp = await api.getMessages('system', lines);
       if (rsp.code !== 0 || !rsp.data) {
         message.error(rsp.msg || t('settings.systemLog.logLoadFailed'));
         return;
@@ -131,7 +130,7 @@ export const SystemLog = () => {
       }
 
       message.success(t('settings.systemLog.testSent'));
-      refreshLog(activeLog, lineCount);
+      refreshLog(lineCount);
     } catch (err) {
       console.log(err);
       message.error(t('settings.systemLog.testFailed'));
@@ -140,15 +139,9 @@ export const SystemLog = () => {
     }
   }
 
-  function changeActiveLog(kind: string) {
-    const next = kind as SystemLogKind;
-    setActiveLog(next);
-    refreshLog(next, lineCount);
-  }
-
   function changeLineCount(value: number) {
     setLineCount(value);
-    refreshLog(activeLog, value);
+    refreshLog(value);
   }
 
   return (
@@ -307,16 +300,6 @@ export const SystemLog = () => {
           {logTruncated && (
             <Alert type="info" showIcon message={t('settings.systemLog.viewer.truncated')} />
           )}
-
-          <Tabs
-            activeKey={activeLog}
-            onChange={changeActiveLog}
-            items={[
-              { key: 'system', label: t('settings.systemLog.viewer.system') },
-              { key: 'kernel', label: t('settings.systemLog.viewer.kernel') },
-              { key: 'backend', label: t('settings.systemLog.viewer.backend') }
-            ]}
-          />
 
           <pre className="min-h-[260px] max-h-[360px] overflow-auto rounded bg-black/50 p-3 font-mono text-xs leading-relaxed text-neutral-200">
             {content || t('settings.systemLog.viewer.empty')}
