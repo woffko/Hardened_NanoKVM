@@ -36,8 +36,12 @@ The current published application release is available from the `woffko` fork at
 [`hardened-rust-rc3`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3).
 
 The latest raw system-update and SD-card artifacts are the matching
-**0.2.17-raw.1** RC3 builds. They use the Buildroot `2023.11.2` base label with
-the `Buildroot 2023.11.3 package backports` security-backport baseline.
+**0.2.17-raw.1** RC3 builds. The full RC3 release carries the matching app,
+raw bundle, and SD-card image; the system-update channel metadata points to the
+companion `hardened-system-0.2.17-raw.1` tag because deployed devices trust
+raw-system downloads from `hardened-system-*` release URLs. They use the
+Buildroot `2023.11.2` base label with the `Buildroot 2023.11.3 package
+backports` security-backport baseline.
 
 ## Current Highlights Compared With Upstream
 
@@ -175,8 +179,8 @@ System update metadata is published through a stable channel release:
 https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json
 ```
 
-That channel metadata points to a versioned full-release tag such as
-`hardened-rust-rc3`, which contains:
+That channel metadata points to a versioned raw-system tag such as
+`hardened-system-0.2.17-raw.1`, which contains:
 
 - `hardened-nanokvm-system-<version>.tar.gz`;
 - `system-latest.json` and signature files;
@@ -201,8 +205,10 @@ The channels can intentionally move independently:
 - Application stable/latest: `2.0.25 RC3`, tag `hardened-rust-rc3`.
 - Application preview: `hardened-rust-preview`, when populated, points to a
   versioned application archive independently from the stable latest release.
-- Raw system stable: `0.2.17-raw.1`, published on tag `hardened-rust-rc3` and
-  advertised through the `hardened-system-stable` channel metadata.
+- Raw system stable: `0.2.17-raw.1`, published on companion tag
+  `hardened-system-0.2.17-raw.1` and advertised through the
+  `hardened-system-stable` channel metadata. The full `hardened-rust-rc3`
+  release also carries the matching raw bundle and SD-card image.
 - Raw system preview: `hardened-system-preview`, currently points to the same
   raw metadata as stable.
 - Latest published SD image: RC3 `2.0.25`, matching raw system
