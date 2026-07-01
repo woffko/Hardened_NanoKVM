@@ -1,3 +1,14 @@
+## Hardened NanoKVM 2.0.25 Test Build (2026-07-01)
+
+### Bug Fixes
+
+* Fixed desktop startup so the saved H.264/WebRTC or H.264 Direct video mode is
+  preserved instead of being reset to MJPEG.
+* Preserved the Appearance menu display mode across updates, including
+  migration from legacy boolean auto-hide values.
+* Fixed the login screen firmware version by loading the current local
+  `/kvmapp/version` through a public lightweight API endpoint.
+
 ## Hardened NanoKVM 2.0.24 Test Build (2026-07-01)
 
 ### Changes

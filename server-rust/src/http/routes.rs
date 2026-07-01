@@ -211,6 +211,10 @@ pub fn build(state: AppState) -> Router {
 
     Router::new()
         .route("/api/health", get(compatibility::health))
+        .route(
+            "/api/application/current-version",
+            get(application::get_current_version),
+        )
         .route("/api/auth/login", post(account::login))
         .route(
             "/api/auth/setup",

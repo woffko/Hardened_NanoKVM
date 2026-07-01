@@ -87,6 +87,11 @@ export function getVersion() {
   return http.get('/api/application/version');
 }
 
+// get current application version without authentication
+export function getCurrentVersion() {
+  return http.get('/api/application/current-version');
+}
+
 // get current base-system version
 export function getSystemVersion() {
   return http.get('/api/system-update/version');

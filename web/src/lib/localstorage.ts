@@ -25,6 +25,19 @@ type ItemWithExpiry = {
   expiry: number;
 };
 
+const menuDisplayModes = ['off', 'auto', 'always'];
+
+function normalizeMenuDisplayMode(value: string | null): string | null {
+  if (!value) return null;
+
+  const mode = value.trim().toLowerCase();
+  if (menuDisplayModes.includes(mode)) return mode;
+  if (mode === 'true') return 'auto';
+  if (mode === 'false') return 'always';
+
+  return null;
+}
+
 // set the value with expiration time (unit: milliseconds)
 function setWithExpiry(key: string, value: string, ttl: number) {
   const now = new Date();
@@ -215,7 +228,14 @@ export function getMenuDisabledItems(): string[] {
 
 export function getMenuDisplayMode(): string {
   const value = localStorage.getItem(MENU_AUTO_HIDE_KEY);
-  return value || 'auto';
+  const mode = normalizeMenuDisplayMode(value);
+  if (!mode) {
+    return 'auto';
+  }
+  if (mode !== value) {
+    localStorage.setItem(MENU_AUTO_HIDE_KEY, mode);
+  }
+  return mode;
 }
 
 export function setMenuDisplayMode(mode: string) {

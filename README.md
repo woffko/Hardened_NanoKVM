@@ -29,17 +29,18 @@ a drop-in replacement for `NanoKVM-Server` and continues to use the existing
 Security release builds are Rust-only: the legacy Go backend and backend switch
 scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
-The web UI currently brands this fork as **Hardened NanoKVM** and reports
-application version **2.0.20**.
+The web UI currently brands this fork as **Hardened NanoKVM**. The current
+source/test build version is **2.0.25**; the latest published GitHub
+application release remains **2.0.24**.
 
-The current public release candidate is published from the `woffko` fork at
-[`hardened-rust-rc1`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc1).
+The current published application release is available from the `woffko` fork at
+[`hardened-rust-2.0.24`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-2.0.24).
 
-The latest application release is **2.0.20 RC1**. The latest raw system-update
-and SD-card artifacts remain the validated **0.2.15-raw.1** builds from the
-2.0.19 line until the next full system-image release.
+The latest raw system-update and SD-card artifacts remain the validated
+**0.2.15-raw.1** builds from the 2.0.19 line until the next full system-image
+release.
 
-## RC1 Highlights Compared With Upstream
+## Current Highlights Compared With Upstream
 
 Hardened NanoKVM keeps the upstream hardware stack and web UI shape, but changes
 the security, update, and administration model substantially:
@@ -68,8 +69,10 @@ the security, update, and administration model substantially:
   reports that clearly.
 - **HTTPS/firewall recovery:** disabling HTTPS forces firewall mode back to
   baseline so HTTP access is not stranded behind restrictive rules.
-- **Video pipeline stability:** HTTPS toggles restart only the Rust web backend,
-  not `kvm_system`, avoiding HDMI capture loss after enabling HTTPS.
+- **Video pipeline stability:** H.264 Direct/WebRTC mode selection is persisted
+  across reloads, HTTP/HTTPS toggles now warn and reboot the device instead of
+  partially restarting the video stack, and the UI redirects to the new
+  protocol after the reboot window.
 - **Network hardening and control:** full wired DHCP/manual IP/DNS editing,
   stable `eth0` MAC persistence, explicit IPv6 Disabled/SLAAC/DHCPv6/Manual
   modes, and DHCPv6 client integration where available.
@@ -80,11 +83,11 @@ the security, update, and administration model substantially:
 - **Device fixes from testing:** wrong-password errors, resolution changes,
   OLED timers of 5 minutes and higher, browser auth-state recovery after
   protocol/IP changes, and update reboot/restore edge cases were fixed.
-- **Hardened branding and observability:** login/toolbar/About branding,
-  correct app version display, device uptime, and web login audit events in
-  syslog.
+- **Hardened branding and observability:** login/toolbar/About branding, login
+  screen version from the local `/kvmapp/version`, device uptime, and web login
+  audit events in syslog.
 
-## Current RC Status
+## Current Status
 
 This fork is usable for active device testing, but it is not a finished firmware
 release. The current development flow is to run the Rust backend on a real
@@ -102,7 +105,7 @@ NanoKVM device and harden one subsystem at a time.
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
 | Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
 | Network | WOL, full wired DHCP/manual IP/DNS settings, explicit IPv6 Disabled/SLAAC/DHCPv6/Manual controls, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | RC online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current app channel: `2.0.20 RC1`. |
+| Updates | Online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current published app channel: `2.0.24`; current local test build: `2.0.25`. |
 | SD image | Latest published SD image remains the beta `2.0.19` / `0.2.15-raw.1` image, built by patching a trusted NanoKVM Rev1.4.2/vendor SDK base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds. |
 | System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded raw install, first-boot root configuration restore, automatic boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.15-raw.1`, built from the beta `2.0.19` SD rootfs. Raw full-rootfs updates are lab-only; current raw payloads are stored gzip-compressed and streamed to the SD-card block devices during install. The current raw/SD image reports Buildroot `2023.11.2` with security backport level `Buildroot 2023.11.3 package backports`; deeper kernel/rootfs security payloads are still pending. |
 
@@ -137,11 +140,10 @@ https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
 ```
 
 The metadata points to a versioned app archive such as
-`hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz` on the `hardened-rust-rc1` release
-tag. The device verifies signed metadata and the archive
-sha512 before installing. The preview toggle uses the `hardened-rust-preview`
-channel metadata, but it still installs the versioned archive named by that
-metadata.
+`hardened-nanokvm-kvmapp-2.0.24.tar.gz` on the `hardened-rust-2.0.24` release
+tag. The device verifies signed metadata and the archive sha512 before
+installing. The preview toggle uses the `hardened-rust-preview` channel
+metadata, but it still installs the versioned archive named by that metadata.
 
 Offline application updates use the same archive format, but the archive is
 uploaded from the browser instead of downloaded from GitHub.
@@ -197,9 +199,9 @@ state.
 
 The channels can intentionally move independently:
 
-- Application stable/latest: `2.0.20 RC1`, tag `hardened-rust-rc1`.
-- Application preview: `hardened-rust-preview`, currently also points to
-  `2.0.19`.
+- Application stable/latest: `2.0.24`, tag `hardened-rust-2.0.24`.
+- Application preview: `hardened-rust-preview`, when populated, points to a
+  versioned application archive independently from the stable latest release.
 - Raw system stable: `0.2.15-raw.1`, tag
   `hardened-system-0.2.15-raw.1`.
 - Raw system preview: `hardened-system-preview`, currently points to the same

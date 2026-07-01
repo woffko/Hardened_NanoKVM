@@ -5,9 +5,15 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import * as api from '@/api/auth.ts';
+import { getCurrentVersion } from '@/api/application.ts';
 import { existToken, setCsrfToken } from '@/lib/cookie.ts';
 import { encrypt } from '@/lib/encrypt.ts';
-import { HARDENED_LOGO_SRC, HARDENED_NAME, HARDENED_VERSION } from '@/lib/hardened.ts';
+import {
+  formatHardenedVersion,
+  HARDENED_LOGO_SRC,
+  HARDENED_NAME,
+  HARDENED_VERSION
+} from '@/lib/hardened.ts';
 import { Head } from '@/components/head.tsx';
 
 import { Tips } from './tips.tsx';
@@ -19,6 +25,7 @@ export const Login = (): ReactElement => {
   const [isLoading, setIsloading] = useState(false);
   const [msg, setMsg] = useState('');
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
+  const [displayVersion, setDisplayVersion] = useState(HARDENED_VERSION);
 
   useEffect(() => {
     if (existToken()) {
@@ -38,6 +45,14 @@ export const Login = (): ReactElement => {
       .catch(() => {
         setSetupRequired(false);
       });
+
+    getCurrentVersion()
+      .then((rsp: any) => {
+        if (rsp.code === 0) {
+          setDisplayVersion(formatHardenedVersion(rsp.data?.current));
+        }
+      })
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -166,7 +181,7 @@ export const Login = (): ReactElement => {
               />
             </div>
             <div className="mt-3 text-lg font-semibold text-neutral-100">{HARDENED_NAME}</div>
-            <div className="mt-1 text-xs text-neutral-500">{HARDENED_VERSION}</div>
+            <div className="mt-1 text-xs text-neutral-500">{displayVersion}</div>
           </div>
           {isSetup && (
             <div className="mb-5 flex flex-col gap-2 text-center">

@@ -56,6 +56,11 @@ pub struct VersionRsp {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CurrentVersionRsp {
+    pub current: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PreviewRsp {
     pub enabled: bool,
 }
@@ -91,8 +96,7 @@ impl Drop for UpdateGuard {
 pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if system_firewall::paranoid_mode_enabled() {
         return Ok(Json(ApiResponse::ok(VersionRsp {
-            current: read_trimmed(APP_VERSION_FILE)
-                .unwrap_or_else(|| DEFAULT_APP_VERSION.to_string()),
+            current: current_app_version(),
             latest: String::new(),
             blocked: Some(true),
             error: Some(system_firewall::paranoid_blocked_message().to_string()),
@@ -108,10 +112,16 @@ pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoRespo
     };
 
     Ok(Json(ApiResponse::ok(VersionRsp {
-        current: read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| DEFAULT_APP_VERSION.to_string()),
+        current: current_app_version(),
         latest,
         blocked: None,
         error: None,
+    })))
+}
+
+pub async fn get_current_version() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(CurrentVersionRsp {
+        current: current_app_version(),
     })))
 }
 
@@ -862,6 +872,10 @@ fn read_trimmed(path: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn current_app_version() -> String {
+    read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| DEFAULT_APP_VERSION.to_string())
 }
 
 fn now_unix_nanos() -> u128 {
