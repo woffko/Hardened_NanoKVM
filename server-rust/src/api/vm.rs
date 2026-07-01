@@ -316,14 +316,8 @@ pub async fn set_hostname(Json(req): Json<SetHostnameReq>) -> Result<impl IntoRe
 }
 
 pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
-    let mode_changed = req.kind == "type" && stream::screen_type_would_change(req.value)?;
-    if mode_changed {
-        stream::drain_video_streams("screen type update");
-        time::sleep(Duration::from_millis(750)).await;
-    }
-
     stream::set_screen_value(&req.kind, req.value)?;
-    info!(kind = %req.kind, value = req.value, mode_changed, "updated screen setting");
+    info!(kind = %req.kind, value = req.value, "updated screen setting");
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -966,9 +960,6 @@ pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<im
 }
 
 pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>> {
-    stream::drain_video_streams("TLS protocol update");
-    time::sleep(Duration::from_millis(250)).await;
-
     let mut config = Config::read()?;
     if req.enabled {
         tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
@@ -981,32 +972,32 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
     }
     config.write()?;
 
-    schedule_server_restart("TLS update");
+    schedule_device_reboot("TLS protocol update");
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-fn schedule_server_restart(reason: &'static str) {
+fn schedule_device_reboot(reason: &'static str) {
     tokio::spawn(async move {
-        time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(1000)).await;
         match run_allowed(
-            AllowedCommand::ServiceNanokvmRestart,
-            ["restart-server"],
-            Duration::from_secs(10),
+            AllowedCommand::Reboot,
+            std::iter::empty::<&str>(),
+            Duration::from_secs(2),
         )
         .await
         {
             Ok(output) if output.status == 0 => {
-                tracing::info!(reason, "scheduled NanoKVM server restart completed")
+                tracing::info!(reason, "scheduled device reboot completed")
             }
             Ok(output) => tracing::warn!(
                 reason,
                 status = output.status,
                 stderr = %String::from_utf8_lossy(&output.stderr),
-                "scheduled NanoKVM server restart failed"
+                "scheduled device reboot failed"
             ),
             Err(err) => {
-                tracing::warn!(reason, error = ?err, "failed to restart NanoKVM service")
+                tracing::warn!(reason, error = ?err, "failed to reboot device")
             }
         }
     });

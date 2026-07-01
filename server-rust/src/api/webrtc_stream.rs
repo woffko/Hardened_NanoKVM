@@ -53,7 +53,7 @@ use webrtc::{
 use crate::{
     AppError, Result,
     api::stream::{
-        self, CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, is_h264_capture_active,
+        CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, is_h264_capture_active,
         read_h264_capture_frame, update_capture_status,
     },
     config::Config,
@@ -83,7 +83,6 @@ pub async fn h264_webrtc_stream(
 
 async fn handle_h264_webrtc_socket(mut socket: WebSocket, config: Arc<Config>) {
     let (signal_tx, mut signal_rx) = mpsc::channel(SIGNAL_BUFFER);
-    let mut drain_rx = stream::subscribe_video_stream_drain();
     let client = match WebRtcClient::new(&config, signal_tx.clone()).await {
         Ok(client) => client,
         Err(err) => {
@@ -104,12 +103,6 @@ async fn handle_h264_webrtc_socket(mut socket: WebSocket, config: Arc<Config>) {
 
     loop {
         tokio::select! {
-            changed = drain_rx.changed() => {
-                if changed.is_ok() {
-                    let _ = socket.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            }
             Some(signal) = signal_rx.recv() => {
                 let payload = match serde_json::to_string(&signal) {
                     Ok(payload) => payload,

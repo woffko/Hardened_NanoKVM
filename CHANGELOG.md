@@ -1,3 +1,15 @@
+## Hardened NanoKVM 2.0.24 Test Build (2026-07-01)
+
+### Changes
+
+* Reverted the experimental video-stream drain and desktop pre-sync changes from
+  `2.0.22`/`2.0.23`, returning MJPEG, H.264 Direct, and H.264 WebRTC behavior
+  to the tested `2.0.21` path.
+* Changed HTTP/HTTPS protocol switching to save the new protocol and reboot the
+  NanoKVM device instead of restarting only the web backend.
+* Added a confirmation warning for protocol changes. After confirmation, the UI
+  starts a 30-second redirect timer to the new `http://` or `https://` address.
+
 ## Hardened NanoKVM 2.0.23 Test Build (2026-07-01)
 
 ### Changes

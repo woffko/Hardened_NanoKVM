@@ -422,7 +422,12 @@ const en = {
         },
         tls: {
           description: 'Enable HTTPS protocol',
-          tip: 'Be aware: Using HTTPS can increase latency, especially with MJPEG video mode.'
+          tip: 'Be aware: Using HTTPS can increase latency, especially with MJPEG video mode.',
+          rebootTitle: 'NanoKVM will reboot',
+          rebootDesc:
+            'The protocol change requires a device reboot. The browser will switch to the new address after {{seconds}} seconds:',
+          rebootOk: 'Apply and reboot',
+          rebootCancel: 'Cancel'
         },
         dns: {
           title: 'DNS',

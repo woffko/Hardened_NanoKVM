@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Switch, Tooltip } from 'antd';
+import { Modal, Switch, Tooltip } from 'antd';
 import { CircleAlertIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
+
+const REDIRECT_DELAY_SECONDS = 30;
 
 export const Tls = () => {
   const { t } = useTranslation();
@@ -15,34 +17,60 @@ export const Tls = () => {
     setIsEnabled(window.location.protocol === 'https:');
   }, []);
 
-  async function update() {
+  function requestUpdate() {
     if (isLoading) return;
-    setIsLoading(true);
 
     const enable = !isEnabled;
+    const target = protocolRedirectUrl(enable);
 
-    const seconds = enable ? 30 : 10;
-    setTimeout(() => {
-      reload(enable);
-    }, seconds * 1000);
+    Modal.confirm({
+      title: t('settings.network.tls.rebootTitle'),
+      content: (
+        <div className="space-y-2">
+          <p>
+            {t('settings.network.tls.rebootDesc', { seconds: REDIRECT_DELAY_SECONDS })}
+          </p>
+          <p className="break-all font-mono text-xs text-neutral-400">{target}</p>
+        </div>
+      ),
+      okText: t('settings.network.tls.rebootOk'),
+      cancelText: t('settings.network.tls.rebootCancel'),
+      onOk: () => update(enable, target)
+    });
+  }
+
+  async function update(enable: boolean, target: string) {
+    setIsLoading(true);
+    const timer = window.setTimeout(() => {
+      window.location.assign(target);
+    }, REDIRECT_DELAY_SECONDS * 1000);
 
     try {
       const rsp = await api.setTLS(enable);
       if (rsp.code === 0) {
         setIsEnabled(enable);
+        return;
       }
     } catch (err) {
       console.log(err);
     }
+
+    window.clearTimeout(timer);
+    setIsLoading(false);
   }
 
-  function reload(enable: boolean) {
-    if (!enable) {
-      const target = window.location.href.replace(/^https:/, 'http:');
-      window.open(target, '_blank');
+  function protocolRedirectUrl(enable: boolean) {
+    const target = new URL(window.location.href);
+    target.protocol = enable ? 'https:' : 'http:';
+
+    if (enable && target.port === '80') {
+      target.port = '';
+    }
+    if (!enable && target.port === '443') {
+      target.port = '';
     }
 
-    window.location.reload();
+    return target.toString();
   }
 
   return (
@@ -63,7 +91,7 @@ export const Tls = () => {
         <span className="text-xs text-neutral-500">{t('settings.network.tls.description')}</span>
       </div>
 
-      <Switch checked={isEnabled} loading={isLoading} onChange={update} />
+      <Switch checked={isEnabled} loading={isLoading} onChange={requestUpdate} />
     </div>
   );
 };

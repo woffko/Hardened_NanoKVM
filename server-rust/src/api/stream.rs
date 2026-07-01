@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs, io,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{broadcast, watch},
+    sync::broadcast,
     time::{self, MissedTickBehavior},
 };
 use tracing::{info, warn};
@@ -63,11 +63,6 @@ static H264_DIRECT_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_CAPTURE_DISABLED: AtomicBool = AtomicBool::new(false);
 static H264_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
-static VIDEO_DRAIN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static VIDEO_DRAIN_TX: LazyLock<watch::Sender<u64>> = LazyLock::new(|| {
-    let (tx, _) = watch::channel(0);
-    tx
-});
 static CAPTURE_STATUS: LazyLock<Mutex<CaptureStatusStore>> =
     LazyLock::new(|| Mutex::new(CaptureStatusStore::default()));
 
@@ -244,16 +239,6 @@ pub fn broadcast_capture_status(status: &CaptureStatus) {
     }
 }
 
-pub fn drain_video_streams(reason: &'static str) {
-    let sequence = VIDEO_DRAIN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
-    VIDEO_DRAIN_TX.send_replace(sequence);
-    info!(reason, sequence, "draining active video streams");
-}
-
-pub fn subscribe_video_stream_drain() -> watch::Receiver<u64> {
-    VIDEO_DRAIN_TX.subscribe()
-}
-
 fn same_public_status(a: &CaptureStatus, b: &CaptureStatus) -> bool {
     if a.ok && b.ok {
         return true;
@@ -334,22 +319,13 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
     let stream = stream! {
         let _guard = MJPEG_FANOUT.add_client();
         let mut rx = MJPEG_FANOUT.subscribe();
-        let mut drain_rx = subscribe_video_stream_drain();
         start_mjpeg_producer();
 
         loop {
-            let frame = tokio::select! {
-                changed = drain_rx.changed() => {
-                    if changed.is_ok() {
-                        break;
-                    }
-                    continue;
-                }
-                frame = rx.recv() => match frame {
-                    Ok(frame) => frame,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
+            let frame = match rx.recv().await {
+                Ok(frame) => frame,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             };
             yield Ok::<Bytes, io::Error>(frame.header);
             yield Ok::<Bytes, io::Error>(frame.data);
@@ -384,23 +360,13 @@ pub async fn h264_direct_stream(
 async fn handle_h264_direct_socket(mut socket: WebSocket) {
     let _guard = H264_DIRECT_FANOUT.add_client();
     let mut rx = H264_DIRECT_FANOUT.subscribe();
-    let mut drain_rx = subscribe_video_stream_drain();
     start_h264_direct_producer();
 
     loop {
-        let frame = tokio::select! {
-            changed = drain_rx.changed() => {
-                if changed.is_ok() {
-                    let _ = socket.send(Message::Close(None)).await;
-                    break;
-                }
-                continue;
-            }
-            frame = rx.recv() => match frame {
-                Ok(frame) => frame,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
+        let frame = match rx.recv().await {
+            Ok(frame) => frame,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
         };
         if socket.send(Message::Binary(frame.packet)).await.is_err() {
             break;
@@ -595,15 +561,6 @@ pub async fn stop_frame_detect(Json(req): Json<StopFrameDetectReq>) -> Result<im
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub fn screen_type_would_change(value: i32) -> Result<bool> {
-    let next_mode = stream_mode_from_type_value(value);
-    let screen = SCREEN
-        .lock()
-        .map_err(|_| AppError::Internal("screen lock poisoned".to_string()))?;
-
-    Ok(screen.mode != next_mode || (next_mode == StreamMode::H264 && h264_capture_disabled()))
-}
-
 pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     let mut screen = SCREEN
         .lock()
@@ -611,9 +568,7 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
 
     match kind {
         "type" => {
-            let next_mode = stream_mode_from_type_value(value);
-
-            if next_mode == StreamMode::Mjpeg {
+            if value == 0 {
                 write_screen_file(SCREEN_TYPE_FILE, "mjpeg")?;
                 screen.mode = StreamMode::Mjpeg;
             } else {
@@ -645,14 +600,6 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn stream_mode_from_type_value(value: i32) -> StreamMode {
-    if value == 0 {
-        StreamMode::Mjpeg
-    } else {
-        StreamMode::H264
-    }
 }
 
 fn write_screen_file(path: &str, value: &str) -> Result<()> {
