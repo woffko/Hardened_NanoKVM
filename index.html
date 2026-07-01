@@ -5,111 +5,562 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM."
+      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed updates, guarded system updates, firewall modes, and safer web administration."
     />
     <meta
       name="google-site-verification"
       content="8S4VCTY99VqIJ3lK7OZJqoMgtbUIvAi5t5Wkb0em4ek"
     />
+    <!-- pages-build: 2026-07-01T17:33Z -->
     <title>Hardened NanoKVM</title>
     <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101211;
+        --panel: #181b1a;
+        --panel-soft: #202523;
+        --text: #f2f4ef;
+        --muted: #a9b0a9;
+        --line: #303632;
+        --accent: #65d6a7;
+        --accent-2: #f2bd6b;
+        --danger: #f27676;
+        --shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         margin: 0;
-        background: #101211;
-        color: #f2f4ef;
+        background:
+          linear-gradient(180deg, rgba(101, 214, 167, 0.08), transparent 32rem),
+          var(--bg);
+        color: var(--text);
         font-family:
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
           "Segoe UI", sans-serif;
         line-height: 1.5;
       }
 
-      main {
-        width: min(980px, calc(100% - 40px));
-        margin: 0 auto;
-        padding: 64px 0;
+      a {
+        color: inherit;
+        text-decoration: none;
       }
 
-      img {
-        display: block;
-        width: min(620px, 100%);
-        height: auto;
-        margin-bottom: 36px;
+      a:hover {
+        color: var(--accent);
+      }
+
+      .shell {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(16, 18, 17, 0.88);
+        backdrop-filter: blur(18px);
+      }
+
+      .nav {
+        display: flex;
+        min-height: 64px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 700;
+      }
+
+      .brand img {
+        width: 44px;
+        height: 28px;
+        object-fit: contain;
+      }
+
+      .nav-links {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 18px;
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      .hero {
+        position: relative;
+        display: grid;
+        min-height: clamp(560px, 82vh, 760px);
+        align-items: center;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .hero::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(90deg, rgba(16, 18, 17, 0.96), rgba(16, 18, 17, 0.62)),
+          url("assets/hardened-logo.png") right 8% center / min(720px, 58vw) auto
+            no-repeat;
+        opacity: 0.98;
+      }
+
+      .hero-content {
+        position: relative;
+        z-index: 1;
+        width: min(760px, 100%);
+        padding: 72px 0 96px;
+      }
+
+      .eyebrow {
+        margin: 0 0 18px;
+        color: var(--accent);
+        font-size: 0.8rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
       }
 
       h1 {
         margin: 0;
-        font-size: clamp(3rem, 8vw, 6rem);
-        line-height: 0.96;
+        max-width: 10ch;
+        font-size: clamp(3.2rem, 8vw, 6.4rem);
+        line-height: 0.95;
       }
 
-      p {
-        max-width: 720px;
-        color: #c8cec7;
-        font-size: 1.15rem;
+      .lead {
+        max-width: 680px;
+        margin: 26px 0 0;
+        color: #d8ded6;
+        font-size: clamp(1.08rem, 2vw, 1.36rem);
       }
 
-      .links {
+      .actions {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
-        margin-top: 30px;
+        margin-top: 34px;
       }
 
-      a {
+      .button {
         display: inline-flex;
         min-height: 44px;
         align-items: center;
-        border: 1px solid #343b37;
+        justify-content: center;
+        border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
-        padding: 0 16px;
-        color: #65d6a7;
-        text-decoration: none;
-        font-weight: 700;
-      }
-
-      a.primary {
-        background: #65d6a7;
+        padding: 0 18px;
+        background: var(--accent);
         color: #07110d;
+        font-weight: 800;
       }
 
-      section {
-        margin-top: 56px;
-        border-top: 1px solid #303632;
-        padding-top: 28px;
+      .button.secondary {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
       }
 
-      ul {
-        padding-left: 1.2rem;
-        color: #c8cec7;
+      .button:hover {
+        color: #07110d;
+        filter: brightness(1.06);
+      }
+
+      .button.secondary:hover {
+        color: var(--accent);
+        filter: none;
+      }
+
+      .status-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: -50px;
+        position: relative;
+        z-index: 2;
+      }
+
+      .status {
+        min-height: 116px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 18px;
+        background: rgba(24, 27, 26, 0.94);
+        box-shadow: var(--shadow);
+      }
+
+      .status strong {
+        display: block;
+        font-size: 1.05rem;
+      }
+
+      .status span {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      main {
+        padding: 76px 0 92px;
+      }
+
+      section + section {
+        margin-top: 74px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 22px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: clamp(1.8rem, 4vw, 2.8rem);
+        line-height: 1.08;
+      }
+
+      .section-head p {
+        max-width: 540px;
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        min-height: 184px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 20px;
+        background: var(--panel);
+      }
+
+      .card h3 {
+        margin: 0;
+        font-size: 1.1rem;
+      }
+
+      .card p {
+        margin: 12px 0 0;
+        color: var(--muted);
+      }
+
+      .release {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 20px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 20px;
+        background: var(--panel);
+      }
+
+      .release + .release {
+        margin-top: 12px;
+      }
+
+      .release h3 {
+        margin: 0;
+        font-size: 1.08rem;
+      }
+
+      .release p {
+        margin: 8px 0 0;
+        color: var(--muted);
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 7px 11px;
+        background: var(--panel-soft);
+        color: var(--accent-2);
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 0.86rem;
+        white-space: nowrap;
+      }
+
+      .warning {
+        border-left: 4px solid var(--danger);
+        padding: 18px 20px;
+        background: rgba(242, 118, 118, 0.08);
+        color: #f7dbdb;
+      }
+
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 30px 0;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 800px) {
+        .nav {
+          align-items: flex-start;
+          flex-direction: column;
+          padding: 14px 0;
+        }
+
+        .nav-links {
+          justify-content: flex-start;
+        }
+
+        .hero {
+          min-height: auto;
+        }
+
+        .hero::before {
+          background:
+            linear-gradient(180deg, rgba(16, 18, 17, 0.82), rgba(16, 18, 17, 0.98)),
+            url("assets/hardened-logo.png") center 22px / min(520px, 92vw) auto
+              no-repeat;
+        }
+
+        .hero-content {
+          padding-top: 220px;
+        }
+
+        h1 {
+          max-width: 100%;
+        }
+
+        .status-row,
+        .grid,
+        .release {
+          grid-template-columns: 1fr;
+        }
+
+        .status-row {
+          margin-top: 18px;
+        }
+
+        .section-head {
+          align-items: start;
+          flex-direction: column;
+        }
       }
     </style>
   </head>
   <body>
-    <main>
-      <img src="assets/hardened-logo.png" alt="Hardened NanoKVM" />
-      <h1>Hardened NanoKVM</h1>
-      <p>
-        A beta security fork for Sipeed NanoKVM focused on replacing the privileged
-        Go web backend with a smaller Rust backend while keeping the existing hardware,
-        web UI, native video pipeline, and service layout.
-      </p>
-      <div class="links">
-        <a class="primary" href="https://github.com/woffko/Hardened_NanoKVM/releases/latest"
-          >Download latest release</a
-        >
-        <a href="https://github.com/woffko/Hardened_NanoKVM">Repository</a>
-        <a href="https://github.com/woffko/Hardened_NanoKVM/blob/main/README.md">Docs</a>
+    <header>
+      <nav class="shell nav" aria-label="Primary">
+        <a class="brand" href="https://woffko.github.io/Hardened_NanoKVM/">
+          <img src="assets/hardened-logo.png" alt="" />
+          <span>Hardened NanoKVM</span>
+        </a>
+        <div class="nav-links">
+          <a href="https://github.com/woffko/Hardened_NanoKVM">Repository</a>
+          <a href="https://github.com/woffko/Hardened_NanoKVM/releases">Releases</a>
+          <a href="https://github.com/woffko/Hardened_NanoKVM/blob/main/README.md">Docs</a>
+          <a href="https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html">NanoKVM</a>
+        </div>
+      </nav>
+    </header>
+
+    <div class="hero">
+      <div class="shell hero-content">
+        <p class="eyebrow">Rust backend security fork for Sipeed NanoKVM</p>
+        <h1>Hardened NanoKVM</h1>
+        <p class="lead">
+          A beta firmware fork focused on replacing the privileged Go web backend with a
+          smaller Rust backend while keeping the NanoKVM hardware, web UI, video
+          pipeline, and service layout.
+        </p>
+        <div class="actions">
+          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/latest"
+            >Download latest app release</a
+          >
+          <a class="button secondary" href="https://github.com/woffko/Hardened_NanoKVM"
+            >View source</a
+          >
+        </div>
       </div>
+    </div>
+
+    <aside class="shell status-row" aria-label="Current project status">
+      <div class="status">
+        <strong>App channel</strong>
+        <span>Published release: 2.0.24. Current hardware test build: 2.0.25.</span>
+      </div>
+      <div class="status">
+        <strong>System channel</strong>
+        <span>Raw/SD baseline: 0.2.15-raw.1 with Buildroot package security backports.</span>
+      </div>
+      <div class="status">
+        <strong>Release state</strong>
+        <span>Beta/lab firmware. Use only with physical SD-card recovery access.</span>
+      </div>
+    </aside>
+
+    <main class="shell">
+      <section>
+        <div class="section-head">
+          <h2>What Changed</h2>
+          <p>
+            Hardened NanoKVM keeps the upstream hardware stack and focuses on backend,
+            update, and administration hardening.
+          </p>
+        </div>
+        <div class="grid">
+          <article class="card">
+            <h3>Rust-only web backend</h3>
+            <p>
+              Release packages replace the privileged Go server with the Hardened Rust
+              backend and reject legacy Go backend files in shipped artifacts.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Hardened authentication</h3>
+            <p>
+              First-boot account setup, CSRF binding, Origin checks, session revocation,
+              login lockout, Argon2id passwords, and security headers.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Signed updates</h3>
+            <p>
+              Application and system channels use signed metadata, archive verification,
+              guarded installs, and explicit separation between app and raw system updates.
+            </p>
+          </article>
+          <article class="card">
+            <h3>System controls</h3>
+            <p>
+              GUI pages for time/NTP, system logs, remote syslog, firewall modes, and
+              network settings under Settings &gt; System.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Managed firewall modes</h3>
+            <p>
+              Baseline, Restricted, and Paranoid profiles make online update, SSH, HTTPS,
+              DNS, NTP, syslog, and WebRTC access explicit.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Video path stability</h3>
+            <p>
+              H.264 Direct is the preferred low-CPU path when HTTPS and WebCodecs are
+              available; MJPEG remains available as a fallback.
+            </p>
+          </article>
+        </div>
+      </section>
 
       <section>
-        <h2>Current status</h2>
-        <ul>
-          <li>Published application channel: Hardened Rust app 2.0.24.</li>
-          <li>Current hardware test build: 2.0.25.</li>
-          <li>Current raw/SD baseline: 0.2.15-raw.1.</li>
-          <li>Raw system updates require physical SD-card recovery access.</li>
-        </ul>
+        <div class="section-head">
+          <h2>Current Downloads</h2>
+          <p>
+            The app and raw system lines intentionally move independently. Use the app
+            channel for normal web/backend updates and raw system builds only for SD-card
+            level changes.
+          </p>
+        </div>
+        <article class="release">
+          <div>
+            <h3>Latest published application release</h3>
+            <p>
+              App-only kvmapp archive for the Rust backend and web UI. This does not rewrite
+              boot, rootfs, kernel, or the base Buildroot system.
+            </p>
+          </div>
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-2.0.24"
+            >hardened-rust-2.0.24</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>Current raw system and SD-card baseline</h3>
+            <p>
+              Full partition-image update and matching SD-card artifacts for the validated
+              security-backports baseline.
+            </p>
+          </div>
+          <a
+            class="tag"
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.15-raw.1"
+            >0.2.15-raw.1</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>Release notes and archive</h3>
+            <p>
+              Detailed changelog, release history, channel policy, and superseded lab builds.
+            </p>
+          </div>
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/blob/main/docs/release-archive.md"
+            >release archive</a
+          >
+        </article>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Update Model</h2>
+          <p>
+            Two update paths exist because replacing kvmapp is much safer than writing raw
+            SD-card partitions.
+          </p>
+        </div>
+        <div class="grid">
+          <article class="card">
+            <h3>Application updates</h3>
+            <p>
+              Replace the Rust server, web assets, helper scripts, init scripts, keys,
+              version files, and kvmapp-side defaults.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Raw system updates</h3>
+            <p>
+              Write boot and rootfs partition images to the SD card. These updates can
+              change the base system and require guarded recovery assumptions.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Offline recovery</h3>
+            <p>
+              Keep physical SD-card recovery access. Raw partition updates have no automatic
+              rollback if the device cannot boot.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="warning">
+        Hardened NanoKVM is beta/lab firmware. Read the release notes before installing,
+        keep the original SD card or a known-good backup, and do not enable raw system
+        updates without physical recovery access.
       </section>
     </main>
+
+    <footer>
+      <div class="shell">
+        Hardened NanoKVM is an independent security-focused fork for Sipeed NanoKVM.
+        NanoKVM hardware documentation remains available from Sipeed.
+      </div>
+    </footer>
   </body>
 </html>
