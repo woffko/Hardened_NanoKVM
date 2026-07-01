@@ -29,6 +29,8 @@ use webrtc::{
         setting_engine::SettingEngine,
     },
     dtls::extension::extension_use_srtp::SrtpProtectionProfile,
+    ice::mdns::MulticastDnsMode,
+    ice::network_type::NetworkType,
     ice_transport::{
         ice_candidate::RTCIceCandidateInit, ice_connection_state::RTCIceConnectionState,
         ice_server::RTCIceServer,
@@ -399,6 +401,8 @@ impl WebRtcClient {
             .map_err(|err| webrtc_error("register default interceptors", err))?;
 
         let mut setting_engine = SettingEngine::default();
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+        setting_engine.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         setting_engine.set_srtp_protection_profiles(vec![
             SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
             SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,

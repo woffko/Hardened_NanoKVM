@@ -972,7 +972,13 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
     }
     config.write()?;
 
-    tokio::spawn(async {
+    schedule_server_restart("TLS update");
+
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+fn schedule_server_restart(reason: &'static str) {
+    tokio::spawn(async move {
         time::sleep(Duration::from_millis(100)).await;
         match run_allowed(
             AllowedCommand::ServiceNanokvmRestart,
@@ -981,19 +987,20 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
         )
         .await
         {
-            Ok(output) if output.status == 0 => {}
+            Ok(output) if output.status == 0 => {
+                tracing::info!(reason, "scheduled NanoKVM server restart completed")
+            }
             Ok(output) => tracing::warn!(
+                reason,
                 status = output.status,
                 stderr = %String::from_utf8_lossy(&output.stderr),
-                "NanoKVM service restart after TLS update failed"
+                "scheduled NanoKVM server restart failed"
             ),
             Err(err) => {
-                tracing::warn!(error = ?err, "failed to restart NanoKVM service after TLS update")
+                tracing::warn!(reason, error = ?err, "failed to restart NanoKVM service")
             }
         }
     });
-
-    Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 fn get_ips() -> Vec<IpInfo> {

@@ -3,6 +3,7 @@
 CONFIG_FILE=/etc/kvm/firewall.json
 SERVER_CONFIG=/etc/kvm/server.yaml
 SYSLOG_CONFIG=/etc/kvm/syslog.json
+WEBRTC_UDP_RANGE=49152:65535
 
 firewall_mode() {
     [ -r "$CONFIG_FILE" ] || {
@@ -122,8 +123,14 @@ apply_restricted_ipv4() {
     iptables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
     iptables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
     iptables -A INPUT -p tcp --dport 22 -m state --state NEW -j ACCEPT
+    iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 53 -m state --state NEW -j ACCEPT
     iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
     iptables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
+    iptables -A OUTPUT -p udp --dport 3478 -j ACCEPT
+    iptables -A OUTPUT -p udp --dport 19302 -j ACCEPT
+    iptables -A INPUT -p udp --dport "$WEBRTC_UDP_RANGE" -j ACCEPT
+    iptables -A OUTPUT -p udp --sport "$WEBRTC_UDP_RANGE" -j ACCEPT
     iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
     iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT 2>/dev/null || true
     iptables -P INPUT DROP
@@ -143,8 +150,14 @@ apply_restricted_ipv6() {
     ip6tables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
     ip6tables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
     ip6tables -A INPUT -p tcp --dport 22 -m state --state NEW -j ACCEPT
+    ip6tables -A OUTPUT -p udp --dport 53 -j ACCEPT
+    ip6tables -A OUTPUT -p tcp --dport 53 -m state --state NEW -j ACCEPT
     ip6tables -A OUTPUT -p udp --dport 123 -j ACCEPT
     ip6tables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
+    ip6tables -A OUTPUT -p udp --dport 3478 -j ACCEPT
+    ip6tables -A OUTPUT -p udp --dport 19302 -j ACCEPT
+    ip6tables -A INPUT -p udp --dport "$WEBRTC_UDP_RANGE" -j ACCEPT
+    ip6tables -A OUTPUT -p udp --sport "$WEBRTC_UDP_RANGE" -j ACCEPT
     ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
     ip6tables -A OUTPUT -p udp --sport 546 --dport 547 -j ACCEPT 2>/dev/null || true
     allow_ipv6_control

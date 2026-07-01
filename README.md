@@ -63,8 +63,9 @@ the security, update, and administration model substantially:
 - **System settings in GUI:** added System Log, remote UDP syslog forwarding,
   local tmpfs log viewing, Time/NTP/timezone controls, and Firewall controls.
 - **Managed firewall modes:** baseline managed rules plus Restricted and
-  Paranoid modes. Restricted keeps HTTPS/SSH/NTP/syslog/update traffic usable;
-  Paranoid blocks online updates intentionally and the UI reports that clearly.
+  Paranoid modes. Restricted keeps HTTPS/SSH/DNS/NTP/syslog/update traffic and
+  WebRTC/ICE UDP usable; Paranoid blocks online updates intentionally and the UI
+  reports that clearly.
 - **HTTPS/firewall recovery:** disabling HTTPS forces firewall mode back to
   baseline so HTTP access is not stranded behind restrictive rules.
 - **Video pipeline stability:** HTTPS toggles restart only the Rust web backend,

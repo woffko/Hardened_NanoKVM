@@ -8,6 +8,13 @@ application/raw/SD-card artifacts.
 * Moved Network settings into `Settings > System > Network` and removed the
   top-level Network item from the Settings sidebar.
 * Updated HTTPS-related UI tips to point to the new Network location.
+* Updated Restricted Firewall mode rules and UI text so WebRTC/ICE UDP and DNS
+  are explicitly allowed and documented.
+* Stopped forcing a Rust backend restart when switching between MJPEG and H.264
+  modes; HTTPS changes still restart only the web backend.
+* Hardened `S95nanokvm` restart handling so the backend can fall back to the
+  persistent `/kvmapp/server` copy when `/tmp` is low and reboots only when the
+  vendor video process cannot be stopped cleanly.
 
 ## Hardened NanoKVM 2.0.20 RC1 (2026-07-01)
 
@@ -33,9 +40,9 @@ settings, managed firewall modes, and HTTPS/firewall recovery.
 * Made Paranoid mode exit explicit in the GUI: the firewall page now always
   shows a visible **Disable Paranoid** action while Paranoid is configured or
   active.
-* Added Restricted Firewall mode, allowing HTTPS, SSH, NTP, remote syslog,
-  DHCP, established connections, and essential IPv6 control traffic while
-  blocking other inbound/outbound traffic.
+* Added Restricted Firewall mode, allowing HTTPS, SSH, DNS, NTP, remote syslog,
+  online updates, WebRTC/ICE UDP, DHCP, established connections, and essential
+  IPv6 control traffic while blocking other inbound/outbound traffic.
 
 ### Bug Fixes
 
@@ -57,8 +64,8 @@ settings, managed firewall modes, and HTTPS/firewall recovery.
   locally. It allows inbound HTTPS plus loopback, established traffic, DHCP, and
   essential IPv6 control traffic; other inbound and outbound traffic is dropped.
 * Restricted firewall mode also requires HTTPS. Unlike Paranoid, it keeps
-  outbound HTTPS available for online updates and permits SSH/NTP/syslog
-  operation.
+  outbound HTTPS/DNS available for online updates and permits SSH/NTP/syslog
+  and WebRTC/ICE UDP operation.
 
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 

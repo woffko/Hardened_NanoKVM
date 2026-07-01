@@ -539,7 +539,7 @@ const ru = {
           mode: {
             title: 'Режим firewall',
             description:
-              'Firewall всегда управляется системой. Baseline сохраняет обычный доступ NanoKVM; Restricted разрешает HTTPS, SSH, NTP и syslog; Paranoid оставляет только HTTPS-доступ.',
+              'Firewall всегда управляется системой. Baseline сохраняет обычный доступ NanoKVM; Restricted разрешает HTTPS, SSH, NTP, syslog, обновления и WebRTC; Paranoid оставляет только HTTPS-доступ.',
             baseline: 'Managed baseline',
             restricted: 'Restricted',
             paranoid: 'Paranoid'
@@ -548,10 +548,10 @@ const ru = {
             enable: 'Включить Restricted',
             active: 'Restricted Firewall mode активен',
             allows:
-              'Разрешенный трафик: HTTPS, SSH, NTP, удаленный syslog, DHCP, established-соединения и минимальный IPv6 control traffic.',
+              'Разрешенный трафик: HTTPS, SSH, DNS, NTP, удаленный syslog, онлайн-обновления, WebRTC/ICE UDP, DHCP, established-соединения и минимальный IPv6 control traffic.',
             confirmTitle: 'Включить Restricted Firewall mode?',
             confirmDesc:
-              'Будет разрешен только HTTPS, SSH, NTP, удаленный syslog, DHCP, established-соединения и минимальный IPv6 control traffic. Остальной входящий/исходящий трафик будет заблокирован.'
+              'Будет разрешен только HTTPS, SSH, DNS, NTP, удаленный syslog, онлайн-обновления, WebRTC/ICE UDP, DHCP, established-соединения и минимальный IPv6 control traffic. Остальной входящий/исходящий трафик будет заблокирован.'
           },
           paranoid: {
             enable: 'Включить Paranoid',

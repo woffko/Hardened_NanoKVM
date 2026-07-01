@@ -568,7 +568,13 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
 
     match kind {
         "type" => {
-            if value == 0 {
+            let next_mode = if value == 0 {
+                StreamMode::Mjpeg
+            } else {
+                StreamMode::H264
+            };
+
+            if next_mode == StreamMode::Mjpeg {
                 write_screen_file(SCREEN_TYPE_FILE, "mjpeg")?;
                 screen.mode = StreamMode::Mjpeg;
             } else {

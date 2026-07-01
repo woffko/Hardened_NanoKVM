@@ -140,9 +140,11 @@ Detailed chronological build/update notes are in
     or active.
 - Added Restricted Firewall mode:
   - available only with HTTPS enabled and locally healthy;
-  - permits inbound HTTPS, outbound HTTPS, inbound SSH, outbound NTP UDP/123,
-    outbound remote syslog UDP on `/etc/kvm/syslog.json` `remotePort` (default
-    514), DHCP, established connections, and essential IPv6 control traffic;
+  - permits inbound HTTPS, outbound HTTPS, inbound SSH, outbound DNS, outbound
+    NTP UDP/123, outbound remote syslog UDP on `/etc/kvm/syslog.json`
+    `remotePort` (default 514), STUN UDP/3478 and UDP/19302, WebRTC/ICE UDP
+    dynamic ports, DHCP, established connections, and essential IPv6 control
+    traffic;
   - does not trigger the online-update blocked warning because outbound HTTPS
     remains available.
 - Live-validated Restricted mode on `10.0.87.132`:

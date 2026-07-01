@@ -10,6 +10,10 @@ disable_stale_autostarts() {
 
 WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
 H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
+SERVER_SOURCE_DIR=/kvmapp/server
+SERVER_RUNTIME_DIR=/tmp/server
+SERVER_RUNTIME_NEW_DIR=/tmp/server.new
+SERVER_LOG=/tmp/nanokvm-server.log
 SYSTEM_UPDATE_WATCHDOG_PID_FILE=/tmp/system-update-watchdog.pid
 SYSTEM_UPDATE_LOG=/tmp/system-update-watchdog.log
 SYSTEM_VERSION_FILE=/etc/kvm/system-version.json
@@ -33,6 +37,20 @@ wait_process_exit() {
     done
     killall -9 "$name" 2>/dev/null
     sleep 1
+    pidof "$name" >/dev/null 2>&1 && return 1
+    return 0
+}
+
+reboot_after_unrecoverable_server() {
+    reason="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') NanoKVM-Server did not exit during $reason; rebooting to recover vendor video driver" >> /tmp/nanokvm-watchdog.log
+    sync
+    reboot
+    exit 1
+}
+
+tmp_available_kb() {
+    df -k /tmp 2>/dev/null | awk 'NR == 2 { print $4 + 0 }'
 }
 
 stop_pid_file() {
@@ -59,7 +77,9 @@ cleanup_server_backups() {
         /kvmapp/server/web.backup \
         /kvmapp/server/web.backup-* \
         /kvmapp/server/web.before-* \
-        /kvmapp/server/web.after-* 2>/dev/null || true
+        /kvmapp/server/web.after-* \
+        /kvmapp/server/NanoKVM-Server.before-* \
+        /kvmapp/server/*.before-* 2>/dev/null || true
 }
 
 ensure_kvm_state_files() {
@@ -127,16 +147,31 @@ restore_sensor_configs() {
 }
 
 start_server_runtime() {
-    rm -rf /tmp/server 2>/dev/null
-    cp -r /kvmapp/server /tmp/
-    nohup /tmp/server/NanoKVM-Server >/tmp/nanokvm-server.log 2>&1 &
+    server_bin="$SERVER_SOURCE_DIR/NanoKVM-Server"
+    tmp_free="$(tmp_available_kb)"
+
+    rm -rf "$SERVER_RUNTIME_NEW_DIR" 2>/dev/null
+    if [ -z "$tmp_free" ] || [ "$tmp_free" -gt 20480 ]; then
+        if cp -r "$SERVER_SOURCE_DIR" "$SERVER_RUNTIME_NEW_DIR" 2>/tmp/nanokvm-server-copy.err && [ -x "$SERVER_RUNTIME_NEW_DIR/NanoKVM-Server" ]; then
+            rm -rf "$SERVER_RUNTIME_DIR" 2>/dev/null
+            mv "$SERVER_RUNTIME_NEW_DIR" "$SERVER_RUNTIME_DIR"
+            server_bin="$SERVER_RUNTIME_DIR/NanoKVM-Server"
+        else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') failed to stage NanoKVM-Server in /tmp; running from $SERVER_SOURCE_DIR" >> /tmp/nanokvm-watchdog.log
+            rm -rf "$SERVER_RUNTIME_NEW_DIR" 2>/dev/null
+        fi
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') /tmp has only ${tmp_free} KiB free; running NanoKVM-Server from $SERVER_SOURCE_DIR" >> /tmp/nanokvm-watchdog.log
+    fi
+
+    : > "$SERVER_LOG" 2>/dev/null || SERVER_LOG=/dev/null
+    nohup "$server_bin" >"$SERVER_LOG" 2>&1 &
 }
 
 restart_server_runtime() {
     stop_watchdog
     killall NanoKVM-Server 2>/dev/null
-    wait_process_exit NanoKVM-Server
-    rm -rf /tmp/server 2>/dev/null
+    wait_process_exit NanoKVM-Server || reboot_after_unrecoverable_server "restart-server"
     start_server_runtime
     start_watchdog
 }
@@ -158,7 +193,7 @@ restart_server_safe() {
     printf 'mjpeg\n' > /kvmapp/kvm/type
     printf 'H.264 encoder health check failed; restarted in MJPEG safe mode\n' > "$H264_SAFE_MODE_FILE"
     killall NanoKVM-Server 2>/dev/null
-    wait_process_exit NanoKVM-Server
+    wait_process_exit NanoKVM-Server || reboot_after_unrecoverable_server "H.264 safe restart"
     start_server_runtime
 }
 
@@ -323,7 +358,7 @@ stop_runtime() {
     killall kvm_system 2>/dev/null
     killall NanoKVM-Server 2>/dev/null
     wait_process_exit kvm_system
-    wait_process_exit NanoKVM-Server
+    wait_process_exit NanoKVM-Server || reboot_after_unrecoverable_server "runtime stop"
     rm -rf /tmp/kvm_system /tmp/server 2>/dev/null
 }
 
