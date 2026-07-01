@@ -1,4 +1,4 @@
-import { ReactElement, useEffect, useState } from 'react';
+import { ReactElement, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import { Button, Form, Input } from 'antd';
 import { useTranslation } from 'react-i18next';
@@ -26,6 +26,8 @@ export const Login = (): ReactElement => {
   const [msg, setMsg] = useState('');
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [displayVersion, setDisplayVersion] = useState(HARDENED_VERSION);
+  const [logoPressed, setLogoPressed] = useState(false);
+  const logoTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (existToken()) {
@@ -60,6 +62,14 @@ export const Login = (): ReactElement => {
       setTimeout(() => setMsg(''), 3000);
     }
   }, [msg]);
+
+  useEffect(() => {
+    return () => {
+      if (logoTimerRef.current) {
+        window.clearTimeout(logoTimerRef.current);
+      }
+    };
+  }, []);
 
   function finishLoginResponse(rsp: any) {
     if (rsp.code !== 0) {
@@ -148,6 +158,22 @@ export const Login = (): ReactElement => {
     return !regex.test(str);
   }
 
+  function pressLogo(evt: MouseEvent<HTMLDivElement>) {
+    evt.preventDefault();
+    if (logoTimerRef.current) {
+      window.clearTimeout(logoTimerRef.current);
+    }
+
+    setLogoPressed(false);
+    window.requestAnimationFrame(() => {
+      setLogoPressed(true);
+      logoTimerRef.current = window.setTimeout(() => {
+        setLogoPressed(false);
+        logoTimerRef.current = null;
+      }, 700);
+    });
+  }
+
   const isSetup = setupRequired === true;
   const isCheckingSetup = setupRequired === null;
 
@@ -164,14 +190,10 @@ export const Login = (): ReactElement => {
         >
           <div className="flex flex-col items-center justify-center pb-5">
             <div
-              className="flex h-[96px] w-[260px] cursor-pointer items-center justify-center overflow-hidden rounded bg-white shadow-lg"
-              onClick={(evt) => {
-                evt.preventDefault();
-                (evt.currentTarget as HTMLDivElement).classList.add('animate-spin');
-                setTimeout(() => {
-                  (evt.currentTarget as HTMLDivElement).classList.remove('animate-spin');
-                }, 1000);
-              }}
+              className={`hardened-login-logo flex h-[96px] w-[260px] cursor-pointer items-center justify-center overflow-hidden rounded bg-white shadow-lg ${
+                logoPressed ? 'hardened-login-logo--active' : ''
+              }`}
+              onClick={pressLogo}
             >
               <img
                 id="logo"

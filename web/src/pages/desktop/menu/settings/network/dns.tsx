@@ -7,6 +7,8 @@ import { useTranslation } from 'react-i18next';
 import * as api from '@/api/network.ts';
 import type { DNSMode } from '@/api/network.ts';
 
+import { IPv6 } from './ipv6.tsx';
+
 type DNSState = {
   mode: DNSMode;
   servers: string[];
@@ -270,7 +272,7 @@ const EditableServerRow = ({
           ref={inputRef}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="0.0.0.0"
+          placeholder="1.1.1.1 or 2606:4700:4700::1111"
           status={isInvalid ? 'error' : undefined}
         />
         <Button
@@ -497,30 +499,31 @@ export const DNS = () => {
   const canAdd = !isLoading && !isSaving && servers.length < maxServers;
 
   return (
-    <div className="flex flex-col space-y-5">
-      {/* Header row: title + segmented control */}
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col space-y-1">
-          <span>{t('settings.network.dns.title')}</span>
-          <span className="text-xs text-neutral-500">{t('settings.network.dns.description')}</span>
+    <div className="flex flex-col space-y-8">
+      <div className="flex flex-col space-y-5">
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col space-y-1">
+            <span>{t('settings.network.dns.ipv4Title')}</span>
+            <span className="text-xs text-neutral-500">
+              {t('settings.network.dns.ipv4Description')}
+            </span>
+          </div>
+
+          <Segmented
+            disabled={isLoading || isSaving}
+            value={mode}
+            onChange={(val) => {
+              setMode(val as DNSMode);
+              setMessage('');
+              setError('');
+            }}
+            options={[
+              { label: t('settings.network.dns.dhcp'), value: 'dhcp' },
+              { label: t('settings.network.dns.manual'), value: 'manual' }
+            ]}
+          />
         </div>
 
-        <Segmented
-          disabled={isLoading || isSaving}
-          value={mode}
-          onChange={(val) => {
-            setMode(val as DNSMode);
-            setMessage('');
-            setError('');
-          }}
-          options={[
-            { label: t('settings.network.dns.dhcp'), value: 'dhcp' },
-            { label: t('settings.network.dns.manual'), value: 'manual' }
-          ]}
-        />
-      </div>
-
-      <div className="space-y-5">
         <Panel title={t('settings.network.dns.networkDetails')}>
           <InfoRow label={t('settings.network.dns.interface')} value={formatInterface(info)} />
           {mode === 'manual' ? (
@@ -570,6 +573,15 @@ export const DNS = () => {
             </>
           )}
         </Panel>
+      </div>
+
+      <IPv6 />
+
+      <div className="flex flex-col space-y-5">
+        <div className="flex flex-col space-y-1">
+          <span>{t('settings.network.dns.title')}</span>
+          <span className="text-xs text-neutral-500">{t('settings.network.dns.description')}</span>
+        </div>
 
         <Panel title={t('settings.network.dns.dnsServers')} description={serversDescription}>
           {mode === 'manual' ? (
@@ -613,7 +625,7 @@ export const DNS = () => {
               )}
 
               {/* Validation hints */}
-              {(hasInvalidServer || isExceedMax) && (
+              {(hasInvalidServer || hasInvalidNetwork || isExceedMax) && (
                 <div className="space-y-1 px-4 pb-3">
                   {hasInvalidServer && (
                     <div className="text-xs text-red-400">{t('settings.network.dns.invalid')}</div>

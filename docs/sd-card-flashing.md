@@ -21,11 +21,10 @@ SD-card images. Install those through the web GUI updater instead.
 - Pick the target disk carefully. A wrong disk name can overwrite your computer
   drive.
 
-Current release note: the latest application releases after beta 2.0.19 are
-app/backend/UI-only releases. The latest published full SD-card image currently
-remains the validated `0.2.15-raw.1` system image from the beta 2.0.19 line.
-After flashing that image, use the web GUI application updater to install the
-latest app release.
+Current release note: the latest published full SD-card image is the RC3
+`2.0.25` image with matching raw system version `0.2.17-raw.1`. It includes the
+current Hardened app, raw-system update support, and the
+`Buildroot 2023.11.3 package backports` security-backport baseline.
 
 ## Windows: Balena Etcher
 
