@@ -17,6 +17,7 @@ Policy:
 | Tag | Status | Notes |
 | --- | --- | --- |
 | `hardened-rust-rc3` | Current full RC | App `2.0.25` with matching raw system `0.2.17-raw.1` and SD-card image. Keeps the tested video path, persists the selected video mode and Appearance display mode, fixes the login firmware version, refines the System > Network IPv4/DNS layout, and keeps the Buildroot `2023.11.3 package backports` baseline on the raw/SD line. |
+| `hardened-system-0.2.17-raw.1` | Current raw channel target | Companion raw-system release for RC3. Stable/preview system-update metadata points here because deployed device validators trust raw downloads and release notes from `hardened-system-*` tags. |
 | `hardened-rust-2.0.24` | Previous app release | App `2.0.24` keeps the tested `2.0.21` video path, moves Network settings under System, and handles HTTP/HTTPS protocol changes through a warned device reboot plus delayed redirect. |
 | `hardened-rust-rc2` | Previous app RC | App `2.0.21` with Network settings moved under `Settings > System > Network`, Restricted firewall/WebRTC DNS text updates, and tested app-only release behavior. |
 | `hardened-rust-rc1` | Previous app RC | App `2.0.20` with System Log, Time/NTP/timezone controls, managed Firewall controls, Restricted/Paranoid modes, HTTPS/firewall recovery, and TLS toggles that keep `kvm_system` running. |

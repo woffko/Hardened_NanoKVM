@@ -18,6 +18,9 @@ SD-card image artifacts.
 * Rebuilt the full raw system-update and SD-card image line as
   `0.2.17-raw.1`, keeping the Buildroot `2023.11.2` base label and the
   `Buildroot 2023.11.3 package backports` security-backport baseline.
+* Published companion raw-system tag `hardened-system-0.2.17-raw.1` and pointed
+  stable/preview system-update channel metadata there for compatibility with
+  deployed device URL validation.
 * Kept Network settings under `Settings > System > Network` from RC2 and
   refined the Network page layout: IPv4 settings now have their own heading,
   DNS settings moved to the bottom with a separate DNS heading, and DNS inputs
