@@ -1,3 +1,19 @@
+## Hardened NanoKVM Beta 2.0.17 (2026-07-01)
+
+### Bug Fixes
+
+* Avoided forcing `sync_all()` on large raw system-update payload files while
+  staging archives on `/data`. This prevents the NanoKVM from rebooting or
+  dropping the backend during the `download/verifying` phase on exFAT-backed
+  staging storage.
+
+### Notes
+
+* Raw system release `0.2.12-raw.1` contained app `2.0.16`, but live testing on
+  `10.0.87.132` showed the app updater could reboot during staging before raw
+  install started. It is superseded by the matching `2.0.17` / `0.2.13-raw.1`
+  build.
+
 ## Hardened NanoKVM Beta 2.0.16 (2026-06-30)
 
 ### Bug Fixes

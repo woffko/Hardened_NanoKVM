@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io,
+    io::{self, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
@@ -9,6 +9,8 @@ use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
 use crate::{AppError, Result, system::files::clean_relative_path};
+
+const MAX_SYNCED_ARCHIVE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn safe_join(root: &Path, member_name: &Path) -> Result<PathBuf> {
     let relative = clean_relative_path(member_name)?;
@@ -42,6 +44,7 @@ pub fn extract_tar_gz_safe(src: &Path, dest: &Path) -> Result<PathBuf> {
         match entry.header().entry_type() {
             EntryType::Directory => fs::create_dir_all(&target)?,
             EntryType::Regular => {
+                let size = entry.header().size()?;
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -52,7 +55,10 @@ pub fn extract_tar_gz_safe(src: &Path, dest: &Path) -> Result<PathBuf> {
                     .mode(0o644)
                     .open(&target)?;
                 io::copy(&mut entry, &mut out)?;
-                out.sync_all()?;
+                out.flush()?;
+                if size <= MAX_SYNCED_ARCHIVE_FILE_BYTES {
+                    out.sync_all()?;
+                }
             }
             _ => {
                 return Err(AppError::BadRequest(
