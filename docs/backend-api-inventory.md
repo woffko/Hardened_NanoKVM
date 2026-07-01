@@ -90,8 +90,8 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method | Path | Rust Status |
 |---|---|---|
 | GET | `/api/system/firewall` | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output. |
-| POST | `/api/system/firewall` | Implemented; accepts `baseline` or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Paranoid mode requires HTTPS configuration and a successful local HTTPS health check before rules are applied. |
-| POST | `/api/system/firewall/confirm` | Implemented; clears the pending Paranoid confirmation marker after the GUI remains reachable. A short rollback task restores baseline if Paranoid is enabled but not confirmed. |
+| POST | `/api/system/firewall` | Implemented; accepts `baseline`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. |
+| POST | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores baseline/previous mode if Restricted or Paranoid is enabled but not confirmed. |
 
 ### VM, Device, And Settings
 

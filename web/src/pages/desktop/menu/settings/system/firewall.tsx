@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Divider, Modal, Segmented, Spin, Tag, message } from 'antd';
-import { LockKeyholeIcon, RefreshCwIcon, ShieldIcon, ShieldOffIcon } from 'lucide-react';
+import type { TFunction } from 'i18next';
+import {
+  LockKeyholeIcon,
+  RefreshCwIcon,
+  ShieldCheckIcon,
+  ShieldIcon,
+  ShieldOffIcon
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/system-firewall.ts';
@@ -20,8 +27,15 @@ export const FirewallSettings = () => {
     if (!status) return '';
     return status.rules[rulesTab] || t('settings.system.firewall.rules.empty');
   }, [status, rulesTab, t]);
+  const isRestrictedMode =
+    status?.restrictedActive ||
+    status?.effectiveMode === 'restricted' ||
+    status?.config.mode === 'restricted';
   const isParanoidMode =
-    status?.paranoidActive || status?.effectiveMode === 'paranoid' || status?.config.mode === 'paranoid';
+    status?.paranoidActive ||
+    status?.effectiveMode === 'paranoid' ||
+    status?.config.mode === 'paranoid';
+  const isLimitedMode = isRestrictedMode || isParanoidMode;
 
   useEffect(() => {
     load();
@@ -45,6 +59,22 @@ export const FirewallSettings = () => {
   }
 
   function requestMode(mode: FirewallMode) {
+    if (mode === 'restricted') {
+      if (!status?.httpsEnabled) {
+        message.warning(t('settings.system.firewall.enableHttpsFirst'));
+        return;
+      }
+
+      Modal.confirm({
+        title: t('settings.system.firewall.restricted.confirmTitle'),
+        content: t('settings.system.firewall.restricted.confirmDesc'),
+        okText: t('settings.system.firewall.restricted.enable'),
+        cancelText: t('settings.system.firewall.cancel'),
+        onOk: () => applyMode(mode)
+      });
+      return;
+    }
+
     if (mode === 'paranoid') {
       if (!status?.httpsEnabled) {
         message.warning(t('settings.system.firewall.enableHttpsFirst'));
@@ -116,6 +146,25 @@ export const FirewallSettings = () => {
         />
       )}
 
+      {isRestrictedMode && !isParanoidMode && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('settings.system.firewall.restricted.active')}
+          description={t('settings.system.firewall.restricted.allows')}
+          action={
+            <Button
+              size="small"
+              loading={isApplying}
+              icon={<ShieldOffIcon size={14} />}
+              onClick={() => requestMode('baseline')}
+            >
+              {t('settings.system.firewall.baseline.apply')}
+            </Button>
+          }
+        />
+      )}
+
       {isParanoidMode && (
         <Alert
           type="error"
@@ -146,10 +195,8 @@ export const FirewallSettings = () => {
               {t('settings.system.firewall.mode.description')}
             </div>
           </div>
-          <Tag color={isParanoidMode ? 'red' : 'blue'}>
-            {isParanoidMode
-              ? t('settings.system.firewall.mode.paranoid')
-              : t('settings.system.firewall.mode.baseline')}
+          <Tag color={isParanoidMode ? 'red' : isRestrictedMode ? 'orange' : 'blue'}>
+            {modeText(t, status?.effectiveMode || status?.config.mode || 'baseline')}
           </Tag>
         </div>
 
@@ -177,7 +224,7 @@ export const FirewallSettings = () => {
           <StatusLine label="nft" value={toolText(status?.backend.nft)} />
           <StatusLine
             label={t('settings.system.firewall.effectiveMode')}
-            value={status?.effectiveMode || '-'}
+            value={modeText(t, status?.effectiveMode || status?.config.mode || 'baseline')}
           />
         </div>
 
@@ -186,17 +233,26 @@ export const FirewallSettings = () => {
             {t('settings.system.firewall.refresh')}
           </Button>
           <Button
-            type={isParanoidMode ? 'primary' : 'default'}
+            type={isLimitedMode ? 'primary' : 'default'}
             danger={isParanoidMode}
             icon={<ShieldOffIcon size={16} />}
-            disabled={!isParanoidMode}
+            disabled={!isLimitedMode}
             loading={isApplying}
             onClick={() => requestMode('baseline')}
           >
             {t('settings.system.firewall.baseline.apply')}
           </Button>
           <Button
-            type={!isParanoidMode ? 'primary' : 'default'}
+            type={isRestrictedMode ? 'primary' : 'default'}
+            icon={<ShieldCheckIcon size={16} />}
+            disabled={isRestrictedMode || !status?.httpsEnabled}
+            loading={isApplying}
+            onClick={() => requestMode('restricted')}
+          >
+            {t('settings.system.firewall.restricted.enable')}
+          </Button>
+          <Button
+            type={isParanoidMode ? 'primary' : 'default'}
             danger
             icon={<LockKeyholeIcon size={16} />}
             disabled={isParanoidMode || !status?.httpsEnabled}
@@ -247,4 +303,15 @@ function StatusLine({ label, value }: { label: string; value: string }) {
 function toolText(tool?: { installed: boolean; detail: string }) {
   if (!tool) return '-';
   return tool.installed ? tool.detail : 'missing';
+}
+
+function modeText(t: TFunction, mode: FirewallMode) {
+  switch (mode) {
+    case 'restricted':
+      return t('settings.system.firewall.mode.restricted');
+    case 'paranoid':
+      return t('settings.system.firewall.mode.paranoid');
+    default:
+      return t('settings.system.firewall.mode.baseline');
+  }
 }

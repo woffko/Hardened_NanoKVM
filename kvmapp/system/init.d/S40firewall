@@ -2,6 +2,7 @@
 
 CONFIG_FILE=/etc/kvm/firewall.json
 SERVER_CONFIG=/etc/kvm/server.yaml
+SYSLOG_CONFIG=/etc/kvm/syslog.json
 
 firewall_mode() {
     [ -r "$CONFIG_FILE" ] || {
@@ -11,6 +12,7 @@ firewall_mode() {
 
     mode="$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" 2>/dev/null | head -n 1)"
     case "$mode" in
+        restricted) echo restricted ;;
         paranoid) echo paranoid ;;
         *) echo baseline ;;
     esac
@@ -23,6 +25,12 @@ https_enabled() {
 https_port() {
     port="$(sed -n 's/^[[:space:]]*https:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SERVER_CONFIG" 2>/dev/null | head -n 1)"
     [ -n "$port" ] || port=443
+    echo "$port"
+}
+
+syslog_port() {
+    port="$(sed -n 's/.*"remotePort"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SYSLOG_CONFIG" 2>/dev/null | head -n 1)"
+    [ -n "$port" ] || port=514
     echo "$port"
 }
 
@@ -103,9 +111,61 @@ apply_paranoid_ipv6() {
     ip6tables -P OUTPUT DROP
 }
 
+apply_restricted_ipv4() {
+    port="$(https_port)"
+    log_port="$(syslog_port)"
+    reset_ipv4
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
+    iptables -A INPUT -p tcp --dport 22 -m state --state NEW -j ACCEPT
+    iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
+    iptables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
+    iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT 2>/dev/null || true
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT DROP
+}
+
+apply_restricted_ipv6() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    port="$(https_port)"
+    log_port="$(syslog_port)"
+    reset_ipv6
+    ip6tables -A INPUT -i lo -j ACCEPT
+    ip6tables -A OUTPUT -o lo -j ACCEPT
+    ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+    ip6tables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
+    ip6tables -A INPUT -p tcp --dport 22 -m state --state NEW -j ACCEPT
+    ip6tables -A OUTPUT -p udp --dport 123 -j ACCEPT
+    ip6tables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
+    ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -p udp --sport 546 --dport 547 -j ACCEPT 2>/dev/null || true
+    allow_ipv6_control
+    ip6tables -P INPUT DROP
+    ip6tables -P FORWARD DROP
+    ip6tables -P OUTPUT DROP
+}
+
 apply_baseline() {
     apply_baseline_ipv4
     apply_baseline_ipv6
+}
+
+apply_restricted() {
+    if ! https_enabled; then
+        apply_baseline
+        return 0
+    fi
+
+    apply_restricted_ipv4
+    apply_restricted_ipv6
 }
 
 apply_paranoid() {
@@ -121,6 +181,7 @@ apply_paranoid() {
 start() {
     printf 'Starting firewall: '
     case "$(firewall_mode)" in
+        restricted) apply_restricted ;;
         paranoid) apply_paranoid ;;
         *) apply_baseline ;;
     esac
@@ -140,12 +201,12 @@ restart() {
 status() {
     mode="$(firewall_mode)"
     effective="$mode"
-    if [ "$mode" = paranoid ] && ! https_enabled; then
+    if [ "$mode" != baseline ] && ! https_enabled; then
         effective=baseline
     fi
 
-    printf 'mode=%s effective=%s https=%s port=%s\n' \
-        "$mode" "$effective" "$(https_enabled && echo enabled || echo disabled)" "$(https_port)"
+    printf 'mode=%s effective=%s https=%s port=%s syslog_port=%s\n' \
+        "$mode" "$effective" "$(https_enabled && echo enabled || echo disabled)" "$(https_port)" "$(syslog_port)"
 }
 
 case "$1" in

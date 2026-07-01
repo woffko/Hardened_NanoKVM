@@ -531,9 +531,19 @@ const en = {
           mode: {
             title: 'Firewall Mode',
             description:
-              'The firewall service is always managed. Baseline keeps current NanoKVM access; Paranoid blocks all application traffic except HTTPS access.',
+              'The firewall service is always managed. Baseline keeps current NanoKVM access; Restricted allows HTTPS, SSH, NTP, and syslog; Paranoid allows only HTTPS access.',
             baseline: 'Managed baseline',
+            restricted: 'Restricted',
             paranoid: 'Paranoid'
+          },
+          restricted: {
+            enable: 'Enable Restricted',
+            active: 'Restricted Firewall mode is active',
+            allows:
+              'Allowed traffic: HTTPS, SSH, NTP, remote syslog, DHCP, established connections, and essential IPv6 control traffic.',
+            confirmTitle: 'Enable Restricted Firewall mode?',
+            confirmDesc:
+              'Allowed traffic will be limited to HTTPS, SSH, NTP, remote syslog, DHCP, established connections, and essential IPv6 control traffic. Other inbound/outbound traffic will be blocked.'
           },
           paranoid: {
             enable: 'Enable Paranoid',
@@ -545,7 +555,7 @@ const en = {
               'Only HTTPS access will remain available. SSH, HTTP, mDNS, NTP, GitHub downloads, and other inbound/outbound traffic will be blocked except for minimal DHCP/IPv6 control traffic.'
           },
           baseline: {
-            apply: 'Disable Paranoid',
+            apply: 'Return to baseline',
             confirmTitle: 'Return to managed baseline?',
             confirmDesc:
               'This keeps the firewall service active but restores the normal NanoKVM access profile.'

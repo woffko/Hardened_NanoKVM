@@ -71,6 +71,8 @@ Detailed chronological build/update notes are in
   - read-only rules viewer for `iptables-save`, `ip6tables-save`, and
     `nft list ruleset`;
   - managed `baseline` mode that preserves the current NanoKVM allow rules;
+  - guarded `restricted` mode that allows HTTPS, SSH, NTP, remote syslog,
+    DHCP, established connections, and essential IPv6 control traffic;
   - guarded `paranoid` mode that is available only after HTTPS is enabled and
     a local HTTPS health check passes.
 - Added managed `/kvmapp/system/init.d/S40firewall`; `S95nanokvm` no longer
@@ -134,6 +136,23 @@ Detailed chronological build/update notes are in
   - firewall GUI now shows a persistent **Disable Paranoid** action in the red
     Paranoid alert and a dedicated mode button whenever Paranoid is configured
     or active.
+- Added Restricted Firewall mode:
+  - available only with HTTPS enabled and locally healthy;
+  - permits inbound HTTPS, outbound HTTPS, inbound SSH, outbound NTP UDP/123,
+    outbound remote syslog UDP on `/etc/kvm/syslog.json` `remotePort` (default
+    514), DHCP, established connections, and essential IPv6 control traffic;
+  - does not trigger the online-update blocked warning because outbound HTTPS
+    remains available.
+- Live-validated Restricted mode on `10.0.87.132`:
+  - installed rebuilt app `2.0.20`;
+  - enabled `mode=restricted`;
+  - verified `effectiveMode=restricted`, `restrictedActive=true`,
+    `paranoidActive=false`;
+  - verified SSH and HTTPS stayed reachable;
+  - verified IPv4/IPv6 policies became `DROP` with allowlist rules for 443,
+    22, UDP/123, UDP/514, DHCP, established traffic, loopback, and IPv6
+    control traffic;
+  - restored `.132` to `mode=baseline` after the test.
 - Device validation on `10.0.87.132`:
   - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
   - `/kvmapp/version` reports `2.0.20`;

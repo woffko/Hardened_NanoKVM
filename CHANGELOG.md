@@ -11,7 +11,7 @@
 * Added `Settings > System > Time` with timezone selection, NTP enable/disable,
   editable NTP servers, router/default server shortcuts, and manual sync.
 * Added `Settings > System > Firewall` with a read-only iptables/ip6tables/nft
-  rules viewer and a guarded Paranoid mode.
+  rules viewer and guarded Restricted/Paranoid modes.
 * Added managed baseline firewall initialization through `S40firewall`, replacing
   the older hardcoded iptables setup in `S95nanokvm`.
 * Added online-update blocking notices when Paranoid mode is active, because
@@ -19,6 +19,9 @@
 * Made Paranoid mode exit explicit in the GUI: the firewall page now always
   shows a visible **Disable Paranoid** action while Paranoid is configured or
   active.
+* Added Restricted Firewall mode, allowing HTTPS, SSH, NTP, remote syslog,
+  DHCP, established connections, and essential IPv6 control traffic while
+  blocking other inbound/outbound traffic.
 
 ### Notes
 
@@ -30,6 +33,9 @@
 * Paranoid firewall mode is available only after HTTPS is enabled and verified
   locally. It allows inbound HTTPS plus loopback, established traffic, DHCP, and
   essential IPv6 control traffic; other inbound and outbound traffic is dropped.
+* Restricted firewall mode also requires HTTPS. Unlike Paranoid, it keeps
+  outbound HTTPS available for online updates and permits SSH/NTP/syslog
+  operation.
 
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 

@@ -2238,3 +2238,40 @@ Follow-up:
 - Updated firewall GUI so **Disable Paranoid** is always visible in the red
   Paranoid alert and as a dedicated mode button whenever Paranoid is configured
   or active.
+
+Restricted mode follow-up:
+
+- Added third managed firewall profile: `restricted`.
+- `restricted` requires HTTPS like `paranoid`, but keeps enough traffic for
+  normal secured administration:
+  - inbound HTTPS;
+  - outbound HTTPS;
+  - inbound SSH;
+  - outbound NTP UDP/123;
+  - outbound remote syslog UDP on configured `remotePort`, default 514;
+  - DHCP, established connections, and essential IPv6 control traffic.
+- Online update blocking remains tied only to `paranoid`; restricted mode keeps
+  outbound HTTPS open so GitHub metadata/downloads can still work.
+
+Live validation on `10.0.87.132`:
+
+- Installed rebuilt app `2.0.20` package:
+  `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`.
+- Enabled `mode=restricted` through HTTPS API.
+- Status returned:
+  - `effectiveMode=restricted`;
+  - `restrictedActive=true`;
+  - `paranoidActive=false`;
+  - `httpsEnabled=true`.
+- Verified SSH stayed reachable.
+- Verified HTTPS health stayed reachable externally via Windows `curl.exe` and
+  locally through `https://127.0.0.1/api/health`.
+- Verified `iptables -S` and `ip6tables -S` policies are `DROP` with allowlist
+  for:
+  - inbound HTTPS 443;
+  - outbound HTTPS 443;
+  - inbound SSH 22;
+  - outbound NTP UDP/123;
+  - outbound syslog UDP/514;
+  - DHCP, loopback, established traffic, and IPv6 control traffic.
+- Restored `.132` to `mode=baseline` after validation.
