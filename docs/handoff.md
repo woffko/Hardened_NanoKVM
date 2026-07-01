@@ -21,15 +21,16 @@ Last updated: 2026-07-01
   - `61d04b1 Document 2.0.16 app release verification`
 - `main` changelog was also updated and pushed as commit
   `80d32fa Update changelog for beta 2 releases`.
-- Current unreleased work: app `2.0.20` system settings, syslog/time/firewall
+- Current release work: app `2.0.20 RC1` system settings, syslog/time/firewall
   controls, Restricted firewall mode, and HTTPS/firewall toggle fixes.
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
 
-### Active Unreleased Work: App 2.0.20 System Settings
+### RC1 Release Work: App 2.0.20 System Settings
 
-- Source version bumped to `2.0.20`; release is not published yet.
+- Source version bumped to `2.0.20`; RC1 release tag is
+  `hardened-rust-rc1`.
 - Added top-level `Settings > System`; `System Log` now lives inside it as a
   subsection.
 - Implemented `Settings > System > System Log`:
@@ -194,8 +195,9 @@ Detailed chronological build/update notes are in
   `/dev/ttyGS0`, producing repeated `auth.err getty[...]` entries. It is
   unrelated to the new syslog feature but should be cleaned before enabling
   remote syslog broadly.
-- Still pending before release:
-  - publish app/raw/SD artifacts only if the user asks for a release.
+- Still pending after app RC1:
+  - publish a matching raw/SD image only when system-image changes are required
+    or the user explicitly asks for a full system-image RC.
 
 ## Latest Releases
 

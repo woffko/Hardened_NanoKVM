@@ -1,4 +1,7 @@
-## Hardened NanoKVM Beta 2.0.20 (unreleased)
+## Hardened NanoKVM 2.0.20 RC1 (2026-07-01)
+
+Release candidate focused on Rust-only operation, system observability, time
+settings, managed firewall modes, and HTTPS/firewall recovery.
 
 ### Features
 

@@ -2317,3 +2317,40 @@ Validation on `10.0.87.132`:
   - server config changed to `proto: https`;
   - `kvm_system` PID remained `1638`;
   - `NanoKVM-Server` restarted to PID `2470`.
+
+## 2026-07-01 - App RC1 preparation
+
+Release target:
+
+- Tag: `hardened-rust-rc1`.
+- Application version: `2.0.20`.
+- Archive:
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz`.
+- Metadata:
+  `build/artifacts/latest.json`, signed with
+  `signature_key_id=hardened-system-dev`.
+
+RC1 scope:
+
+- Application/GUI/backend release only.
+- Raw system-update and SD-card channels remain on the last validated
+  `0.2.15-raw.1` / app `2.0.19` baseline until the next full system-image
+  release is explicitly built.
+
+Verification:
+
+- `cargo test` from `server-rust/`: 129 lib tests, 2 main tests passed.
+- `corepack pnpm --dir web build`: passed.
+- `git diff --check`: passed.
+- `server-rust/scripts/build-linked-libkvm.sh` with
+  `NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`:
+  passed.
+- Packaged archive manifest:
+  - source: `ee48c7a`;
+  - target: `riscv64gc-unknown-linux-musl`;
+  - app version: `2.0.20`;
+  - bundled `kvm_system` helper: `384456 bytes`.
+- Archive listing contains `NanoKVM-Server`, `NanoKVM-Server.rust`,
+  `S95nanokvm`, and `S40firewall`; no legacy Go backend files were present.
+- `latest.json.sig` verified with
+  `/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pub.pem`.
