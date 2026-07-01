@@ -12,10 +12,10 @@ are implemented deeply enough for interactive device testing.
 
 Current published channels:
 
-- app update: `2.0.16`;
-- raw system-update: `0.2.11-raw.1`, built from the beta `2.0.15` SD rootfs
-  with gzip-compressed raw payload staging;
-- SD-card image: beta `2.0.15`.
+- app update: `2.0.20 RC1`, tag `hardened-rust-rc1`;
+- raw system-update: `0.2.15-raw.1`, built from the beta `2.0.19` SD rootfs
+  with gzip-compressed raw payload staging and sysrq reboot after raw writes;
+- SD-card image: beta `2.0.19` / `0.2.15-raw.1`.
 
 ## Build
 
@@ -88,6 +88,9 @@ The generated image installs:
 - `/etc/kvm/backend` compatibility marker with initial value `rust`.
 - Release validation rejects legacy Go backend files such as
   `/kvmapp/backends/NanoKVM-Server.go` and `/etc/kvm/scripts/switch-backend-go.sh`.
+
+For end-user flashing instructions, see
+[`docs/sd-card-flashing.md`](sd-card-flashing.md).
 
 ## Implemented
 

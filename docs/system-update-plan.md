@@ -67,10 +67,13 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
   `hardened-system-0.1.0-dev.1`, validated the non-destructive
   check/download/install/status/confirm/rollback flow on `10.0.87.132`. It is
   now historical. The current stable system channel points to lab raw release
-  `hardened-system-0.2.11-raw.1`, built from the beta `2.0.15` Hardened SD
+  `hardened-system-0.2.15-raw.1`, built from the beta `2.0.19` Hardened SD
   image. The GUI reports system update version, base image, Buildroot release,
   and security backport level separately so the raw channel version is not
-  confused with the underlying Buildroot base.
+  confused with the underlying Buildroot base. This current raw line includes
+  compressed raw payloads, setting preservation, idempotent data-partition init,
+  first-boot root configuration restore, automatic post-boot confirmation, and
+  sysrq reboot after raw partition writes.
   The bundled public key is installed from `kvmapp` to
   `/etc/kvm/system-update-signing.pub.pem` on service start, but this is still
   not a production private-key custody process.

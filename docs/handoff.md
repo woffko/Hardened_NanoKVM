@@ -15,14 +15,13 @@ Last updated: 2026-07-01
   - reboot after raw writes must use kernel sysrq because the live rootfs has
     already been overwritten.
 - Recent commits when this handoff was updated:
-  - `9094820 Fix raw update reboot path`
-  - `02086e0 Fix raw update root restore and auto-confirm`
-  - `41bdfc1 Fix large raw update staging`
-  - `61d04b1 Document 2.0.16 app release verification`
-- `main` changelog was also updated and pushed as commit
-  `80d32fa Update changelog for beta 2 releases`.
-- Current release work: app `2.0.20 RC1` system settings, syslog/time/firewall
-  controls, Restricted firewall mode, and HTTPS/firewall toggle fixes.
+  - `ea63dff Document Hardened NanoKVM RC1`
+  - `ee48c7a Keep video pipeline running during TLS toggles`
+  - `fa10d60 Add restricted firewall mode`
+  - `22bb082 Make paranoid firewall exit explicit`
+- Current published app release: `2.0.20 RC1` on tag `hardened-rust-rc1`.
+- Current app work includes System settings, syslog/time/firewall controls,
+  Restricted firewall mode, and HTTPS/firewall toggle fixes.
 
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
@@ -203,27 +202,25 @@ Detailed chronological build/update notes are in
 
 ### App Release
 
-- Current published app release: `2.0.19`
-- Current source version: `2.0.19`
+- Current published app release: `2.0.20 RC1`
+- Current source version: `2.0.20`
 - GitHub tag:
-  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.19`
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc1`
 - Artifact:
-  `build/artifacts/hardened-nanokvm-kvmapp-2.0.19.tar.gz`
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz`
 - SHA256:
-  `6d4e0243cb53855a57baf79e01abc715446a21f926b036709fd9c4b032598b74`
-- Includes the `2.0.15` compressed raw payload support, raw updater setting
-  preservation, raw staging-on-rootfs refusal, `/data` p3 mounting, explicit
-  IPv6 controls, bundled DHCPv6 client, OLED helper fix, login-loop fix,
-  idempotent p3 init guard, `/etc/kvm.disk0` raw preservation, GUI system
-  metadata label cleanup, raw-updater runtime isolation, `/data`-backed raw
-  preserve state, large raw staging fixes, deferred root configuration restore
-  on first boot, automatic post-boot confirm, root-level preserve restore
-  fixes, and sysrq reboot after raw boot/rootfs writes.
+  `a78f82b58abc25bc8fc7409a34e70f2fec6e48e56dd7aa4112c4e625f2ee2760`
+- Includes System Log, remote UDP syslog, tmpfs log viewer, Time/NTP/timezone
+  controls, managed Firewall controls, Restricted and Paranoid modes,
+  HTTPS/firewall recovery, TLS toggles that keep `kvm_system` running, plus all
+  previous `2.0.19` raw-update reliability fixes in the application updater.
 - Local `latest.json` metadata signature verified with the bundled test public
   key.
-- Published on GitHub and verified through `hardened-rust-preview/latest.json`.
-- Verified on `10.0.87.132` from the device itself:
-  `/api/application/version` reports `current=2.0.19`, `latest=2.0.19`.
+- Published on GitHub and verified through
+  `/releases/latest/download/latest.json` and
+  `/releases/download/hardened-rust-rc1/latest.json`.
+- Published archive and metadata were downloaded back from GitHub; sha256 and
+  metadata signature verification passed.
 
 ### Raw System Release
 
@@ -269,13 +266,14 @@ Detailed chronological build/update notes are in
   - `hardened-system-preview`
   - `hardened-system-stable`
 - Keep current visible releases:
+  - `hardened-rust-rc1`
   - `hardened-rust-beta-2.0.19`
   - `hardened-system-0.2.15-raw.1`
 - Keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
   milestone unless the user later asks for stricter cleanup.
 - Delete only obsolete GitHub release entries/assets, not git tags.
 
-### Current Raw Reboot Fix
+### Historical Raw Reboot Fix Context
 
 - Live device: `10.0.87.132`.
 - User installed raw `0.2.11-raw.1` from the GUI.

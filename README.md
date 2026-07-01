@@ -230,6 +230,10 @@ the same time. A test device should normally install the latest app update
 first, then install a raw system update only when the raw channel offers a newer
 system payload and SD-card recovery is available.
 
+For full SD-card recovery or first-time flashing, use
+[docs/sd-card-flashing.md](docs/sd-card-flashing.md). It covers Windows with
+Balena Etcher plus Linux, macOS, and FreeBSD command-line workflows.
+
 ## What Changed In This Fork
 
 - Added `server-rust/`, a Rust backend that preserves the existing API envelope
@@ -393,6 +397,7 @@ Start with the guide that matches the part of NanoKVM you want to work on:
 - **Hardened Rust backend:** Build, package, and test the Rust replacement in [docs/rust-backend.md](docs/rust-backend.md).
 - **System update plan:** Track planned GUI system updates for vendor-kernel security backports in [docs/system-update-plan.md](docs/system-update-plan.md).
 - **System update releases:** Package future kernel/rootfs update bundles for GitHub-hosted channels with [docs/system-update-github-releases.md](docs/system-update-github-releases.md).
+- **SD-card flashing:** Prepare recovery or first-boot media on Windows, Linux, macOS, and FreeBSD with [docs/sd-card-flashing.md](docs/sd-card-flashing.md).
 - **Release archive:** Historical/internal/broken release notes are preserved in [docs/release-archive.md](docs/release-archive.md), even when old GitHub release entries are removed from the public Releases list.
 - **Vendor SDK build path:** Bootstrap and validate the Sipeed/LicheeRV Nano SDK for future full base-system images in [docs/vendor-sdk-build.md](docs/vendor-sdk-build.md).
 - **New Buildroot study:** Track feasibility of newer SDK/newer Buildroot sysupgrade images in [docs/new-buildroot-sysupgrade-study.md](docs/new-buildroot-sysupgrade-study.md).

@@ -2354,3 +2354,34 @@ Verification:
   `S95nanokvm`, and `S40firewall`; no legacy Go backend files were present.
 - `latest.json.sig` verified with
   `/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pub.pem`.
+
+Publish result:
+
+- GitHub release created:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc1`.
+- Uploaded assets:
+  - `hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz`;
+  - `hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz.sha256`;
+  - `latest.json`;
+  - `latest.json.sha256`;
+  - `latest.json.sig`;
+  - `latest.json.sig.base64`.
+- Post-publish verification:
+  - `/releases/latest/download/latest.json` returns version `2.0.20` and the
+    RC1 archive URL;
+  - `/releases/download/hardened-rust-rc1/latest.json` returns the same
+    metadata;
+  - remote `latest.json.sig` verified with the test public key;
+  - remote archive sha256 check passed.
+
+Documentation follow-up:
+
+- Added `docs/sd-card-flashing.md` with end-user flashing instructions for:
+  - Windows with Balena Etcher;
+  - Linux with `xzcat`/`dd`;
+  - macOS with `diskutil`, `xzcat`, and raw `rdiskN`;
+  - FreeBSD with `camcontrol`/`gpart`, `xzcat`, and `dd`.
+- Linked the SD flashing guide from README.
+- Updated current-status docs to reflect app `2.0.20 RC1` as the latest app
+  release while leaving raw/SD channels on the validated `0.2.15-raw.1`
+  baseline.

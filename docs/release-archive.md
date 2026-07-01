@@ -6,7 +6,8 @@ are removed from the public Releases page.
 Policy:
 
 - keep channel releases because GUI update checks depend on them;
-- keep the latest usable beta app release and matching raw/SD release visible;
+- keep the latest usable app release candidate and matching raw/SD release
+  visible;
 - remove old alpha/internal/broken release entries from the GitHub Releases UI
   after their notes are captured here;
 - do not delete git tags unless explicitly doing a separate repository-history
@@ -16,7 +17,8 @@ Policy:
 
 | Tag | Status | Notes |
 | --- | --- | --- |
-| `hardened-rust-beta-2.0.19` | Current app beta | Raw-update sysrq reboot fix, root-level preserve restore fix, deferred first-boot root restore, and automatic post-boot confirm. |
+| `hardened-rust-rc1` | Current app RC | App `2.0.20` with System Log, Time/NTP/timezone controls, managed Firewall controls, Restricted/Paranoid modes, HTTPS/firewall recovery, and TLS toggles that keep `kvm_system` running. |
+| `hardened-rust-beta-2.0.19` | Previous app beta / current raw baseline app | Raw-update sysrq reboot fix, root-level preserve restore fix, deferred first-boot root restore, and automatic post-boot confirm. The current raw/SD image still embeds this app until the next full system-image release. |
 | `hardened-system-0.2.15-raw.1` | Current raw/SD beta | Matching raw full-rootfs update and SD image with app `2.0.19`, base image `2026-06-29-12-08-d88d58.img`, Buildroot `2023.11.2`, security patch level `Buildroot 2023.11.3 package backports`. Live-validated on `10.0.87.132`. |
 | `hardened-system-stable` | Channel | Stable raw-system metadata channel. Keep this release. |
 | `hardened-rust-preview` | Channel | Preview app metadata channel. Keep this release while preview update support exists. |
@@ -26,7 +28,7 @@ Policy:
 ## Internal Or Obsolete App Releases
 
 These releases were useful during bring-up, but are superseded by
-`hardened-rust-beta-2.0.19`. They can be removed from the GitHub Releases UI
+`hardened-rust-rc1`. They can be removed from the GitHub Releases UI
 without losing the changelog history.
 
 | Tag | Archive status | Notes |
@@ -87,11 +89,12 @@ entries listed above until the next cleanup pass.
 
 When repeating GitHub Releases cleanup:
 
-1. Verify `hardened-rust-beta-2.0.19` is the GitHub latest release and its
+1. Verify `hardened-rust-rc1` is the GitHub latest release and its
    `latest.json` signature verifies.
 2. Verify `hardened-system-stable/system-latest.json` points to
    `0.2.15-raw.1` and its signature verifies.
 3. Delete only obsolete release entries/assets from the GitHub Releases UI.
-4. Keep channel releases and current releases.
+4. Keep channel releases, the current app RC, and the current raw/SD baseline
+   release.
 5. Leave git tags intact unless a separate tag-cleanup task is explicitly
    requested.
