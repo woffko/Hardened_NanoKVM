@@ -1,0 +1,310 @@
+# System Update GitHub Releases
+
+Hardened NanoKVM system updates are published separately from `kvmapp`
+application updates. Application updates continue to use signed `latest.json`
+metadata from the GitHub latest-release endpoint.
+System updates use their own channel metadata so that a kernel/rootfs release
+does not become the GitHub `latest` release and break the application updater.
+
+## Release Channels
+
+Use fixed GitHub release tags as update channels:
+
+- `hardened-system-stable`: stable system-update metadata.
+- `hardened-system-preview`: preview system-update metadata.
+
+Each channel release carries a small metadata file:
+
+- `system-latest.json`
+
+The metadata points to an immutable versioned release tag that carries the real
+system-update archive.
+
+Example stable metadata URL:
+
+```text
+https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json
+```
+
+Do not use `https://github.com/woffko/Hardened_NanoKVM/releases/latest/...` for
+system updates while application updates still use that endpoint.
+
+## Versioned Release Assets
+
+A versioned system release tag should be named like:
+
+```text
+hardened-system-0.1.0
+```
+
+Expected assets:
+
+- `hardened-nanokvm-system-0.1.0.tar.gz`
+- `hardened-nanokvm-system-0.1.0.tar.gz.sha256`
+- `hardened-nanokvm-system-0.1.0.tar.gz.sha512`
+
+Expected channel asset:
+
+- `system-latest.json`
+- `system-latest.json.sha256`
+- `system-latest.json.sig`
+- `system-latest.json.sig.base64`
+
+The Rust backend verifies trusted GitHub URLs, detached
+`system-latest.json.sig` signatures, archive sha256, and archive sha512. The
+public verification key must be installed at
+`/etc/kvm/system-update-signing.pub.pem` unless `paths.system_update_public_key`
+overrides it in `server.yaml`.
+
+`S95nanokvm` installs the bundled key from
+`/kvmapp/system/keys/system-update-signing.pub.pem` into the default `/etc/kvm`
+path on service start. Key rotation for devices using the default path is
+therefore a `kvmapp` update followed by publishing channel metadata signed with
+the new private key. Devices that set `paths.system_update_public_key` to a
+custom path are responsible for provisioning that key themselves.
+
+Unsigned channel metadata is accepted only for explicit development devices with
+`security.allow_unsigned_updates: true`. In that case `system-latest.json` must
+carry `signature_algorithm: "unsigned"` and `signature_key_id: "unsigned"`.
+Production stable/preview channel metadata must use
+`signature_algorithm: "sha256-rsa-pkcs1-v1_5"` and a non-`unsigned`
+`signature_key_id`.
+
+## Current Published System Releases
+
+The current `hardened-system-stable` channel points to lab raw release
+`hardened-system-0.2.15-raw.1`. It was built from the beta `2.0.19` Hardened
+SD image and contains validated gzip-compressed boot/rootfs partition images
+plus matching channel metadata.
+
+The current metadata intentionally separates several version fields:
+
+- system update version: `0.2.15-raw.1`;
+- base image: `2026-06-29-12-08-d88d58.img`;
+- Buildroot release: `2023.11.2`;
+- security backport level: `Buildroot 2023.11.3 package backports`.
+
+This channel is still lab-only. It is intended to validate the sysupgrade
+plumbing and SD-card recovery workflow, not to deliver real kernel or Buildroot
+security backports. The matching public key is bundled under
+`kvmapp/system/keys/system-update-signing.pub.pem`. Production use still needs a
+real release-key custody process before this channel should carry real
+kernel/rootfs security-backport payloads.
+
+Older smoke release `hardened-system-0.1.0-dev.1` only installed a harmless
+test marker. Revoked raw release `hardened-system-0.1.0-raw.1` must not be used.
+Broken raw releases `0.2.5-raw.1` and `0.2.10-raw.1` are preserved only in
+the historical release archive and must not be installed on test devices.
+
+## Bundle Layout
+
+System-update archives are `tar.gz` files with this layout:
+
+```text
+manifest.json
+payload/
+  boot/
+    boot.sd
+    fip.bin
+  rootfs/
+    etc/
+      ...
+  images/
+    boot.vfat
+    rootfs.sd
+    boot.vfat.gz
+    rootfs.sd.gz
+```
+
+The backend must install only known paths:
+
+- `payload/boot/<file>` maps to `/boot/<file>`.
+- `payload/rootfs/<path>` maps to `/<path>`.
+- The packager and backend reject installs to runtime, device, cache, and
+  application roots: `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`,
+  `/kvmapp`, and `/root/.kvmcache`.
+- Experimental raw partition bundles may instead list `raw_images` for exactly
+  `payload/images/boot.vfat -> /dev/mmcblk0p1` and
+  `payload/images/rootfs.sd -> /dev/mmcblk0p2`, or the gzip-compressed
+  equivalents `payload/images/boot.vfat.gz` and
+  `payload/images/rootfs.sd.gz`. Current releases use gzip payloads so the
+  extracted staging tree does not need to hold a full uncompressed rootfs image.
+  This path is disabled unless `security.allow_raw_system_updates: true` is set
+  on the device.
+
+The archive must not contain arbitrary scripts. Installer behavior is fixed in
+the Rust backend: verify, stage, back up, install known paths, mark pending,
+reboot, health-check, then mark boot-good or roll back.
+
+Raw partition bundles are different: they write verified block images directly
+to the SD-card boot/rootfs partitions, sync, and reboot. For gzip raw payloads,
+the updater validates the compressed files with `gzip -t` and streams `gzip -dc`
+directly to the block devices. They do not have automatic rollback; failed boots
+require manual SD-card recovery.
+
+## Manifest Contract
+
+`manifest.json` is generated by `scripts/create-system-update-bundle.sh` and
+contains:
+
+- `format`: currently `hardened-nanokvm-system-update-v1`.
+- `version`: system-update version.
+- `target`: hardware/build target, currently `sg2002-licheervnano-sd`.
+- `base_version`: base image marker expected before update.
+- `kernel_version`: kernel version expected after update.
+- `required_free_bytes`: required free space on `/data`.
+- `requires_reboot`: whether the update must reboot.
+- `operations`: fixed backend operation list.
+- `files`: payload path, install path, size, and sha256 for every file.
+- `raw_images`: optional experimental list of raw partition image payloads,
+  target block devices, labels, sizes, and sha256 values.
+
+## Build Commands
+
+Prepare a payload directory:
+
+```sh
+mkdir -p build/system-update-payload/boot
+mkdir -p build/system-update-payload/rootfs/etc
+```
+
+Create the bundle:
+
+```sh
+BASE_VERSION=2025-02-17-19-08-3649fe.img \
+KERNEL_VERSION=5.10.4-tag-hardened.1 \
+make system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0
+```
+
+Create an experimental raw boot/rootfs bundle from the patched Hardened SD
+image:
+
+```sh
+make rust-kvmapp RUST_TARGET=riscv64gc-unknown-linux-musl
+make sd-image HARDENED_RELEASE_VERSION=1.0.3
+make raw-system-update-images HARDENED_RELEASE_VERSION=1.0.3
+make raw-system-update-bundle SYSTEM_UPDATE_VERSION=0.1.0-raw.1
+```
+
+The default raw inputs are extracted from the patched SD image into:
+
+```text
+build/sd-image/raw-system-update/Hardened_NanoKVM_<version>_Rev1_4_2_rust/boot.vfat
+build/sd-image/raw-system-update/Hardened_NanoKVM_<version>_Rev1_4_2_rust/rootfs.sd
+```
+
+Do not create raw GUI-installable releases directly from
+`build/vendor/LicheeRV-Nano-Build/.../rawimages/rootfs.sd`. That file is a
+stock SDK rootfs and does not contain `/kvmapp`, `/etc/kvm`, the Hardened init
+script, web assets, or Rust-only backend files. The raw bundle helper validates
+the rootfs with `scripts/validate-nanokvm-rootfs.sh` and rejects stock images.
+
+Override `RAW_SYSTEM_UPDATE_BOOT` and `RAW_SYSTEM_UPDATE_ROOTFS` only with
+images extracted from a validated Hardened SD image.
+
+Create channel metadata:
+
+```sh
+make system-update-metadata \
+  SYSTEM_UPDATE_VERSION=0.1.0 \
+  SYSTEM_UPDATE_TAG=hardened-system-0.1.0
+```
+
+Without `SYSTEM_UPDATE_SIGNING_KEY`, the helper creates unsigned development
+metadata. A production stable/preview channel must be generated with a signing
+key.
+
+Create signed channel metadata:
+
+```sh
+SYSTEM_UPDATE_SIGNING_KEY=/secure/path/system-update-signing.pem \
+SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-2026q3 \
+make system-update-metadata \
+  SYSTEM_UPDATE_VERSION=0.1.0 \
+  SYSTEM_UPDATE_TAG=hardened-system-0.1.0
+```
+
+Verify signed metadata:
+
+```sh
+scripts/verify-system-update-metadata.sh \
+  build/system-updates/system-latest.json \
+  build/system-updates/system-latest.json.sig \
+  /secure/path/system-update-signing.pub.pem
+```
+
+The output defaults to:
+
+```text
+build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz
+build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha256
+build/system-updates/hardened-nanokvm-system-0.1.0.tar.gz.sha512
+build/system-updates/system-latest.json
+build/system-updates/system-latest.json.sha256
+build/system-updates/system-latest.json.sig      # when signing key is set
+build/system-updates/system-latest.json.sig.base64
+```
+
+## Revoked Experimental Raw Release
+
+Do not use `hardened-system-0.1.0-raw.1`. It was built from the vendor SDK stock
+rootfs instead of the patched Hardened SD image rootfs. A device that installs
+that raw bundle can boot into plain Buildroot without `/kvmapp`, NanoKVM init,
+or the expected network/runtime configuration and therefore may require SD-card
+reflash recovery.
+
+Any replacement raw release must pass:
+
+```sh
+scripts/validate-nanokvm-rootfs.sh <rootfs.sd>
+```
+
+## Current Device Baseline
+
+The first tested NanoKVM SG2002 baseline is:
+
+```text
+Kernel: 5.10.4-tag- #39 PREEMPT Mon Feb 17 19:04:42 CST 2025
+Rootfs: Buildroot 2023.11.2, VERSION=-g3649fe90d
+Boot marker: 2025-02-17-19-08-3649fe.img
+Boot partition: /dev/mmcblk0p1 vfat, 16 MiB
+Rootfs: /dev/mmcblk0p2 ext4
+Data: /dev/mmcblk0p3 exfat
+```
+
+This baseline is old enough that kernel and rootfs updates should be treated as
+high-risk. The first real system-update release should be a small rootfs-only
+hardening bundle, followed by a kernel bundle only after a reproducible vendor
+SDK image build is established. The selected SDK bootstrap path is documented in
+[vendor-sdk-build.md](vendor-sdk-build.md).
+
+## Device-Side Flow
+
+The Rust backend currently supports manual download, verification, install,
+rollback, and boot-watchdog rollback:
+
+The default update cache root is `/data/.hardened-kvmcache`. Application
+updates use the `application-update` subdirectory; system updates use the
+`system-update` subdirectory so large rootfs images and rollback backups do not
+consume the root filesystem.
+
+- `GET /api/system-update/check` validates `system-latest.json`, rejects
+  unsigned metadata by default, downloads `system-latest.json.sig` for signed
+  metadata, and verifies the detached signature with OpenSSL.
+- `POST /api/system-update/download` downloads the referenced archive into the
+  update cache, verifies archive sha256/sha512, extracts it with safe path
+  handling, validates `manifest.json`, and verifies every payload file listed in
+  the manifest.
+- `GET /api/system-update/status` reports the staged bundle from `staged.json`,
+  pending update marker, and latest rollback backup.
+- `POST /api/system-update/install` re-verifies the staged archive, backs up
+  touched files under the update cache, applies payload files atomically, writes
+  `/etc/kvm/system-version.json`, and writes pending/backup markers.
+- `POST /api/system-update/confirm` marks a pending update as boot-good after
+  basic backend/version/boot-marker/web-root checks pass.
+- `POST /api/system-update/rollback` restores files from the latest backup
+  marker and clears pending/boot-good/rollback markers.
+
+The backend does not reboot automatically. On the next boot, `S95nanokvm`
+checks a pending update and runs `/etc/kvm/system-update-rollback.sh` once if
+local health checks do not pass.

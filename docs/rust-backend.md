@@ -1,16 +1,21 @@
 # Rust Backend Status
 
-The Rust backend lives in `server-rust/`. It is a beta replacement for the
-privileged Go `NanoKVM-Server` process and keeps the existing NanoKVM runtime:
+The Rust backend lives in `server-rust/`. It is the shipped Hardened backend and
+replaces the legacy privileged Go `NanoKVM-Server` process while keeping the
+existing NanoKVM runtime:
 `kvm_system`, `libkvm.so`, USB gadget scripts, the Maix multimedia stack, and
 the React frontend.
 
-The backend is tested on real NanoKVM hardware at this stage. API parity is not
-complete, but the main browser workflows are now implemented deeply enough for
-interactive device testing.
+The backend is tested on real NanoKVM hardware. Compatibility testing against
+historical upstream behavior is still ongoing, but the main browser workflows
+are implemented deeply enough for interactive device testing.
 
-Current public beta release metadata points to `1.0.2` from
-`woffko/Hardened_NanoKVM` GitHub Releases.
+Current published channels:
+
+- app update: `2.0.20 RC1`, tag `hardened-rust-rc1`;
+- raw system-update: `0.2.15-raw.1`, built from the beta `2.0.19` SD rootfs
+  with gzip-compressed raw payload staging and sysrq reboot after raw writes;
+- SD-card image: beta `2.0.19` / `0.2.15-raw.1`.
 
 ## Build
 
@@ -54,9 +59,10 @@ build/artifacts/nanokvm-kvmapp-rust.tar.gz
 
 ## SD Image
 
-The repository still does not build a full boot/rootfs image from SDK sources.
-The `sd-image` target patches a trusted NanoKVM base image with the current
-Rust `kvmapp` package:
+The repository still does not ship a verified full boot/rootfs image from SDK
+sources. `make vendor-sdk` bootstraps the pinned Sipeed/LicheeRV Nano SDK for
+stock-image reproduction work, while the `sd-image` target patches a trusted
+NanoKVM base image with the current Rust `kvmapp` package:
 
 ```sh
 make web-app
@@ -79,9 +85,12 @@ The generated image installs:
 
 - Rust as the active `/kvmapp/server/NanoKVM-Server`.
 - Rust backend backup at `/kvmapp/backends/NanoKVM-Server.rust`.
-- `/etc/kvm/backend` with initial value `rust`.
+- `/etc/kvm/backend` compatibility marker with initial value `rust`.
 - Release validation rejects legacy Go backend files such as
   `/kvmapp/backends/NanoKVM-Server.go` and `/etc/kvm/scripts/switch-backend-go.sh`.
+
+For end-user flashing instructions, see
+[`docs/sd-card-flashing.md`](sd-card-flashing.md).
 
 ## Implemented
 
@@ -131,7 +140,25 @@ The generated image installs:
   `/api/application/version` reads `latest.json`, `/api/application/update`
   verifies signed release metadata, downloads the release archive, verifies
   sha512, installs it under `/kvmapp`, and restarts `S95nanokvm`.
-- UI branding for Hardened NanoKVM and version `beta - 1.0.5`.
+- Read-only system-update version/check routes:
+  `/api/system-update/version` reports the current base-system identity and
+  `/api/system-update/check` validates GitHub-hosted `system-latest.json`
+  metadata without installing the system archive.
+- System-update download/status/install/rollback routes:
+  `/api/system-update/download` downloads and verifies the system archive in
+  the update cache, checks the archive digests and every manifest payload hash,
+  and records `staged.json`; `/api/system-update/status` reports that staged
+  bundle plus pending/boot-health/rollback state. `/api/system-update/install`
+  re-verifies the staged archive, backs up touched files, applies payload files
+  atomically, writes `/etc/kvm/system-version.json`, and records
+  pending/backup markers. `/api/system-update/confirm` writes a boot-good
+  marker after basic health checks. `/api/system-update/rollback` restores the
+  latest backup manually. These routes do not reboot automatically.
+- UI branding for Hardened NanoKVM and app version display from
+  `/kvmapp/version`.
+- Guarded raw system-update switch in Check for Updates. Raw boot/rootfs writes
+  stay disabled by default and require an explicit warning confirmation before
+  `/api/system-update/install` can apply a destructive staged bundle.
 - First-boot web setup for SD-card flashes without `/etc/kvm/pwd`.
 - Rust-only release artifacts without the legacy Go backend switch.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
@@ -139,18 +166,25 @@ The generated image installs:
 
 ## Intentionally Disabled
 
-- Signed update verification is not finished yet. Current beta updates trust
-  the Hardened GitHub release metadata over HTTPS plus sha512 verification of
-  the downloaded `kvmapp` archive.
-- GUI system updates for kernel, dtb, modules, boot files, or rootfs files are
-  not implemented yet. See `docs/system-update-plan.md`.
+- Signed application update metadata enforcement is implemented. Releases must
+  include `latest.json.sig`; unsigned metadata is accepted only when
+  `security.allow_unsigned_updates=true`.
+- Signed system-update metadata enforcement is implemented. Stable/preview
+  metadata must verify against `paths.system_update_public_key`; unsigned
+  metadata is accepted only when `security.allow_unsigned_updates=true`.
+  `S95nanokvm` installs the bundled default public key from
+  `/kvmapp/system/keys/system-update-signing.pub.pem` into `/etc/kvm` before
+  the backend starts. The system-update installer also generates an init-time
+  rollback script, and
+  `S95nanokvm` runs a boot watchdog that rolls back pending system updates when
+  local health checks fail after boot.
 - Default `admin/admin` bootstrap is disabled by default in Rust config. New
   SD-card flashes use the first-boot web setup screen instead. Lost credentials
   are recovered by reflashing the SD card.
 
 ## Known Issues And Remaining Work
 
-- Full API parity still needs route-by-route validation against historical
+- Full API compatibility still needs route-by-route validation against historical
   upstream behavior.
 - H.264 WebRTC needs more browser/ICE stress testing across reconnects and
   browser variants.
@@ -162,9 +196,6 @@ The generated image installs:
   Direct streaming on the test device.
 - First-boot/account setup needs continued product testing on fresh SD-card
   flashes.
-- `kvmapp` update metadata signature verification is implemented. Releases must
-  include `latest.json.sig`; unsigned metadata is accepted only when
-  `security.allow_unsigned_updates=true`.
 - Remote ISO download needs a final production policy before it should be
   treated as broadly enabled functionality.
 - PicoClaw needs end-to-end runtime/session/history validation against the real

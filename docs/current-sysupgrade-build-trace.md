@@ -1,0 +1,2387 @@
+# Current Sysupgrade Build Trace
+
+This file is the local handoff/trace for the active experimental system-update
+build. Keep it updated before long-running builds or risky device operations.
+
+## 2026-06-30: Replacement Init-Fix Release `2.0.10` / `0.2.6-raw.1`
+
+Reason:
+
+- app/raw `2.0.9` / `0.2.5-raw.1` shipped a broken raw rootfs for fresh boot;
+- the rootfs contained only the Hardened `/etc/init.d` overrides
+  `S03usbdev`, `S30eth`, and `S95nanokvm`;
+- stock boot also needs hardware/init scripts such as `S00kmod`, `S01fs`, and
+  `S15kvmhwd`;
+- without `S00kmod`, CVI/Sophgo modules were not loaded, `/dev/cvi-sys` and
+  `/dev/cvi-base` were missing, and the Rust backend could not initialize video
+  hardware before serving HTTP.
+
+Stock comparison:
+
+- original `20260123_NanoKVM_Rev1_4_2.img` `/etc/init.d` includes:
+  `S00kmod`, `S01fs`, `S03usbdev`, `S15kvmhwd`, `S30eth`, `S30wifi`,
+  `S50avahi-daemon`, `S50sshd`, `S80dnsmasq`, and `S95nanokvm`;
+- stock `/kvmapp/system/init.d` also includes `S03usbhid`, but stock
+  `/etc/init.d` does not, so Hardened must not auto-install `S03usbhid`.
+
+Implementation:
+
+- bumped `kvmapp/version` to `2.0.10`;
+- added a stock-compatible boot-safe init list to:
+  - Rust backend runtime self-healing sync;
+  - `kvmapp/system/init.d/S95nanokvm`;
+  - `scripts/build-rust-sd-image.sh`;
+  - `scripts/validate-nanokvm-rootfs.sh`;
+- validator now rejects a raw/SD rootfs missing `/etc/init.d/S00kmod` and the
+  rest of the required boot-safe scripts;
+- old `2.0.9` rootfs now fails validation as expected:
+  `missing required regular: /etc/init.d/S00kmod`.
+
+Live device repair:
+
+- `10.0.87.48` and `10.0.87.60` were reachable by SSH as `root/root`;
+- copied the boot-safe script list into `/etc/init.d` on both devices;
+- ran `S00kmod start` and restarted `S95nanokvm`;
+- both devices answered `/api/health` over HTTP from the host after repair.
+
+Validation:
+
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `bash -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/validate-nanokvm-rootfs.sh`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 115 tests.
+- App `latest.json` signature: verified OK.
+- System `system-latest.json` signature: verified OK.
+- New raw rootfs validator: passed.
+- New raw rootfs `/kvmapp/version`: `2.0.10`.
+- New raw rootfs `/etc/init.d` includes `S00kmod`, `S01fs`, `S15kvmhwd`, and
+  `S95nanokvm`; `S03usbhid` was not installed into `/etc/init.d`.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.10.tar.gz` | `302e60f80f09ca0c29e876532d9fd0c69731733a05a253e2fb5ec2677f3be35e` |
+| App metadata | `build/artifacts/latest.json` | `497d5c41c0ab5324198372c4dbbc669041e7625c55b37dcf9eedd6abdf150822` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.6-raw.1.tar.gz` | `fb1e2dea3ca1c044da7ad74210c3f119a5ca847a05d8ece50ec3bb6fb9f78bac` |
+| System metadata | `build/system-updates/system-latest.json` | `086fc6b1a3b8f85fdbcae4de108fc567f40d037f7b0c6fc5115cec53fb8ef5e7` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_10_buildroot_2023_11_2_security_initfix_Rev1_4_2_rust.img.xz` | `9f396d235cbe40c006e07c9938d7903c15b32f2fcea04f0eefe6c720558267b7` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.10`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.6-raw.1`
+- Updated channels:
+  - `hardened-rust-preview`;
+  - `hardened-system-stable`;
+  - `hardened-system-preview`.
+- Deprecated/broken releases:
+  - `hardened-rust-beta-2.0.9`;
+  - `hardened-system-0.2.5-raw.1`.
+- GitHub verification:
+  - `releases/latest/download/latest.json` returns app `2.0.10`;
+  - `hardened-system-stable/system-latest.json` returns system
+    `0.2.6-raw.1`;
+  - downloaded app and system metadata signatures verify OK with the bundled
+    public key.
+- Device IP stabilization before further updates:
+  - first device moved from DHCP `10.0.87.55` to static
+    `10.0.87.132/24`, gateway/DNS `10.0.87.5`;
+  - second device moved from DHCP `10.0.87.42` to static
+    `10.0.87.133/24`, gateway/DNS `10.0.87.5`;
+  - both devices answer `/api/health` on the fixed addresses;
+  - both devices were app-updated to `2.0.10` through `/api/application/update`;
+  - both devices report app `current=2.0.10`, `latest=2.0.10`;
+  - both devices still report raw system `current=0.2.5-raw.1` and see
+    `latest=0.2.6-raw.1`, `updateAvailable=true`;
+  - raw partition install was not started during this step.
+
+Final manifest source:
+
+- App archive `MANIFEST.txt`: `source: 2a9d02d`.
+- Raw system manifest: `source_commit: 2a9d02d`.
+
+## 2026-06-30: IPv6 Controls + DHCPv6 Client for App/Raw Rebuild
+
+Goal:
+
+- add explicit IPv6 control in the Hardened GUI instead of allowing IPv6 to run
+  implicitly in the background;
+- default IPv6 to Disabled on Hardened-managed devices;
+- support SLAAC, DHCPv6, and Manual IPv6 modes for local networks that need
+  managed IPv6;
+- include the same IPv6 stack in the app archive, raw system-update bundle, and
+  SD-card image.
+
+Implementation status:
+
+- app version bumped locally to `2.0.9`;
+- added `GET/POST /api/network/ipv6` in the Rust backend;
+- added Settings > Network > IPv6 panel with Disabled/SLAAC/DHCPv6/Manual;
+- added `/boot/eth.ipv6.mode` and `/boot/eth.ipv6` persistence;
+- `S30eth` now applies IPv4 and IPv6 separately and defaults missing IPv6 mode
+  to Disabled;
+- bundled RISC-V BusyBox `udhcpc6` at `/kvmapp/system/bin/udhcpc6`;
+- added `/kvmapp/system/network/udhcpc6.script`, a DHCPv6 hook that avoids the
+  stock script's IPv4 reset behavior.
+
+Validation so far:
+
+- `sh -n kvmapp/system/init.d/S30eth`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `sh -n kvmapp/system/network/udhcpc6.script`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 115 tests.
+- `corepack pnpm --dir web exec tsc --noEmit`: passed.
+- `corepack pnpm --dir web build`: passed.
+
+Final generated artifacts after commit `59bc8dd`:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.9.tar.gz` | `d64c3ba4f36a56e80bee7c254261e201bda17ee70a3a864abdfd001612382fb5` |
+| App metadata | `build/artifacts/latest.json` | `a779428aea93ea7c78f841be678e6b2ec96b8c71045e31111fb6916d4f134de2` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `5ab94cc012a9a4af6e3b5ad93e470b357347d537f92096421bf5d1ed879235b0` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img` | `563292d151dcc2f9351954892b7b9775d9213ac89f34895893a042a68f96f3e1` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.img.xz` | `4534e7bef92077926ec12efd528166c05efea58f8822df77c0b40c735c08f1ce` |
+| SD/rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust.rootfs.ext` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
+| Raw boot image | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/boot.vfat` | `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78` |
+| Raw rootfs before bundle patch | `build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_9_buildroot_2023_11_2_security_ipv6_Rev1_4_2_rust/rootfs.sd` | `724b51ef22da45738abbf9ee72e8281954cb08580d3cd72f5c5eec75d548eb94` |
+| Raw rootfs inside bundle | `payload/images/rootfs.sd` | `66df01ceb0d97a7d8cc8e7b16049b2d07009b6ea38b03349dcfe1e42f98fbf02` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.5-raw.1.tar.gz` | `1eb1e6a52cbde814d3b30629f3b63c6866d6acb2c6efcae3073ce7906f082dfb` |
+| System metadata | `build/system-updates/system-latest.json` | `95168b992519300db07b25220eb1cc03e3ada714ade8d495b465515dc7c96f36` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `b064a4dca34ac4ae3a69ec23b0e5499427263a5fb90e7c681ed3561af6587074` |
+
+Signature checks:
+
+- `openssl dgst -sha256 -verify ... build/artifacts/latest.json`: verified OK.
+- `openssl dgst -sha256 -verify ... build/system-updates/system-latest.json`:
+  verified OK.
+
+Manifest source commit:
+
+- App archive `MANIFEST.txt`: `source: 59bc8dd`.
+- Raw system manifest: `source_commit: 59bc8dd`.
+
+Device note:
+
+- On `10.0.87.132`, pre-fix Disabled and SLAAC tests worked.
+- A pre-fix DHCPv6 test used the stock BusyBox udhcpc hook, which reset IPv4
+  on `deconfig`; HTTP/SSH then became unreachable (`No route to host`/connect
+  failure).
+- Do not repeat DHCPv6 device testing until the fixed `S30eth`,
+  `/kvmapp/system/bin/udhcpc6`, and `/kvmapp/system/network/udhcpc6.script`
+  are installed on the device after it is restored/rebooted.
+
+Next steps:
+
+1. After the user restores/reboots `10.0.87.132`, validate the fixed DHCPv6
+   flow on hardware.
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.9`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.5-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Post-publication verification:
+
+- All five release tags point at commit
+  `47aac135a0f0aa533c5325b3f9d2b6831d26f71c`.
+- Published `latest.json` and `system-latest.json` signatures verify OK with
+  the bundled test public key.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app `2.0.9`.
+- `hardened-rust-preview/latest.json` returns app `2.0.9`.
+- `hardened-system-preview/system-latest.json` returns raw system
+  `0.2.5-raw.1`.
+
+## 2026-06-29: Raw System Update With Buildroot 2023.11.3 Security Delta
+
+Goal:
+
+- build a sacrificial raw system-update bundle that can be installed from the
+  Hardened NanoKVM GUI system-update path;
+- include the current Hardened application/backend;
+- include the first low-risk Buildroot security backport layer from upstream
+  `2023.11.2..2023.11.3`;
+- keep the vendor Sipeed/Sophgo SDK, kernel, board config, MMF/VENC, LT6911,
+  and SD-card layout.
+
+Branch:
+
+- repository worktree:
+  `/home/w0w/Hardened_NanoKVM-new-buildroot`
+- branch: `feature/new-buildroot-sysupgrade-lab`
+- latest committed baseline before current uncommitted trace updates:
+  `a9dee95 Add Buildroot 2023 security backport trace`
+
+SDK checkout used for the build:
+
+- `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build`
+- baseline SDK commit: `d88d58feca49ef15f4cc7bd1f27dbf17dc25f85e`
+- this checkout is intentionally outside the tracked repository source.
+
+Buildroot backport helper added:
+
+- `scripts/apply-buildroot-2023-11-3-security-backports.sh`
+
+Backport command run:
+
+```sh
+BUILDROOT_UPSTREAM_REPO=/tmp/buildroot-security-probe \
+LICHEERV_NANO_SDK_DIR=/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build \
+  scripts/apply-buildroot-2023-11-3-security-backports.sh
+```
+
+Upstream Buildroot source used for the diff:
+
+- `/tmp/buildroot-security-probe`
+- range: `2023.11.2..2023.11.3`
+- package dirs only:
+  - `package/libopenssl`
+  - `package/libcurl`
+  - `package/python3`
+  - `package/expat`
+  - `package/libxml2`
+
+Expected version changes now applied in the SDK checkout:
+
+| Package | Old | New |
+| --- | --- | --- |
+| libopenssl | `3.1.4` | `3.1.5` |
+| libcurl | `8.5.0` | `8.6.0` |
+| python3 | `3.11.6` | `3.11.8` |
+| expat | `2.6.0` | `2.6.2` |
+| libxml2 | `2.11.6` | `2.11.7` |
+
+SDK git status after applying the patch:
+
+```text
+M  buildroot/package/expat/expat.hash
+M  buildroot/package/expat/expat.mk
+D  buildroot/package/libcurl/0001-gnutls-fix-build-with-disable-verbose.patch
+M  buildroot/package/libcurl/libcurl.hash
+M  buildroot/package/libcurl/libcurl.mk
+M  buildroot/package/libopenssl/libopenssl.hash
+M  buildroot/package/libopenssl/libopenssl.mk
+M  buildroot/package/libxml2/libxml2.hash
+M  buildroot/package/libxml2/libxml2.mk
+M  buildroot/package/python3/python3.hash
+M  buildroot/package/python3/python3.mk
+?? buildroot/package/libcurl/0001-configure.ac-find-libpsl-with-pkg-config.patch
+```
+
+Next planned steps:
+
+1. Test the GUI update check/install on a sacrificial NanoKVM with raw updates
+   explicitly enabled and SD-card recovery available.
+2. Record device-side installer logs and outcome here.
+3. If the GUI install succeeds, decide whether to keep `hardened-system-stable`
+   pointed at `0.1.4-raw.1` or move this raw build to preview-only.
+
+Progress log:
+
+- Applied the Buildroot `2023.11.2..2023.11.3` package patch to the SDK
+  checkout successfully.
+- Ran targeted Buildroot cleanup:
+
+```sh
+make -C /home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/buildroot \
+  host-libopenssl-dirclean libopenssl-dirclean \
+  host-python3-dirclean python3-dirclean \
+  host-expat-dirclean expat-dirclean \
+  host-libxml2-dirclean libxml2-dirclean \
+  libcurl-dirclean
+```
+
+- First `make vendor-sdk-stock` attempt from the new worktree failed before the
+  build because that worktree did not have local `host-deps`.
+- Re-ran with `VENDOR_SDK_CLEAN_PATH` pointing at the already unpacked
+  `/home/w0w/Hardened_NanoKVM/build/host-deps`.
+- SDK rebuild progressed through U-Boot, FSBL, boot packaging, kernel/modules,
+  osdrv, middleware, LT6911 sensor library, and reached `br-rootfs-pack`.
+- Buildroot then failed while downloading the new Track 1 source tarballs due
+  to sandbox DNS failure, not due to compile errors:
+  - `openssl-3.1.5.tar.gz`
+  - `curl-8.6.0.tar.xz`
+  - `Python-3.11.8.tar.xz`
+  - `expat-2.6.2.tar.xz`
+  - `libxml2-2.11.7.tar.xz`
+- Re-ran the same `vendor-sdk-stock` command with network access outside the
+  sandbox. Buildroot downloaded the new tarballs and successfully rebuilt the
+  Track 1 packages.
+- Vendor SDK stock build completed successfully.
+
+Generated patched stock SDK artifacts:
+
+| Artifact | Path | Size | SHA256 |
+| --- | --- | ---: | --- |
+| SD image | `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img` | ~1.6G | `887d2198d889424f54b5d4a80664adc280183647a1d4ba08dfaa6cf3d73dad0b` |
+| boot partition image | `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/boot.vfat` | 16M | `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78` |
+| raw rootfs | `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/rawimages/rootfs.sd` | ~1.5G | `c56ec0ed5433c8647dba0dca259802f9a8bb5281a4da875fa35ac73c60773406` |
+
+Important detail:
+
+- `/usr/lib/os-release` inside this stock rootfs still reports
+  `VERSION_ID=2023.11.2`, because this build is not a full Buildroot version
+  migration. It is vendor Buildroot `2023.11.2` plus selected package-level
+  security backports from upstream `2023.11.3`.
+- These are still stock SDK artifacts. The current Hardened app/backend has not
+  been injected yet.
+
+Application build and packaging:
+
+- App version: `1.0.5`.
+- Rust tests passed:
+  - `cargo test --manifest-path server-rust/Cargo.toml`
+  - 108 library tests, 2 main tests, 0 failures.
+- Frontend build passed:
+  - `corepack pnpm --dir web build`
+- First linked Rust backend build failed because this new worktree did not have
+  `server-rust/sysroot/lib/libc.so`.
+- Reused the known-good NanoKVM runtime sysroot from the previous worktree:
+  `/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`.
+- Linked Rust backend build passed:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+```
+
+- `kvm_system` helper source:
+  `/home/w0w/Hardened_NanoKVM/build/kvmapp-rust/kvmapp/kvm_system/kvm_system`
+  (`325040` bytes).
+- Staged `kvmapp-rust` archive:
+  `/home/w0w/Hardened_NanoKVM-new-buildroot/build/artifacts/nanokvm-kvmapp-rust.tar.gz`
+  - size: `12M`
+  - sha256:
+    `2c6ee4621548dee2b1ee927eceece958e8e0a199deef4785c3eaba435eee0d85`
+
+Generated Hardened SD artifacts:
+
+| Artifact | Path | Size | SHA256 |
+| --- | --- | ---: | --- |
+| Hardened SD image | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | ~1.6G | `6af992da38937d9891364055b003b54d992afcc626765babecffa162cd7bfffe` |
+| Compressed Hardened SD image | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | 151M | `357874b815a4f49f8056b6d4960a9e814cbfc042a0419fe60c9dfa2d66116315` |
+| Extracted raw boot | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat` | 16M | `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78` |
+| Extracted raw rootfs before bundle patch | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd` | ~1.5G | `153282537b8c6bfa368566cf495ccb5e09c79b8f0a83eac45c6001afc2e04c57` |
+
+Validation:
+
+```sh
+scripts/validate-nanokvm-rootfs.sh \
+  build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext
+```
+
+Result:
+
+- `kvmapp version: 1.0.5`
+- `backend: rust`
+
+Generated raw system-update bundle:
+
+```sh
+BASE_VERSION=2026-06-29-12-08-d88d58.img \
+KERNEL_VERSION=5.10.4-tag- \
+scripts/create-raw-system-update-bundle.sh \
+  0.1.4-raw.1 \
+  sg2002-licheervnano-sd \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
+  build/system-updates
+```
+
+Note:
+
+- A local intermediate `0.1.3-raw.1` bundle was built first, but the GitHub tag
+  already existed with older assets. The published release was bumped to
+  `0.1.4-raw.1` to avoid overwriting and cache confusion.
+
+Bundle artifacts:
+
+| Artifact | Path | Size | SHA256 |
+| --- | --- | ---: | --- |
+| Raw system-update archive | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/hardened-nanokvm-system-0.1.4-raw.1.tar.gz` | 225M | `14a3654de1741c6beabea80d95a3647c990daf1e8a3b907a0158c5e91b3d5f83` |
+| Metadata | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json` | 762 bytes | `4ba73f0d4b888089a127e4a0e9f2c920aa75df97b00cf1922be1e1654eeccf5f` |
+| Metadata signature | `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json.sig` | 384 bytes | `7bc1a09be4507b26b2c12e7bfc6224bc70dbc7b295e84723be0bf69968345fea` |
+
+Bundle manifest notes:
+
+- Version: `0.1.4-raw.1`
+- Target: `sg2002-licheervnano-sd`
+- Source commit: `52f491c`
+- Required staging free space: `2147483648` bytes.
+- Raw writes:
+  - `/dev/mmcblk0p2` from `images/rootfs.sd`
+  - `/dev/mmcblk0p1` from `images/boot.vfat`
+- Bundle script patches `/etc/kvm/system-version.json` into the rootfs copy
+  before archiving, so the rootfs hash inside the archive is:
+  `3330105693b94e952dd5dcbb0dd356c391750fba34f9916fec45c59213c758e1`.
+
+Metadata signing:
+
+```sh
+SYSTEM_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
+SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
+scripts/create-system-update-metadata.sh \
+  0.1.4-raw.1 \
+  hardened-system-0.1.4-raw.1 \
+  build/system-updates/hardened-nanokvm-system-0.1.4-raw.1.tar.gz \
+  build/system-updates/system-latest.json
+```
+
+Signature verification passed:
+
+```sh
+scripts/verify-system-update-metadata.sh \
+  build/system-updates/system-latest.json \
+  build/system-updates/system-latest.json.sig \
+  kvmapp/system/keys/system-update-signing.pub.pem
+```
+
+Result: `Verified OK`.
+
+GitHub publication:
+
+- Branch pushed:
+  `feature/new-buildroot-sysupgrade-lab` at `52f491c`.
+- Versioned release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.4-raw.1`
+- Uploaded versioned release assets:
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz`
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz.sha256`
+  - `hardened-nanokvm-system-0.1.4-raw.1.tar.gz.sha512`
+  - `system-latest.json`
+  - `system-latest.json.sha256`
+  - `system-latest.json.sig`
+  - `system-latest.json.sig.base64`
+  - `Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz`
+  - `Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.sha256`
+- Stable channel release updated:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- Public channel metadata was downloaded from GitHub and verified locally:
+
+```sh
+scripts/verify-system-update-metadata.sh \
+  /tmp/hardened-system-stable-latest.json \
+  /tmp/hardened-system-stable-latest.json.sig \
+  kvmapp/system/keys/system-update-signing.pub.pem
+```
+
+Result: `Verified OK`.
+
+Risk notes:
+
+- This is a lab raw update. It writes raw `/dev/mmcblk0p1` and
+  `/dev/mmcblk0p2`.
+- Recovery is SD-card rewrite, not automatic rollback.
+- Kernel is still the vendor 5.10 tree; no kernel security rebase is included in
+  this first bundle.
+
+## 2026-06-29: Device Install Attempt on `10.0.87.132`
+
+Start state before installing `0.1.4-raw.1`:
+
+- SSH login works as `root/admin1234`.
+- Local WSL `curl` to `http://10.0.87.132:80` failed, but SSH showed
+  `NanoKVM-Server` listening on `0.0.0.0:80`; API calls will be made from the
+  device itself through `localhost`.
+- Device kernel: `5.10.4-tag-`.
+- `/etc/os-release`: Buildroot `2023.11.2`.
+- `/kvmapp/version`: `1.0.5`.
+- `/etc/kvm/system-version.json`: `0.1.3-raw.1`.
+- `/boot/ver`: `2026-01-05-1_4_1.img`.
+- Processes before install:
+  - `/tmp/kvm_system/kvm_system`
+  - `/tmp/server/NanoKVM-Server`
+- `/etc/kvm/preview_updates` exists and contains `1`.
+
+Planned test:
+
+1. Authenticate against `http://127.0.0.1/api/auth/login`.
+2. Check `/api/system-update/check` and `/api/system-update/status`.
+3. Reuse or download the staged `0.1.4-raw.1` bundle.
+4. Run `/api/system-update/install`.
+5. Track `/data/hardened-system-raw-update.log`, API status, and reboot/SSH
+   reachability.
+
+Observed before install:
+
+- Initial `GET /api/system-update/*` returned `404`: the device had app version
+  `1.0.5`, but it was not the sysupgrade-capable app build.
+- Installed local sysupgrade-capable application bundle through the existing
+  offline application update endpoint:
+  `/data/hardened-nanokvm-kvmapp-1.0.5.tar.gz`
+  (`2c6ee4621548dee2b1ee927eceece958e8e0a199deef4785c3eaba435eee0d85`).
+- The restarted backend then exposed `/api/system-update/version`,
+  `/api/system-update/check`, `/api/system-update/status`, and raw update
+  strings.
+- `allow_raw_system_updates` was set to `true` in `/etc/kvm/server.yaml` for
+  this lab test.
+- Preview updates had to be disabled by removing `/etc/kvm/preview_updates`;
+  writing `0` to the file is not enough because the code treats file existence
+  as enabled.
+- Stable channel check succeeded:
+  - current: `0.1.3-raw.1`
+  - latest: `0.1.4-raw.1`
+  - update available: `true`
+- `POST /api/system-update/download` succeeded after about 5.5 minutes:
+  - staged version: `0.1.4-raw.1`
+  - channel: `stable`
+  - archive:
+    `hardened-nanokvm-system-0.1.4-raw.1.tar.gz`
+  - sha256:
+    `14a3654de1741c6beabea80d95a3647c990daf1e8a3b907a0158c5e91b3d5f83`
+  - `fileCount`: `2`
+  - `imageCount`: `2`
+  - `destructive`: `true`
+  - `requiresReboot`: `true`
+
+Notes:
+
+- The GUI/API progress stays at `download/verifying` for several minutes while
+  hashing/extracting the raw rootfs. Future UX should expose a more specific
+  phase and byte progress for this stage.
+- The current preview-channel fallback behavior can hide a newer stable system
+  update when preview metadata is valid but older. This should be fixed before
+  this feature is used outside lab testing.
+
+Install attempt result so far:
+
+- `POST /api/system-update/install` was started against staged `0.1.4-raw.1`.
+- The API client timed out after 120 seconds while the backend was still in
+  `install/extracting`; the backend continued the install.
+- Raw writer then started successfully:
+  - stopped NanoKVM runtime;
+  - prepared `/boot`;
+  - remounted `/` read-only with the normal remount path;
+  - started writing `ROOTFS` to `/dev/mmcblk0p2` at `10:31:40`.
+- Last observed raw log line before the SSH session stopped responding:
+  `writing ROOTFS to /dev/mmcblk0p2`.
+- After that, `10.0.87.132` did not return to SSH/HTTP during repeated probes;
+  `ssh` reported `No route to host` and HTTP timed out.
+
+Image contents confirmation:
+
+- The SD image and the raw system-update rootfs were built from the patched
+  Hardened rootfs, not from the stock SDK rootfs.
+- The rootfs includes full `/kvmapp`:
+  - Rust `server/NanoKVM-Server`;
+  - web UI assets;
+  - `/kvmapp/version` = `1.0.5`;
+  - `kvm_system` helper;
+  - runtime shared libraries under `server/dl_lib`;
+  - system init scripts and kernel modules;
+  - bundled system-update public key at
+    `/kvmapp/system/keys/system-update-signing.pub.pem`.
+- `scripts/validate-nanokvm-rootfs.sh` passed before publishing and reported:
+  `kvmapp version: 1.0.5`, `backend: rust`.
+- Legacy Go backend files are rejected by the package/rootfs validators and
+  should not be present in this build.
+
+Post-write device state:
+
+- The device did not come back on the old DHCP address `10.0.87.132`.
+- It reappeared as `10.0.87.55`.
+- SSH credentials after the raw rootfs write are `root/root`.
+- HTTP is not listening on the new address.
+- The raw system update appears to have been applied:
+  - `uname -a`: vendor `5.10.4-tag-`, build timestamp
+    `Mon Jun 29 11:59:04 EEST 2026`;
+  - `/etc/os-release`: Buildroot `2023.11.2` with SDK revision
+    `-gd88d58fec-dirty`;
+  - `/etc/kvm/system-version.json`: `0.1.4-raw.1`;
+  - `/kvmapp/version`: `1.0.5`;
+  - `/boot/ver`: `2026-06-29-12-08-d88d58.img`;
+  - `/etc/kvm/backend`: `rust`.
+- `/etc/kvm/pwd` is absent, so first web login setup would be expected if the
+  web backend started.
+- `ps` shows `/tmp/kvm_system/kvm_system`, but no running `NanoKVM-Server`.
+- `/tmp/nanokvm-watchdog.log` repeatedly reports that `NanoKVM-Server` is not
+  running.
+- Manual server start from `/kvmapp/server` exits with `Segmentation fault`.
+- The only userspace log before the crash is:
+  `[SAMPLE_COMM_SNS_ParseIni]-2204: Parse /mnt/data/sensor_cfg.ini`.
+- `dmesg` reports repeated `NanoKVM-Server` signal 11 crashes at bad address
+  `0x1a0` inside `libstdc++.so.6.0.28`.
+- Replacing bundled `/kvmapp/server/dl_lib/libsys.so` with the system
+  `/mnt/system/usr/lib/libsys.so` did not change the crash.
+
+Corrected diagnosis after comparing with working `10.0.87.133`:
+
+- The raw updater wrote the new boot/rootfs and included `/kvmapp`; this is not
+  an empty stock-image problem.
+- The web outage is caused by Rust backend startup crashing during native video
+  initialization.
+- The binary/runtime ABI mismatch hypothesis was tested and is not the current
+  root cause:
+  - `10.0.87.133` runs the same `NanoKVM-Server`, `libkvm.so`,
+    `libkvm_mmf.so`, `libsys.so`, and Buildroot `libstdc++.so.6.0.28` hashes;
+  - replacing `libsys.so` and temporarily bundling the MaixCDK `libstdc++`
+    variant on `10.0.87.55` did not fix the crash.
+- The confirmed difference is `/mnt/data` sensor configuration:
+  - broken `10.0.87.55` after the raw update had only
+    `sensor_cfg.ini.alpha` and `sensor_cfg.ini.beta`;
+  - working `10.0.87.133` has `sensor_cfg.ini.LT`,
+    `sensor_cfg.ini.OA`, `sensor_cfg.ini.SC035`, alpha/beta, and active
+    `sensor_cfg.ini` copied from the LT file;
+  - working active config is `LONTIUM_LT6911_2M_60FPS_8BIT`, bus `4`,
+    address `ff`, lane `2, 4, 3, 1, 0`, `mclk_en=0`, `fps=60`;
+  - its sha256 is
+    `26f3e80b1a05eb93b18a0d7e557851462f0bb04619cca902f5ade8abe66bb3c8`.
+- Copying that LT config to `10.0.87.55` fixed backend startup:
+  - `NanoKVM-Server` stayed running;
+  - port `80` listened on the device;
+  - device-local `GET http://127.0.0.1/api/health` returned
+    `{"backend":"rust","phase":"skeleton","status":"ok"}`.
+- Local WSL `curl` to `10.0.87.55:80` still failed even after the backend was
+  listening; this matches the earlier device-local-vs-host reachability quirk
+  seen on `10.0.87.132`.
+
+Fix applied locally:
+
+- Added bundled sensor configs under `/kvmapp/system/mnt-data`:
+  - `sensor_cfg.ini.LT`
+  - `sensor_cfg.ini.OA`
+  - `sensor_cfg.ini.SC035`
+  - `sensor_cfg.ini.alpha`
+  - `sensor_cfg.ini.beta`
+- Updated `S95nanokvm` to restore missing `/mnt/data/sensor_cfg.*` files from
+  `/kvmapp/system/mnt-data` and copy LT to active `/mnt/data/sensor_cfg.ini`
+  before starting the backend.
+- Updated `scripts/build-rust-sd-image.sh` to write bundled sensor configs
+  directly into rootfs `/mnt/data`, including active `sensor_cfg.ini` from LT.
+- Updated `scripts/validate-nanokvm-rootfs.sh` to fail builds missing the
+  bundled and rootfs LT sensor config.
+- Syntax checks passed:
+  - `sh -n kvmapp/system/init.d/S95nanokvm`
+  - `sh -n scripts/build-rust-sd-image.sh`
+  - `sh -n scripts/validate-nanokvm-rootfs.sh`
+
+Final sensorfix release:
+
+- Code/source commit for the fixed artifacts:
+  `06c643f Fix LT6911 sensor config in sysupgrade image`.
+- Branch pushed:
+  `feature/new-buildroot-sysupgrade-lab`.
+- Release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.5-raw.1`
+- Stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- Public stable metadata was checked and returns:
+  - version: `0.1.5-raw.1`;
+  - sha256:
+    `88d681e07f99128ce9e8f6d9f61fde21502afab727d117f3708f641a98379936`;
+  - URL:
+    `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.5-raw.1/hardened-nanokvm-system-0.1.5-raw.1.tar.gz`.
+- Final local artifacts:
+  - app archive:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/artifacts/nanokvm-kvmapp-rust.tar.gz`
+    sha256 `7d5ca62eef83099e93e3691758733123671bef43392558718bf903b01bf1f31b`;
+  - SD image:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_sensorfix_Rev1_4_2_rust.img`
+    sha256 `ba3f08b4657a47b4529154c9094d4ac5c761b1c60294b9265ba198a1b1f734c0`;
+  - compressed SD image:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/sd-image/Hardened_NanoKVM_1_0_5_buildroot_2023_11_2_security_sensorfix_Rev1_4_2_rust.img.xz`
+    sha256 `8c330399656b183ce72f861f16abb332e276033445ea5c87f3e16e69db946bf0`;
+  - raw system-update archive:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/hardened-nanokvm-system-0.1.5-raw.1.tar.gz`
+    sha256 `88d681e07f99128ce9e8f6d9f61fde21502afab727d117f3708f641a98379936`;
+  - final metadata:
+    `/home/w0w/Hardened_NanoKVM-new-buildroot/build/system-updates/system-latest.json`
+    sha256 `63ce32f551342d22a9ef2dacb3e98380f40ee4cbcdaccb3568e212ed7ceea64a`.
+- Final raw manifest source commit is `06c643f`; raw image entries inside the
+  archive:
+  - ROOTFS `/dev/mmcblk0p2` sha256
+    `a33ef9313ec64449cf6f86df3a9a27672ed5efbd0f55a152180ad3c87321bc41`;
+  - BOOT `/dev/mmcblk0p1` sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`.
+- `10.0.87.133` was inspected read-only only. No files, services, or reboot
+  actions were changed there.
+
+## 2026-06-29: Beta 2 Integrated App/SD/Raw Release Build
+
+Goal:
+
+- publish a single beta 2 line that includes the latest Rust-only application,
+  the sysupgrade GUI/backend work, the LT6911 sensorfix, and the Buildroot
+  2023.11.2 security-backport SD/rootfs baseline;
+- add a GUI switch on Check for Updates for explicitly enabling raw system
+  updates before destructive boot/rootfs writes;
+- ship app update, SD-card image, and raw system-update bundle together.
+
+Source commit:
+
+- `8fa6bd6 Add guarded raw system update toggle`
+
+Versioning:
+
+- application update version: `2.0.0`
+- web display version: `beta 2`
+- raw system-update version: `0.2.0-raw.1`
+- app release tag: `hardened-rust-beta-2`
+- system release tag: `hardened-system-0.2.0-raw.1`
+
+Base image for SD/raw:
+
+- `/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img`
+- This is the vendor Buildroot `2023.11.2` SDK image with selected
+  Buildroot `2023.11.3` package-level security backports. It is not a full
+  Buildroot version migration.
+
+Build commands used:
+
+```sh
+cargo check --manifest-path server-rust/Cargo.toml
+corepack pnpm --dir web build
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+APP_VERSION=2.0.0 \
+ARTIFACT_NAME=hardened-nanokvm-kvmapp-2.0.0.tar.gz \
+KVM_SYSTEM_SOURCE=/home/w0w/Hardened_NanoKVM/build/kvmapp-rust/kvmapp/kvm_system/kvm_system \
+  scripts/package-rust-kvmapp.sh
+NANOKVM_BASE_IMAGE=/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img \
+SD_IMAGE_BASENAME=Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust \
+HARDENED_RELEASE_VERSION=2.0.0 \
+  make sd-image
+scripts/extract-sd-raw-images.sh \
+  build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust
+BASE_VERSION=2026-06-29-12-08-d88d58.img \
+KERNEL_VERSION=5.10.4-tag- \
+  scripts/create-raw-system-update-bundle.sh \
+  0.2.0-raw.1 \
+  sg2002-licheervnano-sd \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
+  build/system-updates
+```
+
+Validation:
+
+- `cargo check`: passed.
+- `corepack pnpm --dir web build`: passed.
+- `scripts/validate-nanokvm-rootfs.sh` on the SD rootfs image: passed with
+  `kvmapp version: 2.0.0`, `backend: rust`.
+- `scripts/verify-update-metadata.sh`: `Verified OK`.
+- `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.0.tar.gz` | `acc2a60ffc11bbb751b185ed2b59d1fe6226f1921881fc941e39c4e0e117b989` |
+| App metadata | `build/artifacts/latest.json` | `5a4b29ed5c7e663dbfcfe7e0929e54c52b6f84bf2ed2480b475bf0893a81954f` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `592ee3a1b11e772d084bbd215e7ce488e9ef68cb1250d3dab577b3ce9f3ce07f` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `d5fb17a7550c9534b7b54926fc2c0ee9cde274ece7459704002ea735a08882d7` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `eb8ed7195e731acfc874c6250f1e64974b02b96b14778645cf91f5a4f4dd3eed` |
+| SD rootfs image | `build/sd-image/Hardened_NanoKVM_beta_2_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `07364d3fee1f543c7daa75625d4d03a361a57a971cc1404921d193d60924e75b` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.0-raw.1.tar.gz` | `a718b5546ffea67ebc8ead8ebd7c93f2278faa0d69a950264848acb99d9ac310` |
+| System metadata | `build/system-updates/system-latest.json` | `0fa53649380dfcb5a65df66e2ddf1172cd14c1be63d1ec9085624ab6c2563129` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `9f835ca2e1b7ffe4844039cb2fe3f57f44b6dd35c23c6aefd638f01460a0357a` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `8fa6bd6`
+- required staging free space: `2147483648` bytes
+- raw writes:
+  - ROOTFS `/dev/mmcblk0p2`, patched payload sha256
+    `54480569cee2641e70d3825deba37696f041c7125c9e2329882e62af9f6c1b3e`
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2`
+- System release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.0-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+
+Post-publish verification:
+
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app version `2.0.0` and points to `hardened-rust-beta-2`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json`
+  returns system version `0.2.0-raw.1` and points to
+  `hardened-system-0.2.0-raw.1`.
+- Both downloaded metadata signatures verified with
+  `kvmapp/system/keys/system-update-signing.pub.pem`.
+
+## 2026-06-29: Beta 2.0.1 App/System Patch
+
+Reason:
+
+- device `10.0.87.41` with Preview Updates enabled did not see the newer app
+  release because the preview channel metadata was stale;
+- USB gadget MAC addresses can change after reboot because `S03usbdev` did not
+  set deterministic NCM/RNDIS `dev_addr` and `host_addr` values;
+- app updates replace `/kvmapp`, while the boot-time USB gadget script is run
+  from `/etc/init.d`, so `S95nanokvm` now syncs the bundled `S03usbdev` into
+  `/etc/init.d` on startup.
+
+Device check before the 2.0.1 release:
+
+- `10.0.87.41` login: `admin/admin1234`
+- current app: `1.0.5`
+- visible app update after republishing preview channel metadata: `2.0.0`
+- current system: `0.1.4-raw.1`
+- visible system update: `0.2.0-raw.1`
+- device key: `c9cbd99715194c6c`
+
+Code changes staged for the 2.0.1 release:
+
+- application update checks compare preview and stable metadata and return the
+  newer semantic app version;
+- system update checks compare preview and stable metadata and return the newer
+  raw system version;
+- `S03usbdev` derives stable locally-administered USB MACs from `/device_key`
+  with fallbacks to `/etc/machine-id`, CPU serial, and a fixed seed;
+- SD image patching now installs the bundled `S03usbdev` into `/etc/init.d`;
+- rootfs validation now requires both bundled and boot-time `S03usbdev`.
+
+Validation before build:
+
+- `sh -n kvmapp/system/init.d/S03usbdev`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- `sh -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/validate-nanokvm-rootfs.sh`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+
+Planned release tags:
+
+- app: `hardened-rust-beta-2.0.1`
+- system: `hardened-system-0.2.1-raw.1`
+- stable app latest: GitHub Releases latest points to app `2.0.1`
+- preview app latest: `hardened-rust-preview` will be updated to app `2.0.1`
+- stable and preview system metadata will be updated to `0.2.1-raw.1`
+
+Build commands completed:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+corepack pnpm --dir web build
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+APP_VERSION=2.0.1 \
+ARTIFACT_NAME=hardened-nanokvm-kvmapp-2.0.1.tar.gz \
+KVM_SYSTEM_SOURCE=/home/w0w/Hardened_NanoKVM/build/kvmapp-rust/kvmapp/kvm_system/kvm_system \
+  scripts/package-rust-kvmapp.sh
+APP_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
+APP_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
+  scripts/create-update-metadata.sh \
+  2.0.1 \
+  hardened-rust-beta-2.0.1 \
+  build/artifacts/hardened-nanokvm-kvmapp-2.0.1.tar.gz \
+  build/artifacts/latest.json
+NANOKVM_BASE_IMAGE=/home/w0w/Hardened_NanoKVM/build/vendor/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2026-06-29-12-08-d88d58.img \
+SD_IMAGE_BASENAME=Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust \
+HARDENED_RELEASE_VERSION=2.0.1 \
+  make sd-image
+scripts/extract-sd-raw-images.sh \
+  build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust
+BASE_VERSION=2026-06-29-12-08-d88d58.img \
+KERNEL_VERSION=5.10.4-tag- \
+  scripts/create-raw-system-update-bundle.sh \
+  0.2.1-raw.1 \
+  sg2002-licheervnano-sd \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust/boot.vfat \
+  build/sd-image/raw-system-update/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust/rootfs.sd \
+  build/system-updates
+SYSTEM_UPDATE_SIGNING_KEY=/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pem \
+SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-test \
+  scripts/create-system-update-metadata.sh \
+  0.2.1-raw.1 \
+  hardened-system-0.2.1-raw.1 \
+  build/system-updates/hardened-nanokvm-system-0.2.1-raw.1.tar.gz \
+  build/system-updates/system-latest.json
+```
+
+Validation after build:
+
+- `scripts/verify-update-metadata.sh`: `Verified OK`.
+- `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+- `make sd-image` rootfs validation: passed.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.1.tar.gz` | `3c832e9a50ba83d645f1a20056ee75df5070cd74a55c7dd62cfeb3dbf251bf6d` |
+| App metadata | `build/artifacts/latest.json` | `713b9266bd143e109b42e4b666eaf66fff012f4476bc93a98d244536a43b4db8` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `2e96826aeebe331772469d1409fcf770db1fb7a1395702fe292f2fe892f8bafc` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `6e2eacac921b54d6fd5878196ac8b6c1244f244923dc5390f738152f3550c3b8` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `2a775f81de34ef126d5f491c467741f169269e994b993bdc316de1ef56c93282` |
+| SD/rootfs payload | `build/sd-image/Hardened_NanoKVM_beta_2_0_1_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `d73b8d23989f7797deb96e73b0f0816054bed47f63877336c1315386b48e79cd` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.1-raw.1.tar.gz` | `aed90c1b63ab0c407f9154214b70defef3916da1220c51be6a1714eaf76f7a6d` |
+| System metadata | `build/system-updates/system-latest.json` | `65538d3972646ac3c682fa2b028689efb78e7e35df4adf290c8add0e2b67608e` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `9bf6c8a4ca282301ca9b69d2bbe5661eabbf7ea6a9880e9d13531fbe32218840` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `f21155c`
+- raw writes:
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+  - ROOTFS `/dev/mmcblk0p2`, payload sha256
+    `d73b8d23989f7797deb96e73b0f0816054bed47f63877336c1315386b48e79cd`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.1`
+- System release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.1-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Post-publish verification:
+
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app version `2.0.1` and points to `hardened-rust-beta-2.0.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-rust-preview/latest.json`
+  returns app version `2.0.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json`
+  returns system version `0.2.1-raw.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-preview/system-latest.json`
+  returns system version `0.2.1-raw.1`.
+- Downloaded GitHub app `latest.json` signature verified with
+  `scripts/verify-update-metadata.sh`: `Verified OK`.
+- Downloaded GitHub system `system-latest.json` signature verified with
+  `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+- Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.1`.
+- Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
+  `latest=0.2.1-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.2 Startup Boot-Script Sync
+
+Reason:
+
+- `2.0.1` fixed stable USB MAC generation in `S03usbdev`, but an ordinary
+  application update on an already-flashed device only replaces `/kvmapp`;
+- the boot-time scripts actually run from `/etc/init.d`, so devices with an old
+  `/etc/init.d/S95nanokvm` could install app `2.0.1` without copying the new
+  `S03usbdev` into `/etc/init.d`;
+- Rust backend startup now syncs `/kvmapp/system/init.d/S03usbdev` and
+  `/kvmapp/system/init.d/S95nanokvm` into `/etc/init.d` after an app update.
+
+Validation before build:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- `sh -n kvmapp/system/init.d/S03usbdev`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.2.tar.gz` | `ee9f23333510d59eafaa164f9cf8c1f77b247241ffea8261687a7206a7aad55b` |
+| App metadata | `build/artifacts/latest.json` | `da0eafa991b578c798396348c9d37ee6eb15a556a1120544ea1be76fad2f0d04` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `9996aaea2e1f4951fabb087597f8ef12fcc7001bc56da10450d47417b0fa9d51` |
+
+Generated SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `c3c9f2fbbad5c9c608582cafe7c1325a2dadc41f7444d62917d8bc84eff96d2b` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `32dcd3d674fe2de0f3474867636423af5744551b3cdf029de161d8f3498fe016` |
+| SD/rootfs payload | `build/sd-image/Hardened_NanoKVM_beta_2_0_2_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `c9aedd65788668ec7572217e446062fe06ce5cc995866e22e377e343def01f46` |
+
+Generated raw system-update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system-update archive | `build/system-updates/hardened-nanokvm-system-0.2.2-raw.1.tar.gz` | `b68cff2527b99baf23dd8970c19c082f14ccb40a69f9755d3877236ba3325c98` |
+| System metadata | `build/system-updates/system-latest.json` | `9e7698462c1f8503e76a505c664fdb20e56cd503a20edf8ab28c1b6c78bd1b5e` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `3fdaabd107b11e425900fb78731a37d621ba5af1ff3d4a3282502f6f26789aed` |
+
+Raw manifest notes:
+
+- base version: `2026-06-29-12-08-d88d58.img`
+- kernel version: `5.10.4-tag-`
+- source commit: `8dc8d31`
+- raw writes:
+  - BOOT `/dev/mmcblk0p1`, payload sha256
+    `cbaf57e5fbc3f0adb86a033beb5404e96cd26564481d42c56290dc7bc7942b78`
+  - ROOTFS `/dev/mmcblk0p2`, payload sha256
+    `c9aedd65788668ec7572217e446062fe06ce5cc995866e22e377e343def01f46`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.2`
+- System release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.2-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Post-publish verification:
+
+- `https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json`
+  returns app version `2.0.2` and points to `hardened-rust-beta-2.0.2`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-rust-preview/latest.json`
+  returns app version `2.0.2`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-stable/system-latest.json`
+  returns system version `0.2.2-raw.1`.
+- `https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-preview/system-latest.json`
+  returns system version `0.2.2-raw.1`.
+- Downloaded GitHub app `latest.json` signature verified with
+  `scripts/verify-update-metadata.sh`: `Verified OK`.
+- Downloaded GitHub system `system-latest.json` signature verified with
+  `scripts/verify-system-update-metadata.sh`: `Verified OK`.
+- Device `10.0.87.41` now reports app `current=1.0.5`, `latest=2.0.2`.
+- Device `10.0.87.41` now reports system `current=0.1.4-raw.1`,
+  `latest=0.2.2-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.3 Stale Staged System Update UI Fix
+
+Reason:
+
+- device `10.0.87.133` was on app `2.0.2` and system page showed an old
+  staged raw update `0.1.3-raw.1` with `Install`;
+- latest GitHub system metadata was already correct at `0.2.2-raw.1`;
+- the displayed error `forbidden: raw partition system updates are disabled`
+  was an old failed progress marker from pressing Install before raw updates
+  were enabled;
+- the UI did not compare staged archive/version/hash against latest metadata,
+  so stale staged packages could keep taking precedence over Download/Verify.
+
+Fix:
+
+- app version bumped to `2.0.3`;
+- system-update install progress records the staged version;
+- UI treats staged system updates as installable only when version, archive
+  name, and sha256 match the latest GitHub metadata;
+- if a newer system update exists, the failed/staged screen now offers
+  Download and Verify instead of Install for the stale staged package.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- app metadata signature verified locally and after GitHub publication:
+  `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.3.tar.gz` | `18270060fcdbebec6f1b9e69e5bab147a975d4e5f59a9448181d17ec27fbb160` |
+| App metadata | `build/artifacts/latest.json` | `81587eaa0edd0484e8c8548d4adeb11010af3d3b974dbd52196da81af41576fc` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `5f145fa6a2597c9676a1541397697cfcddf01595d7ce1eef6575a8a5f44c15f7` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.3`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System stable/preview remain at `0.2.2-raw.1`.
+
+Device check:
+
+- `10.0.87.133` app before installing `2.0.3`: `current=2.0.2`,
+  `latest=2.0.3`.
+- `10.0.87.133` system check: `current=0.0.0-stock`,
+  `latest=0.2.2-raw.1`, `updateAvailable=true`.
+
+## 2026-06-29: Beta 2.0.4 Legacy Failed-Progress Cleanup
+
+Reason:
+
+- another device on app `2.0.3` still displayed
+  `forbidden: raw partition system updates are disabled` even with the raw
+  update toggle enabled;
+- root cause was a legacy `install/failed` progress record written by older
+  builds before raw updates were enabled, not the current raw-update setting;
+- the app `2.0.3` UI already showed Download and Verify for newer metadata, but
+  it still displayed the stale failed-progress message.
+
+Fix:
+
+- app version bumped to `2.0.4`;
+- Rust status normalization clears legacy `install/failed` progress records
+  that have no staged version;
+- UI hides stale failed-progress text when a newer system update can be
+  downloaded and verified.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web build`: passed.
+- app metadata signature verified locally and after GitHub publication:
+  `Verified OK`.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.4.tar.gz` | `ac6e8dbf248503f3cb1cb4887af8b9d6024674e13669391ff635f46751026483` |
+| App metadata | `build/artifacts/latest.json` | `9a52e6b29c352cdb7b55c634c0106c67010428d05b752c97e43aec23ed7db980` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `918a65854af8129a2e30d8f50262f26dee36517cf5d0583d52a5bae825581d3f` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.4`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System stable/preview remain at `0.2.2-raw.1`.
+
+Device check:
+
+- `10.0.87.133` app after installing `2.0.3`: `current=2.0.3`,
+  `latest=2.0.4`.
+- `10.0.87.133` Download and Verify completed for system `0.2.2-raw.1`;
+  status now shows staged `0.2.2-raw.1` and `progress=null`.
+- `10.0.87.133` app was then updated to `2.0.4`; final check reports
+  app `current=2.0.4`, `latest=2.0.4`, staged system `0.2.2-raw.1`,
+  and `progress=null`.
+
+## 2026-06-29: Local WIP Manual Network Settings and Stable eth0 MAC
+
+Scope:
+
+- no releases, no GitHub publication, no device writes in this step;
+- local working-tree changes only.
+
+Implemented locally:
+
+- Network/DNS settings Manual mode now edits full wired network settings:
+  IP address, subnet mask, router, and DNS servers.
+- The existing `POST /api/network/dns` endpoint now accepts optional
+  `interface`, `address`, `subnetMask`, and `gateway` fields when
+  `mode=manual`.
+- Manual mode persists static Ethernet config to `/boot/eth.nodhcp`, matching
+  the existing vendor `S30eth` boot mechanism.
+- Applying Manual mode restarts `/etc/init.d/S30eth`; if the browser loses the
+  HTTP response because the IP changed, the UI still redirects to the entered
+  address.
+- Switching back to DHCP removes `/boot/eth.nodhcp`, restarts `S30eth`, and
+  preserves the previous manual DNS list for later.
+- The Rust backend now syncs `/kvmapp/system/init.d/S30eth` into `/etc/init.d`
+  at startup, same as `S03usbdev` and `S95nanokvm`.
+- `S95nanokvm` also installs the bundled `S30eth` boot script.
+- `S30eth` now creates/uses `/boot/eth.mac` and applies that locally
+  administered MAC to `eth0` before DHCP/static configuration. This targets the
+  wired MAC changing on every reboot; USB gadget MACs were already handled by
+  `S03usbdev`.
+
+Validation:
+
+- `cargo fmt --check`: passed.
+- `cargo check`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web files: passed.
+- `sh -n kvmapp/system/init.d/S30eth`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+
+Initial mistaken device check:
+
+- `http://10.0.87.47/`: TCP connection refused.
+- `https://10.0.87.47/`: TCP connection refused.
+- `ssh root@10.0.87.47`: TCP connection refused.
+- Earlier ICMP ping from outside the sandbox succeeded, so the address is
+  reachable at IP level but no expected NanoKVM services are listening from
+  this environment.
+
+Corrected device diagnostic:
+
+- device is `10.0.87.48`, not `.47`;
+- HTTP is reachable, HTTPS is disabled/refused;
+- web login `admin/admin1234` succeeded;
+- SSH `root/admin1234` succeeded via askpass;
+- current app: `2.0.4`;
+- current system: `0.2.2-raw.1`, base `2026-06-29-12-08-d88d58.img`;
+- hostname: `secondary`;
+- `/api/network/dns` reports DHCP mode, `eth0`, `10.0.87.48/24`,
+  router/DNS `10.0.87.5`, search domain `int`;
+- installed `/etc/init.d/S30eth` and `/kvmapp/system/init.d/S30eth` do not
+  contain the local stable-eth0-MAC fix yet;
+- `/boot/eth.mac` is absent and `/boot/eth.nodhcp` is absent;
+- `/device_key` is `e192d5a315195372`, `/etc/machine-id` is empty;
+- current runtime `eth0` MAC is `e2:2e:7a:43:22:9c`;
+- the local WIP stable-MAC algorithm would derive `02:a1:a9:62:76:d7` for
+  this device from `/device_key`.
+
+## 2026-06-29: Beta 2.0.5 Network/MAC Fix Release
+
+Scope:
+
+- app release, raw system update, and SD-card image all include the Manual
+  network settings and stable `eth0` MAC fixes;
+- release was published from commit
+  `a154d2d Add manual network settings and stable eth0 MAC` on branch
+  `feature/new-buildroot-sysupgrade-lab`.
+
+Included fixes:
+
+- Settings > Network/DNS Manual mode can edit and apply wired IP address,
+  subnet mask, router, and DNS servers.
+- Manual network settings are stored in `/boot/eth.nodhcp` and applied through
+  `/etc/init.d/S30eth`.
+- Switching back to DHCP removes `/boot/eth.nodhcp` and restarts Ethernet.
+- `S30eth` now persists a locally administered `eth0` MAC in `/boot/eth.mac`
+  and applies it before DHCP/static configuration.
+- Rust backend syncs the bundled `S30eth` to `/etc/init.d/S30eth` at startup;
+  SD/raw rootfs validation now requires both bundled and installed copies.
+
+Validation before publication:
+
+- `cargo fmt --check`: passed.
+- `cargo test`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- `sh -n` for touched shell scripts: passed.
+- `git diff --check`: passed.
+- Rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.5`.
+- App and system update metadata signatures verified locally and after
+  downloading the published metadata from GitHub.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.5.tar.gz` | `2ede03a071755a62e3292e0e0929e0044ac0658b3ed27823df7467dd6b27b7ad` |
+
+Generated SD-card artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `c0cca617e4f87d3b4937f6c13c6e3da7ada4020218eb6a229a485e86ee6515f1` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `b7f285f02ce13fa876b7dd020662950f3b0f7acec571135a3752918e61317487` |
+| Rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_5_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `338b4debf369dc92e89a0dd9b72aec09783919bd1c7cfe4380748fa2c559b6cf` |
+
+Generated raw system update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.3-raw.1.tar.gz` | `744a187d818ef3fa96aeba1f08c3b51e1fd09f13a02c2d085e4a074fb8fb71cc` |
+
+Raw system manifest:
+
+- version: `0.2.3-raw.1`
+- target: `sg2002-licheervnano-sd`
+- base: `2026-06-29-12-08-d88d58.img`
+- kernel: `5.10.4-tag-`
+- source commit: `a154d2d`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.5`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.3-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Notes:
+
+- The raw manifest rootfs SHA differs from the SD rootfs validation image SHA
+  because `create-raw-system-update-bundle.sh` patches
+  `/etc/kvm/system-version.json` into the staged raw rootfs before packaging.
+- Post-publication GitHub REST tag checks later failed from the local
+  environment with DNS resolution errors for `api.github.com`; direct GitHub
+  download URLs for app/system metadata succeeded and both downloaded
+  signatures verified.
+
+## 2026-06-29: Beta 2.0.6 Redirect/Cache Hotfix Release
+
+Reason:
+
+- after updating to app `2.0.5`, changing wired Manual IP from the GUI could
+  leave the browser on the old address if the network-setting POST was
+  interrupted by `S30eth` restarting Ethernet;
+- one browser also kept returning to the login page after the app update, while
+  another browser worked. Device API login/session checks were healthy, so the
+  likely cause was stale browser state or a stale cached React shell;
+- `10.0.87.133` also had a bad manually-entered DNS server
+  `10.0.77.133`. It was corrected on-device to local router/DNS `10.0.87.5`
+  over HTTPS.
+
+Fix:
+
+- app version bumped to `2.0.6`;
+- Manual network Apply now schedules the browser redirect before waiting for
+  the POST to finish, so navigation still happens if Ethernet restart cuts the
+  request;
+- backend security headers now add `Cache-Control: no-store, max-age=0` for
+  `/` and `*.html`, not only `/api/*`, so browsers do not reuse stale
+  `index.html` after app updates;
+- old GitHub releases were intentionally not deleted. Channel releases
+  `hardened-system-stable`, `hardened-rust-preview`, and
+  `hardened-system-preview` remain because update checks depend on them.
+
+Validation:
+
+- `cargo fmt --check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web file: passed.
+- `git diff --check`: passed.
+- Rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.6`.
+- App and system update metadata signatures verified locally and after
+  downloading the published metadata from GitHub.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.6.tar.gz` | `893933918298bad101cf3d8efe83ab3d66eddbc1b03b0f4d3fdde7946533a31d` |
+| App metadata | `build/artifacts/latest.json` | `5362c40239a8d41ed5ebb44cd8deddc2c5af1ae5ba8b1f9c5e8f69f057306a13` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `a11ae96c371557345a2d9e10990953a58b9a42d877fa97fc30a29022e4dea44f` |
+
+Generated SD-card artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.img` | `7bf2007d93224401c29d41da9cf6818d45d0af2431a782fc81c6d27fbc5367ce` |
+| Compressed SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.img.xz` | `338df3e1477984892986f3e7ae5ce491bf0cb2001d827863bd5212fd8e8f3752` |
+| Rootfs validation image | `build/sd-image/Hardened_NanoKVM_beta_2_0_6_buildroot_2023_11_2_security_Rev1_4_2_rust.rootfs.ext` | `3f2f70e4315ac082823dee0a36440b6fb52ebbe7af9c8bf1529e8f44e7307e02` |
+
+Generated raw system update artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.4-raw.1.tar.gz` | `a4faeafaf25ce6cbb1357f4318e34fa09d39bcded9fcaa1f8838cec89648e961` |
+| System metadata | `build/system-updates/system-latest.json` | `ef51d82d79e399c6c7e2efc8713325d75feaca8047b9260d9a98aae1f42dd54f` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `a9b00667c3639195b0c15f32ee6d935eb39e32c3906e59f7dfb3fc10755b8d0e` |
+
+Raw system manifest:
+
+- version: `0.2.4-raw.1`
+- target: `sg2002-licheervnano-sd`
+- base: `2026-06-29-12-08-d88d58.img`
+- kernel: `5.10.4-tag-`
+- source commit: `33e8f3a`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.6`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.4-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device check:
+
+- `10.0.87.133` current app: `2.0.5`, latest app: `2.0.6`;
+- `10.0.87.133` current system: `0.2.2-raw.1`, latest system:
+  `0.2.4-raw.1`, `updateAvailable=true`;
+- `10.0.87.133` network DNS after correction:
+  mode `manual`, servers/effective/DHCP all `10.0.87.5`, address
+  `10.0.87.133/24`, gateway `10.0.87.5`.
+
+## 2026-06-29: Beta 2.0.7 App Auth-State Hotfix
+
+Reason:
+
+- `10.0.87.132` could log in successfully through the backend API, but the UI
+  immediately returned to the login screen;
+- protected API calls with the HttpOnly session cookie worked, so the backend
+  session was valid;
+- root cause was frontend auth state relying only on the JS-readable
+  `nano-kvm-csrf` cookie. After IP/protocol changes or stale browser state, the
+  CSRF cookie can be absent while the HttpOnly session cookie is still valid.
+
+Fix:
+
+- app version bumped to `2.0.7`;
+- `GET /api/auth/account` now returns the current session CSRF token and
+  expiry alongside the username;
+- `ProtectedRoute` now checks `/api/auth/account` with credentials before
+  redirecting to login when the CSRF cookie is missing. If the HttpOnly session
+  is still valid, it restores the CSRF cookie and lets the UI continue;
+- CSRF cookie writes/removes now explicitly use path `/` and `SameSite=Lax`.
+
+Validation:
+
+- `cargo fmt --check --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed.
+- `corepack pnpm --dir web run build`: passed.
+- Prettier check for touched web files: passed.
+- `git diff --check`: passed.
+- `10.0.87.132` was repaired directly with a local offline app update package.
+- After repair, `10.0.87.132` reports app `2.0.7`, and
+  `/api/auth/account` returns `username`, `csrfToken`, and `expiresAt`.
+- GitHub `latest.json` for app `2.0.7` downloaded successfully and its
+  signature verified.
+
+Generated app artifact:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.7.tar.gz` | `f890f71f5a022e141055e986c4f75ece2d52145b01aa634641ed570c33b5d7e2` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.7`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+
+Notes:
+
+- This was published as an app-only hotfix because the failure was in the
+  browser/backend auth contract, not in boot/rootfs. The existing raw system
+  channel remains at `0.2.4-raw.1`.
+
+## 2026-06-30: Beta 2.0.11 Raw Updater Setting Preservation
+
+Reason:
+
+- Devices `10.0.87.132` and `10.0.87.133` were moved to static IPv4 through
+  `/boot/eth.nodhcp` before raw update testing.
+- The existing `2.0.10` raw updater writes boot/rootfs partitions directly and
+  would lose boot and rootfs user settings after a successful raw update.
+- Raw update testing must therefore install a safer app updater before writing
+  `0.2.6-raw.1`.
+
+Fix:
+
+- app version bumped to `2.0.11`;
+- generated raw updater script now preserves user state before raw `dd` writes:
+  - boot config: `eth.nodhcp`, `resolv.conf`, IPv6 mode/config, stable MAC,
+    hostname prefix/name, USB gadget flags, Wi-Fi seed files, SSH one-shot flag,
+    and custom logo;
+  - rootfs config: `/etc/kvm` user settings, web account, session secret, TLS
+    files, terminal/session config, root/web password files, SSH host keys,
+    hostname/machine-id, `device_key`, Tailscale/PicoClaw state, and optional
+    Tailscale/PicoClaw runtime binaries/init scripts;
+- restored rootfs directories are merged into the newly written rootfs instead
+  of replacing the new directories. This keeps the new system version and
+  bundled update key from the raw image;
+- old sysupgrade state files are deliberately excluded from preserved
+  `/etc/kvm`: `system-version.json`, pending/backup/boot-good/rollback
+  markers, and `system-update-signing.pub.pem`;
+- regression test added:
+  `raw_image_updater_preserves_user_configuration`.
+
+Validation:
+
+- `cargo fmt` in `server-rust`: passed.
+- `cargo test` in `server-rust`: passed, 116 tests.
+- RISC-V linked backend build:
+  `server-rust/scripts/build-linked-libkvm.sh`: passed.
+- App update metadata signature:
+  `scripts/verify-update-metadata.sh build/artifacts/latest.json build/artifacts/latest.json.sig ...`: passed.
+- Published GitHub `releases/latest/download/latest.json`: version `2.0.11`,
+  signature verified after download.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.11.tar.gz` | `4872815fe377df02002b9e7de298663a8c8b96df7dbb573815572d07b06e732f` |
+| App metadata | `build/artifacts/latest.json` | `9678ff5e9b0fba96c40cc61c02213fec32d15153e9302074afa7b610fd826ac4` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `537be42a137b578958bb36a5c31b8be38ef263846d800561423cb23f8670404f` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.11`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+
+Device state before device update:
+
+- `10.0.87.132`: app `2.0.10`, system `0.2.5-raw.1`, latest raw
+  `0.2.6-raw.1`, static IP set to `10.0.87.132/24` with gateway/DNS
+  `10.0.87.5`;
+- `10.0.87.133`: app `2.0.10`, system `0.2.5-raw.1`, latest raw
+  `0.2.6-raw.1`, static IP set to `10.0.87.133/24` with gateway/DNS
+  `10.0.87.5`;
+- raw install has not been started. Install app `2.0.11` first, then test raw
+  update one device at a time.
+
+Follow-up raw/SD rebuild:
+
+- Built a new SD image and raw system update with app `2.0.11` inside the
+  raw rootfs. This avoids downgrading `/kvmapp` back to `2.0.10` after a raw
+  write.
+- Raw system version: `0.2.7-raw.1`.
+- Base: `20260123_NanoKVM_Rev1_4_2.img`.
+- Kernel: `5.10.4-tag-`.
+- Manifest source commit: `a4a4123`.
+
+Generated raw/SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.7-raw.1.tar.gz` | `e9d56782119c87693a24441e40ab053050aaca0786ecb041abc9503a21420b86` |
+| System metadata | `build/system-updates/system-latest.json` | `71d9159e1878dd4d7d139bb4604cc633285b5f2ea34fa9d4ca4046e775450c21` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `91a2d2b33b1b9dc98f1ae3aed962563d93fb1e58d947912220eddcacae498d7c` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_11_buildroot_2023_11_2_security_preserve_Rev1_4_2_rust.img.xz` | `746d0ea45b1ba63c2042eb7429f6b29c2937e3891c2fd42f00db1f152d902cd5` |
+
+Validation:
+
+- `EXPECTED_KVMAPP_VERSION=2.0.11 scripts/validate-nanokvm-rootfs.sh .../rootfs.sd`: passed.
+- `scripts/verify-system-update-metadata.sh build/system-updates/system-latest.json ...`: passed.
+- Published GitHub `hardened-system-stable/system-latest.json`: version
+  `0.2.7-raw.1`, signature verified after download.
+
+Publication:
+
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.7-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device state after app update and raw channel publication:
+
+- `10.0.87.132`: app `2.0.11`, system `0.2.5-raw.1`, latest raw
+  `0.2.7-raw.1`, `updateAvailable=true`;
+- `10.0.87.133`: app `2.0.11`, system `0.2.5-raw.1`, latest raw
+  `0.2.7-raw.1`, `updateAvailable=true`;
+- raw install has still not been started.
+
+## 2026-06-30: Beta 2.0.12 Compressed Raw Staging
+
+Reason:
+
+- First raw download test on `10.0.87.132` for `0.2.7-raw.1` failed before
+  install with `No space left on device (os error 28)`.
+- On the device, `/data` was not mounted as a separate filesystem; the raw
+  update cache lived on rootfs:
+  `/data/.hardened-kvmcache/system-update`.
+- Failed staging had left the downloaded archive plus extracted raw payloads:
+  roughly 775 MiB under `system-update`, including about 503 MiB under
+  `extract/payload` at the time it failed.
+- Only the failed update cache was removed:
+  `/data/.hardened-kvmcache/system-update`. Device settings were not removed.
+  After cleanup, rootfs had about 698 MiB free.
+
+Fix:
+
+- app version bumped to `2.0.12`;
+- raw manifest schema now supports gzip-compressed raw image payloads:
+  - `compression: "gzip"`;
+  - `compressed_size`;
+  - `compressed_sha256`;
+- uncompressed image `size` and `sha256` remain in the manifest for traceability
+  and target-device-size validation;
+- `validate_system_manifest` and install-time raw payload validation compare the
+  staged file size against `compressed_size` for gzip payloads;
+- generated raw updater script validates compressed payloads with `gzip -t` and
+  streams `gzip -dc` directly to the target block device;
+- `scripts/create-raw-system-update-bundle.sh` now defaults to
+  `RAW_IMAGE_COMPRESSION=gzip` and writes `images/rootfs.sd.gz` plus
+  `images/boot.vfat.gz`;
+- `required_free_bytes` for the `0.2.8-raw.1` release was set to `671088640`
+  bytes, matching the compressed-staging design instead of the old 2 GiB lab
+  value.
+
+Validation:
+
+- `sh -n scripts/create-raw-system-update-bundle.sh`: passed.
+- `cargo fmt` in `server-rust`: passed.
+- `cargo test` in `server-rust`: passed, 116 lib tests plus 2 main tests.
+- RISC-V linked backend build:
+  `server-rust/scripts/build-linked-libkvm.sh`: passed.
+- App update metadata signature:
+  `scripts/verify-update-metadata.sh build/artifacts/latest.json build/artifacts/latest.json.sig ...`: passed.
+- Rootfs validator:
+  `EXPECTED_KVMAPP_VERSION=2.0.12 scripts/validate-nanokvm-rootfs.sh .../rootfs.sd`: passed.
+- System update metadata signature:
+  `scripts/verify-system-update-metadata.sh build/system-updates/system-latest.json ...`: passed.
+- GitHub app latest/preview metadata both return version `2.0.12`; signature
+  verified after download.
+- GitHub system stable/preview metadata both return version `0.2.8-raw.1`;
+  signature verified after download.
+
+Generated app artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.12.tar.gz` | `bc971f57b43b560ed61d537bcef39a8fcbda49237e847e1457e93dc3283fc8f6` |
+| App metadata | `build/artifacts/latest.json` | `782e2999f6ec843ed2ef5d456f0e011701d5cb6b2cb6bb272e505614a6a4d97e` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `bd8191eb44eb19ccb72e5acaa70abed6d088a6566cad3b20cc022e037d9fb316` |
+
+Generated raw/SD artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.8-raw.1.tar.gz` | `8455bdce09bce0a4a39188eddf97f4658ea509e9b906806b9445c5d78784b175` |
+| System metadata | `build/system-updates/system-latest.json` | `8b322955bb5553980c524fe25c5d3e16a14e5e1b0213c59c5a1b5848194237f1` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `086829f4065bf7154bb2923e31c225b6436e710d9a31ef918a059e41a90c94d3` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_12_buildroot_2023_11_2_security_compressed_Rev1_4_2_rust.img.xz` | `619a9f13c6b3bd196faeb412107bf39062098071da28950e927de8e29cfff2e5` |
+
+Compressed raw manifest details:
+
+- `version`: `0.2.8-raw.1`
+- `source_commit`: `28161aa`
+- rootfs payload: `images/rootfs.sd.gz`
+  - uncompressed size: `1610612736`
+  - compressed size: `276921128`
+  - uncompressed SHA256:
+    `d71494bc56b65fd1635aad671bdeb6d27f6993c84d95bf94db9dd6a4cf130417`
+  - compressed SHA256:
+    `24d579bca655d5e17b985ea35a9b45920303573729e883628c4110658810af2f`
+- boot payload: `images/boot.vfat.gz`
+  - uncompressed size: `16777216`
+  - compressed size: `7734967`
+  - uncompressed SHA256:
+    `804df51d6cfffdacbae250cfaae2074855de6ee6b56af4f134c5f89da97f158f`
+  - compressed SHA256:
+    `e1ecaa68cbfa86db51d1af596257a40c881cd6795769c9d0dcbe904f97e69a4d`
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.12`
+- App preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-preview`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.8-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+- System preview channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-preview`
+
+Device state before compressed raw install:
+
+- `10.0.87.132`: app `2.0.11`, system `0.2.5-raw.1`, latest app now
+  `2.0.12`, latest raw now `0.2.8-raw.1`; failed `0.2.7-raw.1` staging cache
+  was removed, raw install was not started.
+- `10.0.87.133`: app `2.0.11`, system `0.2.5-raw.1`, latest app now
+  `2.0.12`, latest raw now `0.2.8-raw.1`; raw install has not been started.
+
+Next:
+
+1. Install app `2.0.12` on both devices.
+2. On `10.0.87.132`, download and install `0.2.8-raw.1` from GUI/API.
+3. Confirm post-reboot version, static IP, web account, SSH account, and boot
+   health.
+
+## 2026-06-30: Data Staging Guard Release `2.0.14` / `0.2.10-raw.1`
+
+Reason:
+
+- Device `10.0.87.132` had `/dev/mmcblk0p3` as an exFAT partition, but `/data`
+  was not mounted from p3.
+- The system update cache therefore landed on rootfs under
+  `/data/.hardened-kvmcache/system-update`, which is unsafe for raw writes.
+- Raw updater must not read rootfs payloads from the same rootfs partition that
+  it is about to overwrite.
+
+Implementation:
+
+- app version bumped to `2.0.14`;
+- `S01fs` mounts `/dev/mmcblk0p3` on `/data` with explicit `exfat` and retries;
+- raw install refuses to start when the staged payload directory is on the same
+  filesystem as `/`;
+- raw progress normalization marks a stopped raw writer as failed instead of
+  leaving stale reboot-required progress;
+- raw fail path clears markers before write-start failures and reboots if
+  runtime services had already been stopped.
+
+Build warning discovered during this step:
+
+- `make rust-kvmapp` without `RUST_TARGET` produced an x86-64 host binary;
+- the correct `2.0.14` build used:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+  APP_VERSION=2.0.14 \
+  scripts/package-rust-kvmapp.sh
+```
+
+Validation:
+
+- `file build/kvmapp-rust/kvmapp/server/NanoKVM-Server` reported RISC-V with
+  interpreter `/lib/ld-musl-riscv64xthead.so.1`;
+- `sh -n kvmapp/system/init.d/S01fs`: passed;
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed;
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests;
+- rootfs validator passed with `EXPECTED_KVMAPP_VERSION=2.0.14`;
+- app and system metadata signatures verified locally and after GitHub
+  publication.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.14.tar.gz` | `d84a7b90f755f7afa835db00d59da8f545159e7858153c13790fcdf4c3b3e077` |
+| App metadata | `build/artifacts/latest.json` | `bc1025ffc47333c256e83781396e9552f321ce13f7422c2a3b0523f75b8e2b76` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `a94fdfb5ea1b7764692751180df58efbd05f53c92ee187b4cc20ca6b0a5655a2` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.10-raw.1.tar.gz` | `00896816d05808223f4744493f79f26e934a021f571618b85e4debdfaf4ed26f` |
+| System metadata | `build/system-updates/system-latest.json` | `5269546e182bb055f3e46daa93e31ae5ca06628d732be861d1d7d96111c4b1e7` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `f5875d664da6b2e1d5e25e7fc99b7d9e76b3e0119e431ff0023b74d0ee86e0a6` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_14_buildroot_2023_11_2_security_datafix_Rev1_4_2_rust.img.xz` | `06eb09ff5ed7f48e1499c3d0b35e259380bdecc8b48800d945cc7c3f3e3e5bd7` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.14`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.10-raw.1`
+- App preview channel and system stable/preview channels were updated.
+
+Device `10.0.87.132` result:
+
+- app was manually repaired to correct RISC-V `2.0.14` after the accidental
+  x86-64 archive was installed;
+- `/data` p3 mounted correctly before staging;
+- `0.2.10-raw.1` download/stage succeeded and used `/data` p3;
+- install endpoint returned HTTP 200 with pending `raw-1782829729`;
+- after reboot/drop, the device later had no HTTP/SSH access. Later checks from
+  the host reported route/port failures, so diagnosis requires physical SD
+  inspection, serial, or reflashing.
+
+## 2026-06-30: Follow-up Data Partition Init Fix `2.0.15`
+
+Reason:
+
+- `0.2.10-raw.1` still allowed a dangerous first-boot path after a raw rootfs
+  write.
+- `/etc/kvm.disk0` lives on rootfs and was not preserved. If missing after raw
+  update while `/boot/usb.disk0` exists, `S01fs` could treat the boot as first
+  initialization and attempt to create/format p3 again.
+
+Implementation:
+
+- commit: `c2ee893 Make raw data partition handling idempotent`;
+- app version bumped to `2.0.15`;
+- `S01fs` now checks the real block device first:
+  - if `/dev/mmcblk0p3` exists, it only touches `/etc/kvm.disk0` and mounts
+    `/data`;
+  - it creates and formats p3 only when `/dev/mmcblk0p3` is absent;
+  - partition creation waits for the device node before `mkfs.exfat`.
+- raw updater now preserves and restores `/etc/kvm.disk0`.
+
+Validation:
+
+- `sh -n kvmapp/system/init.d/S01fs`: passed.
+- `cargo fmt --manifest-path server-rust/Cargo.toml`: passed.
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests.
+
+Next:
+
+1. Build and publish app `2.0.15`.
+2. Build and publish the next raw/SD release from commit `c2ee893` or newer.
+3. Do not retry raw installation from `0.2.10-raw.1`.
+4. Restore or inspect `10.0.87.132` before another live raw attempt.
+
+## 2026-06-30: Recovered Former `.132` After Raw `0.2.10`
+
+Device discovery:
+
+- The former `10.0.87.132` was found at DHCP address `10.0.87.44`.
+- `10.0.87.44` exposed NanoKVM HTTP:
+  `/api/health` returned Rust backend status.
+- Web login initially failed with `password setup required`; first setup was
+  recreated as `admin/admin1234`.
+
+Diagnostics through Scripts API:
+
+- hostname: `kvm-48ad`;
+- app: `2.0.14`;
+- system: `0.2.10-raw.1`;
+- `/boot/eth.nodhcp`: empty;
+- `/boot/eth.mac`: `02:17:54:27:05:a7`;
+- `/data`: mounted from `/dev/mmcblk0p3`;
+- `/tmp/data-mount.log`: showed `mkfs.exfat` had formatted p3 during boot,
+  confirming the first-boot marker loss bug;
+- `/etc/kvm.disk0`: present after boot;
+- `/api/vm/ssh`: disabled;
+- `/etc/init.d/S50sshd permanent_on` run from Scripts API started SSH.
+
+Manual repair:
+
+- copied local `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` to the
+  device;
+- extracted it and copied `/kvmapp`;
+- copied fixed init scripts into boot locations:
+  - `/etc/init.d/S01fs`;
+  - `/etc/init.d/S30eth`;
+  - `/etc/init.d/S95nanokvm`;
+- removed `/etc/kvm/ssh_stop`;
+- restored static network:
+  - `/boot/eth.nodhcp`: `10.0.87.132/24 10.0.87.5`;
+  - `/etc/kvm/network/dns.mode`: `manual`;
+  - `/etc/kvm/network/dns.servers`: `10.0.87.5`;
+  - `/etc/resolv.conf`: `nameserver 10.0.87.5`;
+- restarted networking and NanoKVM service.
+
+Final verified state:
+
+- `10.0.87.132` responds to ICMP, SSH 22, and HTTP 80;
+- `/api/health`: OK, Rust backend;
+- web login `admin/admin1234`: OK;
+- `/api/application/version`: current `2.0.15`, latest `2.0.14`;
+- `/api/system-update/status`: current `0.2.10-raw.1`, no staged/pending
+  update;
+- `/api/vm/ssh`: enabled;
+- `/api/network/dns`: static `10.0.87.132/24`, gateway `10.0.87.5`, DNS
+  `10.0.87.5`;
+- `/boot`, `/data`, and rootfs are mounted.
+
+Second-device search:
+
+- paused by user request until after this recovery;
+- known open ports from a broad `10.0.87.0/24` scan included
+  `10.0.87.40`, `10.0.87.87`, `10.0.87.88`, `10.0.87.89`, `10.0.87.128`,
+  `10.0.87.187`, and `10.0.87.188`, but they were not investigated further
+  after `.132` recovery resumed.
+
+## 2026-06-30: Recovered Second Device `.133`
+
+Discovery:
+
+- `10.0.87.133` reappeared with ICMP, SSH 22, and HTTP 80 available.
+- `/api/health` returned Rust backend status.
+- Web login `admin/admin1234` worked.
+
+Initial state:
+
+- app `2.0.13`;
+- system `0.2.5-raw.1`;
+- raw update toggle disabled;
+- SSH enabled;
+- static network already configured as `10.0.87.133/24`, gateway/DNS
+  `10.0.87.5`.
+
+Manual repair:
+
+- copied local `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` to
+  `/tmp`;
+- archive hash on device matched
+  `778fb544b5672644c68cc85e72f2849f938101d6547aa4a6134b95eeedbae12b`;
+- BusyBox `tar -z` is unsupported and `tar -a` failed on this image; extraction
+  works with `gzip -dc hardened-nanokvm-kvmapp-2.0.15.tar.gz | tar -xf - -C /tmp/kvmapp-2.0.15`;
+- replaced `/kvmapp`;
+- copied `S01fs`, `S30eth`, and `S95nanokvm` from `/kvmapp/system/init.d` to
+  `/etc/init.d`;
+- restored static network files for `10.0.87.133/24` and DNS `10.0.87.5`;
+- ensured SSH remains enabled.
+
+Verification:
+
+- reboot was issued and the device returned on `10.0.87.133`;
+- `/api/health`: OK, Rust backend;
+- `/api/application/version`: current `2.0.15`, latest `2.0.14`;
+- `/api/system-update/status`: current `0.2.5-raw.1`, boot health healthy;
+- `/api/vm/ssh`: enabled;
+- `/api/network/dns`: static `10.0.87.133/24`, gateway/DNS `10.0.87.5`;
+- `/data` mounted from `/dev/mmcblk0p3`;
+- installed `S01fs` has the idempotent p3 check and only touches
+  `/etc/kvm.disk0` when `/dev/mmcblk0p3` already exists.
+
+## 2026-06-30: Published Coherent `2.0.15` / `0.2.11-raw.1`
+
+Goal:
+
+- make the current app, raw system update, and SD-card image agree on the same
+  app payload and raw-system metadata;
+- publish `0.2.11-raw.1` after the idempotent `S01fs` fix;
+- split GUI labels so system-update version, base image, Buildroot release, and
+  security backport level are not confused.
+
+Implementation:
+
+- commit: `d9614b6 Clarify system update metadata display`;
+- app version: `2.0.15`;
+- raw system version: `0.2.11-raw.1`;
+- base image: `2026-06-29-12-08-d88d58.img`;
+- kernel string: `5.10.4-tag-`;
+- Buildroot release: `2023.11.2`;
+- security backport level: `Buildroot 2023.11.3 package backports`;
+- raw manifest source commit: `d9614b6`.
+
+Validation:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 116 lib tests
+  plus 2 main tests.
+- `corepack pnpm --dir web build`: passed.
+- `bash -n scripts/build-rust-sd-image.sh`: passed.
+- `sh -n scripts/create-raw-system-update-bundle.sh`: passed.
+- `sh -n scripts/create-system-update-metadata.sh`: passed.
+- RISC-V backend binary verified with `file`; interpreter is
+  `/lib/ld-musl-riscv64xthead.so.1`.
+- SD rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.15` and
+  `EXPECTED_BACKEND=rust`.
+- Raw rootfs validation passed with `EXPECTED_KVMAPP_VERSION=2.0.15` and
+  `EXPECTED_BACKEND=rust`.
+- App `latest.json` signature verified locally and after GitHub download.
+- System `system-latest.json` signature verified locally and after GitHub
+  download.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.15.tar.gz` | `860a860424393a0e4e7ac6f3e855fde6ad55b686df50d6e4e5faf090300a8bf1` |
+| App metadata | `build/artifacts/latest.json` | `b02cfc4fd2ee606037599d2210384b6724c217a157e7c778793c0a7c7c137b50` |
+| App metadata signature | `build/artifacts/latest.json.sig` | `3a719831e3d23a8d3b677ee8f55df0e24cb34a470ffd196f066e5fcecd2a5ed5` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.11-raw.1.tar.gz` | `f2033beb9453f1afc08552cc9ec5d311c5ca8945754890ea0116b2c0a61c25e8` |
+| System metadata | `build/system-updates/system-latest.json` | `2ccca00e01be1da0abd3d83e2cb6beef49894933b123af32e37781e51a864208` |
+| System metadata signature | `build/system-updates/system-latest.json.sig` | `7252ad9fb65c28941d4a8e0f11c1515f0b4b94a782f8d4e8e2b2713a39061eb0` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_15_buildroot_2023_11_2_security_backports_datafix_Rev1_4_2_rust.img.xz` | `39c3fde0af70eb8ed9400c2da6257f0b2952c6929c6c8e45d932ac699afb614b` |
+
+Publication:
+
+- App release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.15`
+- Raw system release:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.11-raw.1`
+- System stable channel:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-stable`
+
+Release cleanup plan:
+
+- keep current release entries and update-channel releases;
+- keep `hardened-rust-beta-1.0.5` as the first Rust-only security beta
+  milestone unless stricter cleanup is requested;
+- delete old alpha/internal/broken/obsolete release entries from the GitHub
+  Releases UI only after preserving their status in `docs/release-archive.md`;
+- do not delete git tags during this cleanup.
+
+## 2026-06-30: GitHub Release List Cleanup
+
+Scope:
+
+- deleted obsolete GitHub release entries/assets only;
+- did not delete git tags;
+- preserved historical/internal/broken release notes in
+  `docs/release-archive.md`.
+
+Result:
+
+- removed 51 old release entries:
+  - all alpha release entries;
+  - beta 1 candidates before `1.0.5`;
+  - internal `hardened-rust-sysupgrade-*` release entries;
+  - obsolete/broken beta 2 app release entries through `2.0.14`;
+  - obsolete/broken raw system release entries through `0.2.10-raw.1`;
+- remaining GitHub release entries:
+  - `hardened-rust-beta-1.0.5`;
+  - `hardened-rust-beta-2.0.15`;
+  - `hardened-rust-preview`;
+  - `hardened-system-0.2.11-raw.1`;
+  - `hardened-system-preview`;
+  - `hardened-system-stable`.
+
+Post-cleanup verification:
+
+- GitHub API returned exactly the 6 remaining releases listed above.
+- `releases/latest/download/latest.json` still returns app `2.0.15`.
+- `hardened-system-stable/system-latest.json` still returns system
+  `0.2.11-raw.1`.
+- App metadata signature verified OK.
+- System metadata signature verified OK.
+
+## 2026-06-30: `.132` Raw `0.2.11` Did Not Auto-Reboot
+
+Live test:
+
+- Device: `10.0.87.132`.
+- User installed raw `0.2.11-raw.1` from the GUI.
+- GUI kept spinning after runtime services stopped.
+- HTTP/HTTPS/SSH were closed, but local ICMP still answered.
+- User power-cycled the device manually.
+- Device booted successfully after power-cycle and the user confirmed the raw
+  update in the GUI.
+
+Post-boot device state:
+
+- `/kvmapp/version`: `2.0.15`;
+- `/etc/kvm/system-version.json`: `0.2.11-raw.1`;
+- `/etc/os-release`: Buildroot `2023.11.2`, `VERSION=-gd88d58fec-dirty`;
+- `/data`: mounted from `/dev/mmcblk0p3`;
+- `/etc/kvm/system-update-boot-good.json`: healthy and confirmed.
+
+Raw writer log:
+
+```text
+2026-06-30 18:46:04 raw system image update started
+2026-06-30 18:46:06 stopping NanoKVM runtime
+2026-06-30 18:46:09 preserving boot configuration files
+2026-06-30 18:46:09 preserving rootfs configuration files
+cp: write error: No space left on device
+2026-06-30 18:46:12 failed to preserve /usr/sbin/tailscaled
+2026-06-30 18:46:12 preparing /boot read-only
+2026-06-30 18:46:12 attempting rootfs read-only remount
+2026-06-30 18:46:12 rootfs is read-only after normal remount
+2026-06-30 18:46:12 testing compressed ROOTFS payload
+2026-06-30 18:47:41 streaming compressed ROOTFS to /dev/mmcblk0p2
+Segmentation fault
+...
+```
+
+Findings:
+
+- The log never reached `ROOTFS image write finished`, boot image write, or
+  `raw system image update finished; rebooting`.
+- `/dev/mmcblk0p1` SHA256 after boot did not match the `0.2.11-raw.1`
+  manifest boot image hash, so boot was not rewritten.
+- The raw writer copied BusyBox into `/tmp`, but BusyBox is dynamically linked.
+  It still depended on the rootfs musl loader/libc while `/dev/mmcblk0p2` was
+  being overwritten. Later tool invocations crashed with `Segmentation fault`,
+  so the writer did not call reboot.
+- Preserve state was also in `/tmp`; copying optional large files can exhaust
+  tmpfs before raw write.
+
+Fix started as app `2.0.16`:
+
+- copy BusyBox, musl loader, and libc into the raw update run directory;
+- launch the writer through the copied loader and `--library-path` so post-write
+  utility calls do not depend on the overwritten rootfs;
+- store preserved boot/rootfs configuration under the `/data` staging directory
+  instead of `/tmp`.
+
+## 2026-07-01: Raw Restore, Auto-Confirm, and Sysrq Reboot Fixes
+
+Summary:
+
+- App `2.0.17` / raw `0.2.13-raw.1` fixed the `/data` staging path by avoiding
+  forced `sync_all()` on large raw archive entries. Live staging on
+  `10.0.87.132` completed successfully.
+- Raw `0.2.13-raw.1` wrote rootfs and boot and rebooted, but root config
+  restore failed before reboot:
+  `mount ... /tmp/hardened-root-preserve-mount failed: Resource busy`.
+- App `2.0.18` / raw `0.2.14-raw.1` deferred root config restore to `S01fs`
+  on first boot and added automatic system-update confirm once backend health
+  succeeds.
+- Live `0.2.14-raw.1` validation on `10.0.87.132` succeeded:
+  - system version became `0.2.14-raw.1`;
+  - app version became `2.0.18`;
+  - log showed `restoring preserved root configuration after raw system update
+    boot` and `preserved root configuration restore finished`;
+  - watchdog log showed `pending system update auto-confirmed`.
+- That live test also showed a minor root-level preserve bug:
+  `failed to create restore directory for /device_key`.
+- App `2.0.19` / raw `0.2.15-raw.1` fixes root-level restore paths and changes
+  post-write reboot to kernel sysrq (`s`, `u`, `b`) so reboot no longer depends
+  on executing `/bin/reboot` from the overwritten live rootfs.
+
+Commits:
+
+- `41bdfc1 Fix large raw update staging`
+- `02086e0 Fix raw update root restore and auto-confirm`
+- `9094820 Fix raw update reboot path`
+- `80d32fa Update changelog for beta 2 releases` on `main`
+
+Published releases:
+
+- App `2.0.19`:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-beta-2.0.19`
+- Raw system `0.2.15-raw.1`:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.15-raw.1`
+- Stable channels:
+  - `hardened-rust-preview/latest.json` reports app `2.0.19`;
+  - `hardened-system-stable/system-latest.json` reports raw `0.2.15-raw.1`.
+
+Generated artifacts:
+
+| Artifact | Path | SHA256 |
+| --- | --- | --- |
+| App archive | `build/artifacts/hardened-nanokvm-kvmapp-2.0.19.tar.gz` | `6d4e0243cb53855a57baf79e01abc715446a21f926b036709fd9c4b032598b74` |
+| Raw system update | `build/system-updates/hardened-nanokvm-system-0.2.15-raw.1.tar.gz` | `a99b0b98f6d1132025ae6bf6c8f125b426ebe1f150f09e7b76f7f6062a039ff3` |
+| SD image | `build/sd-image/Hardened_NanoKVM_beta_2_0_19_buildroot_2023_11_2_security_backports_sysrqreboot_Rev1_4_2_rust.img.xz` | `83fd6a3409e101324348363e16c4f0edae538ee274931921e67d34b8054231f0` |
+
+Validation already completed:
+
+- `cargo test --manifest-path server-rust/Cargo.toml`: passed, 117 lib tests
+  plus 2 main tests.
+- `cargo test --manifest-path server-rust/Cargo.toml raw_image_updater`:
+  passed.
+- `corepack pnpm --dir web build`: passed.
+- `sh -n kvmapp/system/init.d/S01fs`: passed.
+- `sh -n kvmapp/system/init.d/S95nanokvm`: passed.
+- SD and raw rootfs validation both passed with
+  `EXPECTED_BACKEND=rust EXPECTED_KVMAPP_VERSION=2.0.19`.
+- App and system metadata signatures verified locally.
+- GitHub channel metadata verified after publish.
+
+Live test completed on `10.0.87.132`:
+
+- Device was updated to app `2.0.19`.
+- Device staged raw `0.2.15-raw.1`.
+- Raw install was started and returned backup id `raw-1782880745`.
+- During the raw-write window, ICMP stayed alive and HTTP was stopped. This is
+  expected while runtime services are stopped.
+- Device returned without manual intervention.
+- Final verification:
+  - `/api/health`: OK, Rust backend;
+  - `/api/application/version`: `current=2.0.19`, `latest=2.0.19`;
+  - `/kvmapp/version`: `2.0.19`;
+  - `/etc/kvm/system-version.json`: `0.2.15-raw.1`;
+  - `/api/system-update/status`: `current=0.2.15-raw.1`, `staged=null`,
+    `pending=null`, `progress=null`;
+  - raw update log included rootfs/boot write completion, deferred root restore,
+    and first-boot preserve restore without the old `/device_key` restore
+    directory error;
+  - watchdog log included `pending system update auto-confirmed`.
+
+## 2026-07-01 App 2.0.20 Firewall / Paranoid Mode Work
+
+Implemented unreleased app `2.0.20` firewall controls on
+`feature/new-buildroot-sysupgrade-lab`.
+
+Changes:
+
+- Added managed init script `/kvmapp/system/init.d/S40firewall`.
+- Removed the hardcoded iptables/ip6tables setup from `S95nanokvm`; it now
+  installs and runs `S40firewall`.
+- Added Rust API:
+  - `GET /api/system/firewall`;
+  - `POST /api/system/firewall`;
+  - `POST /api/system/firewall/confirm`.
+- Added `Settings > System > Firewall` GUI:
+  - current IPv4/IPv6/nft rules viewer;
+  - managed baseline mode;
+  - guarded Paranoid mode.
+- Paranoid mode requires HTTPS to be enabled and locally healthy before it can
+  be applied. In Paranoid mode, inbound HTTPS, loopback, established traffic,
+  DHCP, and essential IPv6 control traffic are allowed; other inbound/outbound
+  traffic is dropped.
+- Application and system online update checks/downloads now report that updates
+  are blocked while Paranoid mode is active.
+
+Validation:
+
+- Local:
+  - `cargo fmt`;
+  - `cargo test` from `server-rust/`;
+  - `corepack pnpm build` from `web/`;
+  - `sh -n kvmapp/system/init.d/S40firewall`;
+  - `git diff --check`.
+- Device `10.0.87.132`:
+  - manually installed
+    `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`;
+  - `/kvmapp/version`: `2.0.20`;
+  - `/api/health`: Rust backend OK;
+  - `GET /api/system/firewall`: `effectiveMode=baseline`,
+    `paranoidActive=false`, `paranoidAvailable=false`,
+    `httpsEnabled=false`, `preferred=iptables-legacy`;
+  - enabling Paranoid mode on the HTTP-only device is rejected with
+    `enable HTTPS before enabling Paranoid Firewall mode`.
+
+Manual-install note:
+
+- A direct `tar` overlay over an old `/kvmapp` left stale web assets on
+  `10.0.87.132`, which filled tmpfs during `S95nanokvm restart`.
+- Normal application update moves `/kvmapp` aside before installing, so it does
+  not retain stale assets. For manual tar-over tests, remove stale
+  `/kvmapp/server` or install through the backend update path.
+
+Follow-up:
+
+- Live Paranoid test on `10.0.87.132` showed the backend could be restored via
+  HTTPS API, but the GUI did not expose an obvious disable action.
+- Restored `.132` through HTTPS API to `mode=baseline`,
+  `paranoidActive=false`.
+- Updated firewall GUI so **Disable Paranoid** is always visible in the red
+  Paranoid alert and as a dedicated mode button whenever Paranoid is configured
+  or active.
+
+Restricted mode follow-up:
+
+- Added third managed firewall profile: `restricted`.
+- `restricted` requires HTTPS like `paranoid`, but keeps enough traffic for
+  normal secured administration:
+  - inbound HTTPS;
+  - outbound HTTPS;
+  - inbound SSH;
+  - outbound NTP UDP/123;
+  - outbound remote syslog UDP on configured `remotePort`, default 514;
+  - DHCP, established connections, and essential IPv6 control traffic.
+- Online update blocking remains tied only to `paranoid`; restricted mode keeps
+  outbound HTTPS open so GitHub metadata/downloads can still work.
+
+Live validation on `10.0.87.132`:
+
+- Installed rebuilt app `2.0.20` package:
+  `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`.
+- Enabled `mode=restricted` through HTTPS API.
+- Status returned:
+  - `effectiveMode=restricted`;
+  - `restrictedActive=true`;
+  - `paranoidActive=false`;
+  - `httpsEnabled=true`.
+- Verified SSH stayed reachable.
+- Verified HTTPS health stayed reachable externally via Windows `curl.exe` and
+  locally through `https://127.0.0.1/api/health`.
+- Verified `iptables -S` and `ip6tables -S` policies are `DROP` with allowlist
+  for:
+  - inbound HTTPS 443;
+  - outbound HTTPS 443;
+  - inbound SSH 22;
+  - outbound NTP UDP/123;
+  - outbound syslog UDP/514;
+  - DHCP, loopback, established traffic, and IPv6 control traffic.
+- Restored `.132` to `mode=baseline` after validation.
+
+## 2026-07-01 - HTTPS toggle and firewall fallback fix
+
+Problem:
+
+- If HTTPS was disabled while a restrictive firewall mode was configured, the
+  device could be left serving HTTP while the firewall still blocked ordinary
+  access.
+- Toggling HTTPS used the full `S95nanokvm restart` path. That path stops and
+  restarts `kvm_system`, which can wedge the HDMI/video pipeline and produce
+  `No HDMI signal` until reboot.
+
+Fix:
+
+- Added `S95nanokvm restart-server`, which restarts only `NanoKVM-Server` and
+  leaves `kvm_system` untouched.
+- Changed `/api/vm/tls` to use `restart-server` instead of full service
+  restart.
+- Changed HTTPS disable path to force managed firewall mode back to `baseline`
+  before writing `proto: http`.
+
+Validation on `10.0.87.132`:
+
+- Installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`.
+- Before test:
+  - `kvm_system` PID: `1638`;
+  - `NanoKVM-Server` PID: `1654`;
+  - firewall: `mode=restricted effective=restricted https=enabled`;
+  - server config: `proto: https`.
+- Disabled HTTPS through HTTPS API:
+  - HTTP health passed;
+  - firewall changed to `mode=baseline effective=baseline https=disabled`;
+  - `/etc/kvm/firewall.json` contained `{"mode":"baseline"}`;
+  - server config changed to `proto: http`;
+  - `kvm_system` PID remained `1638`;
+  - `NanoKVM-Server` restarted to PID `2136`.
+- Enabled HTTPS through HTTP API:
+  - HTTPS health passed;
+  - firewall stayed `mode=baseline effective=baseline https=enabled`;
+  - server config changed to `proto: https`;
+  - `kvm_system` PID remained `1638`;
+  - `NanoKVM-Server` restarted to PID `2470`.
+
+## 2026-07-01 - App RC1 preparation
+
+Release target:
+
+- Tag: `hardened-rust-rc1`.
+- Application version: `2.0.20`.
+- Archive:
+  `build/artifacts/hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz`.
+- Metadata:
+  `build/artifacts/latest.json`, signed with
+  `signature_key_id=hardened-system-dev`.
+
+RC1 scope:
+
+- Application/GUI/backend release only.
+- Raw system-update and SD-card channels remain on the last validated
+  `0.2.15-raw.1` / app `2.0.19` baseline until the next full system-image
+  release is explicitly built.
+
+Verification:
+
+- `cargo test` from `server-rust/`: 129 lib tests, 2 main tests passed.
+- `corepack pnpm --dir web build`: passed.
+- `git diff --check`: passed.
+- `server-rust/scripts/build-linked-libkvm.sh` with
+  `NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`:
+  passed.
+- Packaged archive manifest:
+  - source: `ee48c7a`;
+  - target: `riscv64gc-unknown-linux-musl`;
+  - app version: `2.0.20`;
+  - bundled `kvm_system` helper: `384456 bytes`.
+- Archive listing contains `NanoKVM-Server`, `NanoKVM-Server.rust`,
+  `S95nanokvm`, and `S40firewall`; no legacy Go backend files were present.
+- `latest.json.sig` verified with
+  `/home/w0w/Hardened_NanoKVM/build/release/system-update-signing-test.pub.pem`.
+
+Publish result:
+
+- GitHub release created:
+  `https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc1`.
+- Uploaded assets:
+  - `hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz`;
+  - `hardened-nanokvm-kvmapp-2.0.20-rc1.tar.gz.sha256`;
+  - `latest.json`;
+  - `latest.json.sha256`;
+  - `latest.json.sig`;
+  - `latest.json.sig.base64`.
+- Post-publish verification:
+  - `/releases/latest/download/latest.json` returns version `2.0.20` and the
+    RC1 archive URL;
+  - `/releases/download/hardened-rust-rc1/latest.json` returns the same
+    metadata;
+  - remote `latest.json.sig` verified with the test public key;
+  - remote archive sha256 check passed.
+
+Documentation follow-up:
+
+- Added `docs/sd-card-flashing.md` with end-user flashing instructions for:
+  - Windows with Balena Etcher;
+  - Linux with `xzcat`/`dd`;
+  - macOS with `diskutil`, `xzcat`, and raw `rdiskN`;
+  - FreeBSD with `camcontrol`/`gpart`, `xzcat`, and `dd`.
+- Linked the SD flashing guide from README.
+- Updated current-status docs to reflect app `2.0.20 RC1` as the latest app
+  release while leaving raw/SD channels on the validated `0.2.15-raw.1`
+  baseline.

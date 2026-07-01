@@ -1,12 +1,15 @@
 # NanoKVM Backend API Inventory
 
-This document maps the current Rust backend surface in `server-rust/`. It is
-intended as a living parity checklist against the original Go `NanoKVM-Server`.
+This document maps the current Rust backend surface in `server-rust/`. It is a
+living compatibility checklist against the historical upstream Go
+`NanoKVM-Server` API shape. The Go backend is not shipped in current Hardened
+release artifacts.
 
 ## Runtime And Serving Model
 
 - Active backend binary on device: `/kvmapp/server/NanoKVM-Server`.
 - Rust backend source: `server-rust/`.
+- Legacy upstream Go source: `server/`, retained for reference only.
 - Static frontend path: configured `paths.web_root`, normally
   `/kvmapp/server/web`.
 - Config file: `/etc/kvm/server.yaml`.
@@ -50,10 +53,45 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method | Path | Rust Status |
 |---|---|---|
-| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. |
-| POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. |
+| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. When Paranoid firewall mode is active, returns the current version with a blocked update message instead of opening outbound GitHub traffic. |
+| POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. Blocked while Paranoid firewall mode is active. |
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
 | GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
+
+### System Updates
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/system-update/version` | Implemented read-only; reports persisted `/etc/kvm/system-version.json` when present, otherwise falls back to `/boot/ver`, kernel release, Buildroot version, hardware marker, and target `sg2002-licheervnano-sd`. |
+| GET | `/api/system-update/check` | Implemented read-only; reads GitHub `hardened-system-stable/system-latest.json`, validates metadata shape, trusted URLs, archive name, size, sha256, sha512, and reports update availability. When Paranoid firewall mode is active, returns the current system state with a blocked update message instead of opening outbound GitHub traffic. |
+| GET | `/api/system-update/status` | Implemented read-only; reports the verified staged system bundle, pending installed update marker, boot-health summary, and latest rollback backup when present. |
+| POST | `/api/system-update/download` | Implemented staging-only; downloads the GitHub release asset, checks size, sha256, sha512, extracts it safely, verifies `manifest.json`, verifies every payload file hash/size/path, and writes `staged.json`. It does not install or reboot. Blocked while Paranoid firewall mode is active. |
+| POST | `/api/system-update/install` | Implemented guarded install; re-verifies staged archive, backs up each target file, applies payload files atomically, writes `/etc/kvm/system-version.json`, writes pending/backup markers, generates `/etc/kvm/system-update-rollback.sh` for init-time recovery, and returns without rebooting. |
+| POST | `/api/system-update/rollback` | Implemented manual rollback; restores files from the latest backup marker, clears pending/boot-good/rollback-attempt markers, and returns without rebooting. |
+| POST | `/api/system-update/confirm` | Implemented manual boot-good confirmation; validates pending version/target against current system identity and basic boot/web-root markers, writes `/etc/kvm/system-update-boot-good.json`, and clears pending marker. |
+
+### System Log
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET/POST | `/api/system-log/config` | Implemented in app `2.0.20`; persists `/etc/kvm/syslog.json`, renders `/etc/default/syslogd` and `/etc/default/klogd`, restarts BusyBox `syslogd`/`klogd`, keeps local logs in tmpfs at `/tmp/hardened-syslog/messages`, and supports UDP remote syslog forwarding. |
+| GET | `/api/system-log/messages` | Implemented; GUI uses the unified `kind=system` tmpfs syslog tail. Hidden/debug reads remain for `kind=kernel` from the current `dmesg` ring buffer and `kind=backend` from `/tmp/nanokvm-server.log`. Line count is clamped to 1-1000. |
+| POST | `/api/system-log/test` | Implemented; emits a test syslog message through `/dev/log` so local and remote forwarding paths can be verified. |
+
+### System Time
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET/POST | `/api/system/time` | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo`, writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
+| POST | `/api/system/time/sync` | Implemented; runs `ntpdate -u` against the first configured NTP server, then restarts `ntpd`. |
+
+### System Firewall
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/system/firewall` | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output. |
+| POST | `/api/system/firewall` | Implemented; accepts `baseline`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. |
+| POST | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores baseline/previous mode if Restricted or Paranoid is enabled but not confirmed. |
 
 ### VM, Device, And Settings
 
@@ -64,7 +102,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST | `/api/vm/hostname` | Implemented. |
 | GET/POST | `/api/vm/web-title` | Implemented. |
 | GET/POST | `/api/vm/gpio` | Implemented. |
-| POST | `/api/vm/screen` | Implemented; writes Go-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
+| POST | `/api/vm/screen` | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
 | GET/POST | `/api/vm/device/virtual` | Implemented. |
 | GET/POST | `/api/vm/oled` | Implemented. |
 | GET | `/api/vm/hdmi` | Implemented. |
@@ -95,7 +133,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET | `/api/stream/mjpeg` | Implemented through `libkvm` with shared fanout. |
 | POST | `/api/stream/mjpeg/detect` | Implemented. |
 | POST | `/api/stream/mjpeg/detect/stop` | Implemented. |
-| GET | `/api/stream/h264/direct` | Implemented Go-compatible direct H.264 binary frame WebSocket. |
+| GET | `/api/stream/h264/direct` | Implemented NanoKVM-compatible direct H.264 binary frame WebSocket. |
 | GET | `/api/stream/h264` | Implemented H.264 WebRTC signaling and RTP sample streaming; needs more browser/ICE soak testing. |
 | GET | `/api/hid/shortcuts` | Implemented. |
 | POST/DELETE | `/api/hid/shortcut` | Implemented. |
@@ -171,8 +209,8 @@ Rust hardening fields under `security` include `require_csrf`,
 `allowed_origins`.
 
 Rust-only path fields include `paths.system_update_public_key`, defaulting to
-`/etc/kvm/system-update-signing.pub.pem`, for detached application-update
-metadata signature verification. The default key is synchronized from
+`/etc/kvm/system-update-signing.pub.pem`, for detached application-update and
+system-update metadata signature verification. The default key is synchronized from
 `/kvmapp/system/keys/system-update-signing.pub.pem` by `S95nanokvm` on service
 start.
 
@@ -192,4 +230,6 @@ start.
 - H.264 WebRTC needs longer browser/ICE validation.
 - `kvmapp` update metadata is signed; release publishing must upload
   `latest.json` and `latest.json.sig`.
-- GUI system updates for vendor-kernel/security backports are not implemented.
+- System-update API/GUI exists, including signed metadata enforcement and
+  rollback, but real vendor-kernel/security-backport bundles still need device
+  testing and release assets.

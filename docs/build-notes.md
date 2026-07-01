@@ -39,8 +39,17 @@ libc.so
 libgcc_s.so or libgcc_s.so.1
 ```
 
-The current repo copy already keeps this under `server-rust/sysroot/lib` on the
-build machine used for releases.
+If the active checkout does not have `server-rust/sysroot/lib`, point the build
+at the known-good extracted NanoKVM sysroot explicitly:
+
+```sh
+NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib \
+  server-rust/scripts/build-linked-libkvm.sh
+```
+
+Do not run `make rust-kvmapp` unless `RUST_TARGET` is explicitly set. Without
+that environment variable it can package an x86-64 host binary that installs
+successfully but fails on the device with `Exec format error`.
 
 ## Build And Package Kvmapp
 
@@ -67,6 +76,7 @@ The binary should be a dynamic RISC-V executable using the NanoKVM loader:
 
 ```sh
 file server-rust/target/riscv64gc-unknown-linux-musl/release/nanokvm-rust-server
+file build/kvmapp-rust/kvmapp/server/NanoKVM-Server
 ```
 
 Expected shape:
@@ -75,6 +85,9 @@ Expected shape:
 ELF 64-bit LSB pie executable, UCB RISC-V, dynamically linked,
 interpreter /lib/ld-musl-riscv64xthead.so.1
 ```
+
+If `file build/kvmapp-rust/kvmapp/server/NanoKVM-Server` reports `x86-64`, stop
+and rebuild before publishing or installing the archive.
 
 ## Manual Device Install
 
@@ -160,3 +173,54 @@ The init script also starts a local health watchdog. If `/api/health` fails
 repeatedly, it writes `/etc/kvm/h264_safe_mode`, forces `/kvmapp/kvm/type` to
 `mjpeg`, and restarts only `NanoKVM-Server`.
 
+## SD And Raw System Update Builds
+
+The safe raw-system-update flow is:
+
+```sh
+cargo test --manifest-path server-rust/Cargo.toml
+corepack pnpm --dir web build
+server-rust/scripts/build-linked-libkvm.sh
+RUST_TARGET=riscv64gc-unknown-linux-musl \
+  APP_VERSION="$(cat kvmapp/version)" \
+  scripts/package-rust-kvmapp.sh
+make sd-image HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
+make raw-system-update-images HARDENED_RELEASE_VERSION="$(cat kvmapp/version)"
+make raw-system-update-bundle \
+  HARDENED_RELEASE_VERSION="$(cat kvmapp/version)" \
+  SYSTEM_UPDATE_VERSION="<system-version>" \
+  RAW_IMAGE_COMPRESSION=gzip \
+  REQUIRED_FREE_BYTES=671088640
+```
+
+`scripts/extract-sd-raw-images.sh` accepts either `.img` or `.img.xz`; compressed
+images are decompressed to a temporary file before partition extraction.
+
+`make raw-system-update-bundle` must package boot/rootfs images extracted from
+the patched Hardened SD image. Do not point it at vendor SDK
+`rawimages/rootfs.sd`; that is a stock Buildroot rootfs without `/kvmapp`,
+`/etc/kvm`, NanoKVM init, or web assets.
+
+Raw partition updates overwrite boot and rootfs. The app updater used to launch
+them must preserve and restore user settings before reboot. Do not test or
+publish a raw update path from an app older than `2.0.12` when the bundle uses
+gzip payloads, because older app versions do not understand
+`images/rootfs.sd.gz`. Do not publish a raw update path from an app older than
+`2.0.11` even for uncompressed payloads, because those versions do not restore
+`/boot` network settings, `/etc/kvm` account/config state, SSH host keys, root
+password files, or extension state after the raw write.
+
+Current raw bundles should use the default gzip payload mode. The updater keeps
+`rootfs.sd.gz` and `boot.vfat.gz` compressed in the extracted staging tree and
+streams them directly to `/dev/mmcblk0p2` and `/dev/mmcblk0p1`; this avoids
+requiring enough `/data` or rootfs free space to hold an additional full 1.5GB
+rootfs image.
+
+The guard rail is:
+
+```sh
+scripts/validate-nanokvm-rootfs.sh <rootfs.sd>
+```
+
+The validator must pass before signing or uploading any raw system update.
+`hardened-system-0.1.0-raw.1` failed this rule and is considered revoked.
