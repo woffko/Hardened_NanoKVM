@@ -1,0 +1,37 @@
+#!/bin/sh
+
+DAEMON=/sbin/klogd
+PIDFILE=/var/run/klogd.pid
+
+KLOGD_ARGS=
+[ -r /etc/default/klogd ] && . /etc/default/klogd
+
+start() {
+    printf 'Starting klogd: '
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -n $KLOGD_ARGS
+    [ $? = 0 ] && echo OK || echo FAIL
+}
+
+stop() {
+    printf 'Stopping klogd: '
+    start-stop-daemon -K -q -p "$PIDFILE" || killall klogd 2>/dev/null || true
+    echo OK
+}
+
+restart() {
+    stop
+    start
+}
+
+case "$1" in
+    start|stop|restart)
+        "$1"
+        ;;
+    reload)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac

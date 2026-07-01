@@ -1,3 +1,18 @@
+## Hardened NanoKVM Beta 2.0.20 (unreleased)
+
+### Features
+
+* Added `Settings > System Log` with UDP remote syslog forwarding, local
+  tmpfs-backed log viewing, kernel log viewing, and a test log action.
+* Added web login audit events to syslog for successful logins, failed
+  credentials, and lockout events.
+
+### Notes
+
+* The local log viewer keeps the active log buffer under `/tmp` to avoid
+  steady SD-card writes. Only syslog configuration is persisted.
+* Remote forwarding uses BusyBox `syslogd -R`, so the initial transport is UDP.
+
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 
 ### Bug Fixes

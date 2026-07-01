@@ -70,6 +70,14 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST | `/api/system-update/rollback` | Implemented manual rollback; restores files from the latest backup marker, clears pending/boot-good/rollback-attempt markers, and returns without rebooting. |
 | POST | `/api/system-update/confirm` | Implemented manual boot-good confirmation; validates pending version/target against current system identity and basic boot/web-root markers, writes `/etc/kvm/system-update-boot-good.json`, and clears pending marker. |
 
+### System Log
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET/POST | `/api/system-log/config` | Implemented in app `2.0.20`; persists `/etc/kvm/syslog.json`, renders `/etc/default/syslogd` and `/etc/default/klogd`, restarts BusyBox `syslogd`/`klogd`, keeps local logs in tmpfs at `/tmp/hardened-syslog/messages`, and supports UDP remote syslog forwarding. |
+| GET | `/api/system-log/messages` | Implemented; returns bounded tail output for `kind=system` from the tmpfs syslog file, `kind=kernel` from the current `dmesg` ring buffer, or `kind=backend` from `/tmp/nanokvm-server.log`, with line count clamped to 1-1000. |
+| POST | `/api/system-log/test` | Implemented; emits a test syslog message through `/dev/log` so local and remote forwarding paths can be verified. |
+
 ### VM, Device, And Settings
 
 | Method | Path | Rust Status |

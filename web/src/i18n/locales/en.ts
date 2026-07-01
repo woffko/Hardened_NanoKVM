@@ -477,6 +477,61 @@ const en = {
           unsaved: 'Unsaved changes'
         }
       },
+      systemLog: {
+        title: 'System Log',
+        loadFailed: 'Failed to load log settings',
+        saveFailed: 'Failed to save log settings',
+        saved: 'Log settings saved',
+        invalidHost: 'Enter a syslog server host',
+        logLoadFailed: 'Failed to load logs',
+        save: 'Save',
+        test: 'Send test log',
+        testSent: 'Test log sent',
+        testFailed: 'Failed to send test log',
+        remote: {
+          title: 'Remote Syslog',
+          description: 'Forward system logs to a syslog server',
+          host: 'Server',
+          port: 'Port',
+          protocol: 'UDP syslog is used by the current BusyBox syslogd.'
+        },
+        local: {
+          title: 'Local Log Buffer',
+          description: 'Current logs are kept in RAM at {{path}} to avoid SD-card writes.',
+          priority: 'Minimum priority',
+          buffer: 'Buffer size',
+          rotations: 'Rotations',
+          compact: 'Compact output',
+          stripTimestamps: 'Strip timestamps'
+        },
+        kernel: {
+          title: 'Kernel Log',
+          description:
+            'Forward kernel messages into syslog. The Kernel viewer reads the current dmesg ring buffer.',
+          enabled: 'Kernel messages',
+          consoleLevel: 'Console level'
+        },
+        viewer: {
+          title: 'Log Viewer',
+          refresh: 'Refresh',
+          system: 'System (syslog)',
+          kernel: 'Kernel (dmesg)',
+          backend: 'Backend',
+          empty: 'No log entries',
+          truncated: 'Only the latest log data is shown.',
+          lines: '{{count}} lines'
+        },
+        level: {
+          1: '1 - Alert',
+          2: '2 - Critical',
+          3: '3 - Error',
+          4: '4 - Warning',
+          5: '5 - Notice',
+          6: '6 - Info',
+          7: '7 - Debug',
+          8: '8 - All'
+        }
+      },
       tailscale: {
         title: 'Tailscale',
         memory: {

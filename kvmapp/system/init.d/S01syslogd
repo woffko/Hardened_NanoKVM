@@ -1,0 +1,39 @@
+#!/bin/sh
+
+DAEMON=/sbin/syslogd
+PIDFILE=/var/run/syslogd.pid
+LOG_DIR=/tmp/hardened-syslog
+
+SYSLOGD_ARGS=
+[ -r /etc/default/syslogd ] && . /etc/default/syslogd
+
+start() {
+    printf 'Starting syslogd: '
+    mkdir -p "$LOG_DIR"
+    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -n $SYSLOGD_ARGS
+    [ $? = 0 ] && echo OK || echo FAIL
+}
+
+stop() {
+    printf 'Stopping syslogd: '
+    start-stop-daemon -K -q -p "$PIDFILE" || killall syslogd 2>/dev/null || true
+    echo OK
+}
+
+restart() {
+    stop
+    start
+}
+
+case "$1" in
+    start|stop|restart)
+        "$1"
+        ;;
+    reload)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac

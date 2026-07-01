@@ -25,6 +25,63 @@ Last updated: 2026-07-01
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
 
+### Active Unreleased Work: App 2.0.20 System Log
+
+- Source version bumped to `2.0.20`; release is not published yet.
+- Implemented `Settings > System Log`:
+  - UDP remote syslog forwarding via BusyBox `syslogd -R`;
+  - local system log viewer backed by `/tmp/hardened-syslog/messages`
+    (`tmpfs`, no steady SD-card writes);
+  - kernel log viewer using the current `dmesg` ring buffer;
+  - backend log viewer for `/tmp/nanokvm-server.log`;
+  - configurable priority, RAM buffer size, rotations, compact output,
+    timestamp stripping, and klogd console level;
+  - `Send test log` action.
+- Added backend APIs:
+  - `GET/POST /api/system-log/config`;
+  - `GET /api/system-log/messages?kind=system|kernel|backend&lines=...`;
+  - `POST /api/system-log/test`.
+- Added web-login audit entries to syslog through `/dev/log`:
+  - success;
+  - invalid credentials;
+  - lockout/locked attempts.
+- Added managed `/kvmapp/system/init.d/S01syslogd` and `S02klogd`; `S95nanokvm`
+  now installs them into `/etc/init.d` during app startup/update.
+- Local verification already run:
+  - `cargo test --manifest-path server-rust/Cargo.toml system_log`;
+  - `cargo test --manifest-path server-rust/Cargo.toml audit`;
+  - `cargo test --manifest-path server-rust/Cargo.toml`;
+  - `corepack pnpm --dir web build`;
+  - `sh -n kvmapp/system/init.d/S01syslogd`;
+  - `sh -n kvmapp/system/init.d/S02klogd`.
+- Device validation on `10.0.87.132`:
+  - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
+  - `/kvmapp/version` reports `2.0.20`;
+  - `/api/health` reports Rust backend OK over HTTP;
+  - `POST /api/system-log/config` applied tmpfs logging;
+  - `syslogd` runs as
+    `/sbin/syslogd -n -O /tmp/hardened-syslog/messages -s 200 -b 1 -l 8`;
+  - `klogd` runs as `/sbin/klogd -n -c 7`;
+  - `POST /api/system-log/test` appears in the system log;
+  - `GET /api/system-log/messages?kind=kernel` returns `dmesg` output;
+  - invalid and successful web logins appear as `hardened-nanokvm-auth`
+    syslog events.
+- Follow-up validation after adding the `Backend` viewer:
+  - rebuilt linked RISC-V backend and reinstalled the `2.0.20` package on
+    `10.0.87.132`;
+  - `/api/system-log/messages?kind=backend` returns
+    `/tmp/nanokvm-server.log`;
+  - `/api/system-log/messages?kind=system` returns the tmpfs syslog tail and
+    includes web login audit entries;
+  - `/api/system-log/messages?kind=kernel` returns current `dmesg` ring-buffer
+    output.
+- Observed follow-up: `/etc/inittab` respawns a `getty` for missing
+  `/dev/ttyGS0`, producing repeated `auth.err getty[...]` entries. It is
+  unrelated to the new syslog feature but should be cleaned before enabling
+  remote syslog broadly.
+- Still pending before release:
+  - publish app/raw/SD artifacts only if the user asks for a release.
+
 ## Latest Releases
 
 ### App Release

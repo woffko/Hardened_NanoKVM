@@ -485,6 +485,61 @@ const ru = {
           unsaved: 'Несохраненные изменения'
         }
       },
+      systemLog: {
+        title: 'Системный лог',
+        loadFailed: 'Не удалось загрузить настройки логирования',
+        saveFailed: 'Не удалось сохранить настройки логирования',
+        saved: 'Настройки логирования сохранены',
+        invalidHost: 'Введите адрес syslog-сервера',
+        logLoadFailed: 'Не удалось загрузить логи',
+        save: 'Сохранить',
+        test: 'Отправить тест',
+        testSent: 'Тестовая запись отправлена',
+        testFailed: 'Не удалось отправить тестовую запись',
+        remote: {
+          title: 'Удаленный Syslog',
+          description: 'Отправка системных логов на syslog-сервер',
+          host: 'Сервер',
+          port: 'Порт',
+          protocol: 'Текущий BusyBox syslogd использует UDP syslog.'
+        },
+        local: {
+          title: 'Локальный буфер логов',
+          description: 'Текущие логи хранятся в RAM по пути {{path}}, без записи на SD-карту.',
+          priority: 'Минимальный уровень',
+          buffer: 'Размер буфера',
+          rotations: 'Ротации',
+          compact: 'Компактный вывод',
+          stripTimestamps: 'Убирать timestamp'
+        },
+        kernel: {
+          title: 'Лог ядра',
+          description:
+            'Передача сообщений ядра в syslog. Вкладка ядра читает текущий кольцевой буфер dmesg.',
+          enabled: 'Сообщения ядра',
+          consoleLevel: 'Уровень консоли'
+        },
+        viewer: {
+          title: 'Просмотр логов',
+          refresh: 'Обновить',
+          system: 'Системный (syslog)',
+          kernel: 'Ядро (dmesg)',
+          backend: 'Backend',
+          empty: 'Записей нет',
+          truncated: 'Показана только последняя часть лога.',
+          lines: '{{count}} строк'
+        },
+        level: {
+          1: '1 - Alert',
+          2: '2 - Critical',
+          3: '3 - Error',
+          4: '4 - Warning',
+          5: '5 - Notice',
+          6: '6 - Info',
+          7: '7 - Debug',
+          8: '8 - Все'
+        }
+      },
       tailscale: {
         title: 'Tailscale',
         memory: {

@@ -9,6 +9,7 @@ pub mod picoclaw;
 pub mod script;
 pub mod storage;
 pub mod stream;
+pub mod system_log;
 pub mod system_update;
 pub mod tailscale;
 pub mod vm;

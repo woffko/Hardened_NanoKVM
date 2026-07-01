@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{AppError, Result};
 
-const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum AllowedCommand {
@@ -17,6 +17,8 @@ pub enum AllowedCommand {
     Passwd,
     ServiceNanokvmRestart,
     ServiceSshd,
+    ServiceSyslogd,
+    ServiceKlogd,
     ServiceAvahiDaemon,
     ServiceUsbDev,
     ServiceEth,
@@ -35,6 +37,7 @@ pub enum AllowedCommand {
     Wget,
     OpenSsl,
     Ip,
+    Dmesg,
     Pidof,
     Kill,
     CustomForTest(PathBuf),
@@ -55,6 +58,8 @@ impl AllowedCommand {
             AllowedCommand::Passwd => OsStr::new("passwd"),
             AllowedCommand::ServiceNanokvmRestart => OsStr::new("/etc/init.d/S95nanokvm"),
             AllowedCommand::ServiceSshd => OsStr::new("/etc/init.d/S50sshd"),
+            AllowedCommand::ServiceSyslogd => OsStr::new("/etc/init.d/S01syslogd"),
+            AllowedCommand::ServiceKlogd => OsStr::new("/etc/init.d/S02klogd"),
             AllowedCommand::ServiceAvahiDaemon => OsStr::new("/etc/init.d/S50avahi-daemon"),
             AllowedCommand::ServiceUsbDev => OsStr::new("/etc/init.d/S03usbdev"),
             AllowedCommand::ServiceEth => OsStr::new("/etc/init.d/S30eth"),
@@ -75,6 +80,7 @@ impl AllowedCommand {
             AllowedCommand::Wget => OsStr::new("/usr/bin/wget"),
             AllowedCommand::OpenSsl => OsStr::new("/usr/bin/openssl"),
             AllowedCommand::Ip => OsStr::new("/usr/sbin/ip"),
+            AllowedCommand::Dmesg => OsStr::new("dmesg"),
             AllowedCommand::Pidof => OsStr::new("pidof"),
             AllowedCommand::Kill => OsStr::new("kill"),
             AllowedCommand::CustomForTest(path) => path.as_os_str(),
@@ -228,11 +234,10 @@ where
         if n == 0 {
             break;
         }
-        let remaining = MAX_CAPTURE_BYTES.saturating_sub(out.len());
-        if remaining == 0 {
-            break;
+        if out.len() < MAX_CAPTURE_BYTES {
+            let remaining = MAX_CAPTURE_BYTES - out.len();
+            out.extend_from_slice(&chunk[..n.min(remaining)]);
         }
-        out.extend_from_slice(&chunk[..n.min(remaining)]);
     }
     Ok(out)
 }

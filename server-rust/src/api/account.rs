@@ -17,7 +17,10 @@ use crate::{
         tls::ClientAddr,
     },
     state::AppState,
-    system::command::{AllowedCommand, CommandOutput, run_allowed_with_stdin},
+    system::{
+        audit,
+        command::{AllowedCommand, CommandOutput, run_allowed_with_stdin},
+    },
 };
 
 const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,6 +80,7 @@ pub async fn login(
     {
         let mut limiter = state.login_limiter.write().await;
         if limiter.check(&source_ip, &req.username) {
+            audit::login_failure(&req.username, &source_ip, "locked");
             return Err(AppError::RateLimited(
                 "account locked due to too many failed attempts".to_string(),
             ));
@@ -89,10 +93,14 @@ pub async fn login(
         let locked = limiter.record_failure(&source_ip, &req.username);
         if locked {
             tracing::warn!(source_ip, username = %req.username, "login lockout threshold reached");
+            audit::login_failure(&req.username, &source_ip, "lockout");
+        } else {
+            audit::login_failure(&req.username, &source_ip, "invalid_credentials");
         }
         return Err(AppError::InvalidCredentials);
     }
 
+    audit::login_success(&req.username, &source_ip);
     state
         .login_limiter
         .write()

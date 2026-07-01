@@ -151,12 +151,16 @@ reserved-memory, and `libkvm.so` compatibility is understood and tested.
    - progress, verification state, reboot prompt, and rollback status.
 
 9. Add remote syslog support for update observability:
-   - `Settings > Device > Advanced` toggle and host/port/protocol fields;
-   - BusyBox `syslogd` forwarding with local logging kept enabled;
-   - Rust/backend, init/watchdog, and raw updater logs routed through syslog
-     tags such as `nanokvm-server` and `hardened-system-update`;
-   - `Send test log` action in the GUI;
-   - LAN/VPN-only warning because initial syslog transport is plaintext UDP.
+   - initial implementation is in app `2.0.20` under `Settings > System Log`;
+   - BusyBox `syslogd` UDP forwarding keeps a local tmpfs log buffer enabled;
+   - GUI exposes host/port, priority, RAM buffer size, rotations, kernel log
+     forwarding, local system/kernel viewers, and `Send test log`;
+   - web login success/failure/lockout audit events are routed through
+     `/dev/log`;
+   - remaining follow-up: route raw-updater/init/watchdog logs through
+     consistent syslog tags such as `hardened-system-update`;
+   - LAN/VPN-only warning remains because initial syslog transport is plaintext
+     UDP.
 
 ## GitHub Release Contract
 
