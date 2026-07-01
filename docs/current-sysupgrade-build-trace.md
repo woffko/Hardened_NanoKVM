@@ -2176,3 +2176,55 @@ Live test completed on `10.0.87.132`:
     and first-boot preserve restore without the old `/device_key` restore
     directory error;
   - watchdog log included `pending system update auto-confirmed`.
+
+## 2026-07-01 App 2.0.20 Firewall / Paranoid Mode Work
+
+Implemented unreleased app `2.0.20` firewall controls on
+`feature/new-buildroot-sysupgrade-lab`.
+
+Changes:
+
+- Added managed init script `/kvmapp/system/init.d/S40firewall`.
+- Removed the hardcoded iptables/ip6tables setup from `S95nanokvm`; it now
+  installs and runs `S40firewall`.
+- Added Rust API:
+  - `GET /api/system/firewall`;
+  - `POST /api/system/firewall`;
+  - `POST /api/system/firewall/confirm`.
+- Added `Settings > System > Firewall` GUI:
+  - current IPv4/IPv6/nft rules viewer;
+  - managed baseline mode;
+  - guarded Paranoid mode.
+- Paranoid mode requires HTTPS to be enabled and locally healthy before it can
+  be applied. In Paranoid mode, inbound HTTPS, loopback, established traffic,
+  DHCP, and essential IPv6 control traffic are allowed; other inbound/outbound
+  traffic is dropped.
+- Application and system online update checks/downloads now report that updates
+  are blocked while Paranoid mode is active.
+
+Validation:
+
+- Local:
+  - `cargo fmt`;
+  - `cargo test` from `server-rust/`;
+  - `corepack pnpm build` from `web/`;
+  - `sh -n kvmapp/system/init.d/S40firewall`;
+  - `git diff --check`.
+- Device `10.0.87.132`:
+  - manually installed
+    `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`;
+  - `/kvmapp/version`: `2.0.20`;
+  - `/api/health`: Rust backend OK;
+  - `GET /api/system/firewall`: `effectiveMode=baseline`,
+    `paranoidActive=false`, `paranoidAvailable=false`,
+    `httpsEnabled=false`, `preferred=iptables-legacy`;
+  - enabling Paranoid mode on the HTTP-only device is rejected with
+    `enable HTTPS before enabling Paranoid Firewall mode`.
+
+Manual-install note:
+
+- A direct `tar` overlay over an old `/kvmapp` left stale web assets on
+  `10.0.87.132`, which filled tmpfs during `S95nanokvm restart`.
+- Normal application update moves `/kvmapp` aside before installing, so it does
+  not retain stale assets. For manual tar-over tests, remove stale
+  `/kvmapp/server` or install through the backend update path.

@@ -10,6 +10,12 @@
   now lives inside this section.
 * Added `Settings > System > Time` with timezone selection, NTP enable/disable,
   editable NTP servers, router/default server shortcuts, and manual sync.
+* Added `Settings > System > Firewall` with a read-only iptables/ip6tables/nft
+  rules viewer and a guarded Paranoid mode.
+* Added managed baseline firewall initialization through `S40firewall`, replacing
+  the older hardcoded iptables setup in `S95nanokvm`.
+* Added online-update blocking notices when Paranoid mode is active, because
+  outbound traffic to GitHub is intentionally blocked in that mode.
 
 ### Notes
 
@@ -18,6 +24,9 @@
 * Remote forwarding uses BusyBox `syslogd -R`, so the initial transport is UDP.
 * NTP remains enabled by default and uses public `pool.ntp.org` servers unless
   the user changes the server list.
+* Paranoid firewall mode is available only after HTTPS is enabled and verified
+  locally. It allows inbound HTTPS plus loopback, established traffic, DHCP, and
+  essential IPv6 control traffic; other inbound and outbound traffic is dropped.
 
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 

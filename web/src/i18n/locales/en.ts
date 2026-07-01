@@ -481,6 +481,7 @@ const en = {
         title: 'System',
         sections: {
           time: 'Time',
+          firewall: 'Firewall',
           systemLog: 'System Log'
         },
         time: {
@@ -512,6 +513,46 @@ const en = {
             useRouter: 'Use router',
             useDefaults: 'Use defaults',
             routerDetected: 'Detected router: {{gateway}}'
+          }
+        },
+        firewall: {
+          loadFailed: 'Failed to load firewall status',
+          saveFailed: 'Failed to apply firewall settings',
+          saved: 'Firewall settings applied',
+          cancel: 'Cancel',
+          refresh: 'Refresh',
+          backend: 'Backend',
+          effectiveMode: 'Effective mode',
+          disabled: 'Disabled',
+          enabledPort: 'Enabled on port {{port}}',
+          enableHttpsFirst: 'Enable HTTPS before enabling Paranoid Firewall mode',
+          httpsRequired:
+            'Paranoid mode is disabled until HTTPS is enabled in Settings > Network.',
+          mode: {
+            title: 'Firewall Mode',
+            description:
+              'The firewall service is always managed. Baseline keeps current NanoKVM access; Paranoid blocks all application traffic except HTTPS access.',
+            baseline: 'Managed baseline',
+            paranoid: 'Paranoid'
+          },
+          paranoid: {
+            enable: 'Enable Paranoid',
+            active: 'Paranoid Firewall mode is active',
+            blocks:
+              'Online updates and outbound network features are blocked. Offline update upload and already staged installs remain available.',
+            confirmTitle: 'Enable Paranoid Firewall mode?',
+            confirmDesc:
+              'Only HTTPS access will remain available. SSH, HTTP, mDNS, NTP, GitHub downloads, and other inbound/outbound traffic will be blocked except for minimal DHCP/IPv6 control traffic.'
+          },
+          baseline: {
+            apply: 'Managed baseline',
+            confirmTitle: 'Return to managed baseline?',
+            confirmDesc:
+              'This keeps the firewall service active but restores the normal NanoKVM access profile.'
+          },
+          rules: {
+            title: 'Current Rules',
+            empty: 'No rules'
           }
         }
       },
@@ -614,6 +655,9 @@ const en = {
         title: 'Check for Updates',
         queryFailed: 'Get version failed',
         updateFailed: 'Update failed. Please retry.',
+        paranoidBlocked: 'Online updates are blocked by Paranoid Firewall mode',
+        paranoidBlockedDesc:
+          'GitHub checks and downloads require outbound network access. Offline upload and already staged installs remain available.',
         isLatest: 'You already have the latest version.',
         available: 'An update is available. Are you sure you want to update now?',
         updating: 'Update started. Please wait...',

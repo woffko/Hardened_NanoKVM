@@ -1,0 +1,162 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/kvm/firewall.json
+SERVER_CONFIG=/etc/kvm/server.yaml
+
+firewall_mode() {
+    [ -r "$CONFIG_FILE" ] || {
+        echo baseline
+        return
+    }
+
+    mode="$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" 2>/dev/null | head -n 1)"
+    case "$mode" in
+        paranoid) echo paranoid ;;
+        *) echo baseline ;;
+    esac
+}
+
+https_enabled() {
+    grep -q '^proto:[[:space:]]*https[[:space:]]*$' "$SERVER_CONFIG" 2>/dev/null
+}
+
+https_port() {
+    port="$(sed -n 's/^[[:space:]]*https:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SERVER_CONFIG" 2>/dev/null | head -n 1)"
+    [ -n "$port" ] || port=443
+    echo "$port"
+}
+
+reset_ipv4() {
+    iptables -P INPUT ACCEPT 2>/dev/null || true
+    iptables -P FORWARD ACCEPT 2>/dev/null || true
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    iptables -F 2>/dev/null || true
+}
+
+reset_ipv6() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    ip6tables -P INPUT ACCEPT 2>/dev/null || true
+    ip6tables -P FORWARD ACCEPT 2>/dev/null || true
+    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+    ip6tables -F 2>/dev/null || true
+}
+
+apply_baseline_ipv4() {
+    reset_ipv4
+    iptables -A INPUT -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP 2>/dev/null || true
+}
+
+apply_baseline_ipv6() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    reset_ipv6
+    ip6tables -A INPUT -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+    ip6tables -A INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+    ip6tables -A INPUT -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
+}
+
+allow_ipv6_control() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    for type in destination-unreachable packet-too-big time-exceeded parameter-problem router-solicitation router-advertisement neighbor-solicitation neighbor-advertisement; do
+        ip6tables -A INPUT -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT 2>/dev/null || true
+        ip6tables -A OUTPUT -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT 2>/dev/null || true
+    done
+}
+
+apply_paranoid_ipv4() {
+    port="$(https_port)"
+    reset_ipv4
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+    iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT 2>/dev/null || true
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT DROP
+}
+
+apply_paranoid_ipv6() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    port="$(https_port)"
+    reset_ipv6
+    ip6tables -A INPUT -i lo -j ACCEPT
+    ip6tables -A OUTPUT -o lo -j ACCEPT
+    ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -A INPUT -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+    ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -p udp --sport 546 --dport 547 -j ACCEPT 2>/dev/null || true
+    allow_ipv6_control
+    ip6tables -P INPUT DROP
+    ip6tables -P FORWARD DROP
+    ip6tables -P OUTPUT DROP
+}
+
+apply_baseline() {
+    apply_baseline_ipv4
+    apply_baseline_ipv6
+}
+
+apply_paranoid() {
+    if ! https_enabled; then
+        apply_baseline
+        return 0
+    fi
+
+    apply_paranoid_ipv4
+    apply_paranoid_ipv6
+}
+
+start() {
+    printf 'Starting firewall: '
+    case "$(firewall_mode)" in
+        paranoid) apply_paranoid ;;
+        *) apply_baseline ;;
+    esac
+    echo OK
+}
+
+stop() {
+    printf 'Stopping firewall: '
+    apply_baseline
+    echo 'baseline'
+}
+
+restart() {
+    start
+}
+
+status() {
+    mode="$(firewall_mode)"
+    effective="$mode"
+    if [ "$mode" = paranoid ] && ! https_enabled; then
+        effective=baseline
+    fi
+
+    printf 'mode=%s effective=%s https=%s port=%s\n' \
+        "$mode" "$effective" "$(https_enabled && echo enabled || echo disabled)" "$(https_port)"
+}
+
+case "$1" in
+    start|stop|restart|status)
+        "$1"
+        ;;
+    reload)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload|status}"
+        exit 1
+        ;;
+esac

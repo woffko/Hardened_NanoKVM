@@ -19,6 +19,7 @@ use tokio::{fs as tokio_fs, io::AsyncWriteExt, time};
 
 use crate::{
     AppError, Result,
+    api::system_firewall,
     error::ApiResponse,
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
@@ -48,6 +49,10 @@ static UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 pub struct VersionRsp {
     pub current: String,
     pub latest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +89,16 @@ impl Drop for UpdateGuard {
 }
 
 pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    if system_firewall::paranoid_mode_enabled() {
+        return Ok(Json(ApiResponse::ok(VersionRsp {
+            current: read_trimmed(APP_VERSION_FILE)
+                .unwrap_or_else(|| DEFAULT_APP_VERSION.to_string()),
+            latest: String::new(),
+            blocked: Some(true),
+            error: Some(system_firewall::paranoid_blocked_message().to_string()),
+        })));
+    }
+
     let latest = match get_latest(is_preview_enabled(), &state.config).await {
         Ok(latest) => latest.version,
         Err(err) => {
@@ -95,6 +110,8 @@ pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoRespo
     Ok(Json(ApiResponse::ok(VersionRsp {
         current: read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| DEFAULT_APP_VERSION.to_string()),
         latest,
+        blocked: None,
+        error: None,
     })))
 }
 
@@ -124,6 +141,12 @@ pub async fn set_preview(Json(req): Json<SetPreviewReq>) -> Result<impl IntoResp
 }
 
 pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()>>> {
+    if system_firewall::paranoid_mode_enabled() {
+        return Err(AppError::BadRequest(
+            system_firewall::paranoid_blocked_message().to_string(),
+        ));
+    }
+
     let _guard = acquire_update_lock()?;
     let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
 

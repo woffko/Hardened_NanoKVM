@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import semver from 'semver';
 
 import * as api from '@/api/application.ts';
+import * as firewallApi from '@/api/system-firewall.ts';
 import type {
   SystemBootHealth,
   SystemLatest,
@@ -19,6 +20,7 @@ import type {
   SystemUpdateProgress,
   SystemVersion
 } from '@/api/application.ts';
+import type { FirewallStatus } from '@/api/system-firewall.ts';
 
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
@@ -45,12 +47,36 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemErrMsg, setSystemErrMsg] = useState('');
   const [systemRawEnabled, setSystemRawEnabled] = useState(false);
   const [systemRawUpdating, setSystemRawUpdating] = useState(false);
+  const [firewallStatus, setFirewallStatus] = useState<FirewallStatus | null>(null);
 
   useEffect(() => {
-    checkForUpdates();
-    checkSystemUpdates();
+    refreshFirewallStatus();
     refreshRawSystemUpdatesEnabled();
   }, []);
+
+  const onlineUpdatesBlocked = !!firewallStatus?.paranoidActive;
+
+  async function refreshFirewallStatus() {
+    try {
+      const rsp = await firewallApi.getStatus();
+      const firewall = rsp.code === 0 && rsp.data ? (rsp.data as FirewallStatus) : null;
+      setFirewallStatus(firewall);
+
+      if (firewall?.paranoidActive) {
+        setStatus('failed');
+        setErrMsg(t('settings.update.paranoidBlocked'));
+        setSystemStatus('failed');
+        setSystemErrMsg(t('settings.update.paranoidBlocked'));
+        refreshSystemUpdateStatus();
+        return;
+      }
+    } catch (err) {
+      console.log(err);
+    }
+
+    checkForUpdates();
+    checkSystemUpdates();
+  }
 
   function isVersionAtLeast(current: string, latest: string) {
     if (semver.valid(current) && semver.valid(latest)) {
@@ -61,12 +87,22 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   }
 
   function checkForUpdates() {
+    if (onlineUpdatesBlocked) {
+      setStatus('failed');
+      setErrMsg(t('settings.update.paranoidBlocked'));
+      return;
+    }
     if (status === 'loading') return;
     setStatus('loading');
 
     api
       .getVersion()
       .then((rsp: any) => {
+        if (rsp.data?.blocked) {
+          setStatus('failed');
+          setErrMsg(rsp.data.error || t('settings.update.paranoidBlocked'));
+          return;
+        }
         if (rsp.code !== 0 || !rsp.data) {
           setStatus('failed');
           setErrMsg(t('settings.update.queryFailed'));
@@ -90,6 +126,12 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   }
 
   function checkSystemUpdates() {
+    if (onlineUpdatesBlocked) {
+      setSystemStatus('failed');
+      setSystemErrMsg(t('settings.update.paranoidBlocked'));
+      refreshSystemUpdateStatus();
+      return;
+    }
     if (systemStatus === 'loading') return;
     setSystemStatus('loading');
     setSystemErrMsg('');
@@ -108,7 +150,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
         if (rsp.data.error) {
           setSystemStatus('failed');
-          setSystemErrMsg(t('settings.update.system.queryFailed'));
+          setSystemErrMsg(
+            rsp.data.error.includes('Paranoid Firewall')
+              ? t('settings.update.paranoidBlocked')
+              : t('settings.update.system.queryFailed')
+          );
           return;
         }
 
@@ -220,6 +266,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   }
 
   function downloadSystemUpdate() {
+    if (onlineUpdatesBlocked) {
+      setSystemStatus('failed');
+      setSystemErrMsg(t('settings.update.paranoidBlocked'));
+      return;
+    }
     if (!systemLatest || systemStatus === 'downloading') return;
 
     setIsLocked(true);
@@ -373,6 +424,11 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   }
 
   function update() {
+    if (onlineUpdatesBlocked) {
+      setStatus('failed');
+      setErrMsg(t('settings.update.paranoidBlocked'));
+      return;
+    }
     if (status !== 'outdated') return;
 
     setIsLocked(true);
@@ -426,7 +482,10 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
   const isStagedLatest = stagedMatchesLatest(systemStaged, systemLatest);
   const canDownloadLatestSystemUpdate =
-    !!systemLatest && (!systemStaged || !isStagedLatest) && systemStatus !== 'downloading';
+    !!systemLatest &&
+    !onlineUpdatesBlocked &&
+    (!systemStaged || !isStagedLatest) &&
+    systemStatus !== 'downloading';
   const showSystemProgress =
     !!systemProgress && !(systemProgress.phase === 'failed' && canDownloadLatestSystemUpdate);
 
@@ -442,6 +501,15 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setIsLocked={setIsLocked}
         setErrMsg={setErrMsg}
       />
+      {onlineUpdatesBlocked && (
+        <Alert
+          type="error"
+          showIcon
+          className="mb-4"
+          message={t('settings.update.paranoidBlocked')}
+          description={t('settings.update.paranoidBlockedDesc')}
+        />
+      )}
       <Divider className="opacity-50" />
 
       <div className="flex min-h-[320px] flex-col justify-between">
@@ -466,7 +534,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             title={currentVersion}
             subTitle={t('settings.update.isLatest')}
             extra={[
-              <Button key="confirm" onClick={checkForUpdates}>
+              <Button key="confirm" onClick={refreshFirewallStatus}>
                 {t('settings.update.title')}
               </Button>
             ]}
@@ -480,7 +548,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             title={`${currentVersion} -> ${latestVersion}`}
             subTitle={t('settings.update.available')}
             extra={[
-              <Button key="confirm" type="primary" onClick={update}>
+              <Button key="confirm" type="primary" disabled={onlineUpdatesBlocked} onClick={update}>
                 {t('settings.update.confirm')}
               </Button>
             ]}
@@ -552,7 +620,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               title={systemCurrent.version}
               subTitle={t('settings.update.system.isLatest')}
               extra={[
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>,
                 systemRollback ? (
@@ -581,7 +649,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                     {t('settings.update.system.releaseNotes')}
                   </Button>
                 ) : null,
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>,
                 <Button
@@ -614,10 +682,15 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                     {t('settings.update.system.releaseNotes')}
                   </Button>
                 ) : null,
-                <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                <Button
+                  key="download"
+                  type="primary"
+                  disabled={onlineUpdatesBlocked}
+                  onClick={downloadSystemUpdate}
+                >
                   {t('settings.update.system.downloadVerify')}
                 </Button>,
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>
               ]}
@@ -631,7 +704,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               title={`${systemPending.version} ${t('settings.update.system.installed')}`}
               subTitle={t('settings.update.system.rebootRequired')}
               extra={[
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>
               ]}
@@ -645,7 +718,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               title={t('settings.update.system.rollbackDone')}
               subTitle={t('settings.update.system.rebootRequired')}
               extra={[
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>
               ]}
@@ -659,7 +732,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               title={t('settings.update.system.confirmed')}
               subTitle={t('settings.update.system.bootGood')}
               extra={[
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>
               ]}
@@ -681,10 +754,15 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                 >
                   {t('settings.update.system.releaseNotes')}
                 </Button>,
-                <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                <Button
+                  key="download"
+                  type="primary"
+                  disabled={onlineUpdatesBlocked}
+                  onClick={downloadSystemUpdate}
+                >
                   {t('settings.update.system.downloadVerify')}
                 </Button>,
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>,
                 systemRollback ? (
@@ -707,11 +785,16 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   : systemErrMsg
               }
               extra={[
-                <Button key="refresh" onClick={checkSystemUpdates}>
+                <Button key="refresh" onClick={refreshFirewallStatus}>
                   {t('settings.update.system.refresh')}
                 </Button>,
                 canDownloadLatestSystemUpdate ? (
-                  <Button key="download" type="primary" onClick={downloadSystemUpdate}>
+                  <Button
+                    key="download"
+                    type="primary"
+                    disabled={onlineUpdatesBlocked}
+                    onClick={downloadSystemUpdate}
+                  >
                     {t('settings.update.system.downloadVerify')}
                   </Button>
                 ) : null,

@@ -489,6 +489,7 @@ const ru = {
         title: 'Система',
         sections: {
           time: 'Время',
+          firewall: 'Firewall',
           systemLog: 'Системный лог'
         },
         time: {
@@ -520,6 +521,46 @@ const ru = {
             useRouter: 'Использовать роутер',
             useDefaults: 'По умолчанию',
             routerDetected: 'Обнаружен роутер: {{gateway}}'
+          }
+        },
+        firewall: {
+          loadFailed: 'Не удалось загрузить состояние firewall',
+          saveFailed: 'Не удалось применить настройки firewall',
+          saved: 'Настройки firewall применены',
+          cancel: 'Отмена',
+          refresh: 'Обновить',
+          backend: 'Backend',
+          effectiveMode: 'Фактический режим',
+          disabled: 'Отключен',
+          enabledPort: 'Включен на порту {{port}}',
+          enableHttpsFirst: 'Перед Paranoid Firewall mode включите HTTPS',
+          httpsRequired:
+            'Paranoid mode недоступен, пока HTTPS не включен в Settings > Network.',
+          mode: {
+            title: 'Режим firewall',
+            description:
+              'Firewall всегда управляется системой. Baseline сохраняет обычный доступ NanoKVM; Paranoid блокирует весь прикладной трафик кроме HTTPS-доступа.',
+            baseline: 'Managed baseline',
+            paranoid: 'Paranoid'
+          },
+          paranoid: {
+            enable: 'Включить Paranoid',
+            active: 'Paranoid Firewall mode активен',
+            blocks:
+              'Онлайн-обновления и исходящие сетевые функции заблокированы. Offline upload и установка уже подготовленных обновлений остаются доступны.',
+            confirmTitle: 'Включить Paranoid Firewall mode?',
+            confirmDesc:
+              'Останется доступ только по HTTPS. SSH, HTTP, mDNS, NTP, загрузки с GitHub и прочий входящий/исходящий трафик будут заблокированы, кроме минимального DHCP/IPv6 control traffic.'
+          },
+          baseline: {
+            apply: 'Managed baseline',
+            confirmTitle: 'Вернуться в managed baseline?',
+            confirmDesc:
+              'Firewall service останется активен, но будет восстановлен обычный профиль доступа NanoKVM.'
+          },
+          rules: {
+            title: 'Текущие правила',
+            empty: 'Правил нет'
           }
         }
       },
@@ -621,6 +662,9 @@ const ru = {
         title: 'Проверить обновления',
         queryFailed: 'Получить версию не удалось',
         updateFailed: 'Обновление не удалось. Пожалуйста, попробуйте еще раз.',
+        paranoidBlocked: 'Онлайн-обновления заблокированы Paranoid Firewall mode',
+        paranoidBlockedDesc:
+          'Проверки GitHub и скачивание требуют исходящий доступ. Offline upload и установка уже подготовленных обновлений остаются доступны.',
         isLatest: 'У вас уже последняя версия.',
         available: 'Доступно обновление. Вы уверены, что хотите обновить?',
         updating: 'Начато обновление. Пожалуйста, подождите...',

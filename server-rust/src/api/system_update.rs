@@ -21,6 +21,7 @@ use tokio::task;
 use crate::{
     AppError, Result,
     api::application::is_preview_enabled,
+    api::system_firewall,
     config::Config,
     error::ApiResponse,
     state::AppState,
@@ -391,6 +392,14 @@ pub async fn set_raw_enabled(Json(req): Json<SetRawUpdateEnabledReq>) -> Result<
 
 pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let current = read_current_system_version();
+    if system_firewall::paranoid_mode_enabled() {
+        return Ok(Json(ApiResponse::ok(SystemCheckRsp {
+            current,
+            latest: None,
+            update_available: false,
+            error: Some(system_firewall::paranoid_blocked_message().to_string()),
+        })));
+    }
 
     match get_latest_system(is_preview_enabled(), &state.config).await {
         Ok(latest) => {
@@ -468,6 +477,12 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
 }
 
 pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    if system_firewall::paranoid_mode_enabled() {
+        return Err(AppError::BadRequest(
+            system_firewall::paranoid_blocked_message().to_string(),
+        ));
+    }
+
     let guard = acquire_update_lock()?;
     let current = read_current_system_version();
     let latest = get_latest_system(is_preview_enabled(), &state.config).await?;

@@ -53,8 +53,8 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method | Path | Rust Status |
 |---|---|---|
-| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. |
-| POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. |
+| GET | `/api/application/version` | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. When Paranoid firewall mode is active, returns the current version with a blocked update message instead of opening outbound GitHub traffic. |
+| POST | `/api/application/update` | Implemented beta release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and legacy Go backend files, installs `/kvmapp`, and restarts service. Blocked while Paranoid firewall mode is active. |
 | POST | `/api/application/update/offline` | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction. |
 | GET/POST | `/api/application/preview` | Implemented; selects stable latest metadata or preview tag metadata with stable fallback. |
 
@@ -63,9 +63,9 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method | Path | Rust Status |
 |---|---|---|
 | GET | `/api/system-update/version` | Implemented read-only; reports persisted `/etc/kvm/system-version.json` when present, otherwise falls back to `/boot/ver`, kernel release, Buildroot version, hardware marker, and target `sg2002-licheervnano-sd`. |
-| GET | `/api/system-update/check` | Implemented read-only; reads GitHub `hardened-system-stable/system-latest.json`, validates metadata shape, trusted URLs, archive name, size, sha256, sha512, and reports update availability. |
+| GET | `/api/system-update/check` | Implemented read-only; reads GitHub `hardened-system-stable/system-latest.json`, validates metadata shape, trusted URLs, archive name, size, sha256, sha512, and reports update availability. When Paranoid firewall mode is active, returns the current system state with a blocked update message instead of opening outbound GitHub traffic. |
 | GET | `/api/system-update/status` | Implemented read-only; reports the verified staged system bundle, pending installed update marker, boot-health summary, and latest rollback backup when present. |
-| POST | `/api/system-update/download` | Implemented staging-only; downloads the GitHub release asset, checks size, sha256, sha512, extracts it safely, verifies `manifest.json`, verifies every payload file hash/size/path, and writes `staged.json`. It does not install or reboot. |
+| POST | `/api/system-update/download` | Implemented staging-only; downloads the GitHub release asset, checks size, sha256, sha512, extracts it safely, verifies `manifest.json`, verifies every payload file hash/size/path, and writes `staged.json`. It does not install or reboot. Blocked while Paranoid firewall mode is active. |
 | POST | `/api/system-update/install` | Implemented guarded install; re-verifies staged archive, backs up each target file, applies payload files atomically, writes `/etc/kvm/system-version.json`, writes pending/backup markers, generates `/etc/kvm/system-update-rollback.sh` for init-time recovery, and returns without rebooting. |
 | POST | `/api/system-update/rollback` | Implemented manual rollback; restores files from the latest backup marker, clears pending/boot-good/rollback-attempt markers, and returns without rebooting. |
 | POST | `/api/system-update/confirm` | Implemented manual boot-good confirmation; validates pending version/target against current system identity and basic boot/web-root markers, writes `/etc/kvm/system-update-boot-good.json`, and clears pending marker. |
@@ -84,6 +84,14 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 |---|---|---|
 | GET/POST | `/api/system/time` | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo`, writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
 | POST | `/api/system/time/sync` | Implemented; runs `ntpdate -u` against the first configured NTP server, then restarts `ntpd`. |
+
+### System Firewall
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET | `/api/system/firewall` | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output. |
+| POST | `/api/system/firewall` | Implemented; accepts `baseline` or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Paranoid mode requires HTTPS configuration and a successful local HTTPS health check before rules are applied. |
+| POST | `/api/system/firewall/confirm` | Implemented; clears the pending Paranoid confirmation marker after the GUI remains reachable. A short rollback task restores baseline if Paranoid is enabled but not confirmed. |
 
 ### VM, Device, And Settings
 

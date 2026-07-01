@@ -64,6 +64,20 @@ Detailed chronological build/update notes are in
   `/etc/kvm/time.json` and persists the NTP enabled/disabled state across
   reboot. Both `S95nanokvm` and the Rust backend runtime boot-script installer
   now include `S49ntp`.
+- Implemented `Settings > System > Firewall`:
+  - `GET /api/system/firewall`;
+  - `POST /api/system/firewall`;
+  - `POST /api/system/firewall/confirm`;
+  - read-only rules viewer for `iptables-save`, `ip6tables-save`, and
+    `nft list ruleset`;
+  - managed `baseline` mode that preserves the current NanoKVM allow rules;
+  - guarded `paranoid` mode that is available only after HTTPS is enabled and
+    a local HTTPS health check passes.
+- Added managed `/kvmapp/system/init.d/S40firewall`; `S95nanokvm` no longer
+  hardcodes iptables/ip6tables setup and now installs/runs `S40firewall`.
+- While Paranoid mode is active, application and system online updates report
+  that GitHub updates are blocked by the firewall instead of trying outbound
+  network access. Offline application updates remain available.
 - Local verification already run:
   - `cargo test --manifest-path server-rust/Cargo.toml system_log`;
   - `cargo test --manifest-path server-rust/Cargo.toml audit`;
@@ -75,6 +89,12 @@ Detailed chronological build/update notes are in
   - `cargo test` from `server-rust/`;
   - `corepack pnpm build` from `web/`;
   - `sh -n kvmapp/system/init.d/S49ntp`.
+- Local verification after adding firewall controls:
+  - `cargo fmt`;
+  - `cargo test` from `server-rust/`;
+  - `corepack pnpm build` from `web/`;
+  - `sh -n kvmapp/system/init.d/S40firewall`;
+  - `git diff --check`.
 - Device validation after adding time controls on `10.0.87.132`:
   - built RISC-V linked backend with
     `NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`;
@@ -91,6 +111,22 @@ Detailed chronological build/update notes are in
   - changing timezone to `Europe/Tallinn` updated API current time to `EEST`;
   - timezone was restored to `Etc/UTC`, NTP was restored to enabled, and
     `ntpd` was confirmed running as `/usr/sbin/ntpd -g -p /var/run/ntpd.pid`.
+- Device firewall validation on `10.0.87.132`:
+  - built RISC-V linked backend with
+    `NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`;
+  - packaged `build/artifacts/nanokvm-kvmapp-rust-2.0.20-firewall.tar.gz`;
+  - manually installed it on the device after cleaning stale overlaid
+    `/kvmapp/server` assets from an earlier manual tar-over install;
+  - `/kvmapp/version` reports `2.0.20`;
+  - `/api/health` reports Rust backend OK over HTTP;
+  - `GET /api/system/firewall` from the device reports
+    `effectiveMode=baseline`, `paranoidActive=false`,
+    `paranoidAvailable=false`, `httpsEnabled=false`, and
+    `preferred=iptables-legacy`;
+  - `POST /api/system/firewall {"mode":"paranoid"}` is rejected with
+    `enable HTTPS before enabling Paranoid Firewall mode`, as expected on this
+    HTTP-only device;
+  - baseline IPv4/IPv6 rules are active and policies remain `ACCEPT`.
 - Device validation on `10.0.87.132`:
   - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
   - `/kvmapp/version` reports `2.0.20`;
