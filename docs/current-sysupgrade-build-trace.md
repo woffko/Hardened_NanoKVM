@@ -2228,3 +2228,13 @@ Manual-install note:
 - Normal application update moves `/kvmapp` aside before installing, so it does
   not retain stale assets. For manual tar-over tests, remove stale
   `/kvmapp/server` or install through the backend update path.
+
+Follow-up:
+
+- Live Paranoid test on `10.0.87.132` showed the backend could be restored via
+  HTTPS API, but the GUI did not expose an obvious disable action.
+- Restored `.132` through HTTPS API to `mode=baseline`,
+  `paranoidActive=false`.
+- Updated firewall GUI so **Disable Paranoid** is always visible in the red
+  Paranoid alert and as a dedicated mode button whenever Paranoid is configured
+  or active.

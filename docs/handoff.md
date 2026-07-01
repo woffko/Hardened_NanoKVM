@@ -127,6 +127,13 @@ Detailed chronological build/update notes are in
     `enable HTTPS before enabling Paranoid Firewall mode`, as expected on this
     HTTP-only device;
   - baseline IPv4/IPv6 rules are active and policies remain `ACCEPT`.
+- Follow-up firewall UX fix:
+  - after live Paranoid testing, the GUI did not make the exit path obvious;
+  - `.132` was restored through HTTPS API to `mode=baseline`,
+    `paranoidActive=false`;
+  - firewall GUI now shows a persistent **Disable Paranoid** action in the red
+    Paranoid alert and a dedicated mode button whenever Paranoid is configured
+    or active.
 - Device validation on `10.0.87.132`:
   - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
   - `/kvmapp/version` reports `2.0.20`;

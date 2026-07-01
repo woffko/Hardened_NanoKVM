@@ -16,6 +16,9 @@
   the older hardcoded iptables setup in `S95nanokvm`.
 * Added online-update blocking notices when Paranoid mode is active, because
   outbound traffic to GitHub is intentionally blocked in that mode.
+* Made Paranoid mode exit explicit in the GUI: the firewall page now always
+  shows a visible **Disable Paranoid** action while Paranoid is configured or
+  active.
 
 ### Notes
 

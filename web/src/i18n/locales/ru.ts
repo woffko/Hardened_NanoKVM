@@ -553,7 +553,7 @@ const ru = {
               'Останется доступ только по HTTPS. SSH, HTTP, mDNS, NTP, загрузки с GitHub и прочий входящий/исходящий трафик будут заблокированы, кроме минимального DHCP/IPv6 control traffic.'
           },
           baseline: {
-            apply: 'Managed baseline',
+            apply: 'Выключить Paranoid',
             confirmTitle: 'Вернуться в managed baseline?',
             confirmDesc:
               'Firewall service останется активен, но будет восстановлен обычный профиль доступа NanoKVM.'

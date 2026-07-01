@@ -20,6 +20,8 @@ export const FirewallSettings = () => {
     if (!status) return '';
     return status.rules[rulesTab] || t('settings.system.firewall.rules.empty');
   }, [status, rulesTab, t]);
+  const isParanoidMode =
+    status?.paranoidActive || status?.effectiveMode === 'paranoid' || status?.config.mode === 'paranoid';
 
   useEffect(() => {
     load();
@@ -114,12 +116,23 @@ export const FirewallSettings = () => {
         />
       )}
 
-      {status?.paranoidActive && (
+      {isParanoidMode && (
         <Alert
           type="error"
           showIcon
           message={t('settings.system.firewall.paranoid.active')}
           description={t('settings.system.firewall.paranoid.blocks')}
+          action={
+            <Button
+              danger
+              size="small"
+              loading={isApplying}
+              icon={<ShieldOffIcon size={14} />}
+              onClick={() => requestMode('baseline')}
+            >
+              {t('settings.system.firewall.baseline.apply')}
+            </Button>
+          }
         />
       )}
 
@@ -133,8 +146,8 @@ export const FirewallSettings = () => {
               {t('settings.system.firewall.mode.description')}
             </div>
           </div>
-          <Tag color={status?.paranoidActive ? 'red' : 'blue'}>
-            {status?.paranoidActive
+          <Tag color={isParanoidMode ? 'red' : 'blue'}>
+            {isParanoidMode
               ? t('settings.system.firewall.mode.paranoid')
               : t('settings.system.firewall.mode.baseline')}
           </Tag>
@@ -172,26 +185,26 @@ export const FirewallSettings = () => {
           <Button icon={<RefreshCwIcon size={16} />} loading={isLoading} onClick={load}>
             {t('settings.system.firewall.refresh')}
           </Button>
-          {status?.paranoidActive ? (
-            <Button
-              icon={<ShieldOffIcon size={16} />}
-              loading={isApplying}
-              onClick={() => requestMode('baseline')}
-            >
-              {t('settings.system.firewall.baseline.apply')}
-            </Button>
-          ) : (
-            <Button
-              type="primary"
-              danger
-              icon={<LockKeyholeIcon size={16} />}
-              disabled={!status?.httpsEnabled}
-              loading={isApplying}
-              onClick={() => requestMode('paranoid')}
-            >
-              {t('settings.system.firewall.paranoid.enable')}
-            </Button>
-          )}
+          <Button
+            type={isParanoidMode ? 'primary' : 'default'}
+            danger={isParanoidMode}
+            icon={<ShieldOffIcon size={16} />}
+            disabled={!isParanoidMode}
+            loading={isApplying}
+            onClick={() => requestMode('baseline')}
+          >
+            {t('settings.system.firewall.baseline.apply')}
+          </Button>
+          <Button
+            type={!isParanoidMode ? 'primary' : 'default'}
+            danger
+            icon={<LockKeyholeIcon size={16} />}
+            disabled={isParanoidMode || !status?.httpsEnabled}
+            loading={isApplying}
+            onClick={() => requestMode('paranoid')}
+          >
+            {t('settings.system.firewall.paranoid.enable')}
+          </Button>
         </div>
       </div>
 

@@ -545,7 +545,7 @@ const en = {
               'Only HTTPS access will remain available. SSH, HTTP, mDNS, NTP, GitHub downloads, and other inbound/outbound traffic will be blocked except for minimal DHCP/IPv6 control traffic.'
           },
           baseline: {
-            apply: 'Managed baseline',
+            apply: 'Disable Paranoid',
             confirmTitle: 'Return to managed baseline?',
             confirmDesc:
               'This keeps the firewall service active but restores the normal NanoKVM access profile.'
