@@ -24,10 +24,13 @@ use tracing_subscriber::{EnvFilter, fmt};
 const BOOT_INIT_SCRIPTS: &[&str] = &[
     "S00kmod",
     "S01fs",
+    "S01syslogd",
+    "S02klogd",
     "S03usbdev",
     "S15kvmhwd",
     "S30eth",
     "S30wifi",
+    "S49ntp",
     "S50avahi-daemon",
     "S50sshd",
     "S80dnsmasq",

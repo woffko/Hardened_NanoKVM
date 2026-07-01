@@ -25,10 +25,12 @@ Last updated: 2026-07-01
 Detailed chronological build/update notes are in
 [`docs/current-sysupgrade-build-trace.md`](current-sysupgrade-build-trace.md).
 
-### Active Unreleased Work: App 2.0.20 System Log
+### Active Unreleased Work: App 2.0.20 System Settings
 
 - Source version bumped to `2.0.20`; release is not published yet.
-- Implemented `Settings > System Log`:
+- Added top-level `Settings > System`; `System Log` now lives inside it as a
+  subsection.
+- Implemented `Settings > System > System Log`:
   - UDP remote syslog forwarding via BusyBox `syslogd -R`;
   - a single `System Log` viewer backed by `/tmp/hardened-syslog/messages`
     (`tmpfs`, no steady SD-card writes);
@@ -48,6 +50,20 @@ Detailed chronological build/update notes are in
   - lockout/locked attempts.
 - Added managed `/kvmapp/system/init.d/S01syslogd` and `S02klogd`; `S95nanokvm`
   now installs them into `/etc/init.d` during app startup/update.
+- Implemented `Settings > System > Time`:
+  - `GET/POST /api/system/time`;
+  - `POST /api/system/time/sync`;
+  - timezone selection from `/usr/share/zoneinfo`;
+  - NTP enable/disable;
+  - editable NTP server list with detected-router and `pool.ntp.org` defaults;
+  - manual `ntpdate -u` sync.
+- NTP remains enabled by default and uses public `0.pool.ntp.org` through
+  `3.pool.ntp.org` unless changed by the user. Device check on `10.0.87.132`
+  confirmed the existing `/etc/ntp.conf` was already using those pool servers.
+- Added managed `/kvmapp/system/init.d/S49ntp`; it reads
+  `/etc/kvm/time.json` and persists the NTP enabled/disabled state across
+  reboot. Both `S95nanokvm` and the Rust backend runtime boot-script installer
+  now include `S49ntp`.
 - Local verification already run:
   - `cargo test --manifest-path server-rust/Cargo.toml system_log`;
   - `cargo test --manifest-path server-rust/Cargo.toml audit`;
@@ -55,6 +71,26 @@ Detailed chronological build/update notes are in
   - `corepack pnpm --dir web build`;
   - `sh -n kvmapp/system/init.d/S01syslogd`;
   - `sh -n kvmapp/system/init.d/S02klogd`.
+- Local verification after adding time controls:
+  - `cargo test` from `server-rust/`;
+  - `corepack pnpm build` from `web/`;
+  - `sh -n kvmapp/system/init.d/S49ntp`.
+- Device validation after adding time controls on `10.0.87.132`:
+  - built RISC-V linked backend with
+    `NANOKVM_SYSROOT_LIB=/home/w0w/Hardened_NanoKVM/server-rust/sysroot/lib`;
+  - packaged and manually installed
+    `build/artifacts/nanokvm-kvmapp-rust-2.0.20-system-time.tar`;
+  - `/kvmapp/version` reports `2.0.20`;
+  - `/api/health` reports Rust backend OK over HTTP;
+  - `GET /api/system/time` reports NTP enabled, timezone `Etc/UTC`, servers
+    `0.pool.ntp.org` through `3.pool.ntp.org`, detected gateway `10.0.87.5`,
+    and includes `Europe/Tallinn` in timezone options;
+  - disabling NTP through `POST /api/system/time` stopped `ntpd` and persisted
+    `"ntpEnabled": false` in `/etc/kvm/time.json`;
+  - enabling NTP through `POST /api/system/time` restarted `ntpd`;
+  - changing timezone to `Europe/Tallinn` updated API current time to `EEST`;
+  - timezone was restored to `Etc/UTC`, NTP was restored to enabled, and
+    `ntpd` was confirmed running as `/usr/sbin/ntpd -g -p /var/run/ntpd.pid`.
 - Device validation on `10.0.87.132`:
   - manually installed `build/artifacts/nanokvm-kvmapp-rust-2.0.20.tar`;
   - `/kvmapp/version` reports `2.0.20`;

@@ -6,12 +6,18 @@
   tmpfs-backed log viewing, kernel log viewing, and a test log action.
 * Added web login audit events to syslog for successful logins, failed
   credentials, and lockout events.
+* Added `Settings > System` as the home for system-level controls. `System Log`
+  now lives inside this section.
+* Added `Settings > System > Time` with timezone selection, NTP enable/disable,
+  editable NTP servers, router/default server shortcuts, and manual sync.
 
 ### Notes
 
 * The local log viewer keeps the active log buffer under `/tmp` to avoid
   steady SD-card writes. Only syslog configuration is persisted.
 * Remote forwarding uses BusyBox `syslogd -R`, so the initial transport is UDP.
+* NTP remains enabled by default and uses public `pool.ntp.org` servers unless
+  the user changes the server list.
 
 ## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
 

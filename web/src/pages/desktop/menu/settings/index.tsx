@@ -7,7 +7,7 @@ import {
   CircleArrowUpIcon,
   NetworkIcon,
   PaletteIcon,
-  ScrollTextIcon,
+  ServerCogIcon,
   SettingsIcon,
   SmartphoneIcon,
   UserRoundIcon
@@ -27,7 +27,7 @@ import { Account } from './account';
 import { Appearance } from './appearance';
 import { Device } from './device';
 import { Network } from './network';
-import { SystemLog } from './system-log';
+import { System } from './system';
 import { Tailscale } from './tailscale';
 import { Update } from './update';
 
@@ -48,7 +48,7 @@ export const Settings = () => {
     { id: 'appearance', icon: <PaletteIcon size={16} />, component: <Appearance /> },
     { id: 'device', icon: <SmartphoneIcon size={16} />, component: <Device /> },
     { id: 'network', icon: <NetworkIcon size={16} />, component: <Network /> },
-    { id: 'systemLog', icon: <ScrollTextIcon size={16} />, component: <SystemLog /> },
+    { id: 'system', icon: <ServerCogIcon size={16} />, component: <System /> },
     {
       id: 'tailscale',
       icon: <TailscaleIcon />,

@@ -9,7 +9,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     api::{
         account, application, autostart, compatibility, download, hid, network, picoclaw, script,
-        storage, stream, system_log, system_update, tailscale, vm, webrtc_stream,
+        storage, stream, system_log, system_time, system_update, tailscale, vm, webrtc_stream,
     },
     http::middleware::{picoclaw_internal, protected},
     security::headers::security_headers,
@@ -56,6 +56,11 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/system-log/messages", get(system_log::get_messages))
         .route("/api/system-log/test", post(system_log::test_message))
+        .route(
+            "/api/system/time",
+            get(system_time::get_config).post(system_time::set_config),
+        )
+        .route("/api/system/time/sync", post(system_time::sync_now))
         .route("/api/vm/info", get(vm::get_info))
         .route("/api/vm/hardware", get(vm::get_hardware))
         .route(

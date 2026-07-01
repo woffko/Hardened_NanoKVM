@@ -477,6 +477,44 @@ const en = {
           unsaved: 'Unsaved changes'
         }
       },
+      system: {
+        title: 'System',
+        sections: {
+          time: 'Time',
+          systemLog: 'System Log'
+        },
+        time: {
+          loadFailed: 'Failed to load time settings',
+          saveFailed: 'Failed to save time settings',
+          saved: 'Time settings saved',
+          syncFailed: 'Failed to synchronize time',
+          synced: 'Time synchronized',
+          invalidServers: 'Enter at least one NTP server',
+          maxServers: 'Maximum {{count}} NTP servers allowed',
+          refresh: 'Refresh',
+          syncNow: 'Sync now',
+          save: 'Save',
+          ntp: {
+            title: 'NTP',
+            description: 'Synchronize device time from configured NTP servers'
+          },
+          clock: {
+            title: 'Clock',
+            description: 'Set the local timezone used by logs and the UI',
+            current: 'Current time',
+            timezone: 'Timezone'
+          },
+          servers: {
+            title: 'NTP Servers',
+            description:
+              'Use public pool servers by default, or point NanoKVM at your local router/NTP server.',
+            add: 'Add server',
+            useRouter: 'Use router',
+            useDefaults: 'Use defaults',
+            routerDetected: 'Detected router: {{gateway}}'
+          }
+        }
+      },
       systemLog: {
         title: 'System Log',
         loadFailed: 'Failed to load log settings',

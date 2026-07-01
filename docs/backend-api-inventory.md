@@ -78,6 +78,13 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET | `/api/system-log/messages` | Implemented; GUI uses the unified `kind=system` tmpfs syslog tail. Hidden/debug reads remain for `kind=kernel` from the current `dmesg` ring buffer and `kind=backend` from `/tmp/nanokvm-server.log`. Line count is clamped to 1-1000. |
 | POST | `/api/system-log/test` | Implemented; emits a test syslog message through `/dev/log` so local and remote forwarding paths can be verified. |
 
+### System Time
+
+| Method | Path | Rust Status |
+|---|---|---|
+| GET/POST | `/api/system/time` | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo`, writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
+| POST | `/api/system/time/sync` | Implemented; runs `ntpdate -u` against the first configured NTP server, then restarts `ntpd`. |
+
 ### VM, Device, And Settings
 
 | Method | Path | Rust Status |

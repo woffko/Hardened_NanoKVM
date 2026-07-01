@@ -20,7 +20,7 @@ const defaultConfig: SystemLogConfig = {
   kernelConsoleLevel: 7
 };
 
-export const SystemLog = () => {
+export const SystemLog = ({ showTitle = true }: { showTitle?: boolean }) => {
   const { t } = useTranslation();
 
   const [config, setConfig] = useState<SystemLogConfig>(defaultConfig);
@@ -146,8 +146,12 @@ export const SystemLog = () => {
 
   return (
     <>
-      <div className="text-base">{t('settings.systemLog.title')}</div>
-      <Divider className="opacity-50" />
+      {showTitle && (
+        <>
+          <div className="text-base">{t('settings.systemLog.title')}</div>
+          <Divider className="opacity-50" />
+        </>
+      )}
 
       <div className="flex flex-col space-y-6">
         <div className="flex items-start justify-between gap-4">
