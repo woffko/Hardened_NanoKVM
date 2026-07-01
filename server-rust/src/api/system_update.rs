@@ -1835,7 +1835,7 @@ $BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'
     }
 
     script.push_str(
-        "restore_root_config\n\
+        "log 'rootfs configuration restore is deferred until first boot'\n\
 restore_boot_config\n\
 progress rebooting 'raw image write finished; rebooting'\n\
 log 'raw system image update finished; rebooting'\n\
@@ -3644,7 +3644,10 @@ mod tests {
         assert!(
             script.contains("preserve_boot_config\npreserve_root_config\nprepare_boot_readonly")
         );
-        assert!(script.contains("restore_root_config\nrestore_boot_config\nprogress rebooting"));
+        assert!(script.contains(
+            "log 'rootfs configuration restore is deferred until first boot'\nrestore_boot_config\nprogress rebooting"
+        ));
+        assert!(!script.contains("restore_root_config\nrestore_boot_config"));
         assert!(script.contains("eth.nodhcp"));
         assert!(script.contains("eth.ipv6.mode"));
         assert!(script.contains("/etc/kvm"));

@@ -1,3 +1,25 @@
+## Hardened NanoKVM Beta 2.0.18 (2026-07-01)
+
+### Bug Fixes
+
+* Fixed raw system-update root configuration restore. The raw writer no longer
+  tries to mount the newly written rootfs while the old rootfs is still mounted
+  as `/`; preserved root configuration is restored by `S01fs` on the first boot
+  after the raw update, before SSH and the web backend start.
+* Restored preserved file permissions after copying root configuration back
+  from the exFAT `/data` staging area, including `/etc/shadow`, `/etc/kvm/pwd`,
+  session secrets, and SSH host private keys.
+* Added automatic system-update confirmation after boot health succeeds. This
+  handles both file-based pending updates and raw update pending markers stored
+  under `/data`.
+
+### Notes
+
+* Live raw update `0.2.13-raw.1` on `10.0.87.132` successfully wrote rootfs and
+  boot and rebooted, but showed the old restore bug in
+  `/data/hardened-system-raw-update.log`: `mount ... Resource busy`. This
+  release fixes that path for the next raw build.
+
 ## Hardened NanoKVM Beta 2.0.17 (2026-07-01)
 
 ### Bug Fixes

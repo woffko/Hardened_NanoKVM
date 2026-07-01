@@ -17,6 +17,8 @@ SYSTEM_PENDING_FILE=/etc/kvm/system-update-pending.json
 SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
 SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
 SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
+SYSTEM_RAW_INSTALL_MARKER=/data/hardened-system-raw-update-pending.json
+SYSTEM_UPDATE_STAGE_DIR=/data/.hardened-kvmcache/system-update
 SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
 SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
 SENSOR_BUNDLE_DIR=/kvmapp/system/mnt-data
@@ -192,9 +194,26 @@ json_string_value() {
     sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | head -n 1
 }
 
+pending_update_file() {
+    if [ -f "$SYSTEM_PENDING_FILE" ]; then
+        printf '%s\n' "$SYSTEM_PENDING_FILE"
+        return 0
+    fi
+    if [ -f "$SYSTEM_RAW_INSTALL_MARKER" ]; then
+        printf '%s\n' "$SYSTEM_RAW_INSTALL_MARKER"
+        return 0
+    fi
+    return 1
+}
+
+pending_update_exists() {
+    pending_update_file >/dev/null 2>&1
+}
+
 system_update_version_matches() {
-    pending_version="$(json_string_value "$SYSTEM_PENDING_FILE" version)"
-    pending_target="$(json_string_value "$SYSTEM_PENDING_FILE" target)"
+    pending_file="$(pending_update_file)" || return 1
+    pending_version="$(json_string_value "$pending_file" version)"
+    pending_target="$(json_string_value "$pending_file" target)"
     current_version="$(json_string_value "$SYSTEM_VERSION_FILE" version)"
     current_target="$(json_string_value "$SYSTEM_VERSION_FILE" target)"
 
@@ -204,12 +223,39 @@ system_update_version_matches() {
 }
 
 system_update_boot_healthy() {
-    [ -f "$SYSTEM_PENDING_FILE" ] || return 1
+    pending_update_exists || return 1
     [ -f /boot/ver ] || return 1
     [ -f /kvmapp/server/web/index.html ] || return 1
     system_update_version_matches || return 1
     health_check || return 1
     return 0
+}
+
+confirm_system_update_boot() {
+    pending_file="$(pending_update_file)" || return 1
+    version="$(json_string_value "$pending_file" version)"
+    target="$(json_string_value "$pending_file" target)"
+    now="$(date +%s 2>/dev/null || echo 0)"
+
+    mkdir -p /etc/kvm
+    cat > "$SYSTEM_BOOT_GOOD_FILE" <<EOF
+{
+  "confirmedAt": $now,
+  "confirmedBy": "S95nanokvm",
+  "version": "$version",
+  "target": "$target",
+  "health": {
+    "backendRunning": true,
+    "versionMatchesPending": true,
+    "bootMarkerPresent": true,
+    "webRootPresent": true,
+    "healthy": true
+  }
+}
+EOF
+    chmod 0644 "$SYSTEM_BOOT_GOOD_FILE"
+    rm -f "$SYSTEM_PENDING_FILE" "$SYSTEM_RAW_INSTALL_MARKER" "$SYSTEM_UPDATE_STAGE_DIR/progress.json" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update auto-confirmed" >> "$SYSTEM_UPDATE_LOG"
 }
 
 run_system_update_rollback() {
@@ -232,7 +278,7 @@ run_system_update_rollback() {
 }
 
 start_system_update_watchdog() {
-    [ -f "$SYSTEM_PENDING_FILE" ] || return
+    pending_update_exists || return
     [ -f "$SYSTEM_BOOT_GOOD_FILE" ] && return
     [ -f "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
 
@@ -240,12 +286,13 @@ start_system_update_watchdog() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update detected; waiting for boot health" >> "$SYSTEM_UPDATE_LOG"
 
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if [ ! -f "$SYSTEM_PENDING_FILE" ] || [ -f "$SYSTEM_BOOT_GOOD_FILE" ]; then
+            if ! pending_update_exists || [ -f "$SYSTEM_BOOT_GOOD_FILE" ]; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update was cleared" >> "$SYSTEM_UPDATE_LOG"
                 exit 0
             fi
             if system_update_boot_healthy; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update boot health is OK" >> "$SYSTEM_UPDATE_LOG"
+                confirm_system_update_boot
                 exit 0
             fi
             sleep 10

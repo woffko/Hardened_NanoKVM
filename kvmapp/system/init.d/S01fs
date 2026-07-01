@@ -5,6 +5,14 @@ then
         DATA_DEVICE=/dev/mmcblk0p3
         DATA_MOUNT=/data
         DATA_LOG=/tmp/data-mount.log
+        RAW_UPDATE_MARKER="$DATA_MOUNT/hardened-system-raw-update-pending.json"
+        RAW_RESTORE_ROOT="$DATA_MOUNT/.hardened-kvmcache/system-update/preserve/root"
+        RAW_RESTORE_DONE="$DATA_MOUNT/.hardened-kvmcache/system-update/root-restore-done"
+        RAW_RESTORE_LOG="$DATA_MOUNT/hardened-system-raw-update.log"
+
+        log_data() {
+                echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$RAW_RESTORE_LOG" 2>/dev/null || true
+        }
 
         mount_data_partition() {
                 [ -e "$DATA_DEVICE" ] || return 0
@@ -64,6 +72,95 @@ then
                 return 0
         }
 
+        restore_preserved_path() {
+                rel="$1"
+                src="$RAW_RESTORE_ROOT/$rel"
+                dest="/$rel"
+                dest_dir="${dest%/*}"
+
+                [ -e "$src" ] || return 0
+                mkdir -p "$dest_dir" || {
+                        log_data "failed to create restore directory for /$rel"
+                        return 0
+                }
+
+                if [ -d "$src" ]
+                then
+                        mkdir -p "$dest" || {
+                                log_data "failed to create restore directory /$rel"
+                                return 0
+                        }
+                        cp -a "$src/." "$dest/" >> "$RAW_RESTORE_LOG" 2>&1 || log_data "failed to restore /$rel"
+                else
+                        rm -f "$dest" 2>/dev/null || true
+                        cp -p "$src" "$dest" >> "$RAW_RESTORE_LOG" 2>&1 || log_data "failed to restore /$rel"
+                fi
+        }
+
+        fix_restored_permissions() {
+                [ -f /etc/passwd ] && chmod 0644 /etc/passwd
+                [ -f /etc/group ] && chmod 0644 /etc/group
+                [ -f /etc/shadow ] && chmod 0600 /etc/shadow
+                [ -f /etc/gshadow ] && chmod 0600 /etc/gshadow
+                [ -f /device_key ] && chmod 0644 /device_key
+                [ -d /etc/kvm ] && chmod 0755 /etc/kvm
+                [ -f /etc/kvm/pwd ] && chmod 0600 /etc/kvm/pwd
+                [ -f /etc/kvm/session_secret ] && chmod 0600 /etc/kvm/session_secret
+                [ -f /etc/kvm/server.yaml ] && chmod 0644 /etc/kvm/server.yaml
+                [ -f /etc/kvm/backend ] && chmod 0644 /etc/kvm/backend
+                [ -f /etc/kvm/update-nanokvm.py ] && chmod 0755 /etc/kvm/update-nanokvm.py
+
+                if [ -d /etc/ssh ]
+                then
+                        chmod 0755 /etc/ssh
+                        chmod 0600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
+                        chmod 0644 /etc/ssh/ssh_host_*_key.pub /etc/ssh/ssh_config /etc/ssh/sshd_config /etc/ssh/moduli 2>/dev/null || true
+                fi
+
+                [ -x /usr/bin/tailscale ] && chmod 0755 /usr/bin/tailscale
+                [ -x /usr/sbin/tailscaled ] && chmod 0755 /usr/sbin/tailscaled
+                [ -x /usr/bin/picoclaw ] && chmod 0755 /usr/bin/picoclaw
+                [ -x /etc/init.d/S96picoclaw ] && chmod 0755 /etc/init.d/S96picoclaw
+                [ -x /etc/init.d/S98tailscaled ] && chmod 0755 /etc/init.d/S98tailscaled
+        }
+
+        restore_raw_root_config() {
+                [ -f "$RAW_UPDATE_MARKER" ] || return 0
+                [ -d "$RAW_RESTORE_ROOT" ] || return 0
+                [ -f "$RAW_RESTORE_DONE" ] && return 0
+
+                log_data "restoring preserved root configuration after raw system update boot"
+                for rel in \
+                        etc/kvm \
+                        etc/ssh \
+                        etc/dropbear \
+                        etc/passwd \
+                        etc/shadow \
+                        etc/group \
+                        etc/gshadow \
+                        etc/kvm.disk0 \
+                        etc/hostname \
+                        etc/machine-id \
+                        etc/resolv.conf \
+                        device_key \
+                        root/.tailscale \
+                        root/.picoclaw \
+                        root/.picoclaw-cache \
+                        var/lib/tailscale \
+                        usr/bin/tailscale \
+                        usr/sbin/tailscaled \
+                        usr/bin/picoclaw \
+                        etc/init.d/S96picoclaw \
+                        etc/init.d/S98tailscaled \
+                        etc/GOMEMLIMIT
+                do
+                        restore_preserved_path "$rel"
+                done
+                fix_restored_permissions
+                date '+%Y-%m-%d %H:%M:%S' > "$RAW_RESTORE_DONE" 2>/dev/null || true
+                log_data "preserved root configuration restore finished"
+        }
+
                 # use all sdcard free space for data
                 parted -s /dev/mmcblk0 "resizepart 2 -0"
                 echo "yes
@@ -82,6 +179,7 @@ then
 
         ensure_data_partition || true
         mount_data_partition || true
+        restore_raw_root_config
 
         echo "OK"
 fi
