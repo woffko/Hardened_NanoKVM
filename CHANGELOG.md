@@ -1,3 +1,14 @@
+## Hardened NanoKVM 2.0.21 RC2 (2026-07-01)
+
+Release candidate focused on settings navigation cleanup and matching
+application/raw/SD-card artifacts.
+
+### Changes
+
+* Moved Network settings into `Settings > System > Network` and removed the
+  top-level Network item from the Settings sidebar.
+* Updated HTTPS-related UI tips to point to the new Network location.
+
 ## Hardened NanoKVM 2.0.20 RC1 (2026-07-01)
 
 Release candidate focused on Rust-only operation, system observability, time

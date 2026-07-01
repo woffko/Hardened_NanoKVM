@@ -5,7 +5,6 @@ import { useSetAtom } from 'jotai';
 import {
   BadgeInfoIcon,
   CircleArrowUpIcon,
-  NetworkIcon,
   PaletteIcon,
   ServerCogIcon,
   SettingsIcon,
@@ -26,7 +25,6 @@ import { About } from './about';
 import { Account } from './account';
 import { Appearance } from './appearance';
 import { Device } from './device';
-import { Network } from './network';
 import { System } from './system';
 import { Tailscale } from './tailscale';
 import { Update } from './update';
@@ -47,7 +45,6 @@ export const Settings = () => {
     { id: 'about', icon: <BadgeInfoIcon size={16} />, component: <About /> },
     { id: 'appearance', icon: <PaletteIcon size={16} />, component: <Appearance /> },
     { id: 'device', icon: <SmartphoneIcon size={16} />, component: <Device /> },
-    { id: 'network', icon: <NetworkIcon size={16} />, component: <Network /> },
     { id: 'system', icon: <ServerCogIcon size={16} />, component: <System /> },
     {
       id: 'tailscale',

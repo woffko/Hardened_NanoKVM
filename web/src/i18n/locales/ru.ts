@@ -72,7 +72,7 @@ const ru = {
       scale: 'Масштаб',
       title: 'Экран',
       video: 'Видеорежим',
-      videoDirectTips: 'Включите HTTPS в "Настройки > Устройство", чтобы использовать этот режим',
+      videoDirectTips: 'Включите HTTPS в "Настройки > Система > Сеть", чтобы использовать этот режим',
       resolution: 'Разрешение',
       auto: 'Автоматическое',
       autoTips:
@@ -535,7 +535,7 @@ const ru = {
           enabledPort: 'Включен на порту {{port}}',
           enableHttpsFirst: 'Перед Paranoid Firewall mode включите HTTPS',
           httpsRequired:
-            'Paranoid mode недоступен, пока HTTPS не включен в Settings > Network.',
+            'Paranoid mode недоступен, пока HTTPS не включен в Настройки > Система > Сеть.',
           mode: {
             title: 'Режим firewall',
             description:

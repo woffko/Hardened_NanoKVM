@@ -68,7 +68,7 @@ const en = {
       scale: 'Scale',
       title: 'Screen',
       video: 'Video Mode',
-      videoDirectTips: 'Enable HTTPS in "Settings > Device" to use this mode',
+      videoDirectTips: 'Enable HTTPS in "Settings > System > Network" to use this mode',
       resolution: 'Resolution',
       auto: 'Automatic',
       autoTips:
@@ -527,7 +527,7 @@ const en = {
           enabledPort: 'Enabled on port {{port}}',
           enableHttpsFirst: 'Enable HTTPS before enabling Paranoid Firewall mode',
           httpsRequired:
-            'Paranoid mode is disabled until HTTPS is enabled in Settings > Network.',
+            'Paranoid mode is disabled until HTTPS is enabled in Settings > System > Network.',
           mode: {
             title: 'Firewall Mode',
             description:

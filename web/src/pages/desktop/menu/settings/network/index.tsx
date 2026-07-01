@@ -6,13 +6,21 @@ import { IPv6 } from './ipv6.tsx';
 import { Tls } from './tls.tsx';
 import { Wifi } from './wifi.tsx';
 
-export const Network = () => {
+type NetworkProps = {
+  showTitle?: boolean;
+};
+
+export const Network = ({ showTitle = true }: NetworkProps) => {
   const { t } = useTranslation();
 
   return (
     <>
-      <div className="text-base">{t('settings.network.title')}</div>
-      <Divider className="opacity-50" />
+      {showTitle && (
+        <>
+          <div className="text-base">{t('settings.network.title')}</div>
+          <Divider className="opacity-50" />
+        </>
+      )}
 
       <div className="flex flex-col space-y-8">
         <Tls />
