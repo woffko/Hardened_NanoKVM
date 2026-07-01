@@ -77,6 +77,7 @@ then
                 src="$RAW_RESTORE_ROOT/$rel"
                 dest="/$rel"
                 dest_dir="${dest%/*}"
+                [ -n "$dest_dir" ] || dest_dir=/
 
                 [ -e "$src" ] || return 0
                 mkdir -p "$dest_dir" || {

@@ -1,3 +1,16 @@
+## Hardened NanoKVM Beta 2.0.19 (2026-07-01)
+
+### Bug Fixes
+
+* Fixed raw system-update reboot after writing the rootfs and boot partitions.
+  The raw writer no longer relies on launching `reboot` from the overwritten
+  live rootfs; it requests reboot through kernel sysrq after sync/remount.
+* Fixed first-boot raw restore for preserved files located directly under `/`,
+  including `/device_key`.
+* Supersedes `2.0.18` / `0.2.14-raw.1`, where live testing showed the device
+  could keep responding to ICMP with SSH/HTTP stopped if reboot did not happen
+  after raw writes.
+
 ## Hardened NanoKVM Beta 2.0.18 (2026-07-01)
 
 ### Bug Fixes

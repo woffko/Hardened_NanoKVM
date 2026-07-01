@@ -1517,22 +1517,30 @@ fail() {{\n\
   log \"failed: $1\"\n\
   if [ \"$RAW_WRITE_STARTED\" = \"1\" ]; then\n\
     log 'raw write had started; rebooting instead of restarting services'\n\
-    $BB sync\n\
-    $BB sleep 2\n\
-    $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
+    force_reboot_now\n\
     exit 1\n\
   fi\n\
   $BB rm -f {raw_marker} {pending_file} >/dev/null 2>&1 || true\n\
   if [ \"$SERVICES_STOPPED\" = \"1\" ]; then\n\
     log 'runtime services were stopped; rebooting to recover cleanly'\n\
-    $BB sync\n\
-    $BB sleep 2\n\
-    $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
+    force_reboot_now\n\
     exit 1\n\
   fi\n\
   $BB mount -o remount,rw / >/dev/null 2>&1 || true\n\
   /etc/init.d/S95nanokvm start >/dev/null 2>&1 || true\n\
   exit 1\n\
+}}\n\
+force_reboot_now() {{\n\
+  # After raw partition writes the current rootfs has been overwritten under\n\
+  # the running kernel. Avoid execing /bin/busybox or /sbin/reboot from that\n\
+  # filesystem; use shell builtins and kernel sysrq instead.\n\
+  if [ -w /proc/sysrq-trigger ]; then\n\
+    echo s > /proc/sysrq-trigger 2>/dev/null || true\n\
+    echo u > /proc/sysrq-trigger 2>/dev/null || true\n\
+    echo b > /proc/sysrq-trigger 2>/dev/null || true\n\
+  fi\n\
+  $BB sync >/dev/null 2>&1 || true\n\
+  $BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n\
 }}\n\
 root_is_ro() {{\n\
   while read DEV MNT TYPE OPTS REST; do\n\
@@ -1839,9 +1847,7 @@ $BB dd if={} of={} bs=4M conv=fsync >/dev/null 2>&1 || fail 'failed to write {}'
 restore_boot_config\n\
 progress rebooting 'raw image write finished; rebooting'\n\
 log 'raw system image update finished; rebooting'\n\
-$BB sync\n\
-$BB sleep 2\n\
-$BB reboot -f >/dev/null 2>&1 || $BB reboot >/dev/null 2>&1 || true\n",
+force_reboot_now\n",
     );
 
     Ok(script)
