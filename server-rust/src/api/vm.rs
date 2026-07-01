@@ -316,8 +316,14 @@ pub async fn set_hostname(Json(req): Json<SetHostnameReq>) -> Result<impl IntoRe
 }
 
 pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
+    let mode_changed = req.kind == "type" && stream::screen_type_would_change(req.value)?;
+    if mode_changed {
+        stream::drain_video_streams("screen type update");
+        time::sleep(Duration::from_millis(750)).await;
+    }
+
     stream::set_screen_value(&req.kind, req.value)?;
-    info!(kind = %req.kind, value = req.value, "updated screen setting");
+    info!(kind = %req.kind, value = req.value, mode_changed, "updated screen setting");
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 

@@ -595,6 +595,15 @@ pub async fn stop_frame_detect(Json(req): Json<StopFrameDetectReq>) -> Result<im
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+pub fn screen_type_would_change(value: i32) -> Result<bool> {
+    let next_mode = stream_mode_from_type_value(value);
+    let screen = SCREEN
+        .lock()
+        .map_err(|_| AppError::Internal("screen lock poisoned".to_string()))?;
+
+    Ok(screen.mode != next_mode || (next_mode == StreamMode::H264 && h264_capture_disabled()))
+}
+
 pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     let mut screen = SCREEN
         .lock()
@@ -602,11 +611,7 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
 
     match kind {
         "type" => {
-            let next_mode = if value == 0 {
-                StreamMode::Mjpeg
-            } else {
-                StreamMode::H264
-            };
+            let next_mode = stream_mode_from_type_value(value);
 
             if next_mode == StreamMode::Mjpeg {
                 write_screen_file(SCREEN_TYPE_FILE, "mjpeg")?;
@@ -640,6 +645,14 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn stream_mode_from_type_value(value: i32) -> StreamMode {
+    if value == 0 {
+        StreamMode::Mjpeg
+    } else {
+        StreamMode::H264
+    }
 }
 
 fn write_screen_file(path: &str, value: &str) -> Result<()> {

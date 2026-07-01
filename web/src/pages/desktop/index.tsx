@@ -4,6 +4,7 @@ import { useAtom, useAtomValue } from 'jotai';
 import { useTranslation } from 'react-i18next';
 import { useMediaQuery } from 'react-responsive';
 
+import { updateScreen } from '@/api/vm.ts';
 import * as storage from '@/lib/localstorage.ts';
 import { client } from '@/lib/websocket.ts';
 import { picoclawChatOpenAtom } from '@/jotai/picoclaw.ts';
@@ -51,14 +52,30 @@ export const Desktop = () => {
   const isPicoclawChatOpen = useAtomValue(picoclawChatOpenAtom);
 
   useEffect(() => {
+    let disposed = false;
     client.connect();
 
-    setVideoMode(activeVideoMode);
-
     const res = storage.getResolution() || { width: 0, height: 0 };
-    setResolution(res);
+
+    async function initializeScreenMode() {
+      try {
+        await updateScreen('type', activeVideoMode === 'mjpeg' ? 0 : 1);
+      } catch (err) {
+        console.warn('Failed to synchronize video mode:', err);
+      }
+
+      if (disposed) {
+        return;
+      }
+
+      setVideoMode(activeVideoMode);
+      setResolution(res);
+    }
+
+    initializeScreenMode();
 
     return () => {
+      disposed = true;
       client.close();
     };
   }, [activeVideoMode, setResolution, setVideoMode]);

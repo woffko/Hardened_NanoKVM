@@ -1,3 +1,12 @@
+## Hardened NanoKVM 2.0.23 Test Build (2026-07-01)
+
+### Changes
+
+* Fixed the H.264/MJPEG mode switch path after `2.0.22` could leave the device
+  in H.264 safe mode. The desktop UI now synchronizes the backend capture mode
+  before mounting a video stream, and the backend drains active video clients
+  before applying a real MJPEG/H.264 type change.
+
 ## Hardened NanoKVM 2.0.22 Test Build (2026-07-01)
 
 ### Changes
