@@ -7,9 +7,12 @@ import { DownloadIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { downloadImage, imageEnabled, statusImage } from '@/api/download.ts';
-import { isKeyboardEnableAtom } from '@/jotai/keyboard.ts';
 import { getCsrfToken } from '@/lib/cookie.ts';
+import { notifyImageListChanged } from '@/lib/image-events.ts';
+import { isKeyboardEnableAtom } from '@/jotai/keyboard.ts';
 import { MenuItem } from '@/components/menu-item.tsx';
+
+type TransferKind = 'local' | 'remote';
 
 export const DownloadImage = () => {
   const { t } = useTranslation();
@@ -23,14 +26,41 @@ export const DownloadImage = () => {
   const [popoverKey, setPopoverKey] = useState(0);
 
   const inputRef = useRef<InputRef>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const statusRef = useRef('');
+  const activeTransferRef = useRef<TransferKind | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  const intervalId = useRef<NodeJS.Timeout | undefined>(undefined);
+  const intervalId = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   useEffect(() => {
     checkDiskEnabled();
   }, []);
+
+  function setDownloadStatus(nextStatus: string) {
+    statusRef.current = nextStatus;
+    setStatus(nextStatus);
+  }
+
+  function stopStatusPolling() {
+    if (!intervalId.current) return;
+
+    clearInterval(intervalId.current);
+    intervalId.current = undefined;
+  }
+
+  function startStatusPolling() {
+    if (intervalId.current) return;
+
+    intervalId.current = setInterval(getDownloadStatus, 2500);
+  }
+
+  function clearFileInput() {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }
 
   function checkDiskEnabled() {
     imageEnabled()
@@ -46,138 +76,186 @@ export const DownloadImage = () => {
 
   function handleOpenChange(open: boolean) {
     if (open) {
-      clearInterval(intervalId.current);
+      stopStatusPolling();
       checkDiskEnabled();
       getDownloadStatus();
-      if (!intervalId.current) {
-        intervalId.current = setInterval(getDownloadStatus, 2500);
-      }
+      startStatusPolling();
       setIsKeyboardEnable(false);
       setPopoverKey((prevKey) => prevKey + 1); // Force re-render
     } else {
       setInput('');
-      setStatus('');
+      setDownloadStatus('');
       setLog('');
+      setSelectedFile(null);
+      setIsDragging(false);
+      activeTransferRef.current = null;
+      clearFileInput();
 
       setIsKeyboardEnable(true);
-      clearInterval(intervalId.current);
-      intervalId.current = undefined;
+      stopStatusPolling();
     }
   }
 
   function handleChange(e: ChangeEvent<HTMLInputElement>) {
     setInput(e.target.value);
+    if (statusRef.current === 'complete') {
+      setDownloadStatus('idle');
+      setLog('');
+    }
   }
 
   function getDownloadStatus() {
     statusImage().then((rsp) => {
-      if (rsp.data.status) {
-        setStatus(rsp.data.status);
-        if (rsp.data.status === 'in_progress') {
-          // Check if rsp has a percentage value
-          if (rsp.data.percentage) {
-            setLog('Downloading (' + rsp.data.percentage + ')' + ': ' + rsp.data.file);
-          } else {
-            setLog('Downloading' + ': ' + rsp.data.file);
-          }
+      if (rsp.code !== 0 || !rsp.data?.status) {
+        return;
+      }
+
+      const nextStatus = rsp.data.status;
+      if (nextStatus === 'in_progress') {
+        setDownloadStatus(nextStatus);
+        // Check if rsp has a percentage value
+        if (rsp.data.percentage) {
+          setLog('Downloading (' + rsp.data.percentage + ')' + ': ' + rsp.data.file);
+        } else {
+          setLog('Downloading' + ': ' + rsp.data.file);
+        }
+        if (activeTransferRef.current === 'remote') {
           setInput(rsp.data.file);
         }
-        if (rsp.data.status === 'failed') {
-          setLog('Failed');
-          clearInterval(intervalId.current);
+        return;
+      }
+
+      if (nextStatus === 'failed') {
+        setDownloadStatus(nextStatus);
+        setLog('Failed');
+        activeTransferRef.current = null;
+        stopStatusPolling();
+        return;
+      }
+
+      if (nextStatus === 'idle') {
+        const previousStatus = statusRef.current;
+        const previousTransfer = activeTransferRef.current;
+        activeTransferRef.current = null;
+        stopStatusPolling();
+
+        if (previousStatus === 'complete') {
+          return;
         }
-        if (rsp.data.status === 'idle') {
-          setLog(''); // Clear the log
-          clearInterval(intervalId.current);
+
+        if (previousStatus === 'in_progress' && previousTransfer === 'remote') {
+          setInput('');
+          setDownloadStatus('complete');
+          setLog(t('download.complete'));
+          notifyImageListChanged();
+          return;
         }
+
+        setDownloadStatus('idle');
+        setLog(''); // Clear the log
       }
     });
   }
 
   function download(url?: string) {
-    if (!url) return;
+    const targetUrl = url?.trim();
+    if (!targetUrl) return;
     if (!remoteEnabled) {
-      setStatus('failed');
+      setDownloadStatus('failed');
       setLog(t('download.remoteDisabled'));
       return;
     }
 
-    setStatus('in_progress');
-    setLog('Downloading: ' + url);
+    activeTransferRef.current = 'remote';
+    setDownloadStatus('in_progress');
+    setLog('Downloading: ' + targetUrl);
     // start the getDownloadStatus to tick every 5 seconds
 
-    downloadImage(url)
+    downloadImage(targetUrl)
       .then((rsp) => {
         if (rsp.code !== 0) {
-          setStatus('failed');
+          activeTransferRef.current = null;
+          setDownloadStatus('failed');
           setLog(rsp.msg || t('download.remoteFailed'));
           return;
         }
         getDownloadStatus();
         // Start the interval to check the download status
-        if (!intervalId.current) {
-          intervalId.current = setInterval(getDownloadStatus, 2500);
-        }
+        startStatusPolling();
       })
       .catch(() => {
-        clearInterval(intervalId.current); // Clear the interval when the download is complete or fails
-        setStatus('failed');
+        stopStatusPolling(); // Clear the interval when the download is complete or fails
+        activeTransferRef.current = null;
+        setDownloadStatus('failed');
         setLog('Failed');
       });
+  }
+
+  function selectLocalFile(file: File | null) {
+    if (!file || !file.name.toLowerCase().endsWith('.iso')) {
+      setDownloadStatus('failed');
+      setLog(t('download.NoISO'));
+      setSelectedFile(null);
+      clearFileInput();
+      return;
+    }
+    setDownloadStatus('idle');
+    setLog('');
+    setSelectedFile(file);
+    activeTransferRef.current = null;
+    stopStatusPolling();
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
-    if (!file || !file.name.toLowerCase().endsWith(".iso")) {
-      setStatus('failed');
-      setLog(t('download.NoISO'));
-      return;
-    }
-    setStatus('idle');
-    setLog('');
-    setSelectedFile(file);
-    clearInterval(intervalId.current);
-    intervalId.current = undefined;
+    selectLocalFile(file);
   }
 
-  function upload(file: File | null) {
+  async function upload(file: File | null) {
     if (!file) return;
 
-    if (!file || !file.name.toLowerCase().endsWith(".iso")) {
-      setStatus('failed');
+    if (!file || !file.name.toLowerCase().endsWith('.iso')) {
+      setDownloadStatus('failed');
       setLog(t('download.NoISO'));
       return;
     }
 
-    setStatus('in_progress');
+    activeTransferRef.current = 'local';
+    setDownloadStatus('in_progress');
     setLog('Downloading: ' + file.name);
 
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append('file', file);
 
     const csrfToken = getCsrfToken();
-    fetch("/api/download/file", {
-      method: "POST",
-      headers: csrfToken ? { "x-csrf-token": csrfToken } : undefined,
-      body: formData,
-    }).catch(() => {
-        clearInterval(intervalId.current); // Clear the interval when the download is complete or fails
-        setStatus('failed');
-        setLog('Failed');
-      }).then(() => {
-        clearInterval(intervalId.current); // Clear the interval when the download is complete or fails
-        setStatus('idle');
-        setLog('');
-      });
 
-    // Start the interval to check the download status
-    if (!intervalId.current) {
-      getDownloadStatus();
-      setTimeout(() => {
-        intervalId.current = setInterval(getDownloadStatus, 2500);
-      }, 2500);
+    try {
+      const uploadRequest = fetch('/api/download/file', {
+        method: 'POST',
+        headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+        body: formData
+      });
+      startStatusPolling();
+      const response = await uploadRequest;
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok || body?.code !== 0) {
+        throw new Error(body?.msg || 'Failed');
+      }
+
+      stopStatusPolling();
+      activeTransferRef.current = null;
+      setDownloadStatus('complete');
+      setLog(t('download.complete'));
+      setSelectedFile(null);
+      clearFileInput();
+      notifyImageListChanged();
+    } catch (error) {
+      stopStatusPolling(); // Clear the interval when the download is complete or fails
+      activeTransferRef.current = null;
+      setDownloadStatus('failed');
+      setLog(error instanceof Error && error.message ? error.message : 'Failed');
     }
-    
   }
 
   const content = (
@@ -204,7 +282,7 @@ export const DownloadImage = () => {
               <Button
                 type="primary"
                 onClick={() => download(input)}
-                disabled={status === 'in_progress' || !remoteEnabled}
+                disabled={status === 'in_progress' || status === 'complete' || !remoteEnabled || !input.trim()}
               >
                 {t('download.ok')}
               </Button>
@@ -217,47 +295,44 @@ export const DownloadImage = () => {
             <div className="pb-1 text-neutral-500">{t('download.inputfile')}</div>
             <div className="flex items-center space-x-1">
               <div
-                  className={clsx(
-                    "flex flex-col items-center justify-center w-full h-10 border-2 border-solid rounded-xl transition css-9118ya ant-input-outlined",
-                    isDragging ? "bg-neutral-500 border-blue-500" : "",
-                    status === "in_progress" ? "opacity-50 cursor-not-allowed pointer-events-none border-neutral-600 bg-neutral-700" : "cursor-pointer hover:bg-neutral-500"
-                  )}
-                  onDrop={(e) => {
-                    if (status === "in_progress") return; // deaktiviert
-                    e.preventDefault();
-                    setIsDragging(false);
-                    const file = e.dataTransfer.files?.[0] ?? null;
-                    if (!file || !file.name.toLowerCase().endsWith(".iso")) {
-                      setStatus('failed');
-                      setLog(t('download.NoISO'));
-                      return;
-                    }
-                    setStatus('idle');
-                    setLog('');
-                    setSelectedFile(file);
-                  }}
-                  onDragOver={(e) => {
-                    if (status === "in_progress") return; // deaktiviert
-                    e.preventDefault();
-                    setIsDragging(true); // Datei wird über den Bereich gezogen
-                  }}
-                  onDragLeave={(e) => {
-                    if (status === "in_progress") return; // deaktiviert
-                    e.preventDefault();
-                    setIsDragging(false); // Maus verlässt Bereich
-                  }}
-                  onClick={() => {
-                    if (status === "in_progress") return; // deaktiviert
-                    document.getElementById("file-upload")?.click()
-                  }}
-                >
-                <span className="text-neutral-100 text-sm p-1">
+                className={clsx(
+                  'css-9118ya ant-input-outlined flex h-10 w-full flex-col items-center justify-center rounded-xl border-2 border-solid transition',
+                  isDragging ? 'border-blue-500 bg-neutral-500' : '',
+                  status === 'in_progress'
+                    ? 'pointer-events-none cursor-not-allowed border-neutral-600 bg-neutral-700 opacity-50'
+                    : 'cursor-pointer hover:bg-neutral-500'
+                )}
+                onDrop={(e) => {
+                  if (status === 'in_progress') return; // deaktiviert
+                  e.preventDefault();
+                  setIsDragging(false);
+                  const file = e.dataTransfer.files?.[0] ?? null;
+                  selectLocalFile(file);
+                }}
+                onDragOver={(e) => {
+                  if (status === 'in_progress') return; // deaktiviert
+                  e.preventDefault();
+                  setIsDragging(true); // Datei wird über den Bereich gezogen
+                }}
+                onDragLeave={(e) => {
+                  if (status === 'in_progress') return; // deaktiviert
+                  e.preventDefault();
+                  setIsDragging(false); // Maus verlässt Bereich
+                }}
+                onClick={() => {
+                  if (status === 'in_progress') return; // deaktiviert
+                  fileInputRef.current?.click();
+                }}
+              >
+                <span className="p-1 text-sm text-neutral-100">
                   {selectedFile ? selectedFile.name : t('download.uploadbox')}
                 </span>
 
-                <Input
+                <input
                   id="file-upload"
+                  ref={fileInputRef}
                   type="file"
+                  accept=".iso"
                   onChange={handleFileChange}
                   disabled={status === 'in_progress'}
                   className="hidden"
@@ -267,7 +342,7 @@ export const DownloadImage = () => {
                 type="primary"
                 className="h-10 border-2"
                 onClick={() => upload(selectedFile)}
-                disabled={status === 'in_progress' || !selectedFile}
+                disabled={status === 'in_progress' || status === 'complete' || !selectedFile}
               >
                 {t('download.ok')}
               </Button>
@@ -276,7 +351,7 @@ export const DownloadImage = () => {
         </>
       )}
       <div className={clsx('py-2')}>
-        {status && (
+        {status && log && (
           <div
             className={clsx(
               'max-w-[300px] break-words text-sm',

@@ -19,6 +19,7 @@ use crate::{
 const CONFIG_FILE: &str = "/etc/kvm/firewall.json";
 const PENDING_FILE: &str = "/tmp/hardened-firewall-pending.json";
 const MODE_BASELINE: &str = "baseline";
+const MODE_MODERATE: &str = "moderate";
 const MODE_RESTRICTED: &str = "restricted";
 const MODE_PARANOID: &str = "paranoid";
 const PARANOID_BLOCKED_MESSAGE: &str = "online updates are blocked by Paranoid Firewall mode";
@@ -32,7 +33,7 @@ pub struct FirewallConfig {
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
-            mode: MODE_BASELINE.to_string(),
+            mode: MODE_MODERATE.to_string(),
         }
     }
 }
@@ -48,6 +49,7 @@ pub struct SetFirewallReq {
 pub struct FirewallStatusRsp {
     config: FirewallConfig,
     effective_mode: String,
+    moderate_active: bool,
     restricted_active: bool,
     paranoid_active: bool,
     paranoid_available: bool,
@@ -101,11 +103,11 @@ pub fn paranoid_blocked_message() -> &'static str {
     PARANOID_BLOCKED_MESSAGE
 }
 
-pub async fn force_baseline_mode() -> Result<()> {
-    let baseline = FirewallConfig {
-        mode: MODE_BASELINE.to_string(),
+pub async fn force_moderate_mode() -> Result<()> {
+    let moderate = FirewallConfig {
+        mode: MODE_MODERATE.to_string(),
     };
-    write_config(&baseline)?;
+    write_config(&moderate)?;
     remove_file_if_exists(PENDING_FILE)?;
     apply_firewall().await
 }
@@ -154,6 +156,7 @@ async fn build_status() -> Result<FirewallStatusRsp> {
     let server_config = Config::read().unwrap_or_default();
     let https_enabled = https_enabled(&server_config);
     let effective_mode = effective_mode_for(&config, &server_config);
+    let moderate_active = effective_mode == MODE_MODERATE;
     let restricted_active = effective_mode == MODE_RESTRICTED;
     let paranoid_active = effective_mode == MODE_PARANOID;
     let confirmation_required = Path::new(PENDING_FILE).exists();
@@ -169,6 +172,7 @@ async fn build_status() -> Result<FirewallStatusRsp> {
     Ok(FirewallStatusRsp {
         config,
         effective_mode,
+        moderate_active,
         restricted_active,
         paranoid_active,
         paranoid_available: https_enabled,
@@ -193,11 +197,11 @@ fn effective_mode() -> Result<String> {
 }
 
 fn effective_mode_for(config: &FirewallConfig, server_config: &Config) -> String {
-    if mode_requires_https(&config.mode) && https_enabled(server_config) {
-        config.mode.clone()
-    } else {
-        MODE_BASELINE.to_string()
+    if mode_requires_https(&config.mode) && !https_enabled(server_config) {
+        return MODE_MODERATE.to_string();
     }
+
+    config.mode.clone()
 }
 
 fn https_enabled(config: &Config) -> bool {
@@ -234,7 +238,7 @@ async fn ensure_https_mode_can_be_enabled(mode: &str) -> Result<()> {
 
 fn normalize_mode(mode: &str) -> Result<FirewallConfig> {
     match mode {
-        MODE_BASELINE | MODE_RESTRICTED | MODE_PARANOID => Ok(FirewallConfig {
+        MODE_BASELINE | MODE_MODERATE | MODE_RESTRICTED | MODE_PARANOID => Ok(FirewallConfig {
             mode: mode.to_string(),
         }),
         _ => Err(AppError::BadRequest("invalid firewall mode".to_string())),
@@ -382,9 +386,15 @@ mod tests {
     #[test]
     fn validates_firewall_modes() {
         assert_eq!(normalize_mode("baseline").unwrap().mode, MODE_BASELINE);
+        assert_eq!(normalize_mode("moderate").unwrap().mode, MODE_MODERATE);
         assert_eq!(normalize_mode("restricted").unwrap().mode, MODE_RESTRICTED);
         assert_eq!(normalize_mode("paranoid").unwrap().mode, MODE_PARANOID);
         assert!(normalize_mode("off").is_err());
+    }
+
+    #[test]
+    fn defaults_to_moderate_mode() {
+        assert_eq!(FirewallConfig::default().mode, MODE_MODERATE);
     }
 
     #[test]
@@ -396,7 +406,7 @@ mod tests {
             proto: "http".to_string(),
             ..Config::default()
         };
-        assert_eq!(effective_mode_for(&firewall, &config), MODE_BASELINE);
+        assert_eq!(effective_mode_for(&firewall, &config), MODE_MODERATE);
 
         config.proto = "https".to_string();
         assert_eq!(effective_mode_for(&firewall, &config), MODE_PARANOID);
@@ -411,9 +421,21 @@ mod tests {
             proto: "http".to_string(),
             ..Config::default()
         };
-        assert_eq!(effective_mode_for(&firewall, &config), MODE_BASELINE);
+        assert_eq!(effective_mode_for(&firewall, &config), MODE_MODERATE);
 
         config.proto = "https".to_string();
         assert_eq!(effective_mode_for(&firewall, &config), MODE_RESTRICTED);
+    }
+
+    #[test]
+    fn moderate_does_not_require_https_for_effective_mode() {
+        let firewall = FirewallConfig {
+            mode: MODE_MODERATE.to_string(),
+        };
+        let config = Config {
+            proto: "http".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(effective_mode_for(&firewall, &config), MODE_MODERATE);
     }
 }

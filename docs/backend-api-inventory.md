@@ -90,9 +90,9 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method | Path | Rust Status |
 |---|---|---|
-| GET | `/api/system/firewall` | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output. |
-| POST | `/api/system/firewall` | Implemented; accepts `baseline`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. |
-| POST | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores baseline/previous mode if Restricted or Paranoid is enabled but not confirmed. |
+| GET | `/api/system/firewall` | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, local-source policy state, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output. |
+| POST | `/api/system/firewall` | Implemented; accepts `baseline`, `moderate`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Moderate is the default profile and keeps baseline services reachable only from private IPv4, IPv4 link-local, IPv6 ULA, and IPv6 link-local sources. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. |
+| POST | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores moderate/previous mode if Restricted or Paranoid is enabled but not confirmed. |
 
 ### VM, Device, And Settings
 

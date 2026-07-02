@@ -1,12 +1,13 @@
 import { http } from '@/lib/http.ts';
 
-export type FirewallMode = 'baseline' | 'restricted' | 'paranoid';
+export type FirewallMode = 'baseline' | 'moderate' | 'restricted' | 'paranoid';
 
 export type FirewallStatus = {
   config: {
     mode: FirewallMode;
   };
   effectiveMode: FirewallMode;
+  moderateActive: boolean;
   restrictedActive: boolean;
   paranoidActive: boolean;
   paranoidAvailable: boolean;

@@ -12,11 +12,11 @@ are implemented deeply enough for interactive device testing.
 
 Current published channels:
 
-- app update: `2.0.25 RC3`, tag `hardened-rust-rc3`;
-- current source/test build: `2.0.25`, installed and smoke-tested on hardware;
-- raw system-update: `0.2.17-raw.1`, built from the RC3 `2.0.25` SD rootfs
+- app update: `2.0.26 RC4`, tag `hardened-rust-rc4`;
+- current source/test build: `2.0.26`, installed and smoke-tested on hardware;
+- raw system-update: `0.2.18-raw.1`, built from the RC4 `2.0.26` SD rootfs
   with gzip-compressed raw payload staging and sysrq reboot after raw writes;
-- SD-card image: RC3 `2.0.25` / `0.2.17-raw.1`.
+- SD-card image: RC4 `2.0.26` / `0.2.18-raw.1`.
 
 ## Build
 
@@ -107,6 +107,9 @@ For end-user flashing instructions, see
 - VM info, hardware, hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS,
   swap, memory limit, TLS toggle, reboot, scripts, autostart, uptime, and
   session-lock routes.
+- Managed firewall modes: Baseline compatibility, Moderate default local-only
+  access, Restricted local-only service allowlist, and Paranoid local-only HTTPS
+  with online updates intentionally blocked.
 - MJPEG stream and frame-detect endpoints through `libkvm`.
 - H.264 Direct and H.264 WebRTC routes are enabled. Direct streaming is the
   preferred low-CPU mode and has been verified on hardware. WebRTC websocket
@@ -127,6 +130,8 @@ For end-user flashing instructions, see
 - Guarded remote ISO download by URL. It is disabled by default, controlled by
   Settings > Appearance, validates URL shape, filename, size, destination, and
   ISO9660 signature, and writes only under the configured image directory.
+  Completed browser uploads and remote downloads refresh the virtual-media image
+  list without requiring logout.
 - WOL, DNS, Wi-Fi status/connect/AP verification, and Tailscale lifecycle
   routes.
 - Terminal websocket, disabled by default and controlled by the existing

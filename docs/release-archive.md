@@ -16,8 +16,10 @@ Policy:
 
 | Tag | Status | Notes |
 | --- | --- | --- |
-| `hardened-rust-rc3` | Current full RC | App `2.0.25` with matching raw system `0.2.17-raw.1` and SD-card image. Keeps the tested video path, persists the selected video mode and Appearance display mode, fixes the login firmware version, refines the System > Network IPv4/DNS layout, and keeps the Buildroot `2023.11.3 package backports` baseline on the raw/SD line. |
-| `hardened-system-0.2.17-raw.1` | Current raw channel target | Companion raw-system release for RC3. Stable/preview system-update metadata points here because deployed device validators trust raw downloads and release notes from `hardened-system-*` tags. |
+| `hardened-rust-rc4` | Current full RC | App `2.0.26` with matching raw system `0.2.18-raw.1` and SD-card image. Adds Moderate as the default local-only firewall profile, enforces private/ULA/link-local sources for Moderate/Restricted/Paranoid firewall modes, refreshes firewall mode selection UI, and fixes ISO download/upload completion state plus virtual-media image-list refresh. Keeps the Buildroot `2023.11.3 package backports` baseline on the raw/SD line. |
+| `hardened-system-0.2.18-raw.1` | Current raw channel target | Companion raw-system release for RC4. Stable/preview system-update metadata points here because deployed device validators trust raw downloads and release notes from `hardened-system-*` tags. |
+| `hardened-rust-rc3` | Previous full RC | App `2.0.25` with matching raw system `0.2.17-raw.1` and SD-card image. Keeps the tested video path, persists the selected video mode and Appearance display mode, fixes the login firmware version, refines the System > Network IPv4/DNS layout, and keeps the Buildroot `2023.11.3 package backports` baseline on the raw/SD line. |
+| `hardened-system-0.2.17-raw.1` | Previous raw channel target | Companion raw-system release for RC3. Stable/preview system-update metadata pointed here before RC4. |
 | `hardened-rust-2.0.24` | Previous app release | App `2.0.24` keeps the tested `2.0.21` video path, moves Network settings under System, and handles HTTP/HTTPS protocol changes through a warned device reboot plus delayed redirect. |
 | `hardened-rust-rc2` | Previous app RC | App `2.0.21` with Network settings moved under `Settings > System > Network`, Restricted firewall/WebRTC DNS text updates, and tested app-only release behavior. |
 | `hardened-rust-rc1` | Previous app RC | App `2.0.20` with System Log, Time/NTP/timezone controls, managed Firewall controls, Restricted/Paranoid modes, HTTPS/firewall recovery, and TLS toggles that keep `kvm_system` running. |
@@ -31,7 +33,7 @@ Policy:
 ## Internal Or Obsolete App Releases
 
 These releases were useful during bring-up, but are superseded by
-`hardened-rust-rc3`. They can be removed from the GitHub Releases UI
+`hardened-rust-rc4`. They can be removed from the GitHub Releases UI
 without losing the changelog history.
 
 | Tag | Archive status | Notes |
@@ -94,10 +96,10 @@ entries listed above until the next cleanup pass.
 
 When repeating GitHub Releases cleanup:
 
-1. Verify `hardened-rust-rc3` is the GitHub latest release and its
+1. Verify `hardened-rust-rc4` is the GitHub latest release and its
    `latest.json` signature verifies.
 2. Verify `hardened-system-stable/system-latest.json` points to
-   `0.2.17-raw.1` and its signature verifies.
+   `0.2.18-raw.1` and its signature verifies.
 3. Delete only obsolete release entries/assets from the GitHub Releases UI.
 4. Keep channel releases, the current app release, and the current raw/SD
    baseline release.

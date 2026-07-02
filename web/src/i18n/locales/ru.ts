@@ -72,7 +72,8 @@ const ru = {
       scale: 'Масштаб',
       title: 'Экран',
       video: 'Видеорежим',
-      videoDirectTips: 'Включите HTTPS в "Настройки > Система > Сеть", чтобы использовать этот режим',
+      videoDirectTips:
+        'Включите HTTPS в "Настройки > Система > Сеть", чтобы использовать этот режим',
       resolution: 'Разрешение',
       auto: 'Автоматическое',
       autoTips:
@@ -271,6 +272,7 @@ const ru = {
       uploadbox: 'Перетащите сюда файл или нажмите, чтобы выбрать',
       inputfile: 'Пожалуйста, введите файл изображения',
       NoISO: 'Нет ISO',
+      complete: 'Скачивание завершено',
       remoteDisabled: 'Удаленное скачивание ISO отключено в Настройки > Внешний вид.',
       remoteFailed: 'Не удалось скачать удаленный ISO'
     },
@@ -458,7 +460,8 @@ const ru = {
           maxServers: 'Разрешено не более {{count}} DNS-серверов',
           dnsServers: 'DNS-серверы',
           dhcpServersDescription: 'DNS-серверы автоматически получаются от DHCP',
-          manualServersDescription: 'DNS-серверы можно редактировать вручную. IPv4 и IPv6 поддерживаются',
+          manualServersDescription:
+            'DNS-серверы можно редактировать вручную. IPv4 и IPv6 поддерживаются',
           networkDetails: 'Сведения о сети',
           interface: 'Интерфейс',
           ipAddress: 'IP-адрес',
@@ -485,7 +488,8 @@ const ru = {
           ipAddress: 'IPv6-адрес',
           prefix: 'Префикс',
           invalidManual: 'Введите допустимый IPv6-адрес, префикс и маршрутизатор',
-          clientMissing: 'DHCPv6-клиент не установлен. Сначала установите соответствующее raw-обновление системы.',
+          clientMissing:
+            'DHCPv6-клиент не установлен. Сначала установите соответствующее raw-обновление системы.',
           saved: 'Настройки IPv6 сохранены',
           saveFailed: 'Не удалось сохранить настройки IPv6',
           loadFailed: 'Не удалось загрузить настройки IPv6',
@@ -540,40 +544,66 @@ const ru = {
           effectiveMode: 'Фактический режим',
           disabled: 'Отключен',
           enabledPort: 'Включен на порту {{port}}',
-          enableHttpsFirst: 'Перед Paranoid Firewall mode включите HTTPS',
+          enableHttpsFirst: 'Перед режимами Restricted или Paranoid включите HTTPS',
           httpsRequired:
-            'Paranoid mode недоступен, пока HTTPS не включен в Настройки > Система > Сеть.',
+            'Режимы Restricted и Paranoid недоступны, пока HTTPS не включен в Настройки > Система > Сеть.',
           mode: {
             title: 'Режим firewall',
             description:
-              'Firewall всегда управляется системой. Baseline сохраняет обычный доступ NanoKVM; Restricted разрешает HTTPS, SSH, NTP, syslog, обновления и WebRTC; Paranoid оставляет только HTTPS-доступ.',
-            baseline: 'Managed baseline',
+              'Выберите, как открыт входящий административный доступ. Moderate - дефолтный локальный профиль; Baseline - открытый профиль совместимости.',
+            baseline: 'Baseline',
+            baselineDesc:
+              'Открытый управляемый профиль. Сохраняет обычный доступ NanoKVM без фильтрации source ranges.',
+            moderate: 'Moderate',
+            moderateDesc:
+              'Дефолтный профиль. Сохраняет сервисы baseline, но принимает новые входящие соединения только из private, ULA, link-local или loopback диапазонов.',
             restricted: 'Restricted',
-            paranoid: 'Paranoid'
+            restrictedDesc:
+              'Локальные административные порты плюс исходящие сервисы для обновлений, DNS, NTP, syslog и WebRTC.',
+            paranoid: 'Paranoid',
+            paranoidDesc:
+              'Только локальный HTTPS-доступ. Блокирует SSH, HTTP, онлайн-обновления и другие исходящие сетевые функции.',
+            current: 'Текущий',
+            default: 'Дефолтный',
+            localOnly: 'Только local-use',
+            openTag: 'Открытый',
+            httpsRequiredTag: 'Нужен HTTPS',
+            outboundOpen: 'Исходящие открыты',
+            outboundLimited: 'Исходящие ограничены',
+            httpsOnly: 'Только HTTPS'
+          },
+          moderate: {
+            apply: 'Переключить в Moderate',
+            active: 'Moderate Firewall mode активен',
+            allows:
+              'Входящие соединения принимаются только из private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local или IPv6 loopback source ranges. Исходящий доступ остается открытым.'
           },
           restricted: {
             enable: 'Включить Restricted',
             active: 'Restricted Firewall mode активен',
             allows:
-              'Разрешенный трафик: HTTPS, SSH, DNS, NTP, удаленный syslog, онлайн-обновления, WebRTC/ICE UDP, DHCP, established-соединения и минимальный IPv6 control traffic.',
+              'Разрешенный трафик: HTTPS, SSH и WebRTC/ICE UDP только из private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local или IPv6 loopback source ranges; исходящие DNS, NTP, удаленный syslog и онлайн-обновления; DHCP, established-соединения и минимальный IPv6 control traffic.',
             confirmTitle: 'Включить Restricted Firewall mode?',
             confirmDesc:
-              'Будет разрешен только HTTPS, SSH, DNS, NTP, удаленный syslog, онлайн-обновления, WebRTC/ICE UDP, DHCP, established-соединения и минимальный IPv6 control traffic. Остальной входящий/исходящий трафик будет заблокирован.'
+              'Входящий административный доступ будет ограничен private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local или IPv6 loopback source ranges для HTTPS, SSH и WebRTC/ICE UDP. Публичные source ranges не разрешаются. Исходящие DNS, NTP, удаленный syslog, онлайн-обновления, DHCP, established-соединения и минимальный IPv6 control traffic останутся доступны. Остальной входящий/исходящий трафик будет заблокирован.'
           },
           paranoid: {
             enable: 'Включить Paranoid',
             active: 'Paranoid Firewall mode активен',
             blocks:
-              'Онлайн-обновления и исходящие сетевые функции заблокированы. Offline upload и установка уже подготовленных обновлений остаются доступны.',
+              'Останется только HTTPS из private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local или IPv6 loopback source ranges. Онлайн-обновления и исходящие сетевые функции заблокированы. Offline upload и установка уже подготовленных обновлений остаются доступны.',
             confirmTitle: 'Включить Paranoid Firewall mode?',
             confirmDesc:
-              'Останется доступ только по HTTPS. SSH, HTTP, mDNS, NTP, загрузки с GitHub и прочий входящий/исходящий трафик будут заблокированы, кроме минимального DHCP/IPv6 control traffic.'
+              'Останется доступ только по HTTPS из private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local или IPv6 loopback source ranges. Публичные source ranges не разрешаются. SSH, HTTP, mDNS, NTP, загрузки с GitHub и прочий входящий/исходящий трафик будут заблокированы, кроме минимального DHCP/IPv6 control traffic.'
           },
           baseline: {
-            apply: 'Вернуться в baseline',
-            confirmTitle: 'Вернуться в managed baseline?',
+            apply: 'Переключить в Baseline',
+            active: 'Baseline Firewall mode активен',
+            allows:
+              'Firewall service активен, но входящие source ranges не ограничены. Используйте это только для доверенной лабораторной сети или совместимости.',
+            confirmTitle: 'Переключить в открытый Baseline mode?',
             confirmDesc:
-              'Firewall service останется активен, но будет восстановлен обычный профиль доступа NanoKVM.'
+              'Firewall service останется активен, но local-only ограничение source ranges будет снято. Публичные source ranges смогут достучаться до открытых сервисов NanoKVM, если сеть их маршрутизирует.'
           },
           rules: {
             title: 'Текущие правила',

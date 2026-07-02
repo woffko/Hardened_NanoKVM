@@ -72,18 +72,20 @@ Production stable/preview channel metadata must use
 
 ## Current Published System Releases
 
-The current `hardened-system-stable` channel points to the RC3 raw payload
-`0.2.17-raw.1`, published on companion tag
-`hardened-system-0.2.17-raw.1`. The full `hardened-rust-rc3` release also
+The current `hardened-system-stable` channel points to the RC4 raw payload
+`0.2.18-raw.1`, published on companion tag
+`hardened-system-0.2.18-raw.1`. The full `hardened-rust-rc4` release also
 carries the matching raw bundle and SD-card image, but deployed device-side URL
 validation trusts raw downloads and release notes from `hardened-system-*`
-tags. The raw payload was built from the RC3 `2.0.25` Hardened SD image and
+tags. The raw payload was built from the RC4 `2.0.26` Hardened SD image and
 contains gzip-compressed boot/rootfs partition images plus matching channel
-metadata.
+metadata. RC4 keeps the tested raw-update baseline and adds the Moderate
+default firewall profile plus local-source firewall enforcement in the
+application payload.
 
 The current metadata intentionally separates several version fields:
 
-- system update version: `0.2.17-raw.1`;
+- system update version: `0.2.18-raw.1`;
 - base image: `2026-06-29-12-08-d88d58.img`;
 - Buildroot release: `2023.11.2`;
 - security backport level: `Buildroot 2023.11.3 package backports`.

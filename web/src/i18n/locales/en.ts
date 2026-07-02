@@ -266,6 +266,7 @@ const en = {
       uploadbox: 'Drop file here or click to select',
       inputfile: 'Please enter the image File',
       NoISO: 'No ISO',
+      complete: 'Download complete',
       remoteDisabled: 'Remote ISO download is disabled in Settings > Appearance.',
       remoteFailed: 'Remote ISO download failed'
     },
@@ -450,7 +451,8 @@ const en = {
           maxServers: 'Maximum {{count}} DNS servers allowed',
           dnsServers: 'DNS Servers',
           dhcpServersDescription: 'DNS servers are automatically obtained from DHCP',
-          manualServersDescription: 'DNS servers can be edited manually. IPv4 and IPv6 are supported',
+          manualServersDescription:
+            'DNS servers can be edited manually. IPv4 and IPv6 are supported',
           networkDetails: 'Network Details',
           interface: 'Interface',
           ipAddress: 'IP Address',
@@ -477,7 +479,8 @@ const en = {
           ipAddress: 'IPv6 Address',
           prefix: 'Prefix',
           invalidManual: 'Please enter a valid IPv6 address, prefix, and router',
-          clientMissing: 'DHCPv6 client is not installed. Install the matching raw system update first.',
+          clientMissing:
+            'DHCPv6 client is not installed. Install the matching raw system update first.',
           saved: 'IPv6 settings saved',
           saveFailed: 'Failed to save IPv6 settings',
           loadFailed: 'Failed to load IPv6 settings',
@@ -532,40 +535,66 @@ const en = {
           effectiveMode: 'Effective mode',
           disabled: 'Disabled',
           enabledPort: 'Enabled on port {{port}}',
-          enableHttpsFirst: 'Enable HTTPS before enabling Paranoid Firewall mode',
+          enableHttpsFirst: 'Enable HTTPS before enabling Restricted or Paranoid Firewall mode',
           httpsRequired:
-            'Paranoid mode is disabled until HTTPS is enabled in Settings > System > Network.',
+            'Restricted and Paranoid modes are disabled until HTTPS is enabled in Settings > System > Network.',
           mode: {
             title: 'Firewall Mode',
             description:
-              'The firewall service is always managed. Baseline keeps current NanoKVM access; Restricted allows HTTPS, SSH, NTP, syslog, updates, and WebRTC; Paranoid allows only HTTPS access.',
-            baseline: 'Managed baseline',
+              'Choose how inbound admin access is exposed. Moderate is the default local-only profile; Baseline is an open compatibility profile.',
+            baseline: 'Baseline',
+            baselineDesc:
+              'Open managed profile. Keeps normal NanoKVM access without source-range filtering.',
+            moderate: 'Moderate',
+            moderateDesc:
+              'Default profile. Keeps baseline services, but accepts new inbound connections only from private, ULA, link-local, or loopback ranges.',
             restricted: 'Restricted',
-            paranoid: 'Paranoid'
+            restrictedDesc:
+              'Local-only admin ports plus the outbound services needed for updates, DNS, NTP, syslog, and WebRTC.',
+            paranoid: 'Paranoid',
+            paranoidDesc:
+              'Local-only HTTPS access. Blocks SSH, HTTP, online updates, and other outbound network features.',
+            current: 'Current',
+            default: 'Default',
+            localOnly: 'Local-only',
+            openTag: 'Open',
+            httpsRequiredTag: 'HTTPS required',
+            outboundOpen: 'Outbound open',
+            outboundLimited: 'Outbound limited',
+            httpsOnly: 'HTTPS only'
+          },
+          moderate: {
+            apply: 'Switch to Moderate',
+            active: 'Moderate Firewall mode is active',
+            allows:
+              'Inbound connections are accepted only from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, or IPv6 loopback source ranges. Outbound access remains open.'
           },
           restricted: {
             enable: 'Enable Restricted',
             active: 'Restricted Firewall mode is active',
             allows:
-              'Allowed traffic: HTTPS, SSH, DNS, NTP, remote syslog, online updates, WebRTC/ICE UDP, DHCP, established connections, and essential IPv6 control traffic.',
+              'Allowed traffic: HTTPS, SSH, and WebRTC/ICE UDP only from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, or IPv6 loopback source ranges; outbound DNS, NTP, remote syslog, and online updates; DHCP, established connections, and essential IPv6 control traffic.',
             confirmTitle: 'Enable Restricted Firewall mode?',
             confirmDesc:
-              'Allowed traffic will be limited to HTTPS, SSH, DNS, NTP, remote syslog, online updates, WebRTC/ICE UDP, DHCP, established connections, and essential IPv6 control traffic. Other inbound/outbound traffic will be blocked.'
+              'Inbound admin access will be limited to private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, or IPv6 loopback source ranges for HTTPS, SSH, and WebRTC/ICE UDP. Public source ranges are not allowed. Outbound DNS, NTP, remote syslog, online updates, DHCP, established connections, and essential IPv6 control traffic remain available. Other inbound/outbound traffic will be blocked.'
           },
           paranoid: {
             enable: 'Enable Paranoid',
             active: 'Paranoid Firewall mode is active',
             blocks:
-              'Online updates and outbound network features are blocked. Offline update upload and already staged installs remain available.',
+              'Only HTTPS from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, or IPv6 loopback source ranges remains available. Online updates and outbound network features are blocked. Offline update upload and already staged installs remain available.',
             confirmTitle: 'Enable Paranoid Firewall mode?',
             confirmDesc:
-              'Only HTTPS access will remain available. SSH, HTTP, mDNS, NTP, GitHub downloads, and other inbound/outbound traffic will be blocked except for minimal DHCP/IPv6 control traffic.'
+              'Only HTTPS access from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, or IPv6 loopback source ranges will remain available. Public source ranges are not allowed. SSH, HTTP, mDNS, NTP, GitHub downloads, and other inbound/outbound traffic will be blocked except for minimal DHCP/IPv6 control traffic.'
           },
           baseline: {
-            apply: 'Return to baseline',
-            confirmTitle: 'Return to managed baseline?',
+            apply: 'Switch to Baseline',
+            active: 'Baseline Firewall mode is active',
+            allows:
+              'The firewall service is active, but inbound source ranges are not restricted. Use this only for trusted lab or compatibility scenarios.',
+            confirmTitle: 'Switch to open Baseline mode?',
             confirmDesc:
-              'This keeps the firewall service active but restores the normal NanoKVM access profile.'
+              'This keeps the firewall service active but removes the local-only source-range restriction. Public source ranges may reach exposed NanoKVM services if the network routes them.'
           },
           rules: {
             title: 'Current Rules',

@@ -30,15 +30,15 @@ Security release builds are Rust-only: the legacy Go backend and backend switch
 scripts are no longer shipped in `kvmapp` packages or generated SD-card images.
 
 The web UI currently brands this fork as **Hardened NanoKVM**. The current
-published GitHub application release is **2.0.25 RC3**.
+published GitHub application release is **2.0.26 RC4**.
 
 The current published application release is available from the `woffko` fork at
-[`hardened-rust-rc3`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3).
+[`hardened-rust-rc4`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc4).
 
 The latest raw system-update and SD-card artifacts are the matching
-**0.2.17-raw.1** RC3 builds. The full RC3 release carries the matching app,
+**0.2.18-raw.1** RC4 builds. The full RC4 release carries the matching app,
 raw bundle, and SD-card image; the system-update channel metadata points to the
-companion `hardened-system-0.2.17-raw.1` tag because deployed devices trust
+companion `hardened-system-0.2.18-raw.1` tag because deployed devices trust
 raw-system downloads from `hardened-system-*` release URLs. They use the
 Buildroot `2023.11.2` base label with the `Buildroot 2023.11.3 package
 backports` security-backport baseline.
@@ -66,12 +66,16 @@ the security, update, and administration model substantially:
   boot-watchdog rollback support.
 - **System settings in GUI:** added System Log, remote UDP syslog forwarding,
   local tmpfs log viewing, Time/NTP/timezone controls, and Firewall controls.
-- **Managed firewall modes:** baseline managed rules plus Restricted and
-  Paranoid modes. Restricted keeps HTTPS/SSH/DNS/NTP/syslog/update traffic and
-  WebRTC/ICE UDP usable; Paranoid blocks online updates intentionally and the UI
-  reports that clearly.
+- **Managed firewall modes:** Moderate is the default local-only profile:
+  baseline services remain reachable, but new inbound connections are accepted
+  only from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local,
+  and IPv6 loopback source ranges. Baseline remains available as an open
+  compatibility profile. Restricted keeps HTTPS/SSH/WebRTC access local-only
+  while preserving needed outbound DNS/NTP/syslog/update traffic; Paranoid
+  leaves only local-only HTTPS and blocks online updates intentionally.
 - **HTTPS/firewall recovery:** disabling HTTPS forces firewall mode back to
-  baseline so HTTP access is not stranded behind restrictive rules.
+  Moderate so HTTP access is not stranded behind HTTPS-only rules while still
+  keeping public source ranges blocked.
 - **Video pipeline stability:** H.264 Direct/WebRTC mode selection is persisted
   across reloads, HTTP/HTTPS toggles now warn and reboot the device instead of
   partially restarting the video stack, and the UI redirects to the new
@@ -106,11 +110,11 @@ NanoKVM device and harden one subsystem at a time.
 | Video | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is enabled; websocket signaling is verified and browser media validation is ongoing. |
 | HID | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented. |
 | Device settings | Hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS, swap, memory limit, TLS toggle, reboot, scripts, and autostart have Rust endpoints. |
-| Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. |
+| Storage | ISO listing, upload, mount, delete, and CD-ROM mode are implemented with path validation. Remote ISO download exists behind a disabled-by-default safety toggle and validates URL, filename, size, destination, and ISO format. Completed downloads now reset the picker state and refresh the virtual-media image list without logout. |
 | Network | WOL, full wired DHCP/manual IP/DNS settings, explicit IPv6 Disabled/SLAAC/DHCPv6/Manual controls, Wi-Fi status/connect/AP verification, and Tailscale lifecycle endpoints are implemented. |
-| Updates | Online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current published app channel: `2.0.25 RC3`. |
-| SD image | Latest published SD image is the RC3 `2.0.25` / `0.2.17-raw.1` image, built by patching a trusted NanoKVM Rev1.4.2/vendor SDK base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds. |
-| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded raw install, first-boot root configuration restore, automatic boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.17-raw.1`, built from the RC3 `2.0.25` SD rootfs. Raw full-rootfs updates are lab-only; current raw payloads are stored gzip-compressed and streamed to the SD-card block devices during install. The current raw/SD image reports Buildroot `2023.11.2` with security backport level `Buildroot 2023.11.3 package backports`; deeper kernel/rootfs security payloads are still pending. |
+| Updates | Online/offline `kvmapp` updates are implemented through GitHub Releases with signed `latest.json` metadata and sha512 archive verification. Current published app channel: `2.0.26 RC4`. |
+| SD image | Latest published SD image is the RC4 `2.0.26` / `0.2.18-raw.1` image, built by patching a trusted NanoKVM Rev1.4.2/vendor SDK base image with Hardened `kvmapp`. `make vendor-sdk` bootstraps the pinned Sipeed SDK for future reproducible base-system builds. |
+| System updates | Separate GitHub channel metadata, signed metadata enforcement, staging download/verify, guarded raw install, first-boot root configuration restore, automatic boot-good confirmation, manual rollback, and boot-watchdog rollback are implemented. Current raw channel: `0.2.18-raw.1`, built from the RC4 `2.0.26` SD rootfs. Raw full-rootfs updates are lab-only; current raw payloads are stored gzip-compressed and streamed to the SD-card block devices during install. The current raw/SD image reports Buildroot `2023.11.2` with security backport level `Buildroot 2023.11.3 package backports`; deeper kernel/rootfs security payloads are still pending. |
 
 ## How Updates Work
 
@@ -143,7 +147,7 @@ https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
 ```
 
 The metadata points to a versioned app archive such as
-`hardened-nanokvm-kvmapp-2.0.25.tar.gz` on the `hardened-rust-rc3` release tag.
+`hardened-nanokvm-kvmapp-2.0.26.tar.gz` on the `hardened-rust-rc4` release tag.
 The device verifies signed metadata and the archive sha512 before
 installing. The preview toggle uses the `hardened-rust-preview` channel
 metadata, but it still installs the versioned archive named by that metadata.
@@ -180,7 +184,7 @@ https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-sta
 ```
 
 That channel metadata points to a versioned raw-system tag such as
-`hardened-system-0.2.17-raw.1`, which contains:
+`hardened-system-0.2.18-raw.1`, which contains:
 
 - `hardened-nanokvm-system-<version>.tar.gz`;
 - `system-latest.json` and signature files;
@@ -202,26 +206,30 @@ state.
 
 The channels can intentionally move independently:
 
-- Application stable/latest: `2.0.25 RC3`, tag `hardened-rust-rc3`.
+- Application stable/latest: `2.0.26 RC4`, tag `hardened-rust-rc4`.
 - Application preview: `hardened-rust-preview`, when populated, points to a
   versioned application archive independently from the stable latest release.
-- Raw system stable: `0.2.17-raw.1`, published on companion tag
-  `hardened-system-0.2.17-raw.1` and advertised through the
-  `hardened-system-stable` channel metadata. The full `hardened-rust-rc3`
+- Raw system stable: `0.2.18-raw.1`, published on companion tag
+  `hardened-system-0.2.18-raw.1` and advertised through the
+  `hardened-system-stable` channel metadata. The full `hardened-rust-rc4`
   release also carries the matching raw bundle and SD-card image.
 - Raw system preview: `hardened-system-preview`, currently points to the same
   raw metadata as stable.
-- Latest published SD image: RC3 `2.0.25`, matching raw system
-  `0.2.17-raw.1`.
+- Latest published SD image: RC4 `2.0.26`, matching raw system
+  `0.2.18-raw.1`.
 
-The RC3 `2.0.25` application, raw system update, and SD image were rebuilt
-together. The raw rootfs includes compressed raw-update support,
-setting-preserving raw install, IPv6 controls, DHCPv6 client, OLED timer fix,
-browser auth-state recovery, deferred first-boot root configuration restore,
-automatic post-boot confirm, and sysrq reboot after raw partition writes. The
-GUI separates system-update metadata into System update version, Base image,
-Buildroot release, and Security backport level to avoid confusing the raw
-channel version with the base Buildroot version.
+The RC4 `2.0.26` application, raw system update, and SD image were rebuilt
+together. RC4 keeps the tested video/update baseline and adds the Moderate
+default firewall profile, local-source enforcement for Moderate/Restricted/
+Paranoid firewall modes, refreshed firewall mode selection UI, ISO download
+completion-state cleanup, and automatic virtual-media image-list refresh after
+browser upload or remote download. The raw rootfs also keeps compressed
+raw-update support, setting-preserving raw install, IPv6 controls, DHCPv6
+client, browser auth-state recovery, deferred first-boot root configuration
+restore, automatic post-boot confirm, and sysrq reboot after raw partition
+writes. The GUI separates system-update metadata into System update version,
+Base image, Buildroot release, and Security backport level to avoid confusing
+the raw channel version with the base Buildroot version.
 
 ### Which Update Should Be Used?
 
@@ -267,10 +275,12 @@ Balena Etcher plus Linux, macOS, and FreeBSD command-line workflows.
   not multiply native capture reads. The web UI now defaults new sessions to
   H.264 Direct when HTTPS and WebCodecs are available, otherwise to H.264.
 - Added safer file and command handling for script upload/run, autostart files,
-  ISO upload, storage image paths, GitHub update archives, and privileged shell
-  calls.
+  ISO upload and remote download, storage image paths, GitHub update archives,
+  and privileged shell calls.
 - Added guarded remote ISO download by URL, disabled by default and controlled
-  from Settings > Appearance.
+  from Settings > Appearance. Completed downloads now clear the active
+  filename, show completion state, and refresh the virtual-media image list
+  without requiring logout.
 - Removed the legacy Go backend from shipped artifacts and removed the web UI
   backend switch. Release validators reject `NanoKVM-Server.go` and
   `switch-backend-go.sh`.

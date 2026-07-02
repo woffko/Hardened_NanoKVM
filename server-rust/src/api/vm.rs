@@ -967,7 +967,7 @@ pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>
         config.cert.crt = TLS_CERT_FILE.to_string();
         config.cert.key = TLS_KEY_FILE.to_string();
     } else {
-        system_firewall::force_baseline_mode().await?;
+        system_firewall::force_moderate_mode().await?;
         config.proto = "http".to_string();
     }
     config.write()?;
