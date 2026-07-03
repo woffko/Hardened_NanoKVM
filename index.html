@@ -11,7 +11,7 @@
       name="google-site-verification"
       content="8S4VCTY99VqIJ3lK7OZJqoMgtbUIvAi5t5Wkb0em4ek"
     />
-    <!-- pages-build: 2026-07-01T18:10Z -->
+    <!-- pages-build: 2026-07-03T20:00Z -->
     <title>Hardened NanoKVM</title>
     <style>
       :root {
@@ -377,13 +377,14 @@
         <p class="eyebrow">Rust backend security fork for Sipeed NanoKVM</p>
         <h1>Hardened NanoKVM</h1>
         <p class="lead">
-          A beta firmware fork focused on replacing the privileged Go web backend with a
-          smaller Rust backend while keeping the NanoKVM hardware, web UI, video
-          pipeline, and service layout.
+          A beta firmware fork focused on a smaller Rust web backend, signed
+          updates, local-use firewall defaults, and safer administration while
+          keeping the NanoKVM hardware, web UI, video pipeline, and service
+          layout.
         </p>
         <div class="actions">
-          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/latest"
-            >Download latest app release</a
+          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc6"
+            >Download RC6</a
           >
           <a class="button secondary" href="https://github.com/woffko/Hardened_NanoKVM"
             >View source</a
@@ -395,11 +396,11 @@
     <aside class="shell status-row" aria-label="Current project status">
       <div class="status">
         <strong>App channel</strong>
-        <span>Latest full RC: 2.0.25 RC3.</span>
+        <span>Latest full RC: 2.0.28 RC6.</span>
       </div>
       <div class="status">
         <strong>System channel</strong>
-        <span>Raw/SD baseline: 0.2.17-raw.1 with Buildroot package security backports.</span>
+        <span>Raw/SD baseline: 0.2.20-raw.1 with Buildroot package security backports.</span>
       </div>
       <div class="status">
         <strong>Release state</strong>
@@ -420,15 +421,17 @@
           <article class="card">
             <h3>Rust-only web backend</h3>
             <p>
-              Release packages replace the privileged Go server with the Hardened Rust
-              backend and reject legacy Go backend files in shipped artifacts.
+              Release packages ship the Hardened Rust server, keep only the
+              required native helpers, and reject legacy backend switch files in
+              shipped artifacts.
             </p>
           </article>
           <article class="card">
             <h3>Hardened authentication</h3>
             <p>
               First-boot account setup, CSRF binding, Origin checks, session revocation,
-              login lockout, Argon2id passwords, and security headers.
+              login lockout, Argon2id passwords, security headers, and no
+              in-place password reset path.
             </p>
           </article>
           <article class="card">
@@ -448,15 +451,17 @@
           <article class="card">
             <h3>Managed firewall modes</h3>
             <p>
-              Baseline, Restricted, and Paranoid profiles make online update, SSH, HTTPS,
-              DNS, NTP, syslog, and WebRTC access explicit.
+              Moderate is the default local-use profile. Restricted and Paranoid
+              also accept new inbound connections only from private, ULA,
+              link-local, or loopback source ranges.
             </p>
           </article>
           <article class="card">
             <h3>Video path stability</h3>
             <p>
-              H.264 Direct is the preferred low-CPU path when HTTPS and WebCodecs are
-              available; MJPEG remains available as a fallback.
+              H.264 Direct remains the preferred low-CPU path. WebRTC now reacts
+              to browser keyframe requests so HDMI hotplug recovers without
+              switching codecs.
             </p>
           </article>
         </div>
@@ -475,26 +480,41 @@
           <div>
             <h3>Latest published application release</h3>
             <p>
-              App-only kvmapp archive for the Rust backend and web UI. This does not rewrite
-              boot, rootfs, kernel, or the base Buildroot system.
+              Hardened NanoKVM 2.0.28 RC6 app archive for the Rust backend and
+              web UI. This does not rewrite boot, rootfs, kernel, or the base
+              Buildroot system.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3"
-            >hardened-rust-rc3</a
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc6"
+            >hardened-rust-rc6</a
           >
         </article>
         <article class="release">
           <div>
             <h3>Current raw system and SD-card baseline</h3>
             <p>
-              Full partition-image update and matching SD-card artifacts for the validated
-              security-backports baseline.
+              Full partition-image update and matching SD-card artifacts built
+              from the same RC6 rootfs.
             </p>
           </div>
           <a
             class="tag"
-            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc3"
-            >0.2.17-raw.1</a
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.20-raw.1"
+            >0.2.20-raw.1</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>SD-card flashing guide</h3>
+            <p>
+              Recovery and first-boot flashing instructions for Windows, Linux,
+              macOS, and FreeBSD.
+            </p>
+          </div>
+          <a
+            class="tag"
+            href="https://github.com/woffko/Hardened_NanoKVM/blob/main/docs/sd-card-flashing.md"
+            >flash SD</a
           >
         </article>
         <article class="release">
