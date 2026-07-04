@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed updates, guarded system updates, firewall modes, and safer web administration."
+      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed updates, guarded system updates, firewall modes, mobile view, and safer web administration."
     />
     <meta
       name="google-site-verification"
       content="8S4VCTY99VqIJ3lK7OZJqoMgtbUIvAi5t5Wkb0em4ek"
     />
-    <!-- pages-build: 2026-07-03T20:00Z -->
+    <!-- pages-build: 2026-07-04T08:45Z -->
     <title>Hardened NanoKVM</title>
     <style>
       :root {
@@ -378,13 +378,13 @@
         <h1>Hardened NanoKVM</h1>
         <p class="lead">
           A beta firmware fork focused on a smaller Rust web backend, signed
-          updates, local-use firewall defaults, and safer administration while
-          keeping the NanoKVM hardware, web UI, video pipeline, and service
-          layout.
+          updates, local-use firewall defaults, mobile browser usability, and
+          safer administration while keeping the NanoKVM hardware, video
+          pipeline, and service layout.
         </p>
         <div class="actions">
-          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc6"
-            >Download RC6</a
+          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc7"
+            >Download RC7</a
           >
           <a class="button secondary" href="https://github.com/woffko/Hardened_NanoKVM"
             >View source</a
@@ -396,15 +396,15 @@
     <aside class="shell status-row" aria-label="Current project status">
       <div class="status">
         <strong>App channel</strong>
-        <span>Latest full RC: 2.0.28 RC6.</span>
+        <span>Latest full RC: 2.0.29 RC7.</span>
       </div>
       <div class="status">
         <strong>System channel</strong>
-        <span>Raw/SD baseline: 0.2.20-raw.1 with Buildroot package security backports.</span>
+        <span>Raw/SD baseline: 0.2.21-raw.1 with Buildroot package security backports.</span>
       </div>
       <div class="status">
-        <strong>Release state</strong>
-        <span>Beta/lab firmware. Use only with physical SD-card recovery access.</span>
+        <strong>Hardware test</strong>
+        <span>RC7 app payload and mobile UI were smoke-tested on NanoKVM Cube.</span>
       </div>
     </aside>
 
@@ -439,6 +439,15 @@
             <p>
               Application and system channels use signed metadata, archive verification,
               guarded installs, and explicit separation between app and raw system updates.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Mobile view</h3>
+            <p>
+              Hardened adds a phone-focused view that was not present in the
+              original NanoKVM project: mobile settings navigation, reachable
+              submenus, a compact keyboard panel, and automatic KVM screen
+              fitting.
             </p>
           </article>
           <article class="card">
@@ -480,13 +489,13 @@
           <div>
             <h3>Latest published application release</h3>
             <p>
-              Hardened NanoKVM 2.0.28 RC6 app archive for the Rust backend and
+              Hardened NanoKVM 2.0.29 RC7 app archive for the Rust backend and
               web UI. This does not rewrite boot, rootfs, kernel, or the base
               Buildroot system.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc6"
-            >hardened-rust-rc6</a
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc7"
+            >hardened-rust-rc7</a
           >
         </article>
         <article class="release">
@@ -494,13 +503,13 @@
             <h3>Current raw system and SD-card baseline</h3>
             <p>
               Full partition-image update and matching SD-card artifacts built
-              from the same RC6 rootfs.
+              from the same RC7 rootfs.
             </p>
           </div>
           <a
             class="tag"
-            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.20-raw.1"
-            >0.2.20-raw.1</a
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.21-raw.1"
+            >0.2.21-raw.1</a
           >
         </article>
         <article class="release">
@@ -566,7 +575,7 @@
       <section class="warning">
         Hardened NanoKVM is beta/lab firmware. Read the release notes before installing,
         keep the original SD card or a known-good backup, and do not enable raw system
-        updates without physical recovery access.
+        updates without physical recovery access. RC7 was smoke-tested on NanoKVM Cube.
       </section>
     </main>
 
