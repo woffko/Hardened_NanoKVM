@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed updates, guarded system updates, firewall modes, mobile view, and safer web administration."
+      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed app updates, a Buildroot 2026.05.1 system preview, guarded raw updates, firewall modes, mobile view, and safer web administration."
     />
     <meta
       name="google-site-verification"
       content="8S4VCTY99VqIJ3lK7OZJqoMgtbUIvAi5t5Wkb0em4ek"
     />
-    <!-- pages-build: 2026-07-10T18:45Z -->
+    <!-- pages-build: 2026-08-21T17:30Z -->
     <title>Hardened NanoKVM</title>
     <style>
       :root {
@@ -366,7 +366,7 @@
         <div class="nav-links">
           <a href="https://github.com/woffko/Hardened_NanoKVM">Repository</a>
           <a href="https://github.com/woffko/Hardened_NanoKVM/releases">Releases</a>
-          <a href="https://github.com/woffko/Hardened_NanoKVM/blob/main/README.md">Docs</a>
+          <a href="https://github.com/woffko/Hardened_NanoKVM/blob/latestbuilroot/README.md">Docs</a>
           <a href="https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html">NanoKVM</a>
         </div>
       </nav>
@@ -379,12 +379,13 @@
         <p class="lead">
           A beta firmware fork focused on a smaller Rust web backend, signed
           updates, local-use firewall defaults, mobile and tablet browser
-          usability, and safer administration while keeping the NanoKVM hardware, video
-          pipeline, and service layout.
+          usability, and safer administration. RC11 adds an optional Buildroot
+          2026.05.1 userspace while retaining the proven NanoKVM hardware and
+          video boundary.
         </p>
         <div class="actions">
-          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc9"
-            >Download RC9</a
+          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.10"
+            >Download RC11</a
           >
           <a class="button secondary" href="https://github.com/woffko/Hardened_NanoKVM"
             >View source</a
@@ -396,19 +397,27 @@
     <aside class="shell status-row" aria-label="Current project status">
       <div class="status">
         <strong>App channel</strong>
-        <span>Latest full RC: 2.0.32 RC9.</span>
+        <span>Latest: app 2.0.40 RC11 with signed metadata.</span>
       </div>
       <div class="status">
         <strong>System channel</strong>
-        <span>Raw/SD baseline: 0.2.23-raw.1 with Buildroot package security backports.</span>
+        <span>Preview: 0.3.0-raw.10 on Buildroot 2026.05.1. Stable remains 0.2.23-raw.1.</span>
       </div>
       <div class="status">
         <strong>Hardware test</strong>
-        <span>RC9 mobile/tablet UI path was tested on NanoKVM Cube devices.</span>
+        <span>RC11 passed the device suite, five reboots, 30-minute endurance, and a recovery-card boot.</span>
       </div>
     </aside>
 
     <main class="shell">
+      <section class="warning">
+        <strong>Important upgrade order:</strong> existing installations must
+        update the application to <strong>2.0.40 first</strong>, confirm that
+        version after restart, and only then install system
+        <strong>0.3.0-raw.10</strong>. A manually flashed RC11 SD image already
+        contains app 2.0.40 and does not need a separate app update.
+      </section>
+
       <section>
         <div class="section-head">
           <h2>What Changed</h2>
@@ -439,6 +448,7 @@
             <p>
               Application and system channels use signed metadata, archive verification,
               guarded installs, and explicit separation between app and raw system updates.
+              RC11 combines both artifacts while preserving the required app-first order.
             </p>
           </article>
           <article class="card">
@@ -468,9 +478,17 @@
           <article class="card">
             <h3>Video path stability</h3>
             <p>
-              H.264 Direct remains the preferred low-CPU path. WebRTC now reacts
-              to browser keyframe requests so HDMI hotplug recovers without
-              switching codecs.
+              H.264 Direct remains the preferred low-CPU path. RC11 resumes
+              H.264 on the same WebSocket after a temporary MJPEG selection and
+              completes native encoder teardown during backend restarts.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Buildroot 2026 preview</h3>
+            <p>
+              The optional raw/SD preview moves userspace from Buildroot
+              2023.11.2 to 2026.05.1 while deliberately retaining the accepted
+              vendor kernel 5.10.4-tag- and boot boundary.
             </p>
           </article>
         </div>
@@ -480,36 +498,67 @@
         <div class="section-head">
           <h2>Current Downloads</h2>
           <p>
-            The app and raw system lines intentionally move independently. Use the app
-            channel for normal web/backend updates and raw system builds only for SD-card
-            level changes.
+            RC11 is one combined release, but the app and system channels remain
+            independently controlled. App 2.0.40 is the required first step;
+            raw.10 remains a preview and the stable system channel stays on RC9.
           </p>
         </div>
         <article class="release">
           <div>
-            <h3>Latest published application release</h3>
+            <h3>Combined 2.0.40 RC11 release</h3>
             <p>
-              Hardened NanoKVM 2.0.32 RC9 app archive for the Rust backend and
-              web UI, published together with matching raw system and SD-card
-              artifacts.
+              One verified release containing the app update, signed raw
+              0.3.0-raw.10 bundle, Buildroot 2026.05.1 SD image, detached
+              signatures, checksums, detailed changes, and recovery limits.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-rc9"
-            >hardened-rust-rc9</a
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.10"
+            >RC11 + raw.10</a
           >
         </article>
         <article class="release">
           <div>
-            <h3>Current raw system and SD-card baseline</h3>
+            <h3>Application update — install first</h3>
             <p>
-              Full partition-image update and matching SD-card artifacts built
-              from the same RC9 rootfs.
+              App 2.0.40 carries the corrected raw updater, native video fixes,
+              same-WebSocket H.264 recovery, settings preservation, and current
+              Rust/web dependencies.
+            </p>
+          </div>
+          <a
+            class="tag"
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.3.0-raw.10/hardened-nanokvm-kvmapp-2.0.40.tar.gz"
+            >app 2.0.40</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>Buildroot 2026.05.1 raw/SD preview</h3>
+            <p>
+              System 0.3.0-raw.10 migrates userspace to Buildroot 2026.05.1.
+              Use only with physical recovery access; the retained kernel is
+              still 5.10.4-tag-.
+            </p>
+          </div>
+          <a
+            class="tag"
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.10"
+            >system preview</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>Stable system fallback</h3>
+            <p>
+              The stable raw channel intentionally remains on RC9 system
+              0.2.23-raw.1 while RC11 Buildroot compatibility feedback is
+              collected.
             </p>
           </div>
           <a
             class="tag"
             href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.23-raw.1"
-            >0.2.23-raw.1</a
+            >stable 0.2.23</a
           >
         </article>
         <article class="release">
@@ -533,7 +582,7 @@
               Detailed changelog, release history, channel policy, and superseded lab builds.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/blob/main/docs/release-archive.md"
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/blob/latestbuilroot/docs/release-archive.md"
             >release archive</a
           >
         </article>
@@ -575,9 +624,13 @@
       <section class="warning">
         Hardened NanoKVM is beta/lab firmware. Read the release notes before installing,
         keep the original SD card or a known-good backup, and do not enable raw system
-        updates without physical recovery access. RC9 artifacts were locally
-        validated, and the RC9 mobile/tablet UI path was tested on NanoKVM Cube
-        devices.
+        updates without physical recovery access. RC11 passed the complete automated
+        device suite, same-WebSocket H.264 regression, five reboot cycles,
+        30-minute stream/log endurance, and a SanDisk High Endurance recovery-card
+        boot. Visible mouse, host BIOS/reboot, OLED/button, separately authorized
+        ATX, and controlled power-loss coverage remain follow-up limits. Some
+        retained vendor components have <code>NOASSERTION</code> licensing metadata;
+        see the release notes and vendor-input manifest.
       </section>
     </main>
 
