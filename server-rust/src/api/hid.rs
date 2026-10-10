@@ -3,7 +3,6 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{LazyLock, RwLock},
     thread,
@@ -20,10 +19,8 @@ use crate::{
 
 const SHORTCUT_FILE: &str = "/etc/kvm/shortcuts.json";
 const LEADER_KEY_FILE: &str = "/etc/kvm/leader-key";
-const MODE_FLAG_FILE: &str = "/sys/kernel/config/usb_gadget/g0/bcdDevice";
-const MODE_NORMAL_SCRIPT: &str = "/kvmapp/system/init.d/S03usbdev";
-const MODE_HID_ONLY_SCRIPT: &str = "/kvmapp/system/init.d/S03usbhid";
-const USB_DEV_SCRIPT: &str = "/etc/init.d/S03usbdev";
+/// While this file exists, S03usbdev starts the HID-only gadget.
+const HID_ONLY_FLAG: &str = "/boot/usb.hidonly";
 const USB_WAKEUP_ENABLE_FILE: &str = "/boot/usb.wakeup";
 const USB_WAKEUP_DISABLE_FILE: &str = "/boot/usb.notwakeup";
 const USB_HID_FUNCTION_DIR: &str = "/sys/kernel/config/usb_gadget/g0/functions";
@@ -189,7 +186,7 @@ pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoRespons
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
-    copy_hid_mode_file(mode)?;
+    set_hid_only_flag(Path::new(HID_ONLY_FLAG), mode == MODE_HID_ONLY)?;
     tokio::spawn(async {
         time::sleep(Duration::from_millis(500)).await;
         if let Err(err) = run_allowed(
@@ -534,15 +531,18 @@ fn new_shortcut_id() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Whether the device is set to run the HID-only gadget, which has no mass storage or network.
+pub(crate) fn is_hid_only_mode() -> bool {
+    Path::new(HID_ONLY_FLAG).exists()
+}
+
 fn read_hid_mode() -> Result<String> {
-    let flag = fs::read_to_string(MODE_FLAG_FILE)?;
-    match flag.trim() {
-        "0x0510" => Ok(MODE_NORMAL.to_string()),
-        "0x0623" => Ok(MODE_HID_ONLY.to_string()),
-        other => Err(AppError::Internal(format!(
-            "invalid HID mode flag: {other}"
-        ))),
+    Ok(if is_hid_only_mode() {
+        MODE_HID_ONLY
+    } else {
+        MODE_NORMAL
     }
+    .to_string())
 }
 
 fn validate_hid_mode(mode: &str) -> Result<&'static str> {
@@ -553,20 +553,18 @@ fn validate_hid_mode(mode: &str) -> Result<&'static str> {
     }
 }
 
-fn copy_hid_mode_file(mode: &str) -> Result<()> {
-    let source = match validate_hid_mode(mode)? {
-        MODE_NORMAL => MODE_NORMAL_SCRIPT,
-        MODE_HID_ONLY => MODE_HID_ONLY_SCRIPT,
-        _ => unreachable!("validated HID mode"),
-    };
-
-    let metadata = fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(AppError::BadRequest("invalid HID mode script".to_string()));
+fn set_hid_only_flag(flag: &Path, enabled: bool) -> Result<()> {
+    if enabled {
+        write_file(flag, b"", 0o644)?;
+    } else if let Err(err) = fs::remove_file(flag)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err.into());
     }
-    let data = fs::read(source)?;
-    let mode = metadata.permissions().mode() & 0o777;
-    write_file(Path::new(USB_DEV_SCRIPT), &data, mode)
+    // The device reboots right after, and /boot is a FAT partition.
+    // SAFETY: sync() takes no arguments and has no failure mode.
+    unsafe { nix::libc::sync() };
+    Ok(())
 }
 
 fn usb_wakeup_enabled() -> Result<bool> {
@@ -754,6 +752,22 @@ mod tests {
         let id = new_shortcut_id();
         assert_eq!(id.len(), 32);
         assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hid_only_flag_is_created_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("usb.hidonly");
+
+        set_hid_only_flag(&flag, true).unwrap();
+        assert!(flag.exists());
+        set_hid_only_flag(&flag, true).unwrap();
+        assert!(flag.exists());
+
+        set_hid_only_flag(&flag, false).unwrap();
+        assert!(!flag.exists());
+        // Switching back when it was never set is not an error.
+        set_hid_only_flag(&flag, false).unwrap();
     }
 
     #[test]

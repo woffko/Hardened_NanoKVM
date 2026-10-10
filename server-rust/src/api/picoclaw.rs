@@ -56,6 +56,7 @@ const DEFAULT_GATEWAY_PORT: u16 = 18790;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_READ_TIMEOUT_MS: i32 = 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS: i32 = 10_000;
+const MAX_WAIT_MS: i32 = 60_000;
 const DEFAULT_PING_INTERVAL_MS: i32 = 30_000;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -769,7 +770,14 @@ pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
             }),
         ),
         "tools/list" => json_rpc_result(req.id, json!({ "tools": mcp_tool_definitions() })),
-        "tools/call" => mcp_tools_call(&headers, req),
+        "tools/call" => {
+            // Actions sleep and screenshots wait on the encoder; keep them off the runtime.
+            let id = req.id.clone();
+            match task::spawn_blocking(move || mcp_tools_call(&headers, req)).await {
+                Ok(response) => response,
+                Err(err) => json_rpc_error(id, -32603, format!("tool task failed: {err}")),
+            }
+        }
         "ping" => json_rpc_result(req.id, json!({})),
         method => json_rpc_error(req.id, -32601, format!("method not found: {method}")),
     };
@@ -1465,10 +1473,10 @@ fn execute_action_blocking(action: &Action) -> std::result::Result<usize, Picocl
             send_mouse_move_with_button(x, y, 0x00, 0)
         }
         "wait" => {
-            if action.duration_ms < 0 {
+            if !(0..=MAX_WAIT_MS).contains(&action.duration_ms) {
                 return Err(PicoclawErrorData::new(
                     CODE_INVALID_ACTION,
-                    "wait duration must be >= 0",
+                    format!("wait duration must be 0..={MAX_WAIT_MS} ms"),
                 ));
             }
             thread::sleep(Duration::from_millis(action.duration_ms as u64));
@@ -3407,6 +3415,16 @@ mod tests {
         .unwrap();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[1].action, "hotkey");
+    }
+
+    #[test]
+    fn wait_action_rejects_durations_outside_the_cap() {
+        for duration_ms in [-1, MAX_WAIT_MS + 1, i32::MAX] {
+            let raw = format!(r#"{{"action":"wait","duration_ms":{duration_ms}}}"#);
+            let actions = normalize_actions(raw.as_bytes()).unwrap();
+            let err = execute_action_blocking(&actions[0]).unwrap_err();
+            assert_eq!(err.code, CODE_INVALID_ACTION);
+        }
     }
 
     #[test]

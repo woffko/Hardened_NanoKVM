@@ -101,7 +101,8 @@ For end-user flashing instructions, see
 - Rust HTTP and HTTPS listeners, including HTTP-to-HTTPS redirect.
 - Static frontend serving from configured `paths.web_root`.
 - Existing `code/msg/data` API response envelope.
-- Auth setup, login, logout, account, password check/change.
+- Auth setup, login, logout, account, password check/change. Changing the password requires
+  the current one (`currentPassword`), so a stolen session cannot take over the account.
 - Argon2id password hashing for new writes and existing bcrypt verification.
 - Generated per-device session secret at `/etc/kvm/session_secret`.
 - Session cookies compatible with the current React auth guard.

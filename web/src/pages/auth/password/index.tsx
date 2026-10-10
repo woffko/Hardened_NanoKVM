@@ -35,11 +35,16 @@ export const Password = () => {
     }
 
     const username = values.username;
+    const currentPassword = encrypt(values.currentPassword);
     const password = encrypt(values.password);
 
     api
-      .changePassword(username, password)
+      .changePassword(username, currentPassword, password)
       .then((rsp: any) => {
+        if (rsp.code === -2) {
+          setMsg(t('auth.wrongCurrentPassword'));
+          return;
+        }
         if (rsp.code !== 0) {
           setMsg(t('auth.error'));
           return;
@@ -82,13 +87,26 @@ export const Password = () => {
           </Form.Item>
 
           <Form.Item
+            name="currentPassword"
+            rules={[{ required: true, message: t('auth.noEmptyPassword'), min: 1 }]}
+          >
+            <Input
+              prefix={<LockOutlined />}
+              type="password"
+              autoComplete="current-password"
+              placeholder={t('auth.placeholderCurrentPassword')}
+            />
+          </Form.Item>
+
+          <Form.Item
             name="password"
             rules={[{ required: true, message: t('auth.noEmptyPassword'), min: 1 }]}
           >
             <Input
               prefix={<LockOutlined />}
               type="password"
-              placeholder={t('auth.placeholderPassword')}
+              autoComplete="new-password"
+              placeholder={t('auth.placeholderNewPassword')}
             />
           </Form.Item>
 
@@ -99,6 +117,7 @@ export const Password = () => {
             <Input
               prefix={<LockOutlined />}
               type="password"
+              autoComplete="new-password"
               placeholder={t('auth.placeholderPassword2')}
             />
           </Form.Item>

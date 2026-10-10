@@ -331,8 +331,8 @@ const zh = {
           relative: '相对模式'
         },
         sessionLock: {
-          title: '会话锁定时间',
-          description: '超过该时间后需要重新登录',
+          title: '无操作后锁定会话',
+          description: '超过该时间无操作后需要重新登录',
           5: '5分钟',
           15: '15分钟',
           30: '30分钟',

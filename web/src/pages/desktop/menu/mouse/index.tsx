@@ -17,7 +17,6 @@ import { useIsTouchLayout } from '@/hooks/useResponsiveLayout.ts';
 
 import { Cursor } from './cursor.tsx';
 import { Direction } from './direction.tsx';
-import { HidMode } from './hid-mode.tsx';
 import { MobilePointerMode as MobilePointerModeMenu } from './mobile-pointer-mode.tsx';
 import { MouseMode } from './mouse-mode.tsx';
 import { PointerSensitivity } from './pointer-sensitivity.tsx';
@@ -70,7 +69,6 @@ export const Mouse = () => {
       <Speed />
       <Divider style={{ margin: '10px 0' }} />
 
-      <HidMode />
       <ResetHid />
     </div>
   );

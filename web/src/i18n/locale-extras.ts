@@ -7025,6 +7025,13 @@ function setDeep(target: Record<string, unknown>, path: string, value: string) {
   current[leaf] = value;
 }
 
+// The password page's new fields are fork-only; English is supplied for every language.
+const passwordChangeFallbackExtras: TranslationMap = {
+  'auth.placeholderCurrentPassword': 'Current password',
+  'auth.placeholderNewPassword': 'New password',
+  'auth.wrongCurrentPassword': 'Current password is incorrect'
+};
+
 export function applyLocaleExtras(language: string, resource: ResourceLanguage) {
   const key = languageAliases[language] || language;
   const firewallModerateExtras = key === 'en' || key === 'ru' ? {} : firewallModerateFallbackExtras;
@@ -7071,7 +7078,8 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(firewallModerateLocalizedExtras[key] || {}),
     ...(timeLogExtras[key] || {}),
     ...firewallNoWebrtcExtras,
-    ...firewallNoWebrtcModeDescriptionExtras
+    ...firewallNoWebrtcModeDescriptionExtras,
+    ...passwordChangeFallbackExtras
   };
   if (!Object.keys(extras).length) return;
 

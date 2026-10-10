@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 
 import { existToken, removeToken, setCsrfToken } from '@/lib/cookie.ts';
+import { useSessionKeepAlive } from '@/hooks/useSessionKeepAlive.ts';
 
 type AuthState = 'checking' | 'allowed' | 'denied';
 
@@ -9,6 +10,8 @@ export const ProtectedRoute = ({ children }: { children: ReactNode }) => {
   const [authState, setAuthState] = useState<AuthState>(() =>
     existToken() ? 'allowed' : 'checking'
   );
+
+  useSessionKeepAlive(authState === 'allowed');
 
   useEffect(() => {
     if (existToken()) {

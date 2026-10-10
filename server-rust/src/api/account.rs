@@ -40,8 +40,16 @@ pub struct LoginRsp {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SetupAccountReq {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ChangePasswordReq {
     pub username: String,
+    #[serde(rename = "currentPassword")]
+    pub current_password: String,
     pub password: String,
 }
 
@@ -130,7 +138,7 @@ pub async fn login(
 
 pub async fn setup_first_account(
     State(state): State<AppState>,
-    Json(req): Json<ChangePasswordReq>,
+    Json(req): Json<SetupAccountReq>,
 ) -> Result<impl IntoResponse> {
     if state.accounts.exists() {
         return Err(AppError::Conflict(
@@ -197,6 +205,11 @@ pub async fn change_password(
             "cannot change another account password".to_string(),
         ));
     }
+    // A stolen session alone must not be able to take over the account.
+    let current = decode_frontend_password(&req.current_password)?;
+    if !state.accounts.verify(&req.username, &current)? {
+        return Err(AppError::InvalidCredentials);
+    }
     let password = decode_frontend_password(&req.password)?;
     validate_account_credentials(&req.username, &password)?;
     change_root_password(&password).await?;
@@ -239,5 +252,49 @@ fn command_error(message: &str, output: CommandOutput) -> String {
         } else {
             format!("{message}: {detail}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_change_requires_the_current_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.paths.account_file = dir.path().canonicalize().unwrap().join("pwd");
+        let state = AppState::new(config).await.unwrap();
+        state
+            .accounts
+            .set_account("operator", "correct horse battery")
+            .unwrap();
+        let session = state.sessions.issue("operator", 900).await;
+
+        let refused = change_password(
+            State(state.clone()),
+            Extension(CurrentSession(session)),
+            Json(ChangePasswordReq {
+                username: "operator".to_string(),
+                current_password: "not the password".to_string(),
+                password: "a brand new password".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(matches!(refused, Err(AppError::InvalidCredentials)));
+        assert!(
+            state
+                .accounts
+                .verify("operator", "correct horse battery")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn first_account_setup_needs_no_current_password() {
+        let req: SetupAccountReq =
+            serde_json::from_str(r#"{"username":"operator","password":"c2VjcmV0"}"#).unwrap();
+        assert_eq!(req.username, "operator");
     }
 }

@@ -1,6 +1,13 @@
 #!/bin/sh
 # kvmhwd Rev2.2
 
+# HID-only mode is the flag file below; its gadget has its own script.
+HID_ONLY_FLAG="${HID_ONLY_FLAG:-/boot/usb.hidonly}"
+HID_ONLY_SCRIPT="${HID_ONLY_SCRIPT:-/kvmapp/system/init.d/S03usbhid}"
+if [ -e "$HID_ONLY_FLAG" ] && [ -x "$HID_ONLY_SCRIPT" ]; then
+    exec "$HID_ONLY_SCRIPT" "$@"
+fi
+
 stable_usb_mac_seed() {
     for file in /device_key /etc/machine-id
     do
