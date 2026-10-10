@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppError, Result,
+    auth::clock,
     error::ApiResponse,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
 };
@@ -52,6 +53,9 @@ impl Default for TimeConfig {
 pub struct TimeConfigRsp {
     config: TimeConfig,
     current_time: String,
+    /// False while the board still reports its pre-NTP epoch clock. Surfaced so
+    /// the Time page can explain a 1970 timestamp instead of just showing it.
+    clock_synced: bool,
     gateway: String,
     default_servers: Vec<String>,
     timezone_options: Vec<String>,
@@ -98,6 +102,11 @@ pub async fn sync_now() -> Result<impl IntoResponse> {
         )));
     }
 
+    // ntpdate has just stepped the clock, so time-derived authentication can
+    // be trusted from here on even if the result is still below the plausible
+    // floor for some reason.
+    clock::mark_synced();
+
     apply_ntp_state(true).await?;
     Ok(Json(ApiResponse::ok(build_response().await?)))
 }
@@ -106,6 +115,7 @@ async fn build_response() -> Result<TimeConfigRsp> {
     Ok(TimeConfigRsp {
         config: read_config()?,
         current_time: current_time().await.unwrap_or_default(),
+        clock_synced: clock::is_synced(),
         gateway: default_ipv4_gateway().unwrap_or_default(),
         default_servers: DEFAULT_NTP_SERVERS
             .iter()

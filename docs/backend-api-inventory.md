@@ -32,7 +32,8 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method   | Path                       | Rust Status                                                                                                                                           |
 | -------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET      | `/api/health`              | Implemented; returns Rust backend health.                                                                                                             |
-| POST     | `/api/auth/login`          | Implemented with opaque session token, CSRF token, login lockout, and configurable session duration.                                                  |
+| POST     | `/api/auth/login`          | Implemented with opaque session token, CSRF token, login lockout, and configurable session duration. Returns `totpRequired` instead of a session when the account has a second factor enrolled. |
+| POST     | `/api/auth/login/totp`     | Implemented; second login step. Exchanges the pending-ticket cookie plus a TOTP or backup code for a session. Public because the caller holds a ticket, not a session. |
 | GET/POST | `/api/auth/setup`          | Implemented for first-account setup flow; GET reports whether setup is required, POST creates the first account only while `/etc/kvm/pwd` is missing. |
 | POST     | `/api/network/wifi`        | Implemented for AP-mode no-auth Wi-Fi flow with AP key verification.                                                                                  |
 | POST     | `/api/network/wifi/verify` | Implemented for AP-mode verification.                                                                                                                 |
@@ -45,7 +46,12 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | -------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
 | POST     | `/api/auth/logout`   | Implemented; revokes current session.                                                                          |
 | GET      | `/api/auth/account`  | Implemented.                                                                                                   |
-| GET/POST | `/api/auth/password` | Implemented; Argon2id writes, legacy verification, password-change session revocation, and root password sync. |
+| GET/POST | `/api/auth/password` | Implemented; Argon2id writes, legacy verification, password-change session revocation, and root password sync. Existing TOTP enrolment is preserved across a password change. |
+| GET/DELETE | `/api/auth/totp` | Implemented; GET reports enrolment state, clock-sync state, and remaining backup codes. DELETE disables the second factor and requires the account password. |
+| POST | `/api/auth/totp/enroll` | Implemented; requires the account password. Generates a secret held pending confirmation and returns it with an `otpauth://` URI. Refused while the device clock is unsynchronized. |
+| POST | `/api/auth/totp/confirm` | Implemented; verifies one code against the pending secret, activates it, and returns the backup codes once. |
+| POST | `/api/auth/totp/backup-codes` | Implemented; reissues backup codes. Requires the account password. |
+| POST | `/api/auth/totp/required` | Implemented; toggles `security.require_totp`. Refuses to enable until the account has confirmed an enrolment. |
 
 ### Application Updates
 

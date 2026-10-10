@@ -82,4 +82,16 @@ impl SessionStore {
             .await
             .retain(|_, session| session.username != username);
     }
+
+    /// Revoke an account's sessions apart from `keep_token`.
+    ///
+    /// Used when a security setting is changed from the web UI: every other
+    /// session should be invalidated, but logging out the session performing
+    /// the change would be gratuitous.
+    pub async fn revoke_user_except(&self, username: &str, keep_token: &str) {
+        self.sessions
+            .write()
+            .await
+            .retain(|token, session| session.username != username || token == keep_token);
+    }
 }

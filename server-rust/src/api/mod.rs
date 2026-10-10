@@ -1,4 +1,5 @@
 pub mod account;
+pub mod account_totp;
 pub mod application;
 pub mod autostart;
 pub mod compatibility;

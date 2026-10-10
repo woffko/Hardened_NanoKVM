@@ -55,6 +55,10 @@ class Http {
           removeToken();
           window.location.reload();
         }
+        // Must match ENROLMENT_REQUIRED in server-rust/src/http/middleware.rs.
+        if (code === 403 && msg === 'two-factor enrolment required') {
+          window.location.hash = '#/auth/totp';
+        }
         return Promise.reject(error);
       }
     );

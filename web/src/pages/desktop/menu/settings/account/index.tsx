@@ -4,10 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 import * as api from '@/api/auth.ts';
+import { TotpEnrollment } from '@/components/totp-enrollment.tsx';
 
 import { Logout } from './logout.tsx';
 
-export const Account = () => {
+type Props = {
+  setIsLocked?: (locked: boolean) => void;
+};
+
+export const Account = ({ setIsLocked }: Props) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
@@ -41,6 +46,10 @@ export const Account = () => {
           <Button type="primary" onClick={changePassword}>
             {t('settings.account.updateBtn')}
           </Button>
+        </div>
+
+        <div className="flex flex-col">
+          <TotpEnrollment setIsLocked={setIsLocked} />
         </div>
       </div>
 

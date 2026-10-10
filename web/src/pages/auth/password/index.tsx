@@ -30,7 +30,7 @@ export const Password = () => {
       return;
     }
     if (!validateString(values.password)) {
-      setMsg('auth.illegalPassword');
+      setMsg(t('auth.illegalPassword'));
       return;
     }
 
@@ -103,7 +103,7 @@ export const Password = () => {
             />
           </Form.Item>
 
-          <span className="text-red-500">{msg}</span>
+          {msg && <div className="mb-3 text-red-500">{msg}</div>}
           <Form.Item>
             <div className="flex w-full space-x-2">
               <Button type="primary" htmlType="submit" className="w-1/2">

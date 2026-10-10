@@ -39,6 +39,13 @@ export const router = createHashRouter([
           const { Password } = await import('./pages/auth/password');
           return { Component: Password };
         }
+      },
+      {
+        path: 'auth/totp',
+        lazy: async () => {
+          const { Totp } = await import('./pages/auth/totp');
+          return { Component: Totp };
+        }
       }
     ]
   },

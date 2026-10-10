@@ -107,6 +107,9 @@ For end-user flashing instructions, see
 - Session cookies compatible with the current React auth guard.
 - CSRF token binding, Origin checks, security headers, login lockout, and
   logout/password-change session revocation.
+- Optional TOTP (RFC 6238) second factor for web login, with single-use backup
+  codes. See "Two-factor authentication" below. SSH is unaffected and remains
+  password-only.
 - VM info, hardware, hostname, web title, GPIO/ATX, OLED, HDMI, SSH, mDNS,
   swap, memory limit, TLS toggle, reboot, scripts, autostart, uptime, and
   session-lock routes.
@@ -178,6 +181,102 @@ For end-user flashing instructions, see
   layout.
 - SD-card release artifacts are published alongside GUI-installable `kvmapp`
   update archives.
+
+## Two-factor authentication
+
+Opt-in TOTP (RFC 6238: HMAC-SHA1, 6 digits, 30-second steps, +/-1 step of drift)
+for the **web UI only**. SSH authenticates against the root Unix password on a
+separate path and is not covered.
+
+### Login flow
+
+`POST /api/auth/login` behaves as before for accounts without enrolment. For an
+enrolled account it verifies the password and then, instead of issuing a
+session, returns `code: 0` with `{ "totpRequired": true }` and sets a
+short-lived HttpOnly pending-ticket cookie. `POST /api/auth/login/totp`
+exchanges that ticket plus a code for the real session.
+
+The discriminator lives inside `data` rather than being a new error code
+because the frontend treats any nonzero `code` as a hard failure.
+
+The pending ticket is not a session: it is single-use, expires in five minutes,
+is bound to the address that obtained it, and resolves only to a username, so
+no route can mistake it for authentication. A wrong code does not spend it.
+
+### The device clock
+
+This board has no battery-backed RTC. It boots at the Unix epoch and reaches
+real wall-clock time only once NTP succeeds. Two consequences:
+
+- **TOTP codes are refused with an explicit "clock not synchronized" error**
+  while the clock is implausible, rather than reported as invalid codes.
+- **Backup codes are deliberately exempt from that check.** They are the
+  recovery path *for* an unsynchronized clock, so gating them on the clock
+  would make them unreachable in exactly the situation they exist for. This is
+  the single most important invariant in this feature; it has a dedicated
+  regression test.
+
+Sync is detected from a plausibility floor (`MIN_PLAUSIBLE_UNIX_TIME` in
+`auth/clock.rs`, currently 2026-01-01) plus a flag set when a sync through the
+API succeeds. The floor is a source constant rather than a build timestamp
+because a build timestamp would break reproducible builds. `ntpq`/`ntpdc` are
+not built into the image, so querying the daemon is not an option.
+
+### Recovery
+
+Enrolment issues nine single-use backup codes, displayed once. They are stored
+as **SHA-256 hashes, not Argon2**: they are server-generated with 50 bits of
+entropy, so the slow-KDF rationale (resisting offline brute force of a
+guessable human password) does not apply, and one Argon2 verification takes
+seconds on this hardware while checking a backup code has to compare against
+every remaining hash. Online guessing is capped by the existing login lockout.
+
+If both the authenticator and the backup codes are lost, recovery means SSH
+access and removing the `totp` object from `/etc/kvm/pwd`.
+
+### Replay protection
+
+The last accepted step is held **in memory**, not persisted, because persisting
+it would mean a flash write on every login. Sessions are already in-memory, so
+a reboot clears no more than it otherwise would, and replaying a captured code
+across a power cycle means beating a boot that takes far longer than the
+30-second window.
+
+### `security.require_totp`
+
+Requires a second factor for web login. It is switched from **Settings >
+Account** once enrolled. Enabling it through
+`POST /api/auth/totp/required` is refused until the account has confirmed an
+enrolment, mirroring how `system_firewall` refuses restricted modes until HTTPS
+is on.
+
+If the flag is set some other way -- a hand-edited `server.yaml`, a restored
+config, a reset `/etc/kvm/pwd` -- **login still succeeds**, because refusing
+would leave a headless device with no way back in. But the session is
+**confined**: while the policy is on and the account is unenrolled, the
+`protected` middleware answers every route with `403 two-factor enrolment
+required` except the ones needed to enrol or leave -- `GET /api/auth/account`,
+`GET /api/auth/totp`, `POST /api/auth/totp/enroll`, `POST /api/auth/totp/confirm`
+and `POST /api/auth/logout`. The policy toggle is deliberately not among them,
+so a confined session cannot switch the policy off. The frontend turns that 403
+into a redirect to enrolment.
+
+The check runs per request rather than being stored on the session, so
+completing enrolment lifts the restriction for the session that did it, and
+clearing the policy lifts it immediately. When the policy is off it costs one
+atomic load; when on, it reads the account file, and an unreadable file counts
+as unenrolled so the policy fails closed.
+
+### Changing the second factor
+
+Every change to the second factor requires the account password: enrolling,
+disabling and reissuing backup codes. Without it a stolen session could bind
+its own authenticator, which would replace the secret, void the owner's backup
+codes and -- because enrolment revokes other sessions -- log the owner out.
+
+Note that `POST /api/auth/password` does not yet require the current password,
+so a stolen session can still change the password itself. That predates
+two-factor support and is the remaining gap in this model.
 
 ## Intentionally Disabled
 

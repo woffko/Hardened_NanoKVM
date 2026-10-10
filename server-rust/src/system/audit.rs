@@ -36,6 +36,36 @@ pub fn login_failure(username: &str, source_ip: &str, reason: &str) {
     );
 }
 
+pub fn totp_enrolled(username: &str) {
+    emit(
+        85,
+        &format!(
+            "{TAG}: two-factor auth enrolled user={}",
+            sanitize(username)
+        ),
+    );
+}
+
+pub fn totp_disabled(username: &str) {
+    emit(
+        84,
+        &format!(
+            "{TAG}: two-factor auth disabled user={}",
+            sanitize(username)
+        ),
+    );
+}
+
+pub fn totp_backup_codes_regenerated(username: &str) {
+    emit(
+        85,
+        &format!(
+            "{TAG}: two-factor backup codes regenerated user={}",
+            sanitize(username)
+        ),
+    );
+}
+
 fn emit(priority: u8, message: &str) {
     let payload = format!("<{priority}>{message}");
     let Ok(socket) = UnixDatagram::unbound() else {

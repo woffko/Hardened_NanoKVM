@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod ffi;
+pub mod fsutil;
 pub mod http;
 pub mod security;
 pub mod state;

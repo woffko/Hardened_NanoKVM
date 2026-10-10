@@ -8,9 +8,9 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
     api::{
-        account, application, autostart, compatibility, download, hid, network, picoclaw, script,
-        storage, stream, system_firewall, system_log, system_time, system_update, tailscale, vm,
-        webrtc_stream,
+        account, account_totp, application, autostart, compatibility, download, hid, network,
+        picoclaw, script, storage, stream, system_firewall, system_log, system_time, system_update,
+        tailscale, vm, webrtc_stream,
     },
     http::middleware::{picoclaw_internal, protected},
     security::headers::security_headers,
@@ -25,6 +25,17 @@ pub fn build(state: AppState) -> Router {
         .route(
             "/api/auth/password",
             get(account::is_password_updated).post(account::change_password),
+        )
+        .route(
+            "/api/auth/totp",
+            get(account_totp::get_status).delete(account_totp::disable),
+        )
+        .route("/api/auth/totp/enroll", post(account_totp::enroll))
+        .route("/api/auth/totp/confirm", post(account_totp::confirm))
+        .route("/api/auth/totp/required", post(account_totp::set_required))
+        .route(
+            "/api/auth/totp/backup-codes",
+            post(account_totp::regenerate_backup_codes),
         )
         .route("/api/ws", get(hid_ws::connect))
         .route("/api/application/version", get(application::get_version))
@@ -224,6 +235,8 @@ pub fn build(state: AppState) -> Router {
             get(application::get_current_version),
         )
         .route("/api/auth/login", post(account::login))
+        // Public because the caller holds a pending ticket, not a session.
+        .route("/api/auth/login/totp", post(account::login_totp))
         .route(
             "/api/auth/setup",
             get(account::get_setup_state).post(account::setup_first_account),

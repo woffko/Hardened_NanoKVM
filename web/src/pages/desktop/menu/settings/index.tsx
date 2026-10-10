@@ -58,7 +58,11 @@ export const Settings = () => {
       icon: <CircleArrowUpIcon size={16} />,
       component: <Update setIsLocked={setIsLocked} />
     },
-    { id: 'account', icon: <UserRoundIcon size={18} />, component: <Account /> }
+    {
+      id: 'account',
+      icon: <UserRoundIcon size={18} />,
+      component: <Account setIsLocked={setIsLocked} />
+    }
   ];
 
   useEffect(() => {

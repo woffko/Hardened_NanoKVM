@@ -130,6 +130,11 @@ the security, update, and administration model substantially:
   secret, CSRF binding, Origin checks, login rate limiting/lockout, explicit
   session revocation, Argon2id for new passwords, and compatibility with
   existing bcrypt password files.
+- **Optional two-factor auth:** per-account TOTP (RFC 6238) for web login, with
+  single-use backup codes for recovery. Because the board has no
+  battery-backed RTC, backup codes are deliberately exempt from the
+  clock-synchronization check, so recovery still works on a device that booted
+  without a network.
 - **Safer terminal access:** the web terminal is guarded by the authenticated
   web session instead of being merely hidden by a toolbar toggle.
 - **Signed application updates:** GitHub-hosted app updates use signed
@@ -190,7 +195,7 @@ NanoKVM device and harden one subsystem at a time.
 | Rust backend          | Runs on the device as a replacement `NanoKVM-Server`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Web UI                | Existing React UI is retained with Hardened branding and System settings pages.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | HTTPS                 | Implemented in Rust with HTTP-to-HTTPS redirect and existing cert config support.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Authentication        | First-boot web account setup, Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Authentication        | First-boot web account setup, Rust sessions, CSRF protection, Origin checks, rate limiting, security headers, Argon2id for new passwords, legacy bcrypt verification. Optional TOTP second factor with single-use backup codes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Video                 | H.264 Direct is the preferred low-CPU mode and is verified on hardware. MJPEG remains available as a fallback. H.264 WebRTC is available in Baseline/Moderate modes, but is disabled by Restricted/Paranoid firewall policy.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Native video boundary | Rust still calls `libkvm` and the CVI/MMF C/C++ stack. RC10 remediates the 2026-07-11 native audit findings, including lifecycle races, VENC ownership/rollback, bounds and parser bugs, MMF mapping lifetime, signal safety, and retained helper defects. Rebuilt libraries passed MJPEG, H.264 Direct, reboot, and controlled stop/start testing on device 133.                                                                                                                                                                                                                                                                                    |
 | HID                   | Keyboard/mouse websocket, queued HID writes, paste, shortcuts, HID mode, reset, and mouse jiggler are implemented.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -359,6 +364,19 @@ Balena Etcher plus Linux, macOS, and FreeBSD command-line workflows.
 - Added hardened auth/session handling: generated per-device secret, CSRF token
   binding, Origin checks, login lockout, explicit session revocation, and safer
   password storage.
+- Added optional TOTP (RFC 6238) two-factor authentication for web login,
+  enrolled from **Settings > Account** with a QR code and confirmed by a live
+  code before it activates, so a misconfigured authenticator cannot lock the
+  account out. Enrolling, disabling and reissuing backup codes all require the
+  account password. Enrolment issues nine single-use backup codes, displayed
+  once. A `security.require_totp` flag, switched from the same page, can
+  require a second factor device-wide; it refuses to enable until the account
+  has enrolled. If the flag is set some other way, login still succeeds -- so a
+  headless device cannot lock itself out -- but the session is confined
+  server-side to the enrolment endpoints until a second factor is set up. SSH
+  is unaffected and remains password-only. See
+  [`docs/rust-backend.md`](docs/rust-backend.md) for the clock, recovery, and
+  replay-protection details.
 - Added browser auth-state recovery for IP/protocol changes: if the HttpOnly
   session cookie is still valid but the JS-readable CSRF cookie is missing, the
   web UI restores CSRF state through `/api/auth/account` instead of returning

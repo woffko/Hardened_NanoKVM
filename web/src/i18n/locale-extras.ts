@@ -3236,6 +3236,72 @@ const timeLogKeys = [
   'settings.systemLog.level.8'
 ] as const;
 
+// Two-factor auth is fork-only. English is supplied for every language rather
+// than inventing 28 translations; the mechanism already does this for other
+// hardened-only strings (see firewallModerateFallbackExtras).
+const totpFallbackExtras: TranslationMap = {
+  'auth.totp.title': 'Two-factor authentication',
+  'auth.totp.prompt': 'Enter the 6-digit code from your authenticator app.',
+  'auth.totp.backupPrompt': 'Enter one of your backup codes.',
+  'auth.totp.noEmptyCode': 'Enter a code',
+  'auth.totp.placeholderCode': '6-digit code',
+  'auth.totp.placeholderBackup': 'Backup code',
+  'auth.totp.verifyButtonText': 'Verify',
+  'auth.totp.useBackupCode': 'Use a backup code',
+  'auth.totp.useAuthenticator': 'Use authenticator code',
+  'auth.totp.cancel': 'Back',
+  'auth.totp.invalidCode': 'That code is not valid. Try again.',
+  'settings.account.totp.title': 'Two-factor authentication',
+  'settings.account.totp.description':
+    'Require a time-based code from an authenticator app in addition to your password.',
+  'settings.account.totp.enabled': 'Enabled',
+  'settings.account.totp.disabled': 'Disabled',
+  'settings.account.totp.required': 'Required by policy',
+  'settings.account.totp.enable': 'Enable',
+  'settings.account.totp.disable': 'Disable',
+  'settings.account.totp.enableTitle': 'Set up two-factor authentication',
+  'settings.account.totp.enableDescription':
+    'Confirm your password to continue. It is required for any change to the second factor.',
+  'settings.account.totp.continue': 'Continue',
+  'settings.account.totp.disableTitle': 'Disable two-factor authentication?',
+  'settings.account.totp.disableDescription':
+    'Your account will be protected by its password alone. Confirm with your password to continue.',
+  'settings.account.totp.disableFailed': 'Could not disable two-factor authentication',
+  'settings.account.totp.passwordPlaceholder': 'Current password',
+  'settings.account.totp.enrollFailed': 'Could not start enrolment',
+  'settings.account.totp.invalidCode': 'That code does not match. Try the next one.',
+  'settings.account.totp.scan': 'Scan this with your authenticator app.',
+  'settings.account.totp.manualEntry': 'Or enter this key manually:',
+  'settings.account.totp.codePlaceholder': 'Enter the 6-digit code to confirm',
+  'settings.account.totp.confirm': 'Confirm',
+  'settings.account.totp.cancel': 'Cancel',
+  'settings.account.totp.backupTitle': 'Save your backup codes now',
+  'settings.account.totp.backupDescription':
+    'Each code works once and will not be shown again. They are the only way back in if you lose your authenticator, and they keep working when the device clock is not synchronized.',
+  'settings.account.totp.copy': 'Copy',
+  'settings.account.totp.copied': 'Backup codes copied',
+  'settings.account.totp.savedThem': "I've saved them",
+  'settings.account.totp.remaining': '{{remaining}} backup codes remaining',
+  'settings.account.totp.clockUnsynced':
+    'The device clock is not synchronized yet. Synchronize time in Settings > System > Time before enrolling.',
+  'settings.account.totp.noBackupCodes':
+    'No backup codes remain. Use New backup codes to issue a new set.',
+  'settings.account.totp.regenerate': 'New backup codes',
+  'settings.account.totp.regenerateTitle': 'Issue new backup codes?',
+  'settings.account.totp.regenerateDescription':
+    'Your current backup codes will stop working. Confirm with your password to continue.',
+  'settings.account.totp.regenerateFailed': 'Could not issue new backup codes',
+  'settings.account.totp.download': 'Download',
+  'settings.account.totp.copyFailed': 'Could not copy. Select the codes and copy them manually.',
+  'settings.account.totp.requireTitle': 'Require two-factor authentication',
+  'settings.account.totp.requireDescription':
+    'While on, two-factor authentication cannot be disabled, and an account without it must set it up before using the device.',
+  'settings.account.totp.requireFailed': 'Could not change the requirement',
+  'settings.account.totp.requiredTitle': 'Two-factor authentication is required',
+  'settings.account.totp.requiredDescription':
+    'This device is configured to require a second factor, but your account has not enrolled one yet. Set it up now to continue.'
+};
+
 function keyedExtras(keys: readonly string[], packs: Record<string, string[]>) {
   return Object.fromEntries(
     Object.entries(packs).map(([language, values]) => [
@@ -7071,7 +7137,8 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(firewallModerateLocalizedExtras[key] || {}),
     ...(timeLogExtras[key] || {}),
     ...firewallNoWebrtcExtras,
-    ...firewallNoWebrtcModeDescriptionExtras
+    ...firewallNoWebrtcModeDescriptionExtras,
+    ...totpFallbackExtras
   };
   if (!Object.keys(extras).length) return;
 

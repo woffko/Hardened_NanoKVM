@@ -7,6 +7,10 @@ body {
   padding: 0;
   margin: 0;
   background: #000;
+  /* antd's default fontFamily token; keep in sync if the theme ever overrides it. */
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans',
+    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
 }
 
 .settings-modal-mobile {
