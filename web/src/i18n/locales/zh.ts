@@ -74,6 +74,10 @@ const zh = {
       frameDetect: '帧差检测',
       frameDetectTip: '计算帧之间的差异，当检测到远程主机画面不变时，停止传输视频流',
       resetHdmi: '重置 HDMI',
+      webrtcConnectionFailed: {
+        title: 'WebRTC 连接失败',
+        description: '请检查网络连接或切换视频模式。'
+      },
       captureStatus: {
         hdmiError: 'HDMI 画面异常',
         unsupportedResolution: '当前分辨率不支持',
@@ -173,8 +177,14 @@ const zh = {
       mountMode: '挂载模式',
       mountFailed: '挂载失败',
       mountDesc: '在某些系统中，需要在远程主机中弹出虚拟硬盘后再挂载镜像。',
+      diskOnWarn: '挂载镜像会关闭虚拟U盘，电脑将无法再访问 /data 目录。是否继续？',
+      diskOffWarn:
+        '虚拟U盘当前已关闭，需要先开启才能挂载镜像，电脑上的 USB 设备会短暂断开重连。是否继续？',
       unmountFailed: '卸载失败',
       unmountDesc: '在某些系统中，需要在远程主机中手动弹出后再卸载镜像。',
+      forceEject: '强制弹出',
+      forceEjectConfirm:
+        '主机已锁定光驱。强制弹出会使虚拟 USB 设备短暂断开，键盘和鼠标可能会暂时断开连接。是否继续？',
       refresh: '刷新镜像列表',
       attention: '注意',
       deleteConfirm: '确定要删除该镜像吗？',
@@ -240,9 +250,16 @@ const zh = {
       input: '请输入远程镜像 URL',
       ok: '确定',
       disabled: '/data 是只读分区，无法下载镜像',
+      diskShared: '请先关闭虚拟U盘功能，再使用镜像下载功能',
+      mountedImage: '此镜像已挂载。上传同名文件前请先卸载。',
+      diskOff: '关闭虚拟U盘功能',
       uploadbox: '将文件拖放到此处或单击选择',
       inputfile: '请输入图片文件',
-      NoISO: '无 ISO'
+      NoISO: '无 ISO',
+      sha256: 'SHA-256（可选）',
+      sha256Placeholder: '请输入 64 位 SHA-256 校验和',
+      invalidSHA256: 'SHA-256 必须是 64 位十六进制字符串',
+      checksumFailed: '下载失败：SHA-256 校验失败'
     },
     power: {
       title: '电源',
@@ -293,9 +310,24 @@ const zh = {
           modeOff: '关闭',
           modeAuto: '自动隐藏',
           modeAlways: '始终显示',
+          keyboardLedStatus: '键盘锁定状态指示灯',
+          keyboardLedStatusDesc: '显示远程主机的 Num Lock、Caps Lock 和 Scroll Lock 状态',
           icons: '菜单图标',
           iconsDesc: '是否在菜单栏中显示子菜单图标'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: '远程键盘锁定状态',
+        indicatorLabel: '{{label}}：{{state}}',
+        numLock: '数字锁定',
+        numLockShort: '数',
+        capsLock: '大写锁定',
+        capsLockShort: '大',
+        scrollLock: '滚动锁定',
+        scrollLockShort: '滚',
+        on: '开启',
+        off: '关闭',
+        unknown: '未知'
       },
       device: {
         title: '设备',
@@ -343,7 +375,10 @@ const zh = {
           tip: '如果您未使用此功能，建议将其关闭'
         },
         hdmi: {
-          description: '启用 HDMI/显示器 输出功能'
+          description: '启用 HDMI/显示器 输出功能',
+          idleTimeoutTitle: '无观看者自动停止采集',
+          idleTimeoutDescription: '没有活跃观看者后停止 HDMI 采集，0 表示永不停止',
+          minutes: '分钟'
         },
         autostart: {
           title: '自动启动脚本设置',
@@ -360,6 +395,9 @@ const zh = {
         hidOnlyDesc: '该模式下不再挂载虚拟设备，仅保留基础的 HID 控制功能。',
         disk: '虚拟U盘',
         diskDesc: '在远程主机中挂载虚拟U盘',
+        diskLocked: '挂载镜像期间已关闭（开启会取消镜像挂载）',
+        diskCancelMount:
+          '开启虚拟U盘会取消当前挂载的镜像，并中断正在进行的镜像下载或上传，是否继续？',
         network: '虚拟网卡',
         networkDesc: '在远程主机中挂载虚拟网卡',
         reboot: '重新启动',

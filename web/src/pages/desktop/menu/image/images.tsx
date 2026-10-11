@@ -13,6 +13,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/storage.ts';
+import { getVirtualDevice, updateVirtualDevice } from '@/api/virtual-device.ts';
 import { IMAGE_LIST_CHANGED_EVENT } from '@/lib/image-events.ts';
 import { client } from '@/lib/websocket.ts';
 
@@ -35,6 +36,10 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
   const [selectedImage, setSelectedImage] = useState('');
   const [deletingImage, setDeletingImage] = useState('');
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [diskPrompt, setDiskPrompt] = useState('');
+  const [pendingImage, setPendingImage] = useState('');
+  const [isDiskShared, setIsDiskShared] = useState(false);
+  const [forceImage, setForceImage] = useState('');
   const isLoadingRef = useRef(false);
 
   // get mounted image
@@ -76,25 +81,85 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
       });
   }, [getMountedImage]);
 
+  // the host writes /data while the virtual disk serves it, so images are
+  // read-only here and can only be mounted, not deleted or uploaded
+  const getDiskState = useCallback(() => {
+    getVirtualDevice().then((rsp) => {
+      if (rsp.code !== 0) {
+        console.log(rsp.msg);
+        return;
+      }
+
+      setIsDiskShared(!!rsp.data?.disk);
+    });
+  }, []);
+
   useEffect(() => {
     if (isOpen) {
       getImages();
+      getDiskState();
     }
-  }, [getImages, isOpen]);
+  }, [getDiskState, getImages, isOpen]);
 
   useEffect(() => {
     function handleImageListChanged() {
       if (isOpen) {
         getImages();
+        getDiskState();
       }
     }
 
     window.addEventListener(IMAGE_LIST_CHANGED_EVENT, handleImageListChanged);
     return () => window.removeEventListener(IMAGE_LIST_CHANGED_EVENT, handleImageListChanged);
-  }, [getImages, isOpen]);
+  }, [getDiskState, getImages, isOpen]);
+
+  // mounting an image takes the mass storage device away from the virtual disk,
+  // so ask the user before the virtual disk changes on the computer
+  function mountImage(image: string) {
+    if (mountingImage) return;
+
+    // unmounting leaves the virtual disk alone
+    if (mountedImage === image) {
+      doMountImage(image);
+      return;
+    }
+
+    getVirtualDevice().then((rsp) => {
+      if (rsp.code !== 0) {
+        console.log(rsp.msg);
+        return;
+      }
+
+      setDiskPrompt(rsp.data?.disk ? 'on' : 'off');
+      setPendingImage(image);
+    });
+  }
+
+  // turn the virtual disk on, then mount
+  async function confirmMountImage() {
+    const image = pendingImage;
+    const prompt = diskPrompt;
+
+    setPendingImage('');
+    setDiskPrompt('');
+
+    if (!image) return;
+
+    // the media device only exists while the virtual disk is enabled
+    if (prompt === 'off') {
+      const rsp = await updateVirtualDevice('disk');
+      if (rsp.code !== 0) {
+        console.log(rsp.msg);
+        openNotification(false, rsp.msg);
+        return;
+      }
+    }
+
+    doMountImage(image);
+  }
 
   // mount/unmount image
-  function mountImage(image: string) {
+  function doMountImage(image: string, force = false) {
     if (mountingImage) return;
     setMountingImage(image);
 
@@ -106,8 +171,14 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
     const nextCdrom = isMounted ? false : imageCdrom;
 
     api
-      .mountImage(filename, nextCdrom)
+      .mountImage(filename, nextCdrom, force)
       .then((rsp) => {
+        // the computer has locked the medium, so offer to force the eject
+        if (rsp.code === api.MEDIA_LOCKED_CODE) {
+          setForceImage(image);
+          return;
+        }
+
         if (rsp.code !== 0) {
           console.log(rsp.msg);
           openNotification(isMounted, rsp.msg);
@@ -121,7 +192,16 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
       .finally(() => {
         setMountingImage('');
         client.connect();
+        getDiskState();
       });
+  }
+
+  // eject although the computer holds the medium: its USB device disconnects for a moment
+  function confirmForceEject() {
+    const image = forceImage;
+    setForceImage('');
+
+    if (image) doMountImage(image, true);
   }
 
   // show delete image modal
@@ -131,7 +211,7 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
     const isMounted = mountedImage === image;
     const isDeleting = deletingImage !== '';
 
-    if (isMounted || isDeleting) {
+    if (isMounted || isDeleting || isDiskShared) {
       return;
     }
 
@@ -265,21 +345,16 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
               )}
             </div>
 
-            <div
-              className={clsx(
-                'flex h-[24px] w-[24px] items-center justify-center rounded hover:bg-neutral-500/50',
-                mountedImage === image
-                  ? 'cursor-not-allowed text-neutral-500'
-                  : 'text-neutral-300 hover:text-red-500'
-              )}
+            <Button
+              type="text"
+              size="small"
+              danger
+              className="h-[24px] w-[24px] p-0"
+              icon={<Trash2Icon size={16} />}
+              disabled={mountedImage === image || isDiskShared}
+              loading={deletingImage === image}
               onClick={(e) => showDeleteModal(e, image)}
-            >
-              {deletingImage === image ? (
-                <LoaderCircleIcon className="animate-spin text-red-500" size={16} />
-              ) : (
-                <Trash2Icon size={16} />
-              )}
-            </div>
+            />
           </div>
         ))}
       </div>
@@ -325,6 +400,46 @@ export const Images = ({ isOpen, cdrom, setCdrom, setIsMounted }: ImagesProps) =
             {t('image.okBtn')}
           </Button>
           <Button onClick={() => setIsModalOpen(false)}>{t('image.cancelBtn')}</Button>
+        </div>
+      </Modal>
+
+      <Modal
+        title={t('image.attention')}
+        open={diskPrompt !== ''}
+        width={520}
+        footer={null}
+        onCancel={() => setDiskPrompt('')}
+      >
+        <div className="flex flex-col items-center space-y-1 pb-10">
+          <p>{t(diskPrompt === 'on' ? 'image.diskOnWarn' : 'image.diskOffWarn')}</p>
+          <Typography.Text code>{pendingImage.replace(/^.*[\\/]/, '')}</Typography.Text>
+        </div>
+
+        <div className="flex justify-center space-x-3 pb-3">
+          <Button type="primary" onClick={confirmMountImage}>
+            {t('image.okBtn')}
+          </Button>
+          <Button onClick={() => setDiskPrompt('')}>{t('image.cancelBtn')}</Button>
+        </div>
+      </Modal>
+
+      <Modal
+        title={t('image.attention')}
+        open={forceImage !== ''}
+        width={520}
+        footer={null}
+        onCancel={() => setForceImage('')}
+      >
+        <div className="flex flex-col items-center space-y-1 pb-10">
+          <p>{t('image.forceEjectConfirm')}</p>
+          <Typography.Text code>{forceImage.replace(/^.*[\\/]/, '')}</Typography.Text>
+        </div>
+
+        <div className="flex justify-center space-x-3 pb-3">
+          <Button type="primary" danger onClick={confirmForceEject}>
+            {t('image.forceEject')}
+          </Button>
+          <Button onClick={() => setForceImage('')}>{t('image.cancelBtn')}</Button>
         </div>
       </Modal>
 

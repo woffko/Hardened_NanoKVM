@@ -104,10 +104,11 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST            | `/api/vm/screen`           | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
 | GET/POST        | `/api/vm/device/virtual`   | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/oled`             | Implemented.                                                                                                       |
-| GET             | `/api/vm/hdmi`             | Implemented.                                                                                                       |
+| GET             | `/api/vm/hdmi`             | Implemented; returns `enabled`, `signal` (input present) and `idleTimeout` (minutes).                              |
 | POST            | `/api/vm/hdmi/reset`       | Implemented.                                                                                                       |
 | POST            | `/api/vm/hdmi/enable`      | Implemented.                                                                                                       |
 | POST            | `/api/vm/hdmi/disable`     | Implemented.                                                                                                       |
+| POST            | `/api/vm/hdmi/timeout`     | Implemented; `{minutes}` 0-10080, 0 disables the idle stop.                                                        |
 | GET             | `/api/vm/ssh`              | Implemented.                                                                                                       |
 | POST            | `/api/vm/ssh/enable`       | Implemented.                                                                                                       |
 | POST            | `/api/vm/ssh/disable`      | Implemented.                                                                                                       |
@@ -138,6 +139,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST/DELETE | `/api/hid/shortcut`             | Implemented.                                                                                                                                                                 |
 | GET/POST    | `/api/hid/shortcut/leader-key`  | Implemented.                                                                                                                                                                 |
 | GET/POST    | `/api/hid/mode`                 | Implemented.                                                                                                                                                                 |
+| GET         | `/api/hid/leds`                 | Implemented; host lock LEDs, pushed as `hid-led-status` on the websocket.                                                                                                    |
 | POST        | `/api/hid/reset`                | Implemented.                                                                                                                                                                 |
 | POST        | `/api/hid/paste`                | Implemented.                                                                                                                                                                 |
 

@@ -74,6 +74,10 @@ const zh_tw = {
       frameDetect: '影格檢測',
       frameDetectTip: '計算影格之間的差異。當遠端主機畫面未偵測到任何變更時，停止視訊傳輸串流。',
       resetHdmi: '重置 HDMI',
+      webrtcConnectionFailed: {
+        title: 'WebRTC 連線失敗',
+        description: '請檢查網路連線或切換影片模式。'
+      },
       captureStatus: {
         hdmiError: 'HDMI 畫面異常',
         unsupportedResolution: '目前解析度不支援',
@@ -173,8 +177,14 @@ const zh_tw = {
       mountMode: '掛載模式',
       mountFailed: '掛載失敗',
       mountDesc: '在某些系統中，需要在遠端主機中彈出虛擬硬碟後再掛載映像檔。',
+      diskOnWarn: '掛載映像檔會關閉虛擬隨身碟，電腦將無法再存取 /data 目錄。是否繼續？',
+      diskOffWarn:
+        '虛擬隨身碟目前已關閉，需要先開啟才能掛載映像檔，電腦上的 USB 裝置會短暫斷開重連。是否繼續？',
       unmountFailed: '解除安裝失敗',
       unmountDesc: '在某些系統中，需要在遠端主機中手動彈出後再解除安裝映像。',
+      forceEject: '強制彈出',
+      forceEjectConfirm:
+        '主機已鎖定光碟機。強制彈出會使虛擬 USB 裝置短暫中斷連線，鍵盤和滑鼠可能會暫時中斷連線。是否繼續？',
       refresh: '重新整理映像檔列表',
       attention: '注意',
       deleteConfirm: '確定要刪除該映像檔嗎？',
@@ -240,9 +250,16 @@ const zh_tw = {
       input: '請輸入映像檔的下載 URL',
       ok: '確定',
       disabled: '/data 為唯讀目錄，無法下載映像檔',
+      diskShared: '請先關閉虛擬隨身碟功能，再使用映像檔下載功能',
+      mountedImage: '此映像檔已掛載。上傳同名檔案前請先卸載。',
+      diskOff: '關閉虛擬隨身碟功能',
       uploadbox: '將檔案拖曳到此處或按一下選擇',
       inputfile: '請輸入圖片檔案',
-      NoISO: '無 ISO'
+      NoISO: '無 ISO',
+      sha256: 'SHA-256（可選）',
+      sha256Placeholder: '請輸入 64 位元 SHA-256 校驗和',
+      invalidSHA256: 'SHA-256 必須是 64 位元十六進位字串',
+      checksumFailed: '下載失敗：SHA-256 校驗失敗'
     },
     power: {
       title: '電源控制',
@@ -292,9 +309,24 @@ const zh_tw = {
           modeOff: '關閉',
           modeAuto: '自動隱藏',
           modeAlways: '始終顯示',
+          keyboardLedStatus: '鍵盤鎖定狀態指示燈',
+          keyboardLedStatusDesc: '顯示遠端電腦的 Num Lock、Caps Lock 與 Scroll Lock 狀態',
           icons: '選單圖示',
           iconsDesc: '是否在選單欄中顯示子選單圖示'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: '遠端鍵盤鎖定狀態',
+        indicatorLabel: '{{label}}：{{state}}',
+        numLock: '數字鎖定',
+        numLockShort: '數',
+        capsLock: '大寫鎖定',
+        capsLockShort: '大',
+        scrollLock: '捲動鎖定',
+        scrollLockShort: '捲',
+        on: '開啟',
+        off: '關閉',
+        unknown: '未知'
       },
       device: {
         title: '設備',
@@ -334,7 +366,10 @@ const zh_tw = {
           tip: '若無需求，建議關閉此功能'
         },
         hdmi: {
-          description: '啟用 HDMI/螢幕 輸出'
+          description: '啟用 HDMI/螢幕 輸出',
+          idleTimeoutTitle: '擷取閒置逾時',
+          idleTimeoutDescription: '沒有活躍觀看者時，在指定時間後停止 HDMI 擷取',
+          minutes: '分鐘'
         },
         autostart: {
           title: '啟動時指令碼設定',
@@ -351,6 +386,9 @@ const zh_tw = {
         hidOnlyDesc: '停止模擬虛擬設備，僅保留基礎 HID 控制',
         disk: '虛擬隨身碟',
         diskDesc: '在遠端主機上連接虛擬隨身碟',
+        diskLocked: '掛載映像檔期間已關閉（開啟會取消映像檔掛載）',
+        diskCancelMount:
+          '開啟虛擬隨身碟會取消目前掛載的映像檔，並中斷正在進行的映像檔下載或上傳，是否繼續？',
         network: '虛擬網卡',
         networkDesc: '在遠端主機上新增虛擬網卡',
         reboot: '重新啟動',

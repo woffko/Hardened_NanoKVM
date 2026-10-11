@@ -33,11 +33,12 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
-    api::{stream, system_firewall},
+    api::{storage, stream, system_firewall},
     auth::compat_crypto::decode_frontend_password,
     config::Config,
     error::ApiResponse,
     ffi::kvm,
+    hdmi_idle,
     http::{
         cookie::{session_cookie, session_cookie_secure},
         middleware::CurrentSession,
@@ -201,6 +202,19 @@ pub struct GpioRsp {
 #[derive(Debug, Serialize)]
 pub struct EnabledRsp {
     pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HdmiStateRsp {
+    pub enabled: bool,
+    pub signal: bool,
+    #[serde(rename = "idleTimeout")]
+    pub idle_timeout: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetHdmiIdleTimeoutReq {
+    pub minutes: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,20 +389,32 @@ pub async fn set_gpio(Json(req): Json<SetGpioReq>) -> Result<impl IntoResponse> 
 }
 
 pub async fn get_hdmi_state() -> Result<impl IntoResponse> {
-    Ok(Json(ApiResponse::ok(EnabledRsp {
-        enabled: !Path::new(HDMI_DISABLE_FILE).exists(),
+    let enabled = !Path::new(HDMI_DISABLE_FILE).exists();
+    Ok(Json(ApiResponse::ok(HdmiStateRsp {
+        enabled,
+        signal: enabled && kvm::hdmi_signal_active(),
+        idle_timeout: hdmi_idle::idle_timeout_minutes(),
     })))
+}
+
+pub async fn set_hdmi_idle_timeout(
+    Json(req): Json<SetHdmiIdleTimeoutReq>,
+) -> Result<impl IntoResponse> {
+    hdmi_idle::set_idle_timeout(req.minutes)?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn enable_hdmi() -> Result<impl IntoResponse> {
     kvm::set_hdmi(true)?;
     persist_hdmi_enabled()?;
+    hdmi_idle::capture_enabled();
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn disable_hdmi() -> Result<impl IntoResponse> {
     kvm::set_hdmi(false)?;
     persist_hdmi_disabled()?;
+    hdmi_idle::capture_disabled();
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -397,6 +423,7 @@ pub async fn reset_hdmi() -> Result<impl IntoResponse> {
     time::sleep(Duration::from_secs(1)).await;
     kvm::set_hdmi(true)?;
     persist_hdmi_enabled()?;
+    hdmi_idle::capture_enabled();
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -557,8 +584,19 @@ pub async fn get_virtual_device() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(VirtualDeviceRsp {
         network: Path::new(VIRTUAL_NETWORK_FLAG).exists(),
         media: false,
-        disk: Path::new(VIRTUAL_DISK_FLAG).exists(),
+        disk: disk_attached(),
     })))
+}
+
+/// Whether the virtual disk is enabled and /data is currently shared with the
+/// host. A disk that serves an image, or nothing at all, counts as off.
+fn disk_attached() -> bool {
+    Path::new(VIRTUAL_DISK_FLAG).exists() && storage::data_disk_attached()
+}
+
+/// An empty disk flag makes the gadget serve /data; a non-empty one names another disk.
+fn disk_flag_serves_data(flag: &Path) -> bool {
+    fs::metadata(flag).is_ok_and(|meta| meta.len() == 0)
 }
 
 pub async fn update_virtual_device(
@@ -570,19 +608,58 @@ pub async fn update_virtual_device(
         _ => return Err(AppError::BadRequest("invalid virtual device".to_string())),
     };
 
-    let exists = Path::new(flag).exists();
+    // Also covers the gadget restart below: nothing may remount the media meanwhile.
+    let _gadget = storage::lock_gadget().await;
+    let is_disk = req.device == "disk";
+    let exists = if is_disk {
+        disk_attached()
+    } else {
+        Path::new(flag).exists()
+    };
+
+    // A gadget restart serves /data again whenever the disk is on, whichever device is toggled.
+    let handing_over_disk = if is_disk {
+        !exists
+    } else {
+        disk_flag_serves_data(Path::new(VIRTUAL_DISK_FLAG)) && !disk_attached()
+    };
+    if handing_over_disk {
+        storage::ensure_no_transfer()?;
+    }
+
     run_usbdev("stop").await?;
+    if handing_over_disk && let Err(err) = release_data_for_host().await {
+        if let Err(restart) = run_usbdev("start").await {
+            warn!(error = %restart, "failed to restart the USB gadget after a failed handover");
+        }
+        return Err(err);
+    }
     if exists {
         remove_dir_if_exists(config_dir)?;
         remove_file_if_exists(flag)?;
     } else {
-        fs::write(flag, b"")?;
+        // Keep the content: a non-empty flag names the disk to serve.
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(flag)?;
     }
     run_usbdev("start").await?;
 
-    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp {
-        on: Path::new(flag).exists(),
-    })))
+    // The disk is gone from the host, so the KVM writes /data itself again.
+    if is_disk
+        && !disk_attached()
+        && let Err(err) = storage::set_data_writable(true).await
+    {
+        warn!(error = %err, "failed to make /data writable after disabling the virtual disk");
+    }
+
+    let on = if is_disk {
+        disk_attached()
+    } else {
+        Path::new(flag).exists()
+    };
+    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp { on })))
 }
 
 pub async fn reboot() -> Result<impl IntoResponse> {
@@ -859,10 +936,15 @@ fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
 
 fn exec_terminal_shell() -> ! {
     let shell = b"/bin/sh\0";
+    let login_flag = b"-l\0";
+    let home = b"/root\0";
     unsafe {
+        // Best effort: a missing /root must not stop the shell from starting.
+        nix::libc::chdir(home.as_ptr().cast());
         nix::libc::execl(
             shell.as_ptr().cast(),
             shell.as_ptr().cast(),
+            login_flag.as_ptr().cast::<nix::libc::c_char>(),
             ptr::null::<nix::libc::c_char>(),
         );
         nix::libc::_exit(127);
@@ -1308,6 +1390,14 @@ fn valid_pid(pid: &str) -> bool {
     !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// The host writes the partition from now on. Stopping the gadget dropped any lock the host
+/// held on a mounted image, so release it: /data cannot go read-only while the LUN holds a
+/// file on it open.
+async fn release_data_for_host() -> Result<()> {
+    storage::release_lun().await?;
+    storage::set_data_writable(false).await
+}
+
 async fn run_usbdev(action: &'static str) -> Result<()> {
     run_checked(
         AllowedCommand::ServiceUsbDev,
@@ -1401,6 +1491,17 @@ mod tests {
         assert_eq!(size.ws_col, 120);
         assert!(parse_terminal_winsize(br#"{"rows":0,"cols":120}"#).is_none());
         assert!(parse_terminal_winsize(b"not json").is_none());
+    }
+
+    #[test]
+    fn empty_disk_flag_serves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("usb.disk0");
+        assert!(!disk_flag_serves_data(&flag));
+        fs::write(&flag, b"").unwrap();
+        assert!(disk_flag_serves_data(&flag));
+        fs::write(&flag, b"/data/image.iso").unwrap();
+        assert!(!disk_flag_serves_data(&flag));
     }
 
     #[test]

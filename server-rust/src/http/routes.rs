@@ -91,6 +91,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/vm/hdmi/reset", post(vm::reset_hdmi))
         .route("/api/vm/hdmi/enable", post(vm::enable_hdmi))
         .route("/api/vm/hdmi/disable", post(vm::disable_hdmi))
+        .route("/api/vm/hdmi/timeout", post(vm::set_hdmi_idle_timeout))
         .route("/api/vm/ssh", get(vm::get_ssh_state))
         .route("/api/vm/ssh/enable", post(vm::enable_ssh))
         .route("/api/vm/ssh/disable", post(vm::disable_ssh))
@@ -203,6 +204,7 @@ pub fn build(state: AppState) -> Router {
             get(hid::get_leader_key).post(hid::set_leader_key),
         )
         .route("/api/hid/mode", get(hid::get_mode).post(hid::set_mode))
+        .route("/api/hid/leds", get(hid::get_keyboard_leds))
         .route(
             "/api/hid/usb-wakeup",
             get(hid::get_usb_wakeup).post(hid::set_usb_wakeup),

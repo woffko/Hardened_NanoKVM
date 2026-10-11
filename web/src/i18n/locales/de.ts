@@ -81,6 +81,10 @@ const de = {
       frameDetectTip:
         'Berechnet den Unterschied zwischen den Einzelbildern. Beendet die Liveübertragung des Videostreams wenn keine Änderungen auf dem Bildschirm des Hosts festgestellt werden kann.',
       resetHdmi: 'HDMI zurücksetzen',
+      webrtcConnectionFailed: {
+        title: 'WebRTC-Verbindung fehlgeschlagen',
+        description: 'Überprüfen Sie die Netzwerkverbindung oder wechseln Sie den Videomodus.'
+      },
       captureStatus: {
         hdmiError: 'HDMI-Bildschirmfehler',
         unsupportedResolution: 'Die aktuelle Auflösung wird nicht unterstützt',
@@ -185,9 +189,16 @@ const de = {
       mountFailed: 'Einbinden fehlgeschlagen',
       mountDesc:
         'In einigen Systemen ist es notwendig, die virtuelle Festplatte auf dem entfernten Host auszuwerfen, bevor das Image eingebunden werden kann.',
+      diskOnWarn:
+        'Beim Einbinden des Images wird das virtuelle Laufwerk ausgeschaltet, sodass der Computer nicht mehr auf /data zugreifen kann. Fortfahren?',
+      diskOffWarn:
+        'Das virtuelle Laufwerk ist ausgeschaltet und muss zum Einbinden des Images aktiviert werden. Die USB-Geräte am Computer werden neu erkannt. Fortfahren?',
       unmountFailed: 'Das Aufheben der Bereitstellung ist fehlgeschlagen',
       unmountDesc:
         'Auf einigen Systemen müssen Sie das Image manuell vom Remote-Host auswerfen, bevor Sie die Bereitstellung aufheben.',
+      forceEject: 'Auswerfen erzwingen',
+      forceEjectConfirm:
+        'Der Host hat das optische Laufwerk gesperrt. Beim erzwungenen Auswerfen wird das virtuelle USB-Gerät kurz getrennt, sodass Tastatur und Maus kurzzeitig ausfallen können. Fortfahren?',
       refresh: 'Bilder aktualisieren',
       attention: 'Achtung',
       deleteConfirm: 'Sind Sie sicher, dass Sie dieses Bild löschen möchten?',
@@ -254,9 +265,18 @@ const de = {
       ok: 'Ok',
       disabled:
         '/data Partition ist nur-lesbar, daher kann das Systemabbild nicht heruntergeladen werden',
+      diskShared:
+        'Schalten Sie zuerst das virtuelle Laufwerk aus und verwenden Sie dann den Image-Download.',
+      mountedImage:
+        'Dieses Image ist eingebunden. Heben Sie die Einbindung auf, bevor Sie eine Datei mit demselben Namen hochladen.',
+      diskOff: 'Virtuelles Laufwerk ausschalten',
       uploadbox: 'Datei hier ablegen oder klicken zum Auswählen',
       inputfile: 'Bitte geben Sie die Datei für das Systemabbild an',
-      NoISO: 'Keine ISO'
+      NoISO: 'Keine ISO',
+      sha256: 'SHA-256 (optional)',
+      sha256Placeholder: 'Geben Sie eine 64-stellige SHA-256-Prüfsumme ein',
+      invalidSHA256: 'SHA-256 muss eine 64-stellige Hexadezimalzeichenfolge sein',
+      checksumFailed: 'Download fehlgeschlagen: SHA-256-Prüfung fehlgeschlagen'
     },
     power: {
       title: 'Power',
@@ -306,9 +326,25 @@ const de = {
           modeOff: 'Aus',
           modeAuto: 'Automatisch ausblenden',
           modeAlways: 'Immer sichtbar',
+          keyboardLedStatus: 'Tastensperren-Anzeigen',
+          keyboardLedStatusDesc:
+            'Num-Lock-, Feststell- und Rollen-Status des Remote-Computers anzeigen',
           icons: 'Untermenüsymbole',
           iconsDesc: 'Untermenüsymbole in der Menüleiste anzeigen'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Tastensperren-Status der Remote-Tastatur',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num-Taste',
+        numLockShort: 'Num',
+        capsLock: 'Feststelltaste',
+        capsLockShort: 'Fest',
+        scrollLock: 'Rollen-Taste',
+        scrollLockShort: 'Roll',
+        on: 'Ein',
+        off: 'Aus',
+        unknown: 'Unbekannt'
       },
       device: {
         title: 'Gerät',
@@ -348,7 +384,10 @@ const de = {
           tip: 'Deaktivieren Sie den Dienst, wenn Sie ihn nicht benötigen'
         },
         hdmi: {
-          description: 'HDMI/Monitor-Ausgabe aktivieren'
+          description: 'HDMI/Monitor-Ausgabe aktivieren',
+          idleTimeoutTitle: 'Zeitlimit für inaktive Aufnahme',
+          idleTimeoutDescription: 'HDMI-Aufnahme stoppen, wenn keine aktiven Zuschauer vorhanden sind für',
+          minutes: 'Min.'
         },
         autostart: {
           title: 'Autostart-Skripteinstellungen',
@@ -366,6 +405,9 @@ const de = {
           'Hören Sie auf, virtuelle Geräte zu emulieren, und behalten Sie nur die grundlegende HID-Steuerung bei',
         disk: 'Virtuelle Festplatte',
         diskDesc: 'Binde das virtuelle U-Laufwerk an den entfernten Host',
+        diskLocked: 'Aus, solange ein Image eingebunden ist (Einschalten bricht die Einbindung ab)',
+        diskCancelMount:
+          'Das Aktivieren des virtuellen Laufwerks bricht das eingebundene Image ab und unterbricht einen laufenden Image-Download oder -Upload. Fortfahren?',
         network: 'Virtuelles Netzwerk',
         networkDesc: 'Binde die virtuelle Netzwerkkarte an den entfernten Host',
         reboot: 'Neustarten',

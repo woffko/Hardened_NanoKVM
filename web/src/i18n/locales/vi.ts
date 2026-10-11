@@ -78,6 +78,10 @@ const vi = {
       frameDetectTip:
         'Tính toán sự khác biệt giữa các khung hình. Dừng truyền video khi không có thay đổi trên màn hình máy chủ từ xa.',
       resetHdmi: 'Đặt lại HDMI',
+      webrtcConnectionFailed: {
+        title: 'Kết nối WebRTC thất bại',
+        description: 'Kiểm tra kết nối mạng hoặc chuyển đổi chế độ video.'
+      },
       captureStatus: {
         hdmiError: 'Lỗi màn hình HDMI',
         unsupportedResolution: 'Độ phân giải hiện tại không được hỗ trợ',
@@ -180,9 +184,16 @@ const vi = {
       mountMode: 'Chế độ gắn kết',
       mountFailed: 'Mount thất bại',
       mountDesc: 'Trong một số hệ thống, cần phải eject đĩa ảo trên máy remote trước khi mount.',
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Tháo lắp không thành công',
       unmountDesc:
         'Trên một số hệ thống, bạn cần đẩy hình ảnh ra khỏi máy chủ từ xa theo cách thủ công trước khi ngắt kết nối hình ảnh.',
+      forceEject: 'Buộc đẩy ra',
+      forceEjectConfirm:
+        'Máy chủ đã khóa ổ đĩa quang. Buộc đẩy ra sẽ ngắt kết nối thiết bị USB ảo trong giây lát, vì vậy bàn phím và chuột có thể bị ngắt kết nối ngắn. Tiếp tục?',
       refresh: 'Làm mới danh sách hình ảnh',
       attention: 'Chú ý',
       deleteConfirm: 'Bạn có chắc chắn muốn xóa hình ảnh này không?',
@@ -248,9 +259,16 @@ const vi = {
       input: 'Vui lòng nhập hình ảnh từ xa URL',
       ok: 'OK',
       disabled: '/data phân vùng là RO nên không tải được image',
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage: 'Ảnh đĩa này đang được gắn. Hãy gỡ gắn trước khi tải lên tệp cùng tên.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Thả file vào đây hoặc bấm vào để chọn',
       inputfile: 'Vui lòng nhập File hình ảnh',
-      NoISO: 'Không có ISO'
+      NoISO: 'Không có ISO',
+      sha256: 'SHA-256 (tùy chọn)',
+      sha256Placeholder: 'Nhập mã kiểm tra SHA-256 gồm 64 ký tự',
+      invalidSHA256: 'SHA-256 phải là chuỗi thập lục phân gồm 64 ký tự',
+      checksumFailed: 'Tải xuống thất bại: xác minh SHA-256 không thành công'
     },
     power: {
       title: 'Nguồn',
@@ -300,9 +318,25 @@ const vi = {
           modeOff: 'Tắt',
           modeAuto: 'Tự động ẩn',
           modeAlways: 'Luôn hiển thị',
+          keyboardLedStatus: 'Chỉ báo khóa bàn phím',
+          keyboardLedStatusDesc:
+            'Hiển thị trạng thái Num Lock, Caps Lock và Scroll Lock của máy tính từ xa',
           icons: 'Biểu tượng menu con',
           iconsDesc: 'Hiển thị biểu tượng menu con trên thanh menu'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Trạng thái khóa bàn phím từ xa',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Bật',
+        off: 'Tắt',
+        unknown: 'Không rõ'
       },
       device: {
         title: 'Thiết bị',
@@ -342,7 +376,10 @@ const vi = {
           tip: 'Tắt đi nếu không cần thiết'
         },
         hdmi: {
-          description: 'Kích hoạt HDMI/đầu ra màn hình'
+          description: 'Kích hoạt HDMI/đầu ra màn hình',
+          idleTimeoutTitle: 'Thời gian chờ khi không hoạt động',
+          idleTimeoutDescription: 'Dừng việc ghi hình HDMI sau khi không có người xem hoạt động trong',
+          minutes: 'phút'
         },
         autostart: {
           title: 'Cài đặt tập lệnh tự khởi động',
@@ -359,6 +396,9 @@ const vi = {
         hidOnlyDesc: 'Dừng mô phỏng các thiết bị ảo, chỉ giữ lại điều khiển HID cơ bản',
         disk: 'Đĩa ảo',
         diskDesc: 'Mount virtual U-disk on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount:
+          'Enabling the virtual disk cancels the mounted image and interrupts a running image download or upload. Continue?',
         network: 'Mạng ảo',
         networkDesc: 'Gắn card mạng ảo trên máy chủ từ xa',
         reboot: 'Khởi động lại',

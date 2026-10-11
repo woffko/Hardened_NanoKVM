@@ -10,11 +10,15 @@ export function getMountedImage() {
   return http.get('/api/storage/image/mounted');
 }
 
-// mount/unmount image
-export function mountImage(file?: string, cdrom?: boolean) {
+// Must match MEDIA_LOCKED_CODE in server-rust/src/api/storage.rs.
+export const MEDIA_LOCKED_CODE = -423;
+
+// mount/unmount image; force takes the USB gadget down to release a medium the computer has locked
+export function mountImage(file?: string, cdrom?: boolean, force?: boolean) {
   const data = {
     file: file ? file : '',
-    cdrom: cdrom
+    cdrom: cdrom,
+    force: force ?? false
   };
   return http.post('/api/storage/image/mount', data);
 }

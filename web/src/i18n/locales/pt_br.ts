@@ -78,6 +78,10 @@ const pt_br = {
       frameDetectTip:
         'Calcular a diferença entre os quadros. Parar a transmissão de vídeo quando nenhuma alteração for detectada na tela do host remoto.',
       resetHdmi: 'Redefinir HDMI',
+      webrtcConnectionFailed: {
+        title: 'Falha na conexão WebRTC',
+        description: 'Verifique a conexão de rede ou alterne o modo de vídeo.'
+      },
       captureStatus: {
         hdmiError: 'Erro na imagem HDMI',
         unsupportedResolution: 'A resolução atual não é compatível',
@@ -182,9 +186,16 @@ const pt_br = {
       mountFailed: 'Falha na Montagem',
       mountDesc:
         'Em alguns sistemas, é necessário ejetar o disco virtual no host remoto antes de montar a imagem.',
+      diskOnWarn:
+        'Montar a imagem desliga o disco virtual, então o computador não pode mais acessar /data. Continuar?',
+      diskOffWarn:
+        'O disco virtual está desligado e precisa ser ativado para montar a imagem. Os dispositivos USB do computador são reconectados. Continuar?',
       unmountFailed: 'Falha na desmontagem',
       unmountDesc:
         'Em alguns sistemas, é necessário ejetar manualmente do host remoto antes de desmontar a imagem.',
+      forceEject: 'Forçar ejeção',
+      forceEjectConfirm:
+        'O host bloqueou a unidade óptica. Forçar a ejeção desconecta o dispositivo USB virtual por um momento, então o teclado e o mouse podem se desconectar brevemente. Continuar?',
       refresh: 'Atualizar a lista de imagens',
       attention: 'Atenção',
       deleteConfirm: 'Tem certeza que deseja excluir esta imagem?',
@@ -250,9 +261,17 @@ const pt_br = {
       input: 'Por favor, digite uma URL de imagem remota',
       ok: 'Ok',
       disabled: 'A partição /data é RO, então não podemos baixar a imagem',
+      diskShared: 'Desligue primeiro o disco virtual e depois use o download de imagens.',
+      mountedImage:
+        'Esta imagem está montada. Desmonte-a antes de enviar um arquivo com o mesmo nome.',
+      diskOff: 'Desligar o disco virtual',
       uploadbox: 'Solte o arquivo aqui ou clique para selecionar',
       inputfile: 'Por favor insira o arquivo de imagem',
-      NoISO: 'Sem ISO'
+      NoISO: 'Sem ISO',
+      sha256: 'SHA-256 (opcional)',
+      sha256Placeholder: 'Digite um checksum SHA-256 de 64 caracteres',
+      invalidSHA256: 'SHA-256 deve ser uma sequência hexadecimal de 64 caracteres',
+      checksumFailed: 'Falha no download: a verificação SHA-256 falhou'
     },
     power: {
       title: 'Energia',
@@ -302,9 +321,25 @@ const pt_br = {
           modeOff: 'Desligado',
           modeAuto: 'Ocultar automaticamente',
           modeAlways: 'Sempre visível',
+          keyboardLedStatus: 'Indicadores de bloqueio do teclado',
+          keyboardLedStatusDesc:
+            'Exibir o estado de Num Lock, Caps Lock e Scroll Lock do computador remoto',
           icons: 'Ícones do submenu',
           iconsDesc: 'Exibir ícones de submenus na barra de menu'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Estado dos bloqueios do teclado remoto',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Ativado',
+        off: 'Desativado',
+        unknown: 'Desconhecido'
       },
       device: {
         title: 'Dispositivo',
@@ -344,7 +379,10 @@ const pt_br = {
           tip: 'Desligue se não for necessário'
         },
         hdmi: {
-          description: 'Habilitar saída HDMI/monitor'
+          description: 'Habilitar saída HDMI/monitor',
+          idleTimeoutTitle: 'Tempo limite de captura inativa',
+          idleTimeoutDescription: 'Parar a captura HDMI após não haver visualizadores ativos por',
+          minutes: 'min'
         },
         autostart: {
           title: 'Configurações de scripts de inicialização automática',
@@ -362,6 +400,9 @@ const pt_br = {
         hidOnlyDesc: 'Pare de emular dispositivos virtuais, mantendo apenas o controle básico HID',
         disk: 'Disco Virtual',
         diskDesc: 'Montar U-disk virtual no host remoto',
+        diskLocked: 'Desligado enquanto uma imagem estiver montada (ligá-lo cancela a montagem)',
+        diskCancelMount:
+          'Ativar o disco virtual cancela a imagem montada e interrompe um download ou upload de imagem em andamento. Continuar?',
         network: 'Rede Virtual',
         networkDesc: 'Montar placa de rede virtual no host remoto',
         reboot: 'Reiniciar',

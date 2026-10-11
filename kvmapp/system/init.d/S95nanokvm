@@ -574,6 +574,18 @@ system_update_boot_healthy() {
     return 0
 }
 
+# The host is the only writer while the virtual disk shares the raw partition (see S01fs).
+remount_data_readonly_if_shared() {
+    [ -e /boot/usb.disk0 ] || return 0
+    [ ! -e /boot/usb.disk0.ro ] || return 0
+    [ ! -s /boot/usb.disk0 ] || return 0
+    grep -q ' /data ' /proc/mounts || return 0
+    lun_file=/sys/kernel/config/usb_gadget/g0/functions/mass_storage.disk0/lun.0/file
+    [ "$(tr -d '\n' < "$lun_file" 2>/dev/null)" = /dev/mmcblk0p3 ] || return 0
+
+    mount -o remount,ro /data 2>/dev/null || true
+}
+
 confirm_system_update_boot() {
     pending_file="$(pending_update_file)" || return 1
     version="$(json_string_value "$pending_file" version)"
@@ -599,6 +611,7 @@ EOF
     chmod 0644 "$SYSTEM_BOOT_GOOD_FILE"
     rm -f "$SYSTEM_PENDING_FILE" "$SYSTEM_RAW_INSTALL_MARKER" "$SYSTEM_UPDATE_STAGE_DIR/progress.json" 2>/dev/null || true
     echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update auto-confirmed" >> "$SYSTEM_UPDATE_LOG"
+    remount_data_readonly_if_shared
 }
 
 run_system_update_rollback() {
@@ -684,6 +697,7 @@ case "$1" in
     stop_runtime
 
     echo -n kvm > /boot/hostname.prefix
+    [ -e /root/.profile ] || printf '%s\n' 'export PS1="\u@\h:\w# "' > /root/.profile
 
     restore_sensor_configs
 

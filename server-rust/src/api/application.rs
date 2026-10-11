@@ -157,6 +157,7 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
         ));
     }
 
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let _guard = acquire_update_lock()?;
     let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
 
@@ -177,6 +178,7 @@ pub async fn offline_update(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<()>>> {
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let _guard = acquire_update_lock()?;
     let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
 

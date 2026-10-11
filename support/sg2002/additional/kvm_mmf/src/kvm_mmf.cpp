@@ -137,6 +137,12 @@ typedef struct {
 	uint8_t h265_or_h264_is_used;
 
 	mmf_vb_pool_t vb_pool[VB_MAX_COMM_POOLS];
+
+	// Keep all existing member offsets stable for compatibility with the
+	// vendor middleware; zero-copy state is appended at the end.
+	bool vi_frame_valid[MMF_VI_MAX_CHN];
+	bool vi_frame_mapped[MMF_VI_MAX_CHN];
+	bool vi_frame_deferred[MMF_VI_MAX_CHN];
 } priv_t;
 
 typedef struct {
@@ -149,6 +155,61 @@ static priv_t priv;
 static g_priv_t g_priv;
 
 #define MODULE_NAME "soph_vi"
+
+/*
+ * Keep the former zero-copy hook's frame lifetime in the MMF implementation.
+ * A frame released by the image path stays leased until VENC has consumed it.
+ */
+static void _mmf_release_vi_frame(int ch)
+{
+	if (ch < 0 || ch >= MMF_VI_MAX_CHN || !priv.vi_frame_valid[ch]) {
+		return;
+	}
+
+	VIDEO_FRAME_INFO_S *frame = &priv.vi_frame[ch];
+	if (priv.vi_frame_mapped[ch] && frame->stVFrame.pu8VirAddr[0]) {
+		uint32_t image_size = frame->stVFrame.u32Length[0]
+			+ frame->stVFrame.u32Length[1]
+			+ frame->stVFrame.u32Length[2];
+		CVI_SYS_Munmap(frame->stVFrame.pu8VirAddr[0], image_size);
+		frame->stVFrame.pu8VirAddr[0] = NULL;
+	}
+
+	if (CVI_VPSS_ReleaseChnFrame(0, ch, frame) != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VPSS_ReleaseChnFrame failed for ch %d\n", ch);
+	}
+
+	memset(frame, 0, sizeof(*frame));
+	priv.vi_frame_valid[ch] = false;
+	priv.vi_frame_mapped[ch] = false;
+	priv.vi_frame_deferred[ch] = false;
+}
+
+static void _mmf_release_all_vi_frames(void)
+{
+	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch) {
+		_mmf_release_vi_frame(ch);
+	}
+}
+
+static int _mmf_find_deferred_vi_frame(const uint8_t *data, int width, int height,
+	int format, VIDEO_FRAME_INFO_S **frame_out)
+{
+	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch) {
+		if (!priv.vi_frame_valid[ch] || !priv.vi_frame_deferred[ch]) {
+			continue;
+		}
+		VIDEO_FRAME_INFO_S *frame = &priv.vi_frame[ch];
+		if ((const uint8_t *)frame->stVFrame.pu8VirAddr[0] == data
+			&& (int)frame->stVFrame.u32Width == width
+			&& (int)frame->stVFrame.u32Height == height
+			&& (int)frame->stVFrame.enPixelFormat == format) {
+			*frame_out = frame;
+			return ch;
+		}
+	}
+	return -1;
+}
 
 static int _is_module_in_use(const char *module_name) {
     FILE *fp;
@@ -297,9 +358,9 @@ static int _free_leak_memory_of_ion(void)
 		if (sscanf(line, "%*d %19s %19s %*d %19s",
 			alloc_buf_size_str, phy_addr_str, buffer_name) == 3) {
 			printf("[ION] %s  %s  %s\r\n", alloc_buf_size_str, phy_addr_str, buffer_name);
-			// FIXME: release jpeg_ion
-			if (strcmp(buffer_name, "VI_DMA_BUF")
-				&& strcmp(buffer_name, "ISP_SHARED_BUFFER_0"))
+			// ISP_SHARED_BUFFER_0 may still be owned by kvm_system while the
+			// server starts. Releasing it here makes SAMPLE_PLAT_VI_INIT fail.
+			if (strcmp(buffer_name, "VI_DMA_BUF"))
 				continue;
 			struct sys_ion_data_new ion_data = {
 				.cached = 1,
@@ -1266,6 +1327,8 @@ int mmf_vi_init(void)
 	s32Ret = _mmf_vpss_init_new(0, priv.vi_size.u32Width, priv.vi_size.u32Height, PIXEL_FORMAT_UYVY);		// PIXEL_FORMAT_UYVY  PIXEL_FORMAT_NV21
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("_mmf_vpss_init_new failed. s32Ret: 0x%x !\n", s32Ret);
+		priv.vi_is_inited = false;
+		return s32Ret;
 	}
 
 	priv.vi_is_inited = true;
@@ -1279,6 +1342,7 @@ int mmf_vi_deinit(void)
 		return 0;
 	}
 
+	_mmf_release_all_vi_frames();
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	s32Ret = _mmf_vpss_deinit_new(0);
 	if (s32Ret != CVI_SUCCESS) {
@@ -1334,7 +1398,7 @@ static int _mmf_add_vi_channel(int ch, int width, int height, int format) {
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
-	int fps = 30;
+	int fps = 60;
 	int depth = 2;
 	int width_out = ALIGN(width, DEFAULT_ALIGN);
 	int height_out = height;
@@ -1409,6 +1473,7 @@ int mmf_del_vi_channel(int ch) {
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
+	_mmf_release_vi_frame(ch);
 	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, ch, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
@@ -1469,20 +1534,33 @@ int mmf_vi_frame_pop(int ch, void **data, int *len, int *width, int *height, int
 
 	int ret = -1;
 	VIDEO_FRAME_INFO_S *frame = &priv.vi_frame[ch];
+	_mmf_release_vi_frame(ch);
+	memset(frame, 0, sizeof(*frame));
 	if (CVI_VPSS_GetChnFrame(0, ch, frame, 1000) == 0) {
         int image_size = frame->stVFrame.u32Length[0]
                         + frame->stVFrame.u32Length[1]
 				        + frame->stVFrame.u32Length[2];
+		if (frame->stVFrame.u64PhyAddr[0] == 0 || image_size <= 0) {
+			SAMPLE_PRT("invalid VI frame address or size\n");
+			CVI_VPSS_ReleaseChnFrame(0, ch, frame);
+			memset(frame, 0, sizeof(*frame));
+			return -1;
+		}
+
         CVI_VOID *vir_addr;
         vir_addr = CVI_SYS_MmapCache(frame->stVFrame.u64PhyAddr[0], image_size);
 		if (vir_addr == NULL || vir_addr == MAP_FAILED) {
 			printf("CVI_SYS_MmapCache failed for vi ch %d\n", ch);
 			CVI_VPSS_ReleaseChnFrame(0, ch, frame);
+			memset(frame, 0, sizeof(*frame));
 			return -1;
 		}
         CVI_SYS_IonInvalidateCache(frame->stVFrame.u64PhyAddr[0], vir_addr, image_size);
 
 		frame->stVFrame.pu8VirAddr[0] = (CVI_U8 *)vir_addr;		// save virtual address for munmap
+		priv.vi_frame_valid[ch] = true;
+		priv.vi_frame_mapped[ch] = true;
+		priv.vi_frame_deferred[ch] = false;
 		// printf("width: %d, height: %d, total_buf_length: %d, phy:%#lx  vir:%p\n",
 		// 	   frame->stVFrame.u32Width,
 		// 	   frame->stVFrame.u32Height, image_size,
@@ -1499,21 +1577,17 @@ int mmf_vi_frame_pop(int ch, void **data, int *len, int *width, int *height, int
 }
 
 void mmf_vi_frame_free(int ch) {
-	if (ch < 0 || ch >= MMF_VI_MAX_CHN || !priv.vi_chn_is_inited[ch]) {
-		printf("[%d] invalid or closed ch %d\n", __LINE__, ch);
+	if (ch < 0 || ch >= MMF_VI_MAX_CHN || !priv.vi_frame_valid[ch]) {
 		return;
 	}
-	VIDEO_FRAME_INFO_S *frame = &priv.vi_frame[ch];
-	int image_size = frame->stVFrame.u32Length[0]
-                        + frame->stVFrame.u32Length[1]
-				        + frame->stVFrame.u32Length[2];
-	if (frame->stVFrame.pu8VirAddr[0] && image_size > 0) {
-		CVI_SYS_Munmap(frame->stVFrame.pu8VirAddr[0], image_size);
-		frame->stVFrame.pu8VirAddr[0] = NULL;
+	priv.vi_frame_deferred[ch] = true;
+}
+
+void mmf_vi_frame_release(int ch) {
+	if (ch < 0 || ch >= MMF_VI_MAX_CHN) {
+		return;
 	}
-	if (CVI_VPSS_ReleaseChnFrame(0, ch, frame) != 0) {
-		SAMPLE_PRT("CVI_VI_ReleaseChnFrame NG\n");
-	}
+	_mmf_release_vi_frame(ch);
 }
 
 int mmf_region_frame_push(int ch, void *data, int len)
@@ -2336,6 +2410,24 @@ int mmf_venc_push(int ch, uint8_t *data, int w, int h, int format) {
 		return -1;
 	}
 
+	/*
+	 * CameraCviMmf can return an Image backed by the mapped VPSS buffer.
+	 * When that frame is deferred, send it directly to VENC and skip the
+	 * Image -> VENC buffer copy. Non-camera callers still use the old path.
+	 */
+	if (info->type == 2) {
+		VIDEO_FRAME_INFO_S *vi_frame = NULL;
+		if (_mmf_find_deferred_vi_frame(data, w, h, format, &vi_frame) >= 0) {
+			s32Ret = CVI_VENC_SendFrame(ch, vi_frame, 1000);
+			if (s32Ret == CVI_SUCCESS) {
+				info->is_running = 1;
+				info->stream_acquired = 0;
+				return 0;
+			}
+			printf("CVI_VENC_SendFrame zero-copy failed with %#x, fallback to copy\n", s32Ret);
+		}
+	}
+
 	switch (format) {
 		case PIXEL_FORMAT_NV21:
 		{
@@ -2474,6 +2566,9 @@ int mmf_venc_free(int ch) {
 
 	venc_info_t *info = (venc_info_t *)&priv.venc[ch];
 	VENC_STREAM_S *venc_stream = (VENC_STREAM_S *)&priv.venc[ch].capture_stream;
+	// Without a submitted frame the VI frame belongs to the next encode, so
+	// it must stay leased.
+	bool was_running = info->is_running;
 	if (info->stream_acquired) {
 		s32Ret = CVI_VENC_ReleaseStream(ch, venc_stream);
 		if (s32Ret != CVI_SUCCESS) {
@@ -2490,5 +2585,8 @@ int mmf_venc_free(int ch) {
 	venc_stream->u32PackCount = 0;
 
 	info->is_running = 0;
+	if (was_running) {
+		_mmf_release_all_vi_frames();
+	}
 	return s32Ret;
 }

@@ -78,6 +78,10 @@ const ja = {
       frameDetectTip:
         'フレーム間の差異を計算し、リモートホストの画面が変更されない場合はビデオストリームの送信を停止します',
       resetHdmi: 'HDMI をリセット',
+      webrtcConnectionFailed: {
+        title: 'WebRTC 接続に失敗しました',
+        description: 'ネットワーク接続を確認するか、ビデオモードを切り替えてください。'
+      },
       captureStatus: {
         hdmiError: 'HDMI 画面エラー',
         unsupportedResolution: '現在の解像度はサポートされていません',
@@ -182,9 +186,16 @@ const ja = {
       mountFailed: 'マウントに失敗しました',
       mountDesc:
         '一部のシステムでは、イメージをマウントする前にリモートホストで仮想ディスクをアンマウントする必要があります。',
+      diskOnWarn:
+        'イメージをマウントすると仮想ディスクがオフになり、コンピュータから /data にアクセスできなくなります。続行しますか？',
+      diskOffWarn:
+        '仮想ディスクがオフになっているため、イメージのマウントには有効化が必要です。コンピュータの USB デバイスが再接続されます。続行しますか？',
       unmountFailed: 'アンマウントに失敗しました',
       unmountDesc:
         '一部のシステムでは、イメージをアンマウントする前にリモートホストから手動で取り出す必要があります。',
+      forceEject: '強制的に取り出す',
+      forceEjectConfirm:
+        'ホストが光学ドライブをロックしています。強制的に取り出すと、仮想 USB デバイスが一時的に切断されるため、キーボードとマウスも一時的に切断される場合があります。続行しますか？',
       refresh: 'イメージリストを更新',
       attention: '注意',
       deleteConfirm: 'このイメージを削除してもよろしいですか？',
@@ -251,9 +262,17 @@ const ja = {
       ok: 'OK',
       disabled:
         '/data パーティションは読み取り専用であり、イメージのダウンロードには使用できません',
+      diskShared: '先に仮想ディスクをオフにしてから、イメージのダウンロードを使用してください。',
+      mountedImage:
+        'このイメージはマウントされています。同じ名前のファイルをアップロードする前にマウントを解除してください。',
+      diskOff: '仮想ディスクをオフにする',
       uploadbox: 'ここにファイルをドロップするか、クリックして選択してください',
       inputfile: '画像ファイルを入力してください',
-      NoISO: 'ISO なし'
+      NoISO: 'ISO なし',
+      sha256: 'SHA-256（任意）',
+      sha256Placeholder: '64 文字の SHA-256 チェックサムを入力してください',
+      invalidSHA256: 'SHA-256 は 64 文字の 16 進数文字列である必要があります',
+      checksumFailed: 'ダウンロードに失敗しました：SHA-256 検証に失敗しました'
     },
     power: {
       title: '電源',
@@ -303,9 +322,25 @@ const ja = {
           modeOff: '閉じる',
           modeAuto: '自動非表示',
           modeAlways: '常に表示',
+          keyboardLedStatus: 'キーボードロックの表示',
+          keyboardLedStatusDesc:
+            'リモートコンピューターの Num Lock、Caps Lock、Scroll Lock の状態を表示',
           icons: 'メニューアイコン',
           iconsDesc: 'メニューバーでのサブメニューアイコンの表示'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'リモートキーボードのロック状態',
+        indicatorLabel: '{{label}}：{{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'オン',
+        off: 'オフ',
+        unknown: '不明'
       },
       device: {
         title: 'デバイス',
@@ -345,7 +380,10 @@ const ja = {
           tip: 'この機能を使用していない場合は、オフにすることをお勧めします'
         },
         hdmi: {
-          description: 'HDMI/モニター 出力機能を有効にする'
+          description: 'HDMI/モニター 出力機能を有効にする',
+          idleTimeoutTitle: 'キャプチャのアイドルタイムアウト',
+          idleTimeoutDescription: 'アクティブな閲覧者がいない状態が次の時間続いたら HDMI キャプチャを停止',
+          minutes: '分'
         },
         autostart: {
           title: '自動起動スクリプト設定',
@@ -363,6 +401,9 @@ const ja = {
           'このモードでは仮想デバイスはマウントされなくなり、基本的な HID 制御機能のみが保持されます。',
         disk: '仮想ディスク',
         diskDesc: 'リモートホストに仮想 USB ドライブをマウントする',
+        diskLocked: 'イメージのマウント中はオフです（オンにするとマウントが解除されます）',
+        diskCancelMount:
+          '仮想ディスクを有効にすると、マウント中のイメージは解除され、進行中のイメージのダウンロード/アップロードも中断されます。続行しますか？',
         network: '仮想ネットワークカード',
         networkDesc: 'リモートホストに仮想ネットワークカードをマウントする',
         reboot: '再起動',

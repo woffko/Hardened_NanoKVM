@@ -79,6 +79,10 @@ const cz = {
       frameDetectTip:
         'Vypočítá rozdíl mezi snímky. Přenos video streamu se zastaví, pokud nejsou detekovány změny na obrazovce vzdáleného hostitele.',
       resetHdmi: 'Resetovat HDMI',
+      webrtcConnectionFailed: {
+        title: 'Připojení WebRTC se nezdařilo',
+        description: 'Zkontrolujte síťové připojení nebo přepněte režim videa.'
+      },
       captureStatus: {
         hdmiError: 'Chyba obrazu HDMI',
         unsupportedResolution: 'Aktuální rozlišení není podporováno',
@@ -183,9 +187,16 @@ const cz = {
       mountFailed: 'Připojení se nezdařilo',
       mountDesc:
         'V některých systémech je nutné před připojením obrazu vysunout virtuální disk na vzdáleném hostiteli.',
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Odpojení se nezdařilo',
       unmountDesc:
         'Na některých systémech se musíte před odpojením obrazu ručně vysunout ze vzdáleného hostitele.',
+      forceEject: 'Vynutit vysunutí',
+      forceEjectConfirm:
+        'Hostitel zamkl optickou jednotku. Vynucené vysunutí na chvíli odpojí virtuální zařízení USB, takže se klávesnice a myš mohou krátce odpojit. Pokračovat?',
       refresh: 'Obnovte seznam obrázků',
       attention: 'Pozor',
       deleteConfirm: 'Opravdu chcete smazat tento obrázek?',
@@ -251,9 +262,16 @@ const cz = {
       input: 'Zadejte prosím vzdálený obrázek URL',
       ok: 'OK',
       disabled: 'Oddíl /data je RO, takže obrázek nelze stáhnout',
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage: 'Tento obraz je připojen. Před nahráním souboru se stejným názvem jej odpojte.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Přetáhněte soubor sem nebo kliknutím vyberte',
       inputfile: 'Zadejte soubor obrázku',
-      NoISO: 'Žádné ISO'
+      NoISO: 'Žádné ISO',
+      sha256: 'SHA-256 (volitelné)',
+      sha256Placeholder: 'Zadejte 64znakový kontrolní součet SHA-256',
+      invalidSHA256: 'SHA-256 musí být 64znakový hexadecimální řetězec',
+      checksumFailed: 'Stažení se nezdařilo: ověření SHA-256 selhalo'
     },
     power: {
       title: 'Napájení',
@@ -303,9 +321,25 @@ const cz = {
           modeOff: 'Vypnuto',
           modeAuto: 'Automatické skrytí',
           modeAlways: 'Vždy viditelné',
+          keyboardLedStatus: 'Indikátory zámku klávesnice',
+          keyboardLedStatusDesc:
+            'Zobrazit stav Num Lock, Caps Lock a Scroll Lock vzdáleného počítače',
           icons: 'Ikony podnabídky',
           iconsDesc: 'Zobrazení ikon podnabídky na liště nabídek'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Stav zámků vzdálené klávesnice',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Zapnuto',
+        off: 'Vypnuto',
+        unknown: 'Neznámé'
       },
       device: {
         title: 'Zařízení',
@@ -345,7 +379,10 @@ const cz = {
           tip: 'Vypnutí, pokud to není potřeba'
         },
         hdmi: {
-          description: 'Povolit výstup HDMI/monitor'
+          description: 'Povolit výstup HDMI/monitor',
+          idleTimeoutTitle: 'Časový limit nečinnosti snímání',
+          idleTimeoutDescription: 'Zastavit snímání HDMI po době bez aktivních diváků',
+          minutes: 'min'
         },
         autostart: {
           title: 'Nastavení automatického spuštění skriptů',
@@ -362,6 +399,9 @@ const cz = {
         hidOnlyDesc: 'Zastavit emulaci virtuálních zařízení a zachovat pouze základní ovládání HID',
         disk: 'Virtuální disk',
         diskDesc: 'Mount virtual U-disk on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount:
+          'Enabling the virtual disk cancels the mounted image and interrupts a running image download or upload. Continue?',
         network: 'Virtuální síť',
         networkDesc: 'Připojit virtuální síťovou kartu na vzdáleném hostiteli',
         reboot: 'Restartujte',

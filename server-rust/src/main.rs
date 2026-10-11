@@ -6,12 +6,14 @@ use axum::{
 use nanokvm_rust_server::{
     config::Config,
     ffi::kvm,
+    hdmi_idle,
     http::{
         routes,
         tls::{self, ClientAddr},
     },
     state::AppState,
     update::keys::install_bundled_update_trust,
+    ws::hid as hid_ws,
 };
 use std::{
     fs, io,
@@ -55,6 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_runtime_boot_scripts();
     install_runtime_update_trust(&config);
     initialize_kvm();
+    hdmi_idle::start();
+    hid_ws::start_keyboard_led_reader();
     install_shutdown_signal_handler();
 
     if config.proto == "https" {

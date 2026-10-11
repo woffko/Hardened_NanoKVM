@@ -63,6 +63,10 @@ maixcdk_clean(){
 
 case "$1" in
   update_lib)
+    # This script does not run under "set -e", and a release build relies on
+    # update_lib to guarantee the SDK components match the source tree. A copy
+    # that fails silently here would produce stale libraries, so fail loudly.
+    set -e
     cp -rf $NanoKVM_PATH/support/sg2002/additional/kvm $MAIXCDK_PATH/components
     cp -rf $NanoKVM_PATH/support/sg2002/additional/kvm_mmf $MAIXCDK_PATH/components
     cp -rf $NanoKVM_PATH/support/sg2002/additional/vision $MAIXCDK_PATH/components
@@ -194,6 +198,7 @@ then
         
       else
         echo -e "\e[36m[build] \e[31mThe source file does not exist. Please compile using \e[34m./build kvm_system \e[31mfirst.\e[0m"
+        exit 1
       fi
     ;;
     *)

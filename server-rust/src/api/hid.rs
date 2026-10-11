@@ -183,6 +183,11 @@ pub async fn get_mode() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetHidModeRsp { mode })))
 }
 
+/// Lock-key LEDs last reported by the remote host; `known` is false until it has sent one.
+pub async fn get_keyboard_leds() -> Result<impl IntoResponse> {
+    Ok(Json(ApiResponse::ok(hid_ws::keyboard_led_status())))
+}
+
 pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoResponse> {
     let mode = validate_hid_mode(&req.mode)?;
     if read_hid_mode().ok().as_deref() == Some(mode) {

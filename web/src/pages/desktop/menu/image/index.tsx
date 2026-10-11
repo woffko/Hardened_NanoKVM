@@ -6,6 +6,7 @@ import { DiscIcon, HardDriveIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/storage.ts';
+import { IMAGE_LIST_CHANGED_EVENT } from '@/lib/image-events.ts';
 import { submenuOpenCountAtom } from '@/jotai/settings.ts';
 
 import { Images } from './images.tsx';
@@ -41,6 +42,21 @@ export const Image = () => {
   ];
 
   useEffect(() => {
+    getImageState();
+
+    const handleImageUpdated = () => {
+      getImageState();
+    };
+    window.addEventListener(IMAGE_LIST_CHANGED_EVENT, handleImageUpdated);
+
+    return () => {
+      window.removeEventListener(IMAGE_LIST_CHANGED_EVENT, handleImageUpdated);
+    };
+  }, []);
+
+  // readers of the mounted image and of the CD-ROM flag: the icon state and the
+  // mode selector here, and the same state in the mount panel
+  function getImageState() {
     api.getMountedImage().then((rsp) => {
       if (rsp.code === 0) {
         setIsMounted(!!rsp.data?.file);
@@ -52,7 +68,7 @@ export const Image = () => {
         setMode(rsp.data?.cdrom === 1 ? 'cd-rom' : 'mass-storage');
       }
     });
-  }, []);
+  }
 
   function toggleModal(open: boolean) {
     setIsModalOpen(open);

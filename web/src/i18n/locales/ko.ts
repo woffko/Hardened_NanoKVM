@@ -77,6 +77,10 @@ const ko = {
       frameDetectTip:
         '프레임 간의 차이를 계산합니다. 원격 호스트 화면에 변경 사항이 감지되지 않으면 비디오 스트림 전송을 중지합니다.',
       resetHdmi: 'HDMI 초기화',
+      webrtcConnectionFailed: {
+        title: 'WebRTC 연결에 실패했습니다',
+        description: '네트워크 연결을 확인하거나 비디오 모드를 전환하세요.'
+      },
       captureStatus: {
         hdmiError: 'HDMI 화면 오류',
         unsupportedResolution: '현재 해상도는 지원되지 않습니다',
@@ -178,9 +182,16 @@ const ko = {
       mountFailed: '마운트 실패',
       mountDesc:
         '일부 시스템에서는 이미지를 마운트하기 전에 원격 호스트에서 가상 디스크를 제거해야 합니다.',
+      diskOnWarn:
+        '이미지를 마운트하면 가상 디스크가 꺼지고 컴퓨터에서 /data에 접근할 수 없게 됩니다. 계속하시겠습니까?',
+      diskOffWarn:
+        '가상 디스크가 꺼져 있어 이미지를 마운트하려면 먼저 켜야 합니다. 컴퓨터의 USB 장치가 다시 연결됩니다. 계속하시겠습니까?',
       unmountFailed: '언마운트 실패',
       unmountDesc:
         '일부 시스템에서는 이미지를 언마운트하기 전에 원격 호스트에서 수동으로 제거하여야 합니다.',
+      forceEject: '강제 제거',
+      forceEjectConfirm:
+        '호스트가 광학 드라이브를 잠갔습니다. 강제로 제거하면 가상 USB 장치가 잠시 연결 해제되므로 키보드와 마우스도 잠시 연결이 끊길 수 있습니다. 계속하시겠습니까?',
       refresh: '이미지 목록 새로고침',
       attention: '주의',
       deleteConfirm: '이 이미지를 제거하시겠습니까?',
@@ -246,9 +257,17 @@ const ko = {
       input: '원격 이미지 URL을 입력하세요.',
       ok: '확인',
       disabled: '/data 파티션이 읽기 전용(RO) 상태이므로 이미지를 다운로드할 수 없습니다.',
+      diskShared: '먼저 가상 디스크를 끈 다음 이미지 다운로드를 사용하세요.',
+      mountedImage:
+        '이 이미지는 마운트되어 있습니다. 같은 이름의 파일을 업로드하기 전에 마운트를 해제하세요.',
+      diskOff: '가상 디스크 끄기',
       uploadbox: '여기에 파일을 놓거나 클릭하여 선택하세요.',
       inputfile: '이미지 파일을 입력해주세요',
-      NoISO: 'ISO 없음'
+      NoISO: 'ISO 없음',
+      sha256: 'SHA-256 (선택 사항)',
+      sha256Placeholder: '64자 SHA-256 체크섬을 입력하세요',
+      invalidSHA256: 'SHA-256은 64자의 16진수 문자열이어야 합니다',
+      checksumFailed: '다운로드 실패: SHA-256 검증 실패'
     },
     power: {
       title: '전원',
@@ -298,9 +317,24 @@ const ko = {
           modeOff: '꺼짐',
           modeAuto: '자동 숨기기',
           modeAlways: '항상 보이기',
+          keyboardLedStatus: '키보드 잠금 표시기',
+          keyboardLedStatusDesc: '원격 컴퓨터의 Num Lock, Caps Lock, Scroll Lock 상태 표시',
           icons: '하위 메뉴 아이콘',
           iconsDesc: '메뉴 바에 하위 메뉴 아이콘을 표시합니다'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: '원격 키보드 잠금 상태',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: '켜짐',
+        off: '꺼짐',
+        unknown: '알 수 없음'
       },
       device: {
         title: '장치',
@@ -340,7 +374,10 @@ const ko = {
           tip: '사용하지 않는 경우 끄는 것이 좋습니다'
         },
         hdmi: {
-          description: 'HDMI/모니터 출력 활성화'
+          description: 'HDMI/모니터 출력 활성화',
+          idleTimeoutTitle: '캡처 유휴 시간 제한',
+          idleTimeoutDescription: '활성 시청자가 없는 상태가 다음 시간 동안 지속되면 HDMI 캡처 중지',
+          minutes: '분'
         },
         autostart: {
           title: '자동 시작 스크립트 설정',
@@ -357,6 +394,9 @@ const ko = {
         hidOnlyDesc: '가상 장치 에뮬레이션을 중지하고 기본 HID 제어만 유지합니다.',
         disk: '가상 디스크',
         diskDesc: '원격 호스트에서 가상 USB를 마운트합니다.',
+        diskLocked: '이미지가 마운트된 동안 꺼짐 (켜면 마운트가 해제됩니다)',
+        diskCancelMount:
+          '가상 디스크를 켜면 마운트된 이미지가 해제되고 진행 중인 이미지 다운로드/업로드도 중단됩니다. 계속하시겠습니까?',
         network: '가상 네트워크',
         networkDesc: '원격 호스트에서 가상 네트워크 카드를 마운트합니다.',
         reboot: '재부팅',

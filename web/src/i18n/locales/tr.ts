@@ -79,6 +79,10 @@ const tr = {
       frameDetectTip:
         'Gönderilen kareler arasındaki farkı hesaplar. Uzak ana bilgisayardan gönderilen yayında bir değişiklik yoksa görüntü yayınını durdurur.',
       resetHdmi: 'HDMI sıfırla',
+      webrtcConnectionFailed: {
+        title: 'WebRTC bağlantısı başarısız',
+        description: 'Ağ bağlantısını kontrol edin veya video modunu değiştirin.'
+      },
       captureStatus: {
         hdmiError: 'HDMI ekran hatası',
         unsupportedResolution: 'Geçerli çözünürlük desteklenmiyor',
@@ -181,9 +185,16 @@ const tr = {
       mountFailed: 'Bağlantı başarısız oldu',
       mountDesc:
         'Bazı sistemlerde, disk imajını bağlamadan önce uzak ana bilgisayardaki sanal diski çıkarmak gerekir.',
+      diskOnWarn:
+        'İmajı bağlamak sanal diski kapatır, böylece bilgisayar /data dizinine erişemez. Devam edilsin mi?',
+      diskOffWarn:
+        'Sanal disk kapalı ve imajı bağlamak için açılması gerekiyor. Bilgisayardaki USB aygıtları yeniden tanımlanır. Devam edilsin mi?',
       unmountFailed: 'Bağlantıyı kesme işlemi başarısız oldu',
       unmountDesc:
         'Bazı sistemlerde, görüntünün bağlantısını kesmeden önce uzak ana bilgisayardan manuel olarak çıkarmanız gerekir.',
+      forceEject: 'Çıkarmayı zorla',
+      forceEjectConfirm:
+        'Ana bilgisayar optik sürücüyü kilitledi. Çıkarmayı zorlamak, sanal USB aygıtının bağlantısını kısa süreliğine keser; bu nedenle klavye ve fare kısa süreliğine bağlantıyı kaybedebilir. Devam edilsin mi?',
       refresh: 'Disk imajı listesini yenile',
       attention: 'Dikkat',
       deleteConfirm: 'Bu resmi silmek istediğinizden emin misiniz?',
@@ -249,9 +260,16 @@ const tr = {
       input: 'Uzak imaj URL’sini girin',
       ok: 'Tamam',
       disabled: '/data bölüntüsü salt okunur modda, disk imajı indirilemiyor.',
+      diskShared: 'Önce sanal diski kapatın, sonra imaj indirmeyi kullanın.',
+      mountedImage: 'Bu imaj bağlı. Aynı adlı bir dosyayı yüklemeden önce bağlantısını kesin.',
+      diskOff: 'Sanal diski kapat',
       uploadbox: 'Dosyayı buraya bırakın veya seçmek için tıklayın',
       inputfile: 'Lütfen resim dosyasını giriniz',
-      NoISO: 'ISO yok'
+      NoISO: 'ISO yok',
+      sha256: 'SHA-256 (isteğe bağlı)',
+      sha256Placeholder: '64 karakterlik SHA-256 sağlama toplamını girin',
+      invalidSHA256: 'SHA-256, 64 karakterlik bir onaltılık dize olmalıdır',
+      checksumFailed: 'İndirme başarısız: SHA-256 doğrulaması başarısız'
     },
     power: {
       title: 'Güç',
@@ -301,9 +319,25 @@ const tr = {
           modeOff: 'Kapalı',
           modeAuto: 'Otomatik gizle',
           modeAlways: 'Her zaman görünür',
+          keyboardLedStatus: 'Klavye kilidi göstergeleri',
+          keyboardLedStatusDesc:
+            'Uzak bilgisayarın Num Lock, Caps Lock ve Scroll Lock durumunu göster',
           icons: 'Alt Menü Simgeleri',
           iconsDesc: 'Menü çubuğunda alt menü simgelerini görüntüle'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Uzak klavye kilidi durumu',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Açık',
+        off: 'Kapalı',
+        unknown: 'Bilinmiyor'
       },
       device: {
         title: 'Cihaz',
@@ -343,7 +377,10 @@ const tr = {
           tip: 'Kullanmıyorsanız devre dışı bırakabilirsiniz'
         },
         hdmi: {
-          description: 'HDMI/Momitör çıktısını aktifleştir'
+          description: 'HDMI/Momitör çıktısını aktifleştir',
+          idleTimeoutTitle: 'Etkin olmayan yakalama zaman aşımı',
+          idleTimeoutDescription: 'Etkin görüntüleyici olmadığında HDMI yakalamayı şu süre sonunda durdur:',
+          minutes: 'dk'
         },
         autostart: {
           title: 'Otomatik Başlatılan Komut Dosyaları Ayarları',
@@ -362,6 +399,9 @@ const tr = {
           'Yalnızca temel HID kontrolünü koruyarak sanal aygıtları taklit etmeyi bırakın',
         disk: 'Sanal Disk',
         diskDesc: "Sanal U-disk'i uzak ana bilgisayara bağla",
+        diskLocked: 'Bir imaj bağlıyken kapalı (açmak bağlamayı iptal eder)',
+        diskCancelMount:
+          'Sanal diski açmak, bağlı imajı iptal eder ve sürmekte olan imaj indirme veya yüklemeyi keser. Devam edilsin mi?',
         network: 'Sanal Ağ',
         networkDesc: 'Sanal ağ kartını uzak ana bilgisayara bağla',
         reboot: 'Yeniden Başlat',

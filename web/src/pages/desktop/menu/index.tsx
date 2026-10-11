@@ -6,11 +6,12 @@ import { GripVerticalIcon } from 'lucide-react';
 import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 
 import { HARDENED_LOGO_SRC, HARDENED_NAME, HARDENED_SHORT_NAME } from '@/lib/hardened.ts';
-import { menuDisabledItemsAtom } from '@/jotai/settings.ts';
+import { keyboardLedStatusVisibleAtom, menuDisabledItemsAtom } from '@/jotai/settings.ts';
 import { useMenuBounds } from '@/hooks/useMenuBounds.ts';
 import { useMenuVisibility } from '@/hooks/useMenuVisibility.ts';
 import { useIsDesktopLayout } from '@/hooks/useResponsiveLayout.ts';
 
+import { KeyboardLedStatus } from '../keyboard-led-status';
 import { DownloadImage } from './download.tsx';
 import { Fullscreen } from './fullscreen';
 import { Image } from './image';
@@ -31,6 +32,7 @@ export const Menu = () => {
   const isDesktopLayout = useIsDesktopLayout();
 
   const menuDisabledItems = useAtomValue(menuDisabledItemsAtom);
+  const isKeyboardLedStatusVisible = useAtomValue(keyboardLedStatusVisibleAtom);
 
   const {
     isInitialized,
@@ -81,67 +83,80 @@ export const Menu = () => {
 
         {/* Menubar */}
         <div className="sticky top-[10px] flex w-full justify-center">
-          <div
-            className={clsx(
-              'h-[36px] max-w-[calc(100vw-12px)] items-center overflow-x-auto rounded bg-neutral-800/80 pl-1 pr-2 transition-all duration-300',
-              showExpandedMenu ? 'flex' : 'hidden',
-              shouldAutoHide ? '-translate-y-[110%] opacity-80' : 'translate-y-0 opacity-100'
-            )}
-          >
-            <strong className={isDesktopLayout ? '' : 'hidden'}>
-              <div className="flex h-[30px] cursor-move select-none items-center justify-center pl-1 text-neutral-500">
-                <GripVerticalIcon size={18} />
+          <div className="relative">
+            {/* Outside the scrolling bar, so it is not clipped */}
+            {isDesktopLayout && isMenuExpanded && isKeyboardLedStatusVisible && (
+              <div
+                className={clsx(
+                  'absolute inset-y-0 right-full mr-1 transition-all duration-300',
+                  isMenuHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+                )}
+              >
+                <KeyboardLedStatus />
               </div>
-            </strong>
-            {isDesktopLayout && <Divider type="vertical" />}
-
+            )}
             <div
-              className="flex h-[30px] w-[32px] select-none items-center justify-center overflow-hidden rounded bg-white px-0.5 sm:w-[98px]"
-              title={HARDENED_NAME}
+              className={clsx(
+                'h-[36px] max-w-[calc(100vw-12px)] items-center overflow-x-auto rounded bg-neutral-800/80 pl-1 pr-2 transition-all duration-300',
+                showExpandedMenu ? 'flex' : 'hidden',
+                shouldAutoHide ? '-translate-y-[110%] opacity-80' : 'translate-y-0 opacity-100'
+              )}
             >
-              <img
-                src={HARDENED_LOGO_SRC}
-                alt={HARDENED_SHORT_NAME}
-                className="h-full w-full object-cover object-left sm:object-contain sm:object-center"
-              />
-            </div>
-            <Divider type="vertical" />
+              <strong className={isDesktopLayout ? '' : 'hidden'}>
+                <div className="flex h-[30px] cursor-move select-none items-center justify-center pl-1 text-neutral-500">
+                  <GripVerticalIcon size={18} />
+                </div>
+              </strong>
+              {isDesktopLayout && <Divider type="vertical" />}
 
-            <Screen />
-            <LocalKeyboardButton />
-            <Keyboard />
-            <Mouse />
-            <Divider type="vertical" />
-
-            {isEnabled('image') && <Image />}
-            {isEnabled('download') && <DownloadImage />}
-            {isEnabled('terminal') && <Terminal />}
-            {isEnabled('script') && <Script />}
-            {isEnabled('wol') && <Wol />}
-
-            {['image', 'download', 'script', 'terminal', 'wol'].some(isEnabled) && (
+              <div
+                className="flex h-[30px] w-[32px] select-none items-center justify-center overflow-hidden rounded bg-white px-0.5 sm:w-[98px]"
+                title={HARDENED_NAME}
+              >
+                <img
+                  src={HARDENED_LOGO_SRC}
+                  alt={HARDENED_SHORT_NAME}
+                  className="h-full w-full object-cover object-left sm:object-contain sm:object-center"
+                />
+              </div>
               <Divider type="vertical" />
-            )}
 
-            {isEnabled('picoclaw') && (
-              <>
-                <Picoclaw />
+              <Screen />
+              <LocalKeyboardButton />
+              <Keyboard />
+              <Mouse />
+              <Divider type="vertical" />
+
+              {isEnabled('image') && <Image />}
+              {isEnabled('download') && <DownloadImage />}
+              {isEnabled('terminal') && <Terminal />}
+              {isEnabled('script') && <Script />}
+              {isEnabled('wol') && <Wol />}
+
+              {['image', 'download', 'script', 'terminal', 'wol'].some(isEnabled) && (
                 <Divider type="vertical" />
-              </>
-            )}
+              )}
 
-            {isEnabled('power') && (
-              <>
-                <Power />
-                <Divider type="vertical" />
-              </>
-            )}
+              {isEnabled('picoclaw') && (
+                <>
+                  <Picoclaw />
+                  <Divider type="vertical" />
+                </>
+              )}
 
-            <Settings />
-            {isEnabled('fullscreen') && <Fullscreen />}
-            {isDesktopLayout && isEnabled('collapse') && (
-              <Collapse toggleMenu={setIsMenuExpanded} />
-            )}
+              {isEnabled('power') && (
+                <>
+                  <Power />
+                  <Divider type="vertical" />
+                </>
+              )}
+
+              <Settings />
+              {isEnabled('fullscreen') && <Fullscreen />}
+              {isDesktopLayout && isEnabled('collapse') && (
+                <Collapse toggleMenu={setIsMenuExpanded} />
+              )}
+            </div>
           </div>
         </div>
 

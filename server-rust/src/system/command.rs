@@ -47,6 +47,7 @@ pub enum AllowedCommand {
     Ntpdate,
     Pidof,
     Kill,
+    Mount,
     CustomForTest(PathBuf),
 }
 
@@ -97,6 +98,7 @@ impl AllowedCommand {
             AllowedCommand::Ntpdate => OsStr::new("/usr/bin/ntpdate"),
             AllowedCommand::Pidof => OsStr::new("pidof"),
             AllowedCommand::Kill => OsStr::new("kill"),
+            AllowedCommand::Mount => OsStr::new("mount"),
             AllowedCommand::CustomForTest(path) => path.as_os_str(),
         }
     }

@@ -5,14 +5,17 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs,
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
@@ -41,11 +44,20 @@ const BTRFS_MAGIC: &[u8; 8] = b"_BHRfS_M";
 const REMOTE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const UPLOAD_STATUS_STALE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const REMOTE_STATUS_STALE_TIMEOUT: Duration = Duration::from_secs((2 * 60 * 60) + (5 * 60));
+const SHA256_HEADER: &str = "x-sha256-sum";
+const CHECKSUM_QUEUE_CHUNKS: usize = 8;
+const SHA256_MISMATCH: &str = "sha256 mismatch";
+
+/// Image whose remote download failed the checksum; reported once by the status
+/// endpoint, because the background task has no other way to tell the UI.
+static CHECKSUM_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Debug, Deserialize)]
 pub struct DownloadImageReq {
     #[serde(default)]
     pub file: String,
+    #[serde(default)]
+    pub sha256sum: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,10 +107,21 @@ pub async fn set_remote_image_download_enabled(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
+/// Whether an image download or upload is running.
+pub fn transfer_in_progress() -> bool {
+    read_status_image(Path::new(SENTINEL_PATH))
+        .map(|status| status.status == "in_progress")
+        .unwrap_or(false)
+}
+
 pub async fn status_image() -> Result<impl IntoResponse> {
-    Ok(Json(ApiResponse::ok(read_status_image(Path::new(
-        SENTINEL_PATH,
-    ))?)))
+    let status = read_status_image(Path::new(SENTINEL_PATH))?;
+    if status.status == "idle"
+        && let Some(file) = take_checksum_failure()
+    {
+        return Ok(Json(ApiResponse::ok(StatusImageRsp::checksum_failed(file))));
+    }
+    Ok(Json(ApiResponse::ok(status)))
 }
 
 pub async fn download_image(
@@ -112,13 +135,16 @@ pub async fn download_image(
         });
     }
 
+    crate::api::storage::ensure_writable(&state.config.paths.image_directory)?;
+    let expected_sha256 = parse_sha256(&req.sha256sum)?;
     let remote = validate_remote_iso_url(&req.file)?;
     let target = safe_upload_target(&state.config.paths.image_directory, &remote.filename)?;
+    ensure_not_mounted(&target)?;
     let guard = DownloadGuard::acquire(&remote.url)?;
     let root = state.config.paths.image_directory.clone();
 
     tokio::spawn(async move {
-        if let Err(err) = download_remote_iso(remote, root, target, guard).await {
+        if let Err(err) = download_remote_iso(remote, root, target, expected_sha256, guard).await {
             tracing::error!(error = %err, "remote ISO download failed");
         }
     });
@@ -146,6 +172,13 @@ pub async fn upload_image_file(
         return Err(AppError::BadRequest("upload is too large".to_string()));
     }
 
+    crate::api::storage::ensure_writable(&state.config.paths.image_directory)?;
+    let expected_sha256 = parse_sha256(
+        headers
+            .get(SHA256_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
+    )?;
     let guard = DownloadGuard::acquire("upload")?;
     let mut uploaded = false;
 
@@ -167,9 +200,11 @@ pub async fn upload_image_file(
         guard.update(&filename, 0, content_length)?;
 
         let target = safe_upload_target(&state.config.paths.image_directory, &filename)?;
+        ensure_not_mounted(&target)?;
         let mut temp = TempUpload::create(&state.config.paths.image_directory, &filename)?;
         let mut file = temp.open()?;
         let mut total = 0_usize;
+        let checksum = expected_sha256.map(|_| ChecksumWorker::spawn());
         let mut field = field;
 
         while let Some(chunk) = field
@@ -181,14 +216,25 @@ pub async fn upload_image_file(
             if total > MAX_UPLOAD_BYTES {
                 return Err(AppError::BadRequest("upload is too large".to_string()));
             }
+            if let Some(worker) = &checksum {
+                worker.feed(chunk.clone()).await?;
+            }
             file.write_all(&chunk).await?;
             guard.update(&filename, total as u64, content_length)?;
         }
         file.flush().await?;
         drop(file);
 
+        if let (Some(expected), Some(worker)) = (expected_sha256, checksum)
+            && worker.finish().await? != expected
+        {
+            return Err(AppError::BadRequest(SHA256_MISMATCH.to_string()));
+        }
+
         validate_uploaded_image(temp.path(), &filename)?;
 
+        // The image may have been mounted while it uploaded.
+        ensure_not_mounted(&target)?;
         fs::rename(temp.path(), &target)?;
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
         temp.keep();
@@ -219,6 +265,7 @@ async fn download_remote_iso(
     remote: RemoteIso,
     root: PathBuf,
     target: PathBuf,
+    expected_sha256: Option<[u8; 32]>,
     _guard: DownloadGuard,
 ) -> Result<()> {
     let mut temp = TempUpload::create(&root, &remote.filename)?;
@@ -237,12 +284,24 @@ async fn download_remote_iso(
         ));
     }
 
+    if let Some(expected) = expected_sha256 {
+        let path = temp.path().to_path_buf();
+        let actual = tokio::task::spawn_blocking(move || sha256_file(&path))
+            .await
+            .map_err(|err| AppError::Internal(format!("checksum task failed: {err}")))??;
+        if actual != expected {
+            record_checksum_failure(&remote.filename);
+            return Err(AppError::BadRequest(SHA256_MISMATCH.to_string()));
+        }
+    }
+
     if !is_iso9660(temp.path())? {
         return Err(AppError::BadRequest(
             "file is not a valid ISO image".to_string(),
         ));
     }
 
+    ensure_not_mounted(&target)?;
     fs::rename(temp.path(), &target)?;
     fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
     temp.keep();
@@ -277,6 +336,86 @@ async fn download_remote_with_curl(
         OsString::from(url),
     ];
     run_allowed(AllowedCommand::Curl, args, REMOTE_DOWNLOAD_TIMEOUT).await
+}
+
+/// Parses an optional SHA-256 checksum given as 64 hexadecimal characters.
+/// Hashes an upload as it streams in, on its own thread, so the async worker
+/// stays free and no read-back is needed once the last byte has arrived.
+struct ChecksumWorker {
+    tx: tokio::sync::mpsc::Sender<Bytes>,
+    task: tokio::task::JoinHandle<[u8; 32]>,
+}
+
+impl ChecksumWorker {
+    fn spawn() -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(CHECKSUM_QUEUE_CHUNKS);
+        let task = tokio::task::spawn_blocking(move || {
+            let mut hasher = Sha256::new();
+            while let Some(chunk) = rx.blocking_recv() {
+                hasher.update(&chunk);
+            }
+            hasher.finalize().into()
+        });
+        Self { tx, task }
+    }
+
+    /// Waits when the hasher is behind, which slows the upload to its pace.
+    async fn feed(&self, chunk: Bytes) -> Result<()> {
+        self.tx
+            .send(chunk)
+            .await
+            .map_err(|_| AppError::Internal("checksum task stopped".to_string()))
+    }
+
+    async fn finish(self) -> Result<[u8; 32]> {
+        drop(self.tx);
+        self.task
+            .await
+            .map_err(|err| AppError::Internal(format!("checksum task failed: {err}")))
+    }
+}
+
+fn parse_sha256(value: &str) -> Result<Option<[u8; 32]>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let invalid = || AppError::BadRequest("invalid sha256sum".to_string());
+    if value.len() != 64 || !value.is_ascii() {
+        return Err(invalid());
+    }
+
+    let mut sum = [0_u8; 32];
+    for (byte, pair) in sum.iter_mut().zip(value.as_bytes().chunks(2)) {
+        let pair = std::str::from_utf8(pair).map_err(|_| invalid())?;
+        *byte = u8::from_str_radix(pair, 16).map_err(|_| invalid())?;
+    }
+    Ok(Some(sum))
+}
+
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn record_checksum_failure(file: &str) {
+    if let Ok(mut failure) = CHECKSUM_FAILURE.lock() {
+        *failure = Some(file.to_string());
+    }
+}
+
+fn take_checksum_failure() -> Option<String> {
+    CHECKSUM_FAILURE.lock().ok()?.take()
 }
 
 fn validate_remote_iso_url(raw: &str) -> Result<RemoteIso> {
@@ -329,6 +468,14 @@ impl StatusImageRsp {
             status: "in_progress".to_string(),
             file,
             percentage,
+        }
+    }
+
+    fn checksum_failed(file: String) -> Self {
+        Self {
+            status: "checksum_failed".to_string(),
+            file,
+            percentage: String::new(),
         }
     }
 
@@ -393,6 +540,8 @@ impl DownloadGuard {
             .mode(0o600)
             .open(SENTINEL_PATH)?
             .write_all(initial.as_bytes())?;
+        // A new transfer supersedes an unreported checksum failure.
+        let _ = take_checksum_failure();
         Ok(Self)
     }
 
@@ -493,6 +642,17 @@ fn upload_image_kind(filename: &str) -> Option<UploadImageKind> {
         }
         _ => None,
     }
+}
+
+/// Replacing a mounted image would leave the host serving the old, unlinked copy
+/// and keep /data from going read-only.
+fn ensure_not_mounted(target: &Path) -> Result<()> {
+    if crate::api::storage::mounted_image_matches(target) {
+        return Err(AppError::Conflict(
+            "this image is mounted; unmount it before replacing it".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn safe_upload_target(root: &Path, filename: &str) -> Result<PathBuf> {
@@ -848,5 +1008,70 @@ mod tests {
         assert!(!is_mass_storage_image(&path).unwrap());
         let err = validate_uploaded_image(&path, "random.img").unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parses_sha256_in_either_case() {
+        let lower = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let upper = lower.to_ascii_uppercase();
+        let expected = parse_sha256(lower).unwrap().unwrap();
+        assert_eq!(expected[0], 0xba);
+        assert_eq!(expected[31], 0xad);
+        assert_eq!(
+            parse_sha256(&format!("  {upper}\n")).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn empty_sha256_means_no_check() {
+        assert_eq!(parse_sha256("").unwrap(), None);
+        assert_eq!(parse_sha256("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_malformed_sha256() {
+        for value in [
+            "abc",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"g".repeat(64),
+            &"é".repeat(32),
+        ] {
+            let err = parse_sha256(value).unwrap_err();
+            assert!(matches!(err, AppError::BadRequest(_)), "{value}");
+        }
+    }
+
+    #[test]
+    fn hashes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc.iso");
+        fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            parse_sha256("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                .unwrap()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn checksum_failure_is_reported_once() {
+        record_checksum_failure("broken.iso");
+        assert_eq!(take_checksum_failure().as_deref(), Some("broken.iso"));
+        assert_eq!(take_checksum_failure(), None);
+    }
+    #[tokio::test]
+    async fn checksum_worker_hashes_streamed_chunks() {
+        let worker = ChecksumWorker::spawn();
+        for part in [&b"a"[..], &b"b"[..], &b"c"[..]] {
+            worker.feed(Bytes::copy_from_slice(part)).await.unwrap();
+        }
+        let expected =
+            parse_sha256("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                .unwrap()
+                .unwrap();
+        assert_eq!(worker.finish().await.unwrap(), expected);
     }
 }

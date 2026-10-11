@@ -21,6 +21,7 @@ const SKIP_MODIFY_PASSWORD_KEY = 'nano-kvm-skip-modify-password';
 const MENU_DISABLED_ITEMS_KEY = 'nano-kvm-menu-disabled-items';
 const MENU_AUTO_HIDE_KEY = 'nano-kvm-menu-auto-hide';
 const LAYOUT_MODE_KEY = 'nano-kvm-layout-mode';
+const KEYBOARD_LED_STATUS_VISIBLE_KEY = 'nano-kvm-keyboard-led-status-visible';
 const POWER_CONFIRM_KEY = 'nano-kvm-power-confirm';
 
 type ItemWithExpiry = {
@@ -284,6 +285,15 @@ export function getLayoutMode(): LayoutMode {
 
 export function setLayoutMode(mode: LayoutMode) {
   localStorage.setItem(LAYOUT_MODE_KEY, mode);
+}
+
+export function getKeyboardLedStatusVisible(): boolean {
+  const value = localStorage.getItem(KEYBOARD_LED_STATUS_VISIBLE_KEY);
+  return value !== 'false';
+}
+
+export function setKeyboardLedStatusVisible(visible: boolean) {
+  localStorage.setItem(KEYBOARD_LED_STATUS_VISIBLE_KEY, String(visible));
 }
 
 export function getPowerConfirm() {

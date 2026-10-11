@@ -81,6 +81,10 @@ const fr = {
       frameDetectTip:
         "Calcule la différence entre les images. Arrête la transmission du flux vidéo lorsqu'aucun changement n'est détecté sur l'écran de l'hôte distant",
       resetHdmi: 'Réinitialiser le HDMI',
+      webrtcConnectionFailed: {
+        title: 'Échec de la connexion WebRTC',
+        description: 'Vérifiez la connexion réseau ou changez de mode vidéo.'
+      },
       captureStatus: {
         hdmiError: 'Erreur d’image HDMI',
         unsupportedResolution: 'La résolution actuelle n’est pas prise en charge',
@@ -185,9 +189,16 @@ const fr = {
       mountFailed: "Échec du montage de l'image.",
       mountDesc:
         "Dans certains systèmes, il est nécessaire de déséjecter le disque virtuel sur l'hôte distant avant de monter l'image.",
+      diskOnWarn:
+        "Monter l'image désactive le disque virtuel : l'ordinateur ne peut plus accéder à /data. Continuer ?",
+      diskOffWarn:
+        "Le disque virtuel est désactivé et doit être activé pour monter l'image. Les périphériques USB de l'ordinateur sont réénumérés. Continuer ?",
       unmountFailed: 'Échec du démontage',
       unmountDesc:
         "Sur certains systèmes, vous devez l'éjecter manuellement de l'hôte distant avant de démonter l'image.",
+      forceEject: "Forcer l'éjection",
+      forceEjectConfirm:
+        "L'hôte a verrouillé le lecteur optique. Forcer l'éjection déconnecte brièvement le périphérique USB virtuel, de sorte que le clavier et la souris peuvent se déconnecter momentanément. Continuer ?",
       refresh: 'Actualiser la liste des images',
       attention: 'Attention',
       deleteConfirm: 'Etes-vous sûr de vouloir supprimer cette image?',
@@ -253,9 +264,16 @@ const fr = {
       input: 'Veuillez entrer l’URL d’une image distante',
       ok: 'Ok',
       disabled: 'La partition /data est en lecture seule, impossible de télécharger l’image',
+      diskShared: "Désactivez d'abord le disque virtuel, puis utilisez le téléchargement d'images.",
+      mountedImage: "Cette image est montée. Démontez-la avant d'envoyer un fichier du même nom.",
+      diskOff: 'Désactiver le disque virtuel',
       uploadbox: 'Déposez le fichier ici ou cliquez pour sélectionner',
       inputfile: 'Veuillez saisir le fichier image',
-      NoISO: 'Aucun ISO'
+      NoISO: 'Aucun ISO',
+      sha256: 'SHA-256 (facultatif)',
+      sha256Placeholder: 'Saisissez une somme de contrôle SHA-256 de 64 caractères',
+      invalidSHA256: 'SHA-256 doit être une chaîne hexadécimale de 64 caractères',
+      checksumFailed: 'Échec du téléchargement : échec de la vérification SHA-256'
     },
     power: {
       title: 'Power',
@@ -305,9 +323,25 @@ const fr = {
           modeOff: 'Désactivé',
           modeAuto: 'Masquer automatiquement',
           modeAlways: 'Toujours visible',
+          keyboardLedStatus: 'Indicateurs de verrouillage du clavier',
+          keyboardLedStatusDesc:
+            'Afficher l’état de Verr Num, Verr Maj et Arrêt défil du poste distant',
           icons: 'Icônes du sous-menu',
           iconsDesc: 'Afficher les icônes des sous-menus dans la barre de menus'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'État des verrouillages du clavier distant',
+        indicatorLabel: '{{label}} : {{state}}',
+        numLock: 'Verr Num',
+        numLockShort: 'Num',
+        capsLock: 'Verr Maj',
+        capsLockShort: 'Maj',
+        scrollLock: 'Arrêt défil',
+        scrollLockShort: 'Défil',
+        on: 'Activé',
+        off: 'Désactivé',
+        unknown: 'Inconnu'
       },
       device: {
         title: 'Appareil',
@@ -347,7 +381,10 @@ const fr = {
           tip: "L'éteindre si ce n'est pas nécessaire"
         },
         hdmi: {
-          description: 'Activer HDMI/sortie moniteur'
+          description: 'Activer HDMI/sortie moniteur',
+          idleTimeoutTitle: "Délai d'inactivité de la capture",
+          idleTimeoutDescription: "Arrêter la capture HDMI lorsqu'il n'y a aucun spectateur actif pendant",
+          minutes: 'min'
         },
         autostart: {
           title: 'Paramètres des scripts de démarrage automatique',
@@ -365,6 +402,9 @@ const fr = {
           "Arrêtez d'émuler des périphériques virtuels, en ne conservant que le contrôle de base HID",
         disk: 'Disque virtuel',
         diskDesc: "Monter le disque virtuel U sur l'hôte distant",
+        diskLocked: "Désactivé tant qu'une image est montée (l'activer annule le montage)",
+        diskCancelMount:
+          "Activer le disque virtuel annule l'image montée et interrompt un téléchargement ou un envoi d'image en cours. Continuer ?",
         network: 'Réseau virtuel',
         networkDesc: "Monter la carte réseau virtuelle sur l'hôte distant",
         reboot: 'Redémarrer',

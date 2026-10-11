@@ -73,6 +73,10 @@ const en = {
       videoDirectTips: 'Enable HTTPS in "Settings > System > Network" to use this mode',
       videoWebrtcBlockedByFirewall:
         'H.264 WebRTC is disabled in Restricted and Paranoid Firewall modes',
+      transferRunningTitle: 'Image transfer in progress',
+      transferRunningDesc:
+        'Changing the video mode reloads the page, which cancels the running image upload or download.',
+      transferRunningOk: 'Change mode',
       resolution: 'Resolution',
       auto: 'Automatic',
       autoTips:
@@ -88,6 +92,10 @@ const en = {
       frameDetectTip:
         "Calculate the difference between frames. Stop transmitting video stream when no changes are detected on the remote host's screen.",
       resetHdmi: 'Reset HDMI',
+      webrtcConnectionFailed: {
+        title: 'WebRTC connection failed',
+        description: 'Check the network connection or switch the video mode.'
+      },
       captureStatus: {
         hdmiError: 'HDMI screen error',
         unsupportedResolution: 'Current resolution is not supported',
@@ -205,9 +213,16 @@ const en = {
       mountFailed: 'Mount failed',
       mountDesc:
         'On some systems, you need to eject the virtual disk from the remote host before mounting the image.',
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Unmount failed',
       unmountDesc:
         'On some systems, you need to manually eject from the remote host before unmounting the image.',
+      forceEject: 'Force eject',
+      forceEjectConfirm:
+        'The host has locked the optical drive. Forcing an eject disconnects the virtual USB device for a moment, so the keyboard and mouse may briefly disconnect. Continue?',
       usbReconnect: 'USB reconnect',
       usbReconnectConfirm:
         'Reconnect the USB gadget only if the remote host did not notice the media change. Keyboard and mouse may briefly disconnect.',
@@ -285,9 +300,13 @@ const en = {
       title: 'Image Downloader',
       input: 'Please enter a remote image URL',
       ok: 'Ok',
-      disabled: '/data partition is RO, so we cannot download the image',
+      disabled:
+        "Images can't be downloaded or uploaded right now because the storage isn't writable. If an image is mounted, unmount it, then turn off the virtual disk to make the storage writable again.",
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage: 'This image is mounted. Unmount it before uploading a file with the same name.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Drop file here or click to select',
-      inputfile: 'Please enter the image File',
+      inputfile: 'Please enter the image file',
       NoISO: 'No ISO',
       complete: 'Download complete',
       uploadComplete: 'Upload complete',
@@ -299,7 +318,11 @@ const en = {
       canceled: 'Upload canceled',
       cancel: 'Cancel',
       remoteDisabled: 'Remote ISO download is disabled in Settings > Appearance.',
-      remoteFailed: 'Remote ISO download failed'
+      remoteFailed: 'Remote ISO download failed',
+      sha256: 'SHA-256 (optional)',
+      sha256Placeholder: 'Enter a 64-character SHA-256 checksum',
+      invalidSHA256: 'SHA-256 must be a 64-character hexadecimal string',
+      checksumFailed: 'Download failed: SHA-256 verification failed'
     },
     power: {
       title: 'Power',
@@ -354,6 +377,8 @@ const en = {
           modeOff: 'Off',
           modeAuto: 'Auto hide',
           modeAlways: 'Always visible',
+          keyboardLedStatus: 'Keyboard lock indicators',
+          keyboardLedStatusDesc: 'Display remote Num Lock, Caps Lock, and Scroll Lock status',
           icons: 'Submenu Icons',
           iconsDesc: 'Display submenu icons in the menu bar',
           terminalWarningTitle: 'Enable web terminal?',
@@ -368,6 +393,19 @@ const en = {
           remoteDownloadWarningConfirm: 'Enable',
           remoteDownloadWarningCancel: 'Cancel'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Remote keyboard lock status',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'On',
+        off: 'Off',
+        unknown: 'Unknown'
       },
       device: {
         title: 'Device',
@@ -415,7 +453,10 @@ const en = {
           tip: "Turning it off if it's not needed"
         },
         hdmi: {
-          description: 'Enable HDMI/monitor output'
+          description: 'Enable HDMI/monitor output',
+          idleTimeoutTitle: 'Capture idle timeout',
+          idleTimeoutDescription: 'Stop HDMI capture after there are no active viewers for',
+          minutes: 'min'
         },
         autostart: {
           title: 'Autostart Scripts Settings',
@@ -432,6 +473,10 @@ const en = {
         hidOnlyDesc: 'Stop emulating virtual devices, retaining only basic HID control',
         disk: 'Virtual Disk',
         diskDesc: 'Mount SD card on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount: 'Enabling the virtual disk cancels the mounted image. Continue?',
+        diskTransferRunning:
+          'An image transfer is running. Wait for it to finish before enabling the virtual disk.',
         network: 'Virtual Network',
         networkDesc: 'Mount virtual network card on the remote host',
         usbWakeup: 'USB Wakeup',

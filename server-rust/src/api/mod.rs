@@ -2,6 +2,7 @@ pub mod account;
 pub mod application;
 pub mod autostart;
 pub mod compatibility;
+pub mod direct_flow;
 pub mod download;
 pub mod hid;
 pub mod network;

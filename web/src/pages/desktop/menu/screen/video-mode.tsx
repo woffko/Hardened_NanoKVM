@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Tooltip } from 'antd';
+import { Modal, Tooltip } from 'antd';
 import { useAtomValue } from 'jotai';
 import { CheckIcon, TvMinimalPlayIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import * as downloadApi from '@/api/download.ts';
 import * as firewallApi from '@/api/system-firewall.ts';
 import { setVideoMode as setCookie } from '@/lib/localstorage.ts';
 import { videoModeAtom } from '@/jotai/screen.ts';
@@ -75,16 +76,40 @@ export const VideoMode = () => {
     }, 250);
   }, [isDirectSupported, isWebrtcBlocked, videoMode]);
 
-  function update(mode: string) {
-    if (mode === videoMode) return;
-    if (mode === 'h264' && isWebrtcBlocked) return;
+  async function isTransferRunning() {
+    try {
+      const rsp = await downloadApi.statusImage();
+      return rsp.code === 0 && rsp.data?.status === 'in_progress';
+    } catch {
+      return false;
+    }
+  }
 
+  function applyMode(mode: string) {
     setCookie(mode);
 
     // reload after changing video mode
     setTimeout(() => {
       window.location.reload();
     }, 500);
+  }
+
+  async function update(mode: string) {
+    if (mode === videoMode) return;
+    if (mode === 'h264' && isWebrtcBlocked) return;
+
+    // The reload below would cancel a running image upload or download.
+    if (await isTransferRunning()) {
+      Modal.confirm({
+        title: t('screen.transferRunningTitle'),
+        content: t('screen.transferRunningDesc'),
+        okText: t('screen.transferRunningOk'),
+        onOk: () => applyMode(mode)
+      });
+      return;
+    }
+
+    applyMode(mode);
   }
 
   const content = (

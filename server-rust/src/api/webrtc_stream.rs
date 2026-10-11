@@ -6,7 +6,6 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use bytes::Bytes;
 use rtcp::payload_feedbacks::{
     full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
 };
@@ -18,10 +17,11 @@ use std::{
         Arc, LazyLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::{
     sync::{Mutex, mpsc},
-    time::{self, MissedTickBehavior},
+    time,
 };
 use tracing::{debug, info, warn};
 use webrtc::{
@@ -57,23 +57,23 @@ use crate::{
     AppError, Result,
     api::{
         stream::{
-            CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, is_h264_capture_active,
-            read_h264_capture_frame, request_h264_keyframe, update_capture_status,
+            CAPTURE_MODE_H264, H264ConsumerKind, current_h264_screen, h264_frame_duration,
+            is_h264_capture_active, request_h264_keyframe, subscribe_h264, update_capture_status,
         },
         system_firewall,
     },
     config::Config,
+    hdmi_idle,
     state::AppState,
     ws::origin::validate_ws_origin,
 };
 
 const SIGNAL_BUFFER: usize = 64;
+const VIDEO_IDLE_CHECK: Duration = Duration::from_secs(1);
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 
 static WEBRTC_MANAGER: LazyLock<WebRtcManager> = LazyLock::new(WebRtcManager::new);
-static H264_WEBRTC_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_WEBRTC_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
-static H264_WEBRTC_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub async fn h264_webrtc_stream(
     State(state): State<AppState>,
@@ -274,11 +274,13 @@ impl WebRtcManager {
     async fn add_client(&self, client: Arc<WebRtcClient>) {
         let mut clients = self.clients.lock().await;
         clients.insert(client.id, client);
+        hdmi_idle::report_viewers("webrtc", clients.len());
     }
 
     async fn remove_client(&self, client_id: u64) {
         let mut clients = self.clients.lock().await;
         clients.remove(&client_id);
+        hdmi_idle::report_viewers("webrtc", clients.len());
     }
 
     async fn clients(&self) -> Vec<Arc<WebRtcClient>> {
@@ -308,16 +310,20 @@ impl WebRtcManager {
         }
         let _guard = SendingGuard(&self.video_sending);
 
-        let mut screen = current_h264_screen();
-        let mut duration = h264_frame_duration(screen.fps);
-        let mut interval = time::interval(duration);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // The capture is shared with the direct stream; frames arrive paced by it.
+        let mut frames = subscribe_h264(H264ConsumerKind::WebRtc);
         let playout_delay = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
             0, 0,
         ))];
 
         loop {
-            interval.tick().await;
+            // Wake up regularly so a source that stopped delivering does not keep
+            // this task alive after the last client left.
+            let frame = match time::timeout(VIDEO_IDLE_CHECK, frames.next()).await {
+                Ok(Some(frame)) => Some(frame),
+                Ok(None) => return,
+                Err(_) => None,
+            };
 
             let clients = self.clients().await;
             if clients.is_empty() {
@@ -325,36 +331,23 @@ impl WebRtcManager {
                 return;
             }
 
-            screen = current_h264_screen();
             if !is_h264_capture_active() {
                 update_capture_status(CAPTURE_MODE_H264, -8);
                 debug!("stop sending h264 webrtc stream because h264 capture is disabled");
                 return;
             }
-            if !H264_WEBRTC_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(
-                    width = screen.width,
-                    height = screen.height,
-                    bit_rate = screen.bit_rate,
-                    "reading first h264 webrtc frame"
-                );
-            }
 
-            let Some((data, result)) = read_h264_capture_frame(CAPTURE_MODE_H264, screen).await
-            else {
-                if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!("h264 webrtc frame unavailable");
-                }
+            let Some(frame) = frame else {
                 continue;
             };
 
             if !H264_WEBRTC_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(result, bytes = data.len(), "read first h264 webrtc frame");
+                info!(bytes = frame.data.len(), "sending first h264 webrtc frame");
             }
 
             let sample = Sample {
-                data: Bytes::from(data),
-                duration,
+                data: frame.data,
+                duration: h264_frame_duration(current_h264_screen().fps),
                 ..Default::default()
             };
 
@@ -372,14 +365,6 @@ impl WebRtcManager {
                     self.remove_client(client.id).await;
                     client.close().await;
                 }
-            }
-
-            let latest = current_h264_screen();
-            if latest.fps != screen.fps {
-                screen = latest;
-                duration = h264_frame_duration(screen.fps);
-                interval = time::interval(duration);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             }
         }
     }

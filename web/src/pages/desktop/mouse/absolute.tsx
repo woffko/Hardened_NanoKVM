@@ -586,8 +586,18 @@ function getMediaSize(screen: Element) {
     return { width: screen.naturalWidth, height: screen.naturalHeight };
   }
 
-  if (screen instanceof HTMLCanvasElement && screen.width > 0 && screen.height > 0) {
-    return { width: screen.width, height: screen.height };
+  if (screen instanceof HTMLCanvasElement) {
+    // The direct player hands its canvas to a worker, after which canvas.width and
+    // canvas.height no longer follow the frame size; the worker reports it instead.
+    const width = Number(screen.dataset.mediaWidth);
+    const height = Number(screen.dataset.mediaHeight);
+    if (width > 0 && height > 0) {
+      return { width, height };
+    }
+
+    if (screen.width > 0 && screen.height > 0) {
+      return { width: screen.width, height: screen.height };
+    }
   }
 
   return null;

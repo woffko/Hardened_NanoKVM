@@ -121,6 +121,15 @@ For end-user flashing instructions, see
 - MJPEG and H.264 Direct use shared fanout producers, so multiple viewers do
   not multiply native capture reads. New browser sessions default to H.264
   Direct when HTTPS and WebCodecs are available, otherwise to H.264.
+- The H.264 Direct socket takes `?flow=N` (1 to 8) to ask for decode-driven flow
+  control. The player acknowledges each decoded frame with a 9-byte message, the
+  byte `2` followed by the frame's timestamp as a little-endian u64, and can ask
+  for a resync with the single byte `3`. The server keeps at most N frames in
+  flight, drops the rest, and resumes at the next keyframe, so a slow client
+  cannot build up stale frames in its buffers; a client that omits `flow` gets
+  every frame. The server pings every 15 seconds, closes a client that is silent
+  for 30 seconds, and closes a socket that cannot take a frame within 2 seconds.
+  The player reconnects with a growing delay.
 - Device startup uses an idempotent `S95nanokvm`: stale `S95nanokvm.*` backup
   scripts are moved out of boot autostart, old `kvm_system`/`NanoKVM-Server`
   processes are stopped before runtime copy/start, stale web backup directories

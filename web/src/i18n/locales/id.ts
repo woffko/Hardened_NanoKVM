@@ -78,6 +78,10 @@ const id = {
       frameDetectTip:
         'Hitung selisih antar frame. Hentikan transmisi aliran video saat tidak ada perubahan yang terdeteksi di layar host jarak jauh.',
       resetHdmi: 'Atur ulang HDMI',
+      webrtcConnectionFailed: {
+        title: 'Koneksi WebRTC gagal',
+        description: 'Periksa koneksi jaringan atau ganti mode video.'
+      },
       captureStatus: {
         hdmiError: 'Kesalahan layar HDMI',
         unsupportedResolution: 'Resolusi saat ini tidak didukung',
@@ -182,9 +186,16 @@ const id = {
       mountFailed: 'Pemasangan Gagal',
       mountDesc:
         'Di beberapa sistem, perlu mengeluarkan disk virtual pada host jarak jauh sebelum memasang gambar.',
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Pelepasan gagal',
       unmountDesc:
         'Pada beberapa sistem, Anda perlu mengeluarkan secara manual dari host jarak jauh sebelum melepas gambar.',
+      forceEject: 'Paksa keluarkan',
+      forceEjectConfirm:
+        'Host telah mengunci drive optik. Memaksa pengeluaran akan memutuskan perangkat USB virtual sesaat, sehingga keyboard dan mouse dapat terputus sebentar. Lanjutkan?',
       refresh: 'Segarkan daftar gambar',
       attention: 'Perhatian',
       deleteConfirm: 'Apakah Anda yakin ingin menghapus gambar ini?',
@@ -250,9 +261,17 @@ const id = {
       input: 'Silakan masukkan gambar jarak jauh URL',
       ok: 'Ok',
       disabled: 'Partisi /data adalah RO, jadi kami tidak dapat mengunduh gambarnya',
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage:
+        'Image ini sedang di-mount. Lepaskan mount-nya sebelum mengunggah berkas dengan nama yang sama.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Letakkan file di sini atau klik untuk memilih',
       inputfile: 'Silakan masukkan File gambar',
-      NoISO: 'Tidak ada ISO'
+      NoISO: 'Tidak ada ISO',
+      sha256: 'SHA-256 (opsional)',
+      sha256Placeholder: 'Masukkan checksum SHA-256 64 karakter',
+      invalidSHA256: 'SHA-256 harus berupa string heksadesimal 64 karakter',
+      checksumFailed: 'Unduhan gagal: verifikasi SHA-256 gagal'
     },
     power: {
       title: 'Daya',
@@ -302,9 +321,25 @@ const id = {
           modeOff: 'Mati',
           modeAuto: 'Sembunyikan otomatis',
           modeAlways: 'Selalu terlihat',
+          keyboardLedStatus: 'Indikator kunci keyboard',
+          keyboardLedStatusDesc:
+            'Tampilkan status Num Lock, Caps Lock, dan Scroll Lock komputer jarak jauh',
           icons: 'Ikon Submenu',
           iconsDesc: 'Menampilkan ikon submenu di bilah menu'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Status kunci keyboard jarak jauh',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Aktif',
+        off: 'Nonaktif',
+        unknown: 'Tidak diketahui'
       },
       device: {
         title: 'Perangkat',
@@ -344,7 +379,10 @@ const id = {
           tip: 'Mematikan jika tidak diperlukan'
         },
         hdmi: {
-          description: 'Aktifkan keluaran HDMI/monitor'
+          description: 'Aktifkan keluaran HDMI/monitor',
+          idleTimeoutTitle: 'Batas waktu tangkapan tidak aktif',
+          idleTimeoutDescription: 'Hentikan tangkapan HDMI setelah tidak ada penonton aktif selama',
+          minutes: 'mnt'
         },
         autostart: {
           title: 'Pengaturan Skrip Mulai Otomatis',
@@ -361,6 +399,9 @@ const id = {
         hidOnlyDesc: 'Berhenti meniru perangkat virtual, hanya mempertahankan kontrol dasar HID',
         disk: 'Disk virtual',
         diskDesc: 'Mount virtual U-disk on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount:
+          'Enabling the virtual disk cancels the mounted image and interrupts a running image download or upload. Continue?',
         network: 'Jaringan virtual',
         networkDesc: 'Pasang kartu jaringan virtual pada host jarak jauh',
         reboot: 'Mulai ulang',

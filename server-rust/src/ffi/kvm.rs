@@ -1,7 +1,7 @@
 use std::{
     path::Path,
     slice,
-    sync::{LazyLock, Mutex},
+    sync::{LazyLock, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -16,7 +16,7 @@ use std::{
 
 use crate::{AppError, Result};
 
-const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
+pub const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
 const DEFAULT_LIBKVM_PATHS: &[&str] = &["/kvmapp/server/dl_lib/libkvm.so"];
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
@@ -36,6 +36,12 @@ type SetFrameDetect = unsafe extern "C" fn(u8);
 type KvmvDeinit = unsafe extern "C" fn();
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
 type KvmvHdmiControl = unsafe extern "C" fn(u8) -> u8;
+#[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
+type KvmvHdmiSignalActive = unsafe extern "C" fn() -> u8;
+
+// Older libkvm builds lack kvmv_hdmi_signal_active; the pointer stays None for them.
+#[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
+static HDMI_SIGNAL_ACTIVE: OnceLock<Option<KvmvHdmiSignalActive>> = OnceLock::new();
 
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
 #[cfg_attr(not(target_env = "musl"), link(name = "dl"))]
@@ -83,6 +89,12 @@ pub fn set_hdmi(enabled: bool) -> Result<u8> {
     Ok(vision()?.lock().map_err(lock_error)?.set_hdmi(enabled))
 }
 
+/// Whether HDMI capture is enabled and a signal is present. Reads libkvm's
+/// atomic state without taking the vision lock, which frame reads hold.
+pub fn hdmi_signal_active() -> bool {
+    hdmi_signal_active_impl()
+}
+
 pub fn init() -> Result<()> {
     let _ = vision()?;
     Ok(())
@@ -122,6 +134,22 @@ unsafe extern "C" {
     fn kvm_set_frame_detect(frame: u8);
     fn kvmv_deinit();
     fn kvmv_hdmi_control(enabled: u8) -> u8;
+    fn kvmv_hdmi_signal_active() -> u8;
+}
+
+#[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
+fn hdmi_signal_active_impl() -> bool {
+    // SAFETY: Reads atomic state; matches server-rust/native/include/kvm_vision.h.
+    unsafe { kvmv_hdmi_signal_active() != 0 }
+}
+
+#[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
+fn hdmi_signal_active_impl() -> bool {
+    match HDMI_SIGNAL_ACTIVE.get() {
+        // SAFETY: Pointer was loaded from the libkvm held open by VISION for the process lifetime.
+        Some(Some(signal_active)) => unsafe { signal_active() != 0 },
+        _ => false,
+    }
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
@@ -265,6 +293,9 @@ impl KvmVision {
         let set_frame_detect = unsafe { lib.symbol::<SetFrameDetect>("set_frame_detact")? };
         let deinit = unsafe { lib.symbol::<KvmvDeinit>("kvmv_deinit")? };
         let hdmi_control = unsafe { lib.symbol::<KvmvHdmiControl>("kvmv_hdmi_control")? };
+        let signal_active =
+            unsafe { lib.symbol::<KvmvHdmiSignalActive>("kvmv_hdmi_signal_active") }.ok();
+        let _ = HDMI_SIGNAL_ACTIVE.set(signal_active);
 
         let vision = Self {
             _lib: lib,

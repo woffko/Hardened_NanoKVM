@@ -180,6 +180,9 @@ const translations: Record<string, string> = {
   'image.unmountFailed': 'Eemaldamine nurjus',
   'image.unmountDesc':
     'Mõnes süsteemis tuleb enne image eemaldamist see kaugmasinas käsitsi väljutada.',
+  'image.forceEject': 'Sunni väljutamine',
+  'image.forceEjectConfirm':
+    'Kaugmasin on optilise draivi lukustanud. Sunnitud väljutamine katkestab virtuaalse USB-seadme ühenduse korraks, mistõttu klaviatuur ja hiir võivad ajutiselt lahti ühenduda. Kas jätkata?',
   'image.refresh': 'Värskenda image loendit',
   'image.attention': 'Tähelepanu',
   'image.deleteConfirm': 'Kas oled kindel, et soovid selle image kustutada?',

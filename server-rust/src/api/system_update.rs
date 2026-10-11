@@ -499,6 +499,7 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         ));
     }
 
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let guard = acquire_update_lock()?;
     let current = read_current_system_version();
     let latest = get_latest_system(is_preview_enabled(), &state.config).await?;
@@ -619,6 +620,7 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 }
 
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
@@ -684,6 +686,7 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
 }
 
 pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let guard = acquire_update_lock()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let restored =
@@ -699,6 +702,7 @@ pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse
 }
 
 pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    crate::api::storage::ensure_writable(&state.config.paths.update_cache_dir)?;
     let _guard = acquire_update_lock()?;
     let current = read_current_system_version();
     let pending = read_pending_update()?

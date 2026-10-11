@@ -80,6 +80,10 @@ const it = {
       frameDetectTip:
         'Calcola la differenza tra i frame. Interrompe la trasmissione del flusso video quando non vengono rilevate modifiche sullo schermo del dispositivo remoto.',
       resetHdmi: 'Reimposta HDMI',
+      webrtcConnectionFailed: {
+        title: 'Connessione WebRTC non riuscita',
+        description: 'Controlla la connessione di rete o cambia la modalità video.'
+      },
       captureStatus: {
         hdmiError: 'Errore schermata HDMI',
         unsupportedResolution: 'La risoluzione attuale non è supportata',
@@ -184,9 +188,16 @@ const it = {
       mountFailed: 'Montaggio immagine fallito',
       mountDesc:
         "In alcuni sistemi, è necessario espellere il disco virtuale sull'host remoto prima di montare l'immagine.",
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Smontaggio non riuscito',
       unmountDesc:
         "Su alcuni sistemi, è necessario espellere manualmente l'host remoto prima di smontare l'immagine.",
+      forceEject: "Forza l'espulsione",
+      forceEjectConfirm:
+        "L'host ha bloccato l'unità ottica. Forzare l'espulsione disconnette per un momento il dispositivo USB virtuale, quindi tastiera e mouse potrebbero disconnettersi brevemente. Continuare?",
       refresh: "Aggiorna l'elenco delle immagini",
       attention: 'Attenzione',
       deleteConfirm: 'Sei sicuro di voler eliminare questa immagine?',
@@ -252,9 +263,17 @@ const it = {
       input: "Inserisci un'immagine remota URL",
       ok: 'Ok',
       disabled: "La partizione /data è RO, quindi non possiamo scaricare l'immagine",
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage:
+        'Questa immagine è montata. Smontala prima di caricare un file con lo stesso nome.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Rilascia il file qui o fai clic per selezionarlo',
       inputfile: 'Inserisci il file immagine',
-      NoISO: 'Nessuna ISO'
+      NoISO: 'Nessuna ISO',
+      sha256: 'SHA-256 (facoltativo)',
+      sha256Placeholder: 'Inserisci un checksum SHA-256 di 64 caratteri',
+      invalidSHA256: 'SHA-256 deve essere una stringa esadecimale di 64 caratteri',
+      checksumFailed: 'Download non riuscito: verifica SHA-256 non riuscita'
     },
     power: {
       title: 'Accensione',
@@ -304,9 +323,25 @@ const it = {
           modeOff: 'Spento',
           modeAuto: 'Nascondi automaticamente',
           modeAlways: 'Sempre visibile',
+          keyboardLedStatus: 'Indicatori di blocco della tastiera',
+          keyboardLedStatusDesc:
+            'Mostra lo stato di Bloc Num, Bloc Maiusc e Bloc Scorr del computer remoto',
           icons: 'Icone dei sottomenu',
           iconsDesc: 'Visualizza le icone dei sottomenu nella barra dei menu'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Stato dei blocchi della tastiera remota',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Bloc Num',
+        numLockShort: 'Num',
+        capsLock: 'Bloc Maiusc',
+        capsLockShort: 'Mai',
+        scrollLock: 'Bloc Scorr',
+        scrollLockShort: 'Scorr',
+        on: 'Attivo',
+        off: 'Disattivo',
+        unknown: 'Sconosciuto'
       },
       device: {
         title: 'Dispositivo',
@@ -346,7 +381,10 @@ const it = {
           tip: 'Spegnerlo se non è necessario'
         },
         hdmi: {
-          description: 'Abilita HDMI/monitora uscita'
+          description: 'Abilita HDMI/monitora uscita',
+          idleTimeoutTitle: 'Timeout cattura inattiva',
+          idleTimeoutDescription: 'Interrompi la cattura HDMI dopo che non ci sono visualizzatori attivi per',
+          minutes: 'min'
         },
         autostart: {
           title: 'Impostazioni script di avvio automatico',
@@ -365,6 +403,9 @@ const it = {
           'Smette di emulare i dispositivi virtuali, mantenendo solo il controllo di base HID',
         disk: 'Disco virtuale',
         diskDesc: 'Mount virtual U-disk on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount:
+          'Enabling the virtual disk cancels the mounted image and interrupts a running image download or upload. Continue?',
         network: 'Rete virtuale',
         networkDesc: 'Monta la scheda di rete virtuale sull’host remoto',
         reboot: 'Riavvia',

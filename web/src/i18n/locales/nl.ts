@@ -80,6 +80,10 @@ const nl = {
       frameDetectTip:
         'Berekent het verschil tussen frames. Stopt met het verzenden van de videostream wanneer er geen veranderingen worden gedetecteerd op het scherm van de externe host.',
       resetHdmi: 'Reset HDMI',
+      webrtcConnectionFailed: {
+        title: 'WebRTC-verbinding mislukt',
+        description: 'Controleer de netwerkverbinding of wijzig de videomodus.'
+      },
       captureStatus: {
         hdmiError: 'HDMI-schermfout',
         unsupportedResolution: 'De huidige resolutie wordt niet ondersteund',
@@ -184,9 +188,16 @@ const nl = {
       mountFailed: 'Koppelen mislukt',
       mountDesc:
         'In sommige systemen is het noodzakelijk om de virtuele schijf op de externe host uit te werpen voordat het image wordt gekoppeld.',
+      diskOnWarn:
+        'Het koppelen van de image schakelt de virtuele schijf uit, zodat de computer geen toegang meer heeft tot /data. Doorgaan?',
+      diskOffWarn:
+        'De virtuele schijf staat uit en moet aan staan om de image te koppelen. De USB-apparaten op de computer worden opnieuw herkend. Doorgaan?',
       unmountFailed: 'Ontkoppelen mislukt',
       unmountDesc:
         'Op sommige systemen moet u de image handmatig uitwerpen van de externe host voordat u de image ontkoppelt.',
+      forceEject: 'Uitwerpen forceren',
+      forceEjectConfirm:
+        'De host heeft het optische station vergrendeld. Bij geforceerd uitwerpen wordt het virtuele USB-apparaat even losgekoppeld, waardoor het toetsenbord en de muis kort kunnen worden losgekoppeld. Doorgaan?',
       refresh: 'Vernieuw de afbeeldingenlijst',
       attention: 'Let op',
       deleteConfirm: 'Weet u zeker dat u deze afbeelding wilt verwijderen?',
@@ -252,9 +263,17 @@ const nl = {
       input: 'Voer een externe afbeelding in URL',
       ok: 'Ok',
       disabled: '/data partitie is RO, dus we kunnen de afbeelding niet downloaden',
+      diskShared: 'Schakel eerst de virtuele schijf uit en gebruik daarna de image-download.',
+      mountedImage:
+        'Dit image is gekoppeld. Ontkoppel het voordat u een bestand met dezelfde naam uploadt.',
+      diskOff: 'Virtuele schijf uitschakelen',
       uploadbox: 'Zet het bestand hier neer of klik om te selecteren',
       inputfile: 'Voer het afbeeldingsbestand in',
-      NoISO: 'Geen ISO'
+      NoISO: 'Geen ISO',
+      sha256: 'SHA-256 (optioneel)',
+      sha256Placeholder: 'Voer een SHA-256-controlesom van 64 tekens in',
+      invalidSHA256: 'SHA-256 moet een hexadecimale tekenreeks van 64 tekens zijn',
+      checksumFailed: 'Download mislukt: SHA-256-verificatie mislukt'
     },
     power: {
       title: 'Aan/uit',
@@ -304,9 +323,25 @@ const nl = {
           modeOff: 'Uit',
           modeAuto: 'Automatisch verbergen',
           modeAlways: 'Altijd zichtbaar',
+          keyboardLedStatus: 'Toetsvergrendelingsindicatoren',
+          keyboardLedStatusDesc:
+            'Toon de Num Lock-, Caps Lock- en Scroll Lock-status van de externe computer',
           icons: 'Submenupictogrammen',
           iconsDesc: 'Submenupictogrammen weergeven in de menubalk'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Toetsvergrendelingsstatus van extern toetsenbord',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'Aan',
+        off: 'Uit',
+        unknown: 'Onbekend'
       },
       device: {
         title: 'Apparaat',
@@ -346,7 +381,10 @@ const nl = {
           tip: 'Schakel het uit als het niet nodig is'
         },
         hdmi: {
-          description: 'Schakel HDMI/monitoruitgang in'
+          description: 'Schakel HDMI/monitoruitgang in',
+          idleTimeoutTitle: 'Time-out voor inactieve opname',
+          idleTimeoutDescription: 'HDMI-opname stoppen nadat er gedurende deze tijd geen actieve kijkers zijn:',
+          minutes: 'min'
         },
         autostart: {
           title: 'Instellingen voor automatisch starten van scripts',
@@ -365,6 +403,9 @@ const nl = {
           'Stop met het emuleren van virtuele apparaten en behoud alleen de basisbesturing van HID',
         disk: 'Virtuele schijf',
         diskDesc: 'Koppel virtuele U-schijf aan de externe host',
+        diskLocked: 'Uit zolang een image is gekoppeld (aanzetten breekt het koppelen af)',
+        diskCancelMount:
+          'Het inschakelen van de virtuele schijf breekt de gekoppelde image af en onderbreekt een lopende image-download of -upload. Doorgaan?',
         network: 'Virtueel Netwerk',
         networkDesc: 'Koppel virtueel netwerk kaart aan de externe host',
         reboot: 'Opnieuw opstarten',

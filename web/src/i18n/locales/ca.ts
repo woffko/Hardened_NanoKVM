@@ -78,6 +78,10 @@ const ca = {
       frameDetectTip:
         "Calcula la diferència entre fotogrames. S'atura la transmissió si no hi ha canvis a la pantalla de l'amfitrió remot.",
       resetHdmi: 'Restablir HDMI',
+      webrtcConnectionFailed: {
+        title: 'Error de connexió WebRTC',
+        description: 'Comproveu la connexió de xarxa o canvieu el mode de vídeo.'
+      },
       captureStatus: {
         hdmiError: 'Error a la pantalla HDMI',
         unsupportedResolution: 'La resolució actual no és compatible',
@@ -180,9 +184,16 @@ const ca = {
       mountMode: 'Mode de muntatge',
       mountFailed: 'Error en muntar',
       mountDesc: 'En alguns sistemes cal expulsar el disc virtual abans de muntar la imatge.',
+      diskOnWarn:
+        "Muntar la imatge desactiva el disc virtual, de manera que l'ordinador ja no pot accedir a /data. Voleu continuar?",
+      diskOffWarn:
+        "El disc virtual està desactivat i cal activar-lo per muntar la imatge. Els dispositius USB de l'ordinador es tornaran a enumerar. Voleu continuar?",
       unmountFailed: "No s'ha pogut desmuntar",
       unmountDesc:
         "En alguns sistemes, cal expulsar manualment de l'amfitrió remot abans de desmuntar la imatge.",
+      forceEject: "Força l'expulsió",
+      forceEjectConfirm:
+        "L'amfitrió ha bloquejat la unitat òptica. Forçar l'expulsió desconnecta el dispositiu USB virtual durant un moment, de manera que el teclat i el ratolí poden desconnectar-se breument. Voleu continuar?",
       refresh: 'Actualitza la llista',
       attention: 'Atenció',
       deleteConfirm: 'Esteu segur que voleu suprimir aquesta imatge?',
@@ -248,9 +259,17 @@ const ca = {
       input: 'Introdueix la URL de la imatge',
       ok: "D'acord",
       disabled: 'La partició /data és només lectura. No es pot descarregar la imatge.',
+      diskShared: "Apagueu primer el disc virtual i després useu la descàrrega d'imatges.",
+      mountedImage:
+        'Aquesta imatge està muntada. Desmunteu-la abans de pujar un fitxer amb el mateix nom.',
+      diskOff: 'Apaga el disc virtual',
       uploadbox: 'Deixeu anar el fitxer aquí o feu clic per seleccionar-lo',
       inputfile: "Introduïu el fitxer d'imatge",
-      NoISO: 'Cap ISO'
+      NoISO: 'Cap ISO',
+      sha256: 'SHA-256 (opcional)',
+      sha256Placeholder: 'Introduïu una suma de verificació SHA-256 de 64 caràcters',
+      invalidSHA256: 'SHA-256 ha de ser una cadena hexadecimal de 64 caràcters',
+      checksumFailed: 'Descàrrega fallida: ha fallat la verificació SHA-256'
     },
     power: {
       title: 'Alimentació',
@@ -300,9 +319,25 @@ const ca = {
           modeOff: 'Apagat',
           modeAuto: 'Ocultació automàtica',
           modeAlways: 'Sempre visible',
+          keyboardLedStatus: 'Indicadors de bloqueig del teclat',
+          keyboardLedStatusDesc:
+            'Mostra l’estat de Bloq Num, Bloq Maj i Bloq Despl de l’ordinador remot',
           icons: 'Icones del submenú',
           iconsDesc: 'Mostra les icones del submenú a la barra de menús'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Estat de bloqueig del teclat remot',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Bloq Num',
+        numLockShort: 'Num',
+        capsLock: 'Bloq Maj',
+        capsLockShort: 'Maj',
+        scrollLock: 'Bloq Despl',
+        scrollLockShort: 'Despl',
+        on: 'Activat',
+        off: 'Desactivat',
+        unknown: 'Desconegut'
       },
       device: {
         title: 'Dispositiu',
@@ -342,7 +377,10 @@ const ca = {
           tip: 'Desactiva-ho si no és necessari'
         },
         hdmi: {
-          description: 'Activa la sortida HDMI'
+          description: 'Activa la sortida HDMI',
+          idleTimeoutTitle: "Temps d'espera d'inactivitat de captura",
+          idleTimeoutDescription: "Atura la captura HDMI després de no detectar espectadors actius durant",
+          minutes: 'min'
         },
         autostart: {
           title: "Configuració dels scripts d'inici automàtic",
@@ -359,6 +397,9 @@ const ca = {
         hidOnlyDesc: "Deixeu d'emular dispositius virtuals, conservant només el control bàsic HID",
         disk: 'Disc virtual',
         diskDesc: 'Munta un disc U virtual al dispositiu remot',
+        diskLocked: 'Desactivat mentre hi ha una imatge muntada (activar-lo cancel·la el muntatge)',
+        diskCancelMount:
+          "Activar el disc virtual cancel·la la imatge muntada i interromp una descàrrega o pujada d'imatge en curs. Voleu continuar?",
         network: 'Xarxa virtual',
         networkDesc: 'Munta una targeta de xarxa virtual al dispositiu remot',
         reboot: 'Reinicia',

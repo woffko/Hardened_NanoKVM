@@ -174,6 +174,9 @@ const translations: Record<string, string> = {
   'image.unmountFailed': 'Irrottaminen epäonnistui',
   'image.unmountDesc':
     'Joissakin järjestelmissä levykuva on poistettava etäkoneesta käsin ennen irrottamista.',
+  'image.forceEject': 'Pakota poisto',
+  'image.forceEjectConfirm':
+    'Etäkone on lukinnut optisen aseman. Pakotettu poisto katkaisee virtuaalisen USB-laitteen yhteyden hetkeksi, joten näppäimistö ja hiiri voivat irrota lyhyesti. Jatketaanko?',
   'image.refresh': 'Päivitä levykuvaluettelo',
   'image.attention': 'Huomio',
   'image.deleteConfirm': 'Haluatko varmasti poistaa tämän levykuvan?',

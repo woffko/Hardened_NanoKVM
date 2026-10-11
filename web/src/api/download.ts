@@ -1,10 +1,11 @@
 import { http } from '@/lib/http.ts';
 
 // Download image
-export function downloadImage(file?: string) {
+export function downloadImage(file?: string, sha256sum?: string) {
   const data = {
-      file: file ? file : ''
-    };
+    file: file ?? '',
+    sha256sum: sha256sum ?? ''
+  };
   return http.post('/api/download/image', data);
 }
 

@@ -79,6 +79,10 @@ const nb = {
       frameDetectTip:
         'Kalkuler forskjellen mellom bilder. Stopper overføring av video når det ikke oppdages forskjell på den eksterne vertens skjerm.',
       resetHdmi: 'Tilbakestill HDMI',
+      webrtcConnectionFailed: {
+        title: 'WebRTC-tilkobling mislyktes',
+        description: 'Kontroller nettverkstilkoblingen eller bytt videomodus.'
+      },
       captureStatus: {
         hdmiError: 'HDMI-skjermfeil',
         unsupportedResolution: 'Gjeldende oppløsning støttes ikke',
@@ -182,9 +186,16 @@ const nb = {
       mountFailed: 'Montering feilet',
       mountDesc:
         'På noen systemer er det nødvendig å koble fra den virtuelle disken på den eksterne verten før man kan montere arkivfilen.',
+      diskOnWarn:
+        'Mounting the image turns the virtual disk off, so the computer can no longer access /data. Continue?',
+      diskOffWarn:
+        'The virtual disk is off and has to be enabled to mount the image. The USB devices on the computer are enumerated again. Continue?',
       unmountFailed: 'Avmontering mislyktes',
       unmountDesc:
         'På noen systemer må du manuelt løse ut fra den eksterne verten før du demonterer bildet.',
+      forceEject: 'Løs ut med tvang',
+      forceEjectConfirm:
+        'Verten har låst den optiske stasjonen. Tvungen utløsing kobler den virtuelle USB-enheten fra et øyeblikk, så tastaturet og musen kan bli koblet fra en kort stund. Vil du fortsette?',
       refresh: 'Oppdater bildelisten',
       attention: 'Merknad',
       deleteConfirm: 'Er du sikker på at du vil slette dette bildet?',
@@ -250,9 +261,17 @@ const nb = {
       input: 'Vennligst skriv inn et eksternt bilde URL',
       ok: 'Ok',
       disabled: '/data partisjonen er RO, så vi kan ikke laste ned bildet',
+      diskShared: 'Turn the virtual disk off first, then use the image download.',
+      mountedImage:
+        'Dette diskavbildet er montert. Avmonter det før du laster opp en fil med samme navn.',
+      diskOff: 'Turn off the virtual disk',
       uploadbox: 'Slipp filen her eller klikk for å velge',
       inputfile: 'Vennligst skriv inn bildefilen',
-      NoISO: 'Ingen ISO'
+      NoISO: 'Ingen ISO',
+      sha256: 'SHA-256 (valgfritt)',
+      sha256Placeholder: 'Skriv inn en SHA-256-kontrollsum på 64 tegn',
+      invalidSHA256: 'SHA-256 må være en heksadesimal streng på 64 tegn',
+      checksumFailed: 'Nedlasting mislyktes: SHA-256-verifisering mislyktes'
     },
     power: {
       title: 'På-knapp',
@@ -302,9 +321,25 @@ const nb = {
           modeOff: 'Av',
           modeAuto: 'Skjul automatisk',
           modeAlways: 'Alltid synlig',
+          keyboardLedStatus: 'Indikatorer for tastaturlås',
+          keyboardLedStatusDesc:
+            'Vis Num Lock-, Caps Lock- og Scroll Lock-status for den eksterne datamaskinen',
           icons: 'Undermenyikoner',
           iconsDesc: 'Vis undermenyikoner i menylinjen'
         }
+      },
+      keyboardLedStatus: {
+        groupLabel: 'Status for låser på eksternt tastatur',
+        indicatorLabel: '{{label}}: {{state}}',
+        numLock: 'Num Lock',
+        numLockShort: 'Num',
+        capsLock: 'Caps Lock',
+        capsLockShort: 'Caps',
+        scrollLock: 'Scroll Lock',
+        scrollLockShort: 'Scr',
+        on: 'På',
+        off: 'Av',
+        unknown: 'Ukjent'
       },
       device: {
         title: 'Enhet',
@@ -344,7 +379,10 @@ const nb = {
           tip: 'Slå den av hvis den ikke er nødvendig'
         },
         hdmi: {
-          description: 'Aktiver HDMI/skjermutgang'
+          description: 'Aktiver HDMI/skjermutgang',
+          idleTimeoutTitle: 'Tidsavbrudd for inaktivt opptak',
+          idleTimeoutDescription: 'Stopp HDMI-opptak etter at det ikke har vært aktive seere i',
+          minutes: 'min'
         },
         autostart: {
           title: 'Autostart skriptinnstillinger',
@@ -361,6 +399,9 @@ const nb = {
         hidOnlyDesc: 'Slutt å emulere virtuelle enheter, behold bare grunnleggende HID-kontroll',
         disk: 'Virtuell disk',
         diskDesc: 'Mount virtual U-disk on the remote host',
+        diskLocked: 'Off while an image is mounted (turning it on cancels the mount)',
+        diskCancelMount:
+          'Enabling the virtual disk cancels the mounted image and interrupts a running image download or upload. Continue?',
         network: 'Virtuelt nettverk',
         networkDesc: 'Monter virtuelt nettverkskort på den eksterne verten',
         reboot: 'Start på nytt',

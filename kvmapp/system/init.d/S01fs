@@ -136,6 +136,18 @@ then
                 fi
         }
 
+        # While the virtual disk shares the raw partition as a writable disk, the host is the
+        # only writer, so /data is read-only here.
+        remount_data_readonly_if_shared() {
+                [ -e /boot/usb.disk0 ] || return 0
+                [ ! -e /boot/usb.disk0.ro ] || return 0
+                [ ! -s /boot/usb.disk0 ] || return 0
+                grep -q " $DATA_MOUNT " /proc/mounts || return 0
+
+                mount -o remount,ro "$DATA_MOUNT" >> "$DATA_LOG" 2>&1 ||
+                        echo "failed to remount $DATA_MOUNT read-only" >> "$DATA_LOG"
+        }
+
         restore_raw_root_config() {
                 [ -f "$RAW_UPDATE_MARKER" ] || return 0
                 [ -d "$RAW_RESTORE_ROOT" ] || return 0
@@ -195,6 +207,9 @@ then
         ensure_data_partition || true
         mount_data_partition || true
         restore_raw_root_config
+        # A pending system update still removes its marker from /data; S95nanokvm remounts
+        # /data read-only once that is done.
+        [ -f "$RAW_UPDATE_MARKER" ] || remount_data_readonly_if_shared
 
         echo "OK"
 fi

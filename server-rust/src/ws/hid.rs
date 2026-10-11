@@ -11,14 +11,18 @@ use serde::Serialize;
 use std::{
     fs,
     fs::{File, OpenOptions},
-    io::{self, Write},
-    os::unix::fs::{FileTypeExt, OpenOptionsExt},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::{FileTypeExt, OpenOptionsExt},
+    },
     path::Path,
     process::{Command, Stdio},
-    sync::{LazyLock, Mutex},
+    sync::{LazyLock, Mutex, Once, OnceLock},
     thread,
     time::{Duration, Instant},
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{AppError, Result, state::AppState, ws::origin::validate_ws_origin};
@@ -39,6 +43,10 @@ const MOUSE_JIGGLER_INTERVAL: Duration = Duration::from_secs(15);
 const USB_DEV_SCRIPT: &str = "/etc/init.d/S03usbdev";
 const USB_UDC_CLASS: &str = "/sys/class/udc";
 
+const KEYBOARD_LED_STATUS_EVENT: &str = "hid-led-status";
+const LED_REOPEN_INTERVAL: Duration = Duration::from_secs(2);
+const LED_RETRY_PAUSE: Duration = Duration::from_millis(250);
+
 const HEARTBEAT_EVENT: u8 = 0;
 const KEYBOARD_EVENT: u8 = 1;
 const MOUSE_EVENT: u8 = 2;
@@ -48,6 +56,10 @@ const JIGGLER_MODE_ABSOLUTE: &str = "absolute";
 static HID: LazyLock<HidDevices> = LazyLock::new(HidDevices::default);
 static MOUSE_JIGGLER: LazyLock<Mutex<MouseJiggler>> =
     LazyLock::new(|| Mutex::new(MouseJiggler::from_config()));
+static KEYBOARD_LEDS: LazyLock<Mutex<KeyboardLedStatus>> =
+    LazyLock::new(|| Mutex::new(KeyboardLedStatus::default()));
+static LED_READER_START: Once = Once::new();
+static LED_READER_NOTIFY: OnceLock<[RawFd; 2]> = OnceLock::new();
 static WS_EVENTS: LazyLock<broadcast::Sender<String>> = LazyLock::new(|| {
     let (tx, _) = broadcast::channel(64);
     tx
@@ -58,6 +70,21 @@ struct WsEnvelope<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     data: &'a str,
+}
+
+/// Lock-key LED state last reported by the remote host through the keyboard
+/// HID output report. `known` is false until the host has sent one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct KeyboardLedStatus {
+    #[serde(rename = "numLock")]
+    pub num_lock: bool,
+    #[serde(rename = "capsLock")]
+    pub caps_lock: bool,
+    #[serde(rename = "scrollLock")]
+    pub scroll_lock: bool,
+    pub known: bool,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
 }
 
 #[derive(Default)]
@@ -120,7 +147,12 @@ impl HidDevices {
                     .map_err(|_| io::Error::other("hid device lock poisoned"))?;
 
                 let open_result = if guard.is_none() {
-                    open_hid(path).map(|file| *guard = Some(file))
+                    open_hid(path).map(|file| {
+                        *guard = Some(file);
+                        if path == HID_KEYBOARD {
+                            notify_led_reader();
+                        }
+                    })
                 } else {
                     Ok(())
                 };
@@ -175,6 +207,7 @@ impl HidDevices {
     }
 
     fn close_all(&self) -> io::Result<()> {
+        notify_led_reader();
         close_hid_slot(&self.keyboard)?;
         close_hid_slot(&self.relative_mouse)?;
         close_hid_slot(&self.absolute_mouse)
@@ -216,6 +249,178 @@ pub fn close_cached_hid_devices() -> io::Result<()> {
     HID.close_all()
 }
 
+/// Starts the thread that reads the keyboard LED output reports. Idempotent.
+pub fn start_keyboard_led_reader() {
+    LED_READER_START.call_once(|| {
+        let Some(fds) = create_notify_pipe() else {
+            tracing::warn!("failed to create the keyboard LED reader notifier");
+            return;
+        };
+        let _ = LED_READER_NOTIFY.set(fds);
+        if let Err(err) = thread::Builder::new()
+            .name("hid-led-reader".to_string())
+            .spawn(move || keyboard_led_reader_loop(fds[0]))
+        {
+            tracing::warn!(error = %err, "failed to start the keyboard LED reader");
+        }
+    });
+}
+
+/// Snapshot of the remote keyboard lock LEDs.
+pub fn keyboard_led_status() -> KeyboardLedStatus {
+    KEYBOARD_LEDS
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default()
+}
+
+fn led_status_from_report(report: u8) -> KeyboardLedStatus {
+    KeyboardLedStatus {
+        num_lock: report & 0x01 != 0,
+        caps_lock: report & 0x02 != 0,
+        scroll_lock: report & 0x04 != 0,
+        known: true,
+        updated_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default(),
+    }
+}
+
+fn same_led_state(a: &KeyboardLedStatus, b: &KeyboardLedStatus) -> bool {
+    a.num_lock == b.num_lock
+        && a.caps_lock == b.caps_lock
+        && a.scroll_lock == b.scroll_lock
+        && a.known == b.known
+}
+
+/// Stores the state of an output report and returns it when it changed.
+fn apply_led_report(store: &Mutex<KeyboardLedStatus>, report: u8) -> Option<KeyboardLedStatus> {
+    let next = led_status_from_report(report);
+    let mut current = store.lock().ok()?;
+    let changed = !same_led_state(&current, &next);
+    *current = next.clone();
+    changed.then_some(next)
+}
+
+fn update_keyboard_led_status(report: u8) {
+    if let Some(next) = apply_led_report(&KEYBOARD_LEDS, report)
+        && let Ok(data) = serde_json::to_string(&next)
+    {
+        broadcast_event(KEYBOARD_LED_STATUS_EVENT, &data);
+    }
+}
+
+fn create_notify_pipe() -> Option<[RawFd; 2]> {
+    let mut fds = [0 as RawFd; 2];
+    // SAFETY: `fds` is a valid out-array of two descriptors.
+    if unsafe { nix::libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    for fd in fds {
+        // SAFETY: both descriptors were just created and are owned here.
+        let configured = unsafe {
+            nix::libc::fcntl(fd, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC) == 0
+                && nix::libc::fcntl(fd, nix::libc::F_SETFL, nix::libc::O_NONBLOCK) == 0
+        };
+        if !configured {
+            // SAFETY: closing the descriptors created above.
+            unsafe {
+                nix::libc::close(fds[0]);
+                nix::libc::close(fds[1]);
+            }
+            return None;
+        }
+    }
+    Some(fds)
+}
+
+/// Wakes the reader so it reopens the keyboard device.
+fn notify_led_reader() {
+    if let Some(fds) = LED_READER_NOTIFY.get() {
+        let byte = 1_u8;
+        // SAFETY: writes one byte from a valid buffer to our own nonblocking pipe;
+        // a full pipe (EAGAIN) already means a wake-up is pending.
+        unsafe {
+            nix::libc::write(fds[1], (&byte as *const u8).cast(), 1);
+        }
+    }
+}
+
+fn drain_led_notifier(fd: RawFd) {
+    let mut buffer = [0_u8; 64];
+    // SAFETY: reads into a valid buffer from our own nonblocking pipe.
+    while unsafe { nix::libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) } > 0 {}
+}
+
+enum LedWait {
+    Report,
+    Notified,
+    Failed,
+}
+
+/// Waits for an output report on `device` (when given) or a wake-up on `notify`.
+fn wait_for_led_event(device: Option<RawFd>, notify: RawFd, timeout_ms: i32) -> LedWait {
+    let mut fds = [
+        nix::libc::pollfd {
+            fd: notify,
+            events: nix::libc::POLLIN,
+            revents: 0,
+        },
+        nix::libc::pollfd {
+            fd: device.unwrap_or(-1),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: `fds` is a valid array of two pollfd structures.
+    let result =
+        unsafe { nix::libc::poll(fds.as_mut_ptr(), fds.len() as nix::libc::nfds_t, timeout_ms) };
+    if result < 0 {
+        return LedWait::Failed;
+    }
+    if fds[0].revents & nix::libc::POLLIN != 0 {
+        drain_led_notifier(notify);
+        return LedWait::Notified;
+    }
+    let device_events =
+        nix::libc::POLLIN | nix::libc::POLLERR | nix::libc::POLLHUP | nix::libc::POLLNVAL;
+    if device.is_some() && fds[1].revents & device_events != 0 {
+        return LedWait::Report;
+    }
+    LedWait::Failed
+}
+
+fn keyboard_led_reader_loop(notify: RawFd) {
+    let mut buffer = [0_u8; 64];
+    loop {
+        // Read-only and blocking: the loop waits with poll, so an idle host costs nothing.
+        let Ok(mut file) = OpenOptions::new().read(true).open(HID_KEYBOARD) else {
+            wait_for_led_event(None, notify, LED_REOPEN_INTERVAL.as_millis() as i32);
+            continue;
+        };
+
+        loop {
+            match wait_for_led_event(Some(file.as_raw_fd()), notify, -1) {
+                LedWait::Notified => break,
+                LedWait::Report => match file.read(&mut buffer) {
+                    // The keyboard descriptor declares boot-keyboard reports without a
+                    // report ID, so the LED output report is one byte: bits 0-4 are
+                    // the LED bitmap.
+                    Ok(read) if read > 0 => update_keyboard_led_status(buffer[0]),
+                    _ => {
+                        thread::sleep(LED_RETRY_PAUSE);
+                        break;
+                    }
+                },
+                LedWait::Failed => {
+                    thread::sleep(LED_RETRY_PAUSE);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub fn broadcast_event(kind: &str, data: &str) {
     if let Some(message) = ws_event_message(kind, data) {
         let _ = WS_EVENTS.send(message);
@@ -243,6 +448,7 @@ async fn handle_socket(socket: WebSocket) {
     let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx));
     let mouse_worker = tokio::spawn(mouse_worker(mouse_rx));
     send_capture_status_snapshot(&mut ws_tx).await;
+    send_keyboard_led_snapshot(&mut ws_tx).await;
 
     let mut event_rx = WS_EVENTS.subscribe();
     let event_writer = tokio::spawn(async move {
@@ -329,6 +535,17 @@ async fn send_capture_status_snapshot(
         if ws_tx.send(Message::Text(message.into())).await.is_err() {
             break;
         }
+    }
+}
+
+async fn send_keyboard_led_snapshot(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) {
+    let Ok(data) = serde_json::to_string(&keyboard_led_status()) else {
+        return;
+    };
+    if let Some(message) = ws_event_message(KEYBOARD_LED_STATUS_EVENT, &data) {
+        let _ = ws_tx.send(Message::Text(message.into())).await;
     }
 }
 
@@ -680,6 +897,47 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_the_lock_bits_of_an_output_report() {
+        let status = led_status_from_report(0b0000_0101);
+        assert!(status.num_lock);
+        assert!(!status.caps_lock);
+        assert!(status.scroll_lock);
+        assert!(status.known);
+        assert!(!status.updated_at.is_empty());
+
+        // Bits 3-7 are compose/kana/padding and carry no lock state.
+        let status = led_status_from_report(0b1111_1000);
+        assert!(!status.num_lock && !status.caps_lock && !status.scroll_lock);
+    }
+
+    #[test]
+    fn reports_a_change_only_when_the_lock_state_changes() {
+        let store = Mutex::new(KeyboardLedStatus::default());
+
+        // The first report is news even when every lock is off.
+        assert!(apply_led_report(&store, 0).is_some());
+        assert!(apply_led_report(&store, 0).is_none());
+
+        let changed = apply_led_report(&store, 0x02).unwrap();
+        assert!(changed.caps_lock && changed.known);
+        assert!(apply_led_report(&store, 0x02).is_none());
+        assert!(apply_led_report(&store, 0x03).is_some());
+    }
+
+    #[test]
+    fn led_status_serializes_with_the_names_the_web_ui_reads() {
+        let json = serde_json::to_value(led_status_from_report(0x01)).unwrap();
+        assert_eq!(json["numLock"], true);
+        assert_eq!(json["capsLock"], false);
+        assert_eq!(json["scrollLock"], false);
+        assert_eq!(json["known"], true);
+        assert!(json["updatedAt"].is_string());
+
+        let unknown = serde_json::to_value(KeyboardLedStatus::default()).unwrap();
+        assert_eq!(unknown["known"], false);
+    }
 
     #[test]
     fn validates_jiggler_modes() {

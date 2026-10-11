@@ -16,3 +16,6 @@ export const menuDisplayModeAtom = atom<string>('auto');
 
 // responsive layout mode: 'auto' | 'mobile'
 export const layoutModeAtom = atom<LayoutMode>(getLayoutMode());
+
+// show the remote keyboard lock-status indicator beside the menu bar
+export const keyboardLedStatusVisibleAtom = atom(true);
