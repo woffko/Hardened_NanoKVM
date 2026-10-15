@@ -371,8 +371,9 @@ Balena Etcher plus Linux, macOS, and FreeBSD command-line workflows.
   MJPEG, H.264 Direct, H.264 WebRTC signaling, HID, terminal, storage, network,
   Tailscale, scripts, and many VM settings routes.
 - Added full wired network editing from the web UI. Manual mode persists IP,
-  subnet mask, router, and DNS through the existing `S30eth` boot path and
-  keeps a stable `eth0` MAC in `/boot/eth.mac` so DHCP leases survive reboot.
+  subnet mask, router, and DNS through the existing `S30eth` boot path. The
+  `eth0` and USB gadget MACs are derived from the SG2002 chip ID, so they
+  survive reboots and reflashing.
 - Added shared video fanout for MJPEG and H.264 Direct, so multiple viewers do
   not multiply native capture reads. The web UI now defaults new sessions to
   H.264 Direct when HTTPS and WebCodecs are available, otherwise to H.264.

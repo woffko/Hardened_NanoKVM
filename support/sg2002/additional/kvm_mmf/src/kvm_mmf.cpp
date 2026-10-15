@@ -880,7 +880,9 @@ error:
 	return s32Ret;
 }
 
-static CVI_S32 _mmf_init(void)
+#define MMF_INIT_MARKER "/tmp/.kvm_mmf_inited"
+
+static CVI_S32 _mmf_init(bool check_stale)
 {
 	MMF_VERSION_S stVersion;
 	SAMPLE_INI_CFG_S	   stIniCfg;
@@ -891,7 +893,7 @@ static CVI_S32 _mmf_init(void)
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	LOG_LEVEL_CONF_S log_conf;
 
-	int old_pool_cnt = _get_vb_pool_cnt();
+	int old_pool_cnt = check_stale ? _get_vb_pool_cnt() : 0;
 	if (old_pool_cnt > 0) {
 		if (_is_module_in_use("soph_vi") == 0) {
 			reinit_soph_vb();
@@ -947,7 +949,7 @@ static CVI_S32 _mmf_init(void)
 		SAMPLE_PRT("free leak ion memory error\n");
 	}
 
-	if (0 != _free_leak_memory_of_vb()) {
+	if (old_pool_cnt > 0 && 0 != _free_leak_memory_of_vb()) {
 		SAMPLE_PRT("free leak vb memory error\n");
 	}
 
@@ -1005,14 +1007,24 @@ int mmf_init(void)
         return 0;
     }
 
-	if (_try_release_sys() != CVI_SUCCESS) {
+	// Stale state needs an earlier init since boot. Without the marker skip the /proc/cvitek/vb
+	// reads too: the kernel logs "NULL VB HANDLE" for each read while VB is uninitialized.
+	bool check_stale = access(MMF_INIT_MARKER, F_OK) == 0;
+	if (!check_stale || _get_vb_pool_cnt() == 0) {
+		printf("no stale sys state to release\n");
+	} else if (_try_release_sys() != CVI_SUCCESS) {
 		printf("try release sys failed\n");
 		return -1;
 	} else {
 		printf("try release sys ok\n");
 	}
 
-    if (_mmf_init() != CVI_SUCCESS) {
+	// Created before touching hardware so a crash mid-init still triggers cleanup next time.
+	int marker_fd = open(MMF_INIT_MARKER, O_CREAT | O_WRONLY, 0600);
+	if (marker_fd >= 0)
+		close(marker_fd);
+
+    if (_mmf_init(check_stale) != CVI_SUCCESS) {
         printf("maix multi-media init failed\n");
         return -1;
     } else {

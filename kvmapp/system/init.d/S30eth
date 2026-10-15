@@ -1,7 +1,6 @@
 #!/bin/sh
 
 RESERVE_INET="192.168.90.1/22"
-ETH_MAC_FILE="/boot/eth.mac"
 IPV6_MODE_FILE="/boot/eth.ipv6.mode"
 IPV6_CONFIG_FILE="/boot/eth.ipv6"
 BOOT_RESOLV_FILE="${BOOT_RESOLV_FILE:-/boot/resolv.conf}"
@@ -13,73 +12,29 @@ clean_line() {
     echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\r//g'
 }
 
-is_valid_mac() {
-    echo "$1" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
-}
-
-stable_eth_mac_seed() {
-    for file in /device_key /etc/machine-id
-    do
-        if [ -s "$file" ]
-        then
-            seed=$(tr -cd 'A-Fa-f0-9' < "$file" | head -c 32)
-            if [ -n "$seed" ]
-            then
-                echo "$seed"
-                return
-            fi
-        fi
-    done
-
-    if [ -r /proc/cpuinfo ]
-    then
-        seed=$(sed -n 's/^[Ss]erial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | tr -cd 'A-Fa-f0-9' | head -c 32)
-        if [ -n "$seed" ]
-        then
-            echo "$seed"
-            return
-        fi
-    fi
-
-    if [ -r /sys/class/net/eth0/address ]
-    then
-        seed=$(tr -cd 'A-Fa-f0-9' < /sys/class/net/eth0/address | head -c 12)
-        if [ -n "$seed" ]
-        then
-            echo "$seed"
-            return
-        fi
-    fi
-
-    echo 0123456789abcdef
+# Seed from the SG2002 chip ID, in the same form S95nanokvm writes to /device_key.
+hw_mac_seed() {
+    uid=$(awk '{print $2}' "${BASE_UID_FILE:-/sys/class/cvi-base/base_uid}" 2>/dev/null)
+    echo "$(echo "$uid" | cut -d_ -f1)$(echo "$uid" | cut -d_ -f2)" | tr -cd 'A-Fa-f0-9' | head -c 32
 }
 
 make_eth_mac() {
-    seed=$(stable_eth_mac_seed)
-    hash=$(printf '%s:eth0\n' "$seed" | sha256sum | awk '{print $1}')
-    if [ -z "$hash" ]
-    then
-        hash=0123456789abcdef
-    fi
+    hash=$(printf '%s:eth0\n' "$1" | sha256sum | awk '{print $1}')
     printf '%s\n' "$hash" | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*/02:\1:\2:\3:\4:\5/'
 }
 
 ensure_eth_mac() {
     [ -e /sys/class/net/eth0/address ] || return
 
-    mac=""
-    if [ -s "$ETH_MAC_FILE" ]
+    seed=$(hw_mac_seed)
+    if [ -z "$seed" ]
     then
-        mac=$(clean_line "$(cat "$ETH_MAC_FILE")")
+        echo "no hardware ID for a stable eth0 MAC; keeping the random one" >&2
+        return
     fi
 
-    if ! is_valid_mac "$mac"
-    then
-        mac=$(make_eth_mac)
-        echo "$mac" > "$ETH_MAC_FILE" 2>/dev/null || true
-    fi
-
-    is_valid_mac "$mac" || return
+    mac=$(make_eth_mac "$seed")
+    [ "$(cat /sys/class/net/eth0/address)" = "$mac" ] && return
     ip link set dev eth0 down 2>/dev/null || true
     ip link set dev eth0 address "$mac" 2>/dev/null || true
     ip link set dev eth0 up 2>/dev/null || true

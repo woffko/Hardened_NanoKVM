@@ -1681,7 +1681,7 @@ stop_update_runtime() {{\n\
 copy_boot_preserve_files() {{\n\
   SRC_DIR=\"$1\"\n\
   $BB mkdir -p \"$BOOT_PRESERVE_DIR\" >/dev/null 2>&1 || return\n\
-  for NAME in eth.nodhcp resolv.conf resolv.conf.manual.bak eth.mac eth.ipv6.mode eth.ipv6 hostname hostname.prefix usb.vid usb.pid usb.wakeup usb.notwakeup usb.ncm usb.rndis0 usb.disk0 usb.disk0.ro disable_hid BIOS wifi.ssid wifi.pass wifi.nodhcp start_ssh_once logo.ico; do\n\
+  for NAME in eth.nodhcp resolv.conf resolv.conf.manual.bak eth.ipv6.mode eth.ipv6 hostname hostname.prefix usb.vid usb.pid usb.wakeup usb.notwakeup usb.ncm usb.rndis0 usb.disk0 usb.disk0.ro disable_hid BIOS wifi.ssid wifi.pass wifi.nodhcp start_ssh_once logo.ico; do\n\
     [ -e \"$SRC_DIR/$NAME\" ] || continue\n\
     $BB cp -p \"$SRC_DIR/$NAME\" \"$BOOT_PRESERVE_DIR/$NAME\" >> \"$LOG\" 2>&1 || log \"failed to preserve boot file $NAME\"\n\
   done\n\

@@ -118,8 +118,6 @@ require_private_map libstdc++ libstdc++.so.6.0.28 libstdc++.so.6
 require_private_map libgcc libgcc_s.so.1
 require_private_map libgomp libgomp.so.1.0.0 libgomp.so.1
 require_private_map libatomic libatomic.so.1.2.0 libatomic.so.1
-require_private_map opencv-video libopencv_video.so.4.9.0 libopencv_video.so.409
-require_private_map protobuf libprotobuf.so.32.0.12 libprotobuf.so.32
 if ! grep -q '/usr/lib/libz.so.1.3.2' "/proc/$BACKEND_PID/maps"; then
   printf 'MISSING_SYSTEM_MAP=libz\n'
 fi

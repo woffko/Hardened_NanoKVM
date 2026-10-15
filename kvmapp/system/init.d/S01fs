@@ -109,7 +109,6 @@ then
                 [ -f /etc/kvm/session_secret ] && chmod 0600 /etc/kvm/session_secret
                 [ -f /etc/kvm/server.yaml ] && chmod 0644 /etc/kvm/server.yaml
                 [ -f /etc/kvm/backend ] && chmod 0644 /etc/kvm/backend
-                [ -f /etc/kvm/update-nanokvm.py ] && chmod 0755 /etc/kvm/update-nanokvm.py
                 [ -f /etc/default/syslogd ] && chmod 0644 /etc/default/syslogd
                 [ -f /etc/default/klogd ] && chmod 0644 /etc/default/klogd
 

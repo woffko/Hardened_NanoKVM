@@ -1,42 +1,16 @@
 #!/bin/sh
 # kvmhwd Rev2.2
 
-stable_usb_mac_seed() {
-    for file in /device_key /etc/machine-id
-    do
-        if [ -s "$file" ]
-        then
-            seed=$(tr -cd 'A-Fa-f0-9' < "$file" | head -c 32)
-            if [ -n "$seed" ]
-            then
-                echo "$seed"
-                return
-            fi
-        fi
-    done
-
-    if [ -r /proc/cpuinfo ]
-    then
-        seed=$(sed -n 's/^[Ss]erial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | tr -cd 'A-Fa-f0-9' | head -c 32)
-        if [ -n "$seed" ]
-        then
-            echo "$seed"
-            return
-        fi
-    fi
-
-    echo 0123456789abcdef
+# Seed from the SG2002 chip ID, in the same form S95nanokvm writes to /device_key.
+hw_mac_seed() {
+    uid=$(awk '{print $2}' "${BASE_UID_FILE:-/sys/class/cvi-base/base_uid}" 2>/dev/null)
+    echo "$(echo "$uid" | cut -d_ -f1)$(echo "$uid" | cut -d_ -f2)" | tr -cd 'A-Fa-f0-9' | head -c 32
 }
 
 make_usb_mac() {
     prefix="$1"
     label="$2"
-    seed=$(stable_usb_mac_seed)
-    hash=$(printf '%s:%s\n' "$seed" "$label" | sha256sum | awk '{print $1}')
-    if [ -z "$hash" ]
-    then
-        hash=0123456789abcdef
-    fi
+    hash=$(printf '%s:%s\n' "$3" "$label" | sha256sum | awk '{print $1}')
     printf '%s\n' "$hash" | sed "s/^\(..\)\(..\)\(..\)\(..\)\(..\).*/$prefix:\1:\2:\3:\4:\5/"
 }
 
@@ -44,11 +18,33 @@ set_usb_function_macs() {
     func="$1"
     [ -d "$func" ] || return
 
-    dev_addr=$(make_usb_mac 02 "$func-dev")
-    host_addr=$(make_usb_mac 06 "$func-host")
+    seed=$(hw_mac_seed)
+    if [ -z "$seed" ]
+    then
+        echo "no hardware ID for stable USB MACs; keeping the random ones" >&2
+        return
+    fi
+
+    dev_addr=$(make_usb_mac 02 "$func-dev" "$seed")
+    host_addr=$(make_usb_mac 06 "$func-host" "$seed")
 
     [ -e "$func/dev_addr" ] && echo "$dev_addr" > "$func/dev_addr"
     [ -e "$func/host_addr" ] && echo "$host_addr" > "$func/host_addr"
+}
+
+# The host sees the serial, so hash the chip ID rather than expose it.
+make_usb_serial() {
+    printf '%s:usb-serial\n' "$1" | sha256sum | awk '{print toupper(substr($1, 1, 16))}'
+}
+
+usb_serial() {
+    seed=$(hw_mac_seed)
+    if [ -n "$seed" ]
+    then
+        make_usb_serial "$seed"
+    else
+        echo '0123456789ABCDEF'
+    fi
 }
 
 usb_wakeup_enabled() {
@@ -84,7 +80,9 @@ start_usb_dev(){
     echo 0x01 > bDeviceProtocol
 
     mkdir strings/0x409
-    echo '0123456789ABCDEF' > strings/0x409/serialnumber
+    # Not `usb_serial > file`: awk's own write leaves the string empty on this kernel.
+    serial=$(usb_serial)
+    echo "$serial" > strings/0x409/serialnumber
     echo 'sipeed' > strings/0x409/manufacturer
     echo 'NanoKVM' > strings/0x409/product
 
@@ -211,6 +209,10 @@ restart_usb_dev(){
     ls /sys/class/udc/ | cat > /sys/kernel/config/usb_gadget/g0/UDC
     echo "USB Restart OK!"
 }
+
+if [ "${S03USBDEV_TEST_ONLY:-}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 case "$1" in
   start)

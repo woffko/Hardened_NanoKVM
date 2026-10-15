@@ -316,8 +316,6 @@ sync
   const updaterState = await ssh(password, `set -eu
 printf 'BACKEND_DISK_SHA=%s\\n' "$(sha256sum /kvmapp/server/NanoKVM-Server | awk '{print $1}')"
 printf 'BACKEND_RUNTIME_SHA=%s\\n' "$(sha256sum /tmp/server/NanoKVM-Server | awk '{print $1}')"
-printf 'OPENCV_VIDEO=%s\\n' "$([ -e /kvmapp/server/dl_lib/libopencv_video.so.409 ] && echo present || echo missing)"
-printf 'PROTOBUF=%s\\n' "$([ -e /kvmapp/server/dl_lib/libprotobuf.so.32 ] && echo present || echo missing)"
 printf 'S01_HOSTNAME_FIX=%s\\n' "$(grep -q apply_restored_runtime_state /kvmapp/system/init.d/S01fs && echo present || echo missing)"
 printf 'CERT=%s\\n' "$([ -s /etc/kvm/server.crt ] && echo present || echo missing)"
 printf 'KEY=%s\\n' "$([ -s /etc/kvm/server.key ] && echo present || echo missing)"
@@ -329,8 +327,6 @@ printf 'KEY=%s\\n' "$([ -s /etc/kvm/server.key ] && echo present || echo missing
   const fixedUpdaterReady = acceptedBackendHashes.includes(backendDiskSha)
     && backendRuntimeSha === backendDiskSha
     && [
-    'OPENCV_VIDEO=present',
-    'PROTOBUF=present',
     'S01_HOSTNAME_FIX=present',
     'CERT=present',
     'KEY=present',

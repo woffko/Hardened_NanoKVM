@@ -120,12 +120,6 @@ for path in \
 	/etc/kvm/system-version.json \
 	/etc/ssh/sshd_config \
 	/etc/ssl/certs/ca-certificates.crt \
-	/kvmapp/server/dl_lib/libopencv_video.so.409 \
-	/kvmapp/server/dl_lib/libopencv_dnn.so.409 \
-	/kvmapp/server/dl_lib/libopencv_calib3d.so.409 \
-	/kvmapp/server/dl_lib/libopencv_features2d.so.409 \
-	/kvmapp/server/dl_lib/libopencv_flann.so.409 \
-	/kvmapp/server/dl_lib/libprotobuf.so.32 \
 	/kvmapp/server/dl_lib/libstdc++.so.6 \
 	/kvmapp/server/dl_lib/libgcc_s.so.1 \
 	/kvmapp/server/dl_lib/libgomp.so.1 \
@@ -162,10 +156,41 @@ reject_path /kvmapp/system/init.d/S80dnsmasq
 reject_path /kvmapp/server/dl_lib/libz.so
 reject_path /kvmapp/server/dl_lib/libz.so.1
 reject_path /kvmapp/server/dl_lib/libz.so.1.3
+# libkvm.so no longer declares NEEDED on libopencv_video.so.409 (and by
+# extension its downstream-only deps dnn/calib3d/features2d/flann/protobuf) --
+# see server-rust/native/README.md. The vendor-runtime .mk drops the now-dead
+# files rather than ship non-redistributable vendor blobs nothing calls.
+reject_path /kvmapp/server/dl_lib/libopencv_video.so.4.9.0
+reject_path /kvmapp/server/dl_lib/libopencv_video.so.409
+reject_path /kvmapp/server/dl_lib/libopencv_dnn.so.4.9.0
+reject_path /kvmapp/server/dl_lib/libopencv_dnn.so.409
+reject_path /kvmapp/server/dl_lib/libopencv_calib3d.so.4.9.0
+reject_path /kvmapp/server/dl_lib/libopencv_calib3d.so.409
+reject_path /kvmapp/server/dl_lib/libopencv_features2d.so.4.9.0
+reject_path /kvmapp/server/dl_lib/libopencv_features2d.so.409
+reject_path /kvmapp/server/dl_lib/libopencv_flann.so.4.9.0
+reject_path /kvmapp/server/dl_lib/libopencv_flann.so.409
+reject_path /kvmapp/server/dl_lib/libprotobuf.so.32.0.12
+reject_path /kvmapp/server/dl_lib/libprotobuf.so.32
 reject_path /kvmapp/.files-list.before
 reject_path /usr/lib/firmware/aic8800_sdio/.files-list.before
 reject_path /usr/share/fw_vcodec/.files-list.before
 reject_path /usr/lib/libstdc++.so.6.0.33-gdb.py
+# /mnt/system/usr is an unpruned vendor SDK carry-forward -- see
+# server-rust/native/README.md. usr/bin (CVITEK sample/test binaries) is
+# unused entirely; usr/lib is pruned down to exactly libsns_lt6911.so, the
+# one file there with no copy in dl_lib (the real LT6911 HDMI sensor plugin;
+# everything else was either byte-identical or same-name-different-build
+# duplicate of dl_lib content, or a genuinely dead sample/replay/sensor lib).
+reject_path /mnt/system/usr/bin
+USR_LIB_LISTING="$TMP_DIR/mnt-system-usr-lib-listing"
+debugfs -R "ls -l /mnt/system/usr/lib" "$IMAGE" >"$USR_LIB_LISTING" 2>"$TMP_DIR/mnt-system-usr-lib-listing.err"
+# debugfs's own startup banner goes to stderr, kept separate above --
+# merging it into $USR_LIB_LISTING previously fed its "(<date>)" version
+# string into this parse as a fake filename.
+USR_LIB_ENTRIES="$(awk '{print $NF}' "$USR_LIB_LISTING" | grep -vE '^\.\.?$' || true)"
+[ "$USR_LIB_ENTRIES" = "libsns_lt6911.so" ] || \
+	die "/mnt/system/usr/lib must contain only libsns_lt6911.so, found: $USR_LIB_ENTRIES"
 
 SHADOW_FILE="$TMP_DIR/shadow"
 debugfs -R "dump /etc/shadow $SHADOW_FILE" "$IMAGE" >/dev/null 2>&1 || \
@@ -182,23 +207,6 @@ fi
 grep -qx 'enable-wide-area=no' "$AVAHI_CONFIG" || die "Avahi wide-area mode is enabled"
 grep -qx 'rlimit-nofile=256' "$AVAHI_CONFIG" || die "Avahi file descriptors are not bounded"
 
-verify_sha256 /kvmapp/server/dl_lib/libopencv_video.so.4.9.0 \
-	4bda8c165e9e53090cdc783a826c8c61a81ccff3a022bef5f7243a95596f52c7 opencv-video
-verify_sha256 /kvmapp/server/dl_lib/libopencv_dnn.so.4.9.0 \
-	3d2ae102eb4a2d2eb2e109ba23015d761ad43cf9299fdbc427e02c52377bfc79 opencv-dnn
-verify_sha256 /kvmapp/server/dl_lib/libopencv_calib3d.so.4.9.0 \
-	119f69d7bb3c5fd033689e87faeaa37c75547a226dde150fadf01ded04e85466 opencv-calib3d
-verify_sha256 /kvmapp/server/dl_lib/libopencv_features2d.so.4.9.0 \
-	f620d5466f0bd241ce70ed34d3bca07a4dc666a2addf624a2f52902e3c6ec015 opencv-features2d
-verify_sha256 /kvmapp/server/dl_lib/libopencv_flann.so.4.9.0 \
-	1dadc13c42828b3fef7b3c20026b3a0263fcbcd882bfb904105de0bea1a0c991 opencv-flann
-verify_sha256 /kvmapp/server/dl_lib/libprotobuf.so.32.0.12 \
-	096d35f5f085b74d6654d30bdfa91c69398093fc47548979d5c8ed4e5caebd27 protobuf
-SYSTEM_ZLIB="$TMP_DIR/system-libz.so.1.3.2"
-debugfs -R "dump /usr/lib/libz.so.1.3.2 $SYSTEM_ZLIB" "$IMAGE" >/dev/null 2>&1 || \
-	die "could not extract Buildroot system zlib"
-"$ROOT/scripts/verify-zlib-runtime-abi.sh" "$SYSTEM_ZLIB" "$TMP_DIR/protobuf" || \
-	die "Buildroot system zlib does not satisfy the vendor protobuf ABI"
 verify_sha256 /kvmapp/server/dl_lib/libstdc++.so.6.0.28 \
 	9ebc8352014fbb7499194fdca56eb496c51c119b50d08d7b70b96058d3c5be17 libstdcpp
 verify_sha256 /kvmapp/server/dl_lib/libgcc_s.so.1 \

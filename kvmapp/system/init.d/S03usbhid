@@ -1,6 +1,27 @@
 #!/bin/sh
 # kvmhwd hid only
 
+# Seed from the SG2002 chip ID, in the same form S95nanokvm writes to /device_key.
+hw_mac_seed() {
+    uid=$(awk '{print $2}' "${BASE_UID_FILE:-/sys/class/cvi-base/base_uid}" 2>/dev/null)
+    echo "$(echo "$uid" | cut -d_ -f1)$(echo "$uid" | cut -d_ -f2)" | tr -cd 'A-Fa-f0-9' | head -c 32
+}
+
+# The host sees the serial, so hash the chip ID rather than expose it.
+make_usb_serial() {
+    printf '%s:usb-serial\n' "$1" | sha256sum | awk '{print toupper(substr($1, 1, 16))}'
+}
+
+usb_serial() {
+    seed=$(hw_mac_seed)
+    if [ -n "$seed" ]
+    then
+        make_usb_serial "$seed"
+    else
+        echo '0123456789ABCDEF'
+    fi
+}
+
 usb_wakeup_enabled() {
     [ -e /boot/usb.notwakeup ] && return 1
     [ -e /boot/usb.wakeup ]
@@ -31,7 +52,9 @@ start_usb_dev(){
         echo 0x1009 > idProduct
     fi
     mkdir strings/0x409
-    # echo '0' > strings/0x409/serialnumber
+    # Not `usb_serial > file`: awk's own write leaves the string empty on this kernel.
+    serial=$(usb_serial)
+    echo "$serial" > strings/0x409/serialnumber
     echo 'sipeed' > strings/0x409/manufacturer
     echo 'NanoKVM' > strings/0x409/product
 
@@ -92,6 +115,10 @@ restart_usb_dev(){
     ls /sys/class/udc/ | cat > /sys/kernel/config/usb_gadget/g0/UDC
     echo "USB Restart OK!"
 }
+
+if [ "${S03USBHID_TEST_ONLY:-}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 case "$1" in
   start)
