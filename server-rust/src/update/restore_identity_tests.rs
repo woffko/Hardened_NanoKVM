@@ -11,6 +11,336 @@ use std::{
 use tar::{Archive, Builder};
 use tempfile::{TempDir, tempdir};
 
+// Owner-sensitive builder tests run in one exact disposable mapped-root test.
+// No real host identity or parent namespaces/resources are changed.
+fn preflight_namespace(name: &str) -> bool {
+    if std::env::var_os("NANOKVM_PREFLIGHT_OWNER_FIXTURE").is_some() {
+        return true;
+    }
+    let before = fs::read("/proc/self/mountinfo").unwrap();
+    let output = std::process::Command::new("/usr/bin/unshare")
+        .args(["--user", "--map-root-user"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            name.strip_prefix("nanokvm_rust_server::").unwrap(),
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env("NANOKVM_PREFLIGHT_OWNER_FIXTURE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "private preflight fixture: {output:?}"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+    assert!(
+        stdout.contains("running 1 test\n") && stdout.contains("1 passed; 0 failed;"),
+        "exact preflight fixture did not run: {output:?}"
+    );
+    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
+    false
+}
+
+#[test]
+fn private_ssh_root_uses_only_authenticated_native_identity_and_inert_server_data() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::private_ssh_root_uses_only_authenticated_native_identity_and_inert_server_data"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::prepare_sshd_root;
+    use std::os::unix::fs::MetadataExt;
+    let (source, config) = fixture();
+    put(
+        source.path(),
+        "etc/ssh/sshd_config.d/extra.conf",
+        b"Match User root\nMaxAuthTries 3\n",
+    );
+    put(source.path(), "etc/ssh/banner", b"");
+    put(source.path(), "root/.ssh/authorized_keys", b"");
+    for path in [
+        "root/.ssh/id_rsa",
+        "root/.ssh/config",
+        "etc/kvm/scripts/task.sh",
+        "root/.picoclaw/workspace/note.txt",
+    ] {
+        put(
+            source.path(),
+            path,
+            b"synthetic unrelated state, never execute",
+        );
+    }
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    let original_shadow = member(&mut identity, "etc/shadow");
+    let target = tempdir().unwrap();
+    let prepared = prepare_sshd_root(&mut identity, target.path()).unwrap();
+    assert_eq!(prepared.checked_path().unwrap(), target.path());
+    for path in [
+        "etc/passwd",
+        "etc/group",
+        "etc/shadow",
+        "etc/ssh/sshd_config",
+        "etc/ssh/sshd_config.d/extra.conf",
+        "etc/ssh/ssh_host_ed25519_key",
+        "etc/ssh/banner",
+        "root/.ssh/authorized_keys",
+    ] {
+        assert_eq!(
+            fs::read(target.path().join(path)).unwrap(),
+            member(&mut identity, path)
+        );
+        let metadata = fs::metadata(target.path().join(path)).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(
+            (metadata.uid(), metadata.gid(), metadata.nlink()),
+            (0, 0, 1)
+        );
+        let expected = if matches!(path, "etc/passwd" | "etc/group") {
+            0o644
+        } else {
+            0o600
+        };
+        assert_eq!(metadata.mode() & 0o7777, expected);
+    }
+    for path in [
+        "etc/kvm",
+        "boot",
+        "kvmapp",
+        "root/.ssh/id_rsa",
+        "root/.ssh/config",
+        "root/.picoclaw",
+        "usr",
+        "lib",
+        "bin",
+        "sbin",
+        "lib64",
+    ] {
+        assert!(
+            !target.path().join(path).exists(),
+            "unrelated data/runtime imported: {path}"
+        );
+    }
+    for path in [".oldroot", "proc", "sys", "data", "var/empty"] {
+        assert_eq!(fs::read_dir(target.path().join(path)).unwrap().count(), 0);
+    }
+    assert!(fs::read(target.path().join("dev/null")).unwrap().is_empty());
+    assert_eq!(
+        fs::read(target.path().join("etc/nsswitch.conf")).unwrap(),
+        b"passwd: files\ngroup: files\nshadow: files\nhosts: files\n"
+    );
+    assert_eq!(
+        fs::read(source.path().join("etc/shadow")).unwrap(),
+        original_shadow
+    );
+    prepared.cleanup().unwrap();
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    let prepared = prepare_sshd_root(&mut identity, target.path()).unwrap();
+    drop(prepared);
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn private_ssh_root_rejects_existing_unsafe_redirected_or_nested_mount_roots() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::private_ssh_root_rejects_existing_unsafe_redirected_or_nested_mount_roots"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::prepare_sshd_root;
+    use std::os::unix::fs::PermissionsExt;
+    let (source, config) = fixture();
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    let target = tempdir().unwrap();
+    for mode in [0o755, 0o770, 0o1700] {
+        fs::set_permissions(target.path(), fs::Permissions::from_mode(mode)).unwrap();
+        assert!(prepare_sshd_root(&mut identity, target.path()).is_err());
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    put(target.path(), "unrelated", b"keep synthetic existing state");
+    assert!(prepare_sshd_root(&mut identity, target.path()).is_err());
+    assert_eq!(
+        fs::read(target.path().join("unrelated")).unwrap(),
+        b"keep synthetic existing state"
+    );
+    fs::remove_file(target.path().join("unrelated")).unwrap();
+    let alias = source.path().join("target-alias");
+    symlink(target.path(), &alias).unwrap();
+    assert!(prepare_sshd_root(&mut identity, &alias).is_err());
+    assert!(prepare_sshd_root(&mut identity, Path::new("relative-root")).is_err());
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS).unwrap();
+    nix::mount::mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .unwrap();
+    let replacement = tempdir().unwrap();
+    nix::mount::mount(
+        Some(replacement.path()),
+        target.path(),
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .unwrap();
+    let rejected = prepare_sshd_root(&mut identity, target.path()).is_err();
+    nix::mount::umount2(target.path(), nix::mount::MntFlags::empty()).unwrap();
+    assert!(
+        rejected,
+        "same-filesystem bind mount is not private rootfs staging"
+    );
+    assert_eq!(fs::read_dir(replacement.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn private_ssh_root_enforces_new_host_file_budget_before_creating_entries() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::private_ssh_root_enforces_new_host_file_budget_before_creating_entries"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::{PrepareRootError, prepare_sshd_root};
+    let (source, config) = fixture();
+    put(source.path(), "etc/hosts", &vec![b'x'; 64 * 1024 + 1]);
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    let target = tempdir().unwrap();
+    assert!(matches!(
+        prepare_sshd_root(&mut identity, target.path()),
+        Err(PrepareRootError::Input)
+    ));
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn private_ssh_root_cleanup_does_not_follow_parent_links_or_delete_replacements() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::private_ssh_root_cleanup_does_not_follow_parent_links_or_delete_replacements"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::prepare_sshd_root;
+    let (source, config) = fixture();
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    for kind in 0..3 {
+        let target = tempdir().unwrap();
+        let prepared = prepare_sshd_root(&mut identity, target.path()).unwrap();
+        let outside = tempdir().unwrap();
+        put(
+            outside.path(),
+            "shadow",
+            b"outside synthetic state must survive",
+        );
+        match kind {
+            0 => put(target.path(), "root/unknown", b"untracked synthetic state"),
+            1 => {
+                fs::rename(
+                    target.path().join("etc/shadow"),
+                    outside.path().join("original-shadow"),
+                )
+                .unwrap();
+                put(target.path(), "etc/shadow", b"replacement synthetic state");
+            }
+            _ => {
+                fs::rename(
+                    target.path().join("etc"),
+                    outside.path().join("original-etc"),
+                )
+                .unwrap();
+                symlink(outside.path(), target.path().join("etc")).unwrap();
+            }
+        }
+        assert!(prepared.cleanup().is_err());
+        assert_eq!(
+            fs::read(outside.path().join("shadow")).unwrap(),
+            b"outside synthetic state must survive"
+        );
+        if kind == 0 {
+            assert_eq!(
+                fs::read(target.path().join("root/unknown")).unwrap(),
+                b"untracked synthetic state"
+            );
+        }
+        if kind == 1 {
+            assert_eq!(
+                fs::read(target.path().join("etc/shadow")).unwrap(),
+                b"replacement synthetic state"
+            );
+        }
+    }
+    let parent = tempdir().unwrap();
+    let target = parent.path().join("root");
+    fs::create_dir(&target).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    let prepared = prepare_sshd_root(&mut identity, &target).unwrap();
+    let original = parent.path().join("original");
+    fs::rename(&target, &original).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    put(&target, "keep", b"new outer root must survive");
+    assert!(prepared.checked_path().is_err());
+    prepared.cleanup().unwrap();
+    assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
+    assert_eq!(
+        fs::read(target.join("keep")).unwrap(),
+        b"new outer root must survive"
+    );
+}
+
+#[test]
+fn private_ssh_root_cleans_partial_native_inputs_after_actual_kernel_write_failure() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::private_ssh_root_cleans_partial_native_inputs_after_actual_kernel_write_failure"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::{PrepareRootError, prepare_sshd_root};
+    use nix::sys::{
+        resource::{Resource, getrlimit, setrlimit},
+        signal::{SigSet, SigmaskHow, Signal, pthread_sigmask},
+    };
+    let (source, config) = fixture();
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    let target = tempdir().unwrap();
+    let previous = getrlimit(Resource::RLIMIT_FSIZE).unwrap();
+    let config_index = identity
+        .members()
+        .iter()
+        .position(|m| m.path == "etc/ssh/sshd_config")
+        .unwrap();
+    assert!(identity.members()[config_index].size > 64);
+    for path in ["etc/passwd", "etc/group", "etc/shadow"] {
+        let index = identity
+            .members()
+            .iter()
+            .position(|m| m.path == path)
+            .unwrap();
+        assert!(index < config_index && identity.members()[index].size <= 64);
+    }
+    let mut blocked = SigSet::empty();
+    blocked.add(Signal::SIGXFSZ);
+    pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), None).unwrap();
+    // NSS and native tables fit; sshd_config then writes partially and gets
+    // EFBIG. Cleanup must remove the already-copied synthetic shadow as well.
+    setrlimit(Resource::RLIMIT_FSIZE, 64, previous.1).unwrap();
+    let result = prepare_sshd_root(&mut identity, target.path());
+    setrlimit(Resource::RLIMIT_FSIZE, previous.0, previous.1).unwrap();
+    assert!(matches!(result, Err(PrepareRootError::Io)));
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    // SIGXFSZ stays blocked only in this disposable exact-test child.
+}
+
 const CONFIG_PATH: &str = "/etc/kvm/server.yaml";
 const CWD: &str = "/etc/kvm";
 const NATIVE_PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n";

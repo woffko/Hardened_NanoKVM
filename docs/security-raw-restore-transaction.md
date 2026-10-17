@@ -648,6 +648,45 @@ release helper. A real exec test rejects a mismatched transaction before any
 privileged setup. These tests do not prove target ELF compatibility, SSH login,
 exact raw.12 mounting, isolated writing or early restore.
 
+### Private authenticated SSH identity-root builder (component)
+
+`restore_preflight::prepare_sshd_root` accepts only `IdentityCheckedRestore`, not
+an arbitrary archive/path tree. It plans all selected inputs before creation:
+account tables, bounded hostname/hosts, and the same closed inert server-SSH
+subset used by the authority guard. Client private keys/config, app credentials,
+scripts, workspaces, enablement flags and executable/runtime files are omitted.
+The private root is for syntax preflight, not the full restored system. Missing
+optional inputs stay absent; no factory account/key/password is synthesized.
+
+The caller provides an empty root-owned mode-0700 directory on `/`, without
+symlink or crossed-mount components. Fixed directories and regular files are
+created descriptor-relatively with EXCL, fixed owner/group 0 and safe modes.
+Limits are 140 selected files / 9 MiB total; hostname/hosts each have a 64 KiB cap.
+Native account and SSH-specific limits already hold in the checked identity.
+The only generated configuration is files-only NSS for isolated local account/
+host lookup; no ambient host NSS configuration is copied. Runtime code still
+comes exclusively from the separate exact-image binds above.
+
+`PreparedSshRoot` owns the exact created inventory and pinned directory. Its
+checked path must be revalidated before helper invocation. The production job
+must retain this guard until the child is reaped, then explicitly check cleanup.
+Cleanup pins each parent without links/mounts, compares the final inode/device
+and unlinks only recorded entries, never a replacement or unknown tree. An error
+is a hard cleanup failure, not successful removal or a reason for broad rm-rf;
+Drop is best effort. Caller must hold the common lock and exclude concurrent
+writers/protect ancestors; hostile local root is not contained by this API.
+
+These are ephemeral named native-input files on private rootfs, not a named
+plaintext archive spool, boot marker or durable restore commit. After abrupt
+process/power loss, any residual private directory cannot authorize apply; exact
+transaction-owned crash cleanup is still required in the future orchestrator.
+The builder does not itself prove native key possession/effective SSH policy,
+signature/ticket authorization, or successful restoration. No production parent
+currently invokes it. Host tests authenticate a synthetic capsule, build this
+root, import the host runtime through the same image fixture boundary, and run
+real sshd syntax successfully; target loop/image provenance is intentionally not
+claimed. Kernel EFBIG after copied native tables verifies partial-input cleanup.
+
 ### Fresh-process SSH syntax sandbox (component only)
 
 `nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID` is a separate,
@@ -660,8 +699,8 @@ This component checks isolation, not authenticity. The future caller must bind
 the exact signed target executable/loader/libraries and authenticated immutable
 identity snapshot, materialize them into a quiesced private root on `/`, protect
 that directory and its ancestors, and hold the transaction lock throughout.
-The separate exact-image entry above imports its runtime but still has no
-production caller or identity-root builder. A pathname,
+The separate exact-image entry imports its runtime, and the builder above
+prepares its identity inputs; their production caller is still missing. A pathname,
 private mode, ELF header or successful syntax exit never grants restore authority.
 
 The root is owner-0 and private, with no setid/sticky bits; the bounded tree

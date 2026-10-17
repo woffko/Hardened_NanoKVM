@@ -148,10 +148,7 @@ pub(super) fn check_archive(archive: &mut ValidatedRestore) -> Result<()> {
         if FLAGS.contains(&member.path.as_str()) && member.action == RestoreAction::Absent {
             continue;
         }
-        if FILES.contains(&member.path.as_str())
-            || FLAGS.contains(&member.path.as_str())
-            || member.path.starts_with("etc/ssh/sshd_config.d/")
-        {
+        if runtime_file(&member.path) || FLAGS.contains(&member.path.as_str()) {
             if indexes.len() == MAX_FILES {
                 return Err(SshRestoreError::Limit);
             }
@@ -245,6 +242,12 @@ pub(super) async fn check_host_keys(
 
 fn is_config(path: &str) -> bool {
     path == MAIN || path.starts_with("etc/ssh/sshd_config.d/")
+}
+
+// Shared with the private syntax-root builder. Client private keys/config,
+// enablement flags and arbitrary broader restore members are not runtime input.
+pub(super) fn runtime_file(path: &str) -> bool {
+    FILES.contains(&path) || path.starts_with("etc/ssh/sshd_config.d/")
 }
 fn file_limit(path: &str) -> usize {
     if is_config(path) || HOST_KEYS.contains(&path) {
