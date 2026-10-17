@@ -3,7 +3,9 @@
 
 use super::restore_fs;
 use rand_core::{OsRng, RngCore};
-use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, mkdirat, openat2, renameat, unlinkat};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, ResolveFlags, fstatfs, mkdirat, openat2, renameat, unlinkat,
+};
 use std::{
     fs::File,
     io::{self, Write},
@@ -120,6 +122,51 @@ impl StageDirectory {
             Err(rustix::io::Errno::NOENT) => Ok(()),
             Err(error) => Err(error.into()),
         }
+    }
+
+    // Public release bytes ONLY. Unlike secret rootfs restore spools, existing
+    // exFAT p3 has no tmpfile inode operation. Its explicit fallback unlinks an
+    // empty exclusive random file BEFORE writing any public archive data. It is
+    // not a fallback for restore plaintext, keys, tickets or account state.
+    pub(super) fn create_public_spool(&self) -> io::Result<File> {
+        let file = if fstatfs(&self.directory)?.f_type == 0x2011_bab0 {
+            self.create_unlinked_public_spool()?
+        } else {
+            openat2(
+                &self.directory,
+                ".",
+                OFlags::RDWR | OFlags::TMPFILE | OFlags::EXCL | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+                RESOLVE | ResolveFlags::NO_XDEV,
+            )?
+            .into()
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.nlink() != 0
+            || metadata.dev() != self.directory.metadata()?.dev()
+            || metadata.uid() != nix::unistd::geteuid().as_raw()
+            || metadata.mode() & 0o7022 != 0
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        Ok(file)
+    }
+
+    fn create_unlinked_public_spool(&self) -> io::Result<File> {
+        let mut empty = self.create_download()?;
+        let name = empty
+            .temporary
+            .as_ref()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        unlinkat(&self.directory, name, AtFlags::empty())?;
+        empty.temporary = None;
+        self.directory.sync_all()?;
+        // Only this local owner has a writable description. Drop its original
+        // alias before returning the clone; no writable alias leaves capture.
+        let file = empty.file.try_clone()?;
+        drop(empty);
+        Ok(file)
     }
 }
 

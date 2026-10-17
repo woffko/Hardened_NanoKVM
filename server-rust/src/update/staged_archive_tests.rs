@@ -125,3 +125,27 @@ fn rejects_unsafe_stage_names_archive_modes_and_nonregular_objects() {
     .unwrap();
     assert!(StageDirectory::open(&root.path().join("system")).is_err());
 }
+
+#[test]
+fn explicit_exfat_public_spool_protocol_unlinks_empty_name_before_first_write() {
+    // Exercise the deliberate fallback protocol on the host filesystem. This
+    // is not an assertion that the host fixture is actual exFAT/vendor5.10.
+    let root = tempdir().unwrap();
+    let path = root.path().join("system");
+    let stage = StageDirectory::prepare(&path).unwrap();
+    fs::write(path.join("keep"), b"retained recovery").unwrap();
+    let mut file = stage.create_unlinked_public_spool().unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 0);
+    assert_eq!(file.metadata().unwrap().nlink(), 0);
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+    file.write_all(b"public release bytes, never restore secrets")
+        .unwrap();
+    file.sync_all().unwrap();
+    file.rewind().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"public release bytes, never restore secrets");
+    drop(file);
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+    assert_eq!(fs::read(path.join("keep")).unwrap(), b"retained recovery");
+}

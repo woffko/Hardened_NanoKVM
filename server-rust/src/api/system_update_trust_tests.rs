@@ -465,11 +465,7 @@ async fn archive_child_nonzero_exit_deadline_and_cancellation_are_reaped() {
     assert_eq!(fs::read_dir(&stage_path).unwrap().count(), 0);
 }
 
-#[test]
-fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction() {
-    let root = tempdir().unwrap();
-    let stage_path = root.path().join("system");
-    let stage = StageDirectory::prepare(&stage_path).unwrap();
+fn synthetic_system_bundle() -> (SystemLatest, SystemManifest, Vec<u8>) {
     let payload = b"synthetic system version";
     let manifest = tests::valid_manifest(SystemManifestFile {
         payload: "rootfs/etc/kvm/system-version.json".into(),
@@ -494,11 +490,20 @@ fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction()
             .append_data(&mut header, path, bytes.as_slice())
             .unwrap();
     }
-    let mut bytes = builder.into_inner().unwrap().finish().unwrap();
+    let bytes = builder.into_inner().unwrap().finish().unwrap();
     let mut latest = tests::valid_latest();
     latest.size = bytes.len() as u64;
     latest.sha256 = format!("{:x}", Sha256::digest(&bytes));
     latest.sha512 = STANDARD.encode(Sha512::digest(&bytes));
+    (latest, manifest, bytes)
+}
+
+#[test]
+fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction() {
+    let root = tempdir().unwrap();
+    let stage_path = root.path().join("system");
+    let stage = StageDirectory::prepare(&stage_path).unwrap();
+    let (latest, manifest, mut bytes) = synthetic_system_bundle();
     let mut downloaded = stage.create_download().unwrap();
     downloaded.file_mut().write_all(&bytes).unwrap();
     verify_system_archive(downloaded.file_mut(), &latest).unwrap();
@@ -532,6 +537,54 @@ fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction()
             .is_none()
     );
     assert_eq!(fs::read(stage_path.join(&latest.name)).unwrap(), bytes);
+}
+
+#[test]
+fn system_extraction_uses_frozen_archive_despite_source_inode_and_name_tampering() {
+    let root = tempdir().unwrap();
+    let stage_path = root.path().join("system");
+    let stage = StageDirectory::prepare(&stage_path).unwrap();
+    let (latest, manifest, bytes) = synthetic_system_bundle();
+    let source_path = stage_path.join(&latest.name);
+    fs::write(&source_path, &bytes).unwrap();
+    let mut source = stage.open_archive(&latest.name).unwrap();
+    let mut snapshot = freeze_system_archive(&mut source, &stage_path, &latest).unwrap();
+    let tamper = vec![b'x'; bytes.len()];
+    fs::write(&source_path, &tamper).unwrap();
+    // The original inode and the original name are both no longer valid input.
+    fs::rename(&source_path, stage_path.join("old-source")).unwrap();
+    fs::write(&source_path, &tamper).unwrap();
+    let actual = extract_and_verify_system_bundle(&mut snapshot, &stage_path, &latest).unwrap();
+    assert_eq!(actual, manifest);
+    assert!(freeze_system_archive(&mut source, &stage_path, &latest).is_err());
+    assert_eq!(fs::read(stage_path.join("old-source")).unwrap(), tamper);
+    assert_eq!(fs::read(&source_path).unwrap(), tamper);
+}
+
+#[test]
+fn frozen_system_archive_checks_both_signed_digests_without_touching_legacy_staging() {
+    let root = tempdir().unwrap();
+    let stage_path = root.path().join("system");
+    let stage = StageDirectory::prepare(&stage_path).unwrap();
+    let (latest, _, bytes) = synthetic_system_bundle();
+    fs::write(stage_path.join(&latest.name), &bytes).unwrap();
+    fs::write(stage_path.join("preserve"), b"retained recovery").unwrap();
+    for change in 0..4 {
+        let mut forged = latest.clone();
+        match change {
+            0 => forged.sha256 = "b".repeat(64),
+            1 => forged.sha512 = STANDARD.encode([2_u8; 64]),
+            2 => forged.size += 1,
+            _ => forged.sha512 = "invalid".into(),
+        }
+        let mut source = stage.open_archive(&latest.name).unwrap();
+        assert!(freeze_system_archive(&mut source, &stage_path, &forged).is_err());
+        assert_eq!(fs::read_dir(&stage_path).unwrap().count(), 2);
+        assert_eq!(
+            fs::read(stage_path.join("preserve")).unwrap(),
+            b"retained recovery"
+        );
+    }
 }
 
 #[test]

@@ -31,6 +31,7 @@ use crate::{
         keys::resolve_update_public_key,
         staged_archive::{StageDirectory, StagedDownload},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
+        staged_snapshot::PublicSnapshot,
     },
 };
 
@@ -546,7 +547,8 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
             ensure_no_pending_system_update()?;
             let mut archive =
                 StageDirectory::open(&receipt_stage_dir)?.open_archive(&verified.latest.name)?;
-            verify_system_archive(&mut archive, &verified.latest)?;
+            let _snapshot =
+                freeze_system_archive(&mut archive, &receipt_stage_dir, &verified.latest)?;
             persist_verified_system_metadata(&verified)
         })
         .await?;
@@ -601,11 +603,15 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         guard,
         move || {
             ensure_no_pending_system_update()?;
-            verify_system_archive(downloaded.file_mut(), &verified.latest)?;
+            let mut snapshot = freeze_system_archive(
+                downloaded.file_mut(),
+                &stage_dir_for_verify,
+                &verified.latest,
+            )?;
             downloaded.publish(&verified.latest.name)?;
 
             let manifest = extract_and_verify_system_bundle(
-                downloaded.file_mut(),
+                &mut snapshot,
                 &stage_dir_for_verify,
                 &verified.latest,
             )?;
@@ -1417,8 +1423,45 @@ fn verify_system_archive(file: &mut fs::File, latest: &SystemLatest) -> Result<(
     Ok(())
 }
 
+fn freeze_system_archive(
+    source: &mut fs::File,
+    stage_dir: &Path,
+    latest: &SystemLatest,
+) -> Result<PublicSnapshot> {
+    if source.metadata()?.len() != latest.size {
+        return Err(AppError::BadRequest(
+            "system update archive size mismatch".into(),
+        ));
+    }
+    validate_sha256_hex(&latest.sha256)?;
+    let mut sha256 = [0_u8; 32];
+    for (byte, hex) in sha256
+        .iter_mut()
+        .zip(latest.sha256.as_bytes().as_chunks::<2>().0)
+    {
+        let hex = std::str::from_utf8(hex)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+        *byte = u8::from_str_radix(hex, 16)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+    }
+    let sha512: [u8; 64] = STANDARD
+        .decode(&latest.sha512)
+        .map_err(|_| AppError::BadRequest("invalid system update sha512".into()))?
+        .try_into()
+        .map_err(|_| AppError::BadRequest("invalid system update sha512".into()))?;
+    source.rewind()?;
+    PublicSnapshot::capture(
+        &StageDirectory::open(stage_dir)?,
+        source,
+        latest.size,
+        &sha256,
+        &sha512,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
 fn extract_and_verify_system_bundle(
-    archive: &mut fs::File,
+    archive: &mut impl Read,
     stage_dir: &Path,
     latest: &SystemLatest,
 ) -> Result<SystemManifest> {
@@ -1452,7 +1495,7 @@ fn install_staged_update(
     let latest = verified.latest;
     enforce_required_application_version(&latest)?;
 
-    let mut archive = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
+    let mut source = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(
@@ -1462,7 +1505,8 @@ fn install_staged_update(
             Some("verifying staged system update archive".to_string()),
         ),
     )?;
-    verify_system_archive(&mut archive, &latest)?;
+    let mut archive = freeze_system_archive(&mut source, stage_dir, &latest)?;
+    drop(source);
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(

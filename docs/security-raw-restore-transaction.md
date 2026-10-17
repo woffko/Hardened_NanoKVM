@@ -65,16 +65,36 @@ Only the owned temporary member is removed on failure. The canonical archive,
 progress and stage-record names are replaced by rename, never opened through
 old symlinks/hardlinks for writing; outside target contents are left unchanged.
 
-Fresh verification and extraction read the same open archive descriptor. Cache
-reuse and install open regular single-link archives beneath the pinned directory
-with `openat2` confinement and rehash them against authenticated metadata. Same
-size plus a valid extracted tree is insufficient. SHA-256/SHA-512 and the
-production key IDs/algorithm are unchanged.
+Before fresh extraction, cached-receipt commitment and install, the API copies
+the entire public update archive into a separate anonymous disk snapshot while
+checking exact size/EOF and both authenticated SHA-256/SHA-512 digests. After
+fsync it independently reopens that inode as kernel `O_RDONLY`, checks inode/
+device/length/link count/access mode, and closes its sole writable description.
+Extraction reads only this snapshot. Replacing or overwriting the original
+archive after this point cannot change the bytes being parsed. Cache reuse also
+checks the canonical archive, not merely its size and extracted tree. Production
+keys/algorithms are unchanged; the snapshot API is not itself a signature proof.
 
-**C1 remains open.** A pinned descriptor prevents pathname replacement, not an
-in-place write by another holder of the inode or raw p3. Extraction destinations,
-some legacy record reads, payload consumers and the raw/early writer are not yet
-an immutable descriptor-owned transaction. USB p3 exclusion, isolated writer,
+On filesystems supporting it, snapshots use `O_TMPFILE|O_EXCL`. The existing
+exFAT p3 has no tmpfile operation: only on actual exFAT, an exclusive random
+**empty** public temporary file is unlinked and the directory synced before the
+first byte is copied. No data-bearing name remains. Other unsupported filesystems
+fail closed. This explicit public-release path must never be reused for restore
+plaintext, accounts, tickets or keys; secret spools remain strict rootfs
+`O_TMPFILE|O_EXCL`, without a named fallback. The one deliberate parent-side
+`/proc/self/fd` reopen checks actual procfs and the exact owned anonymous inode;
+it does not mount host proc inside the native sandbox or accept arbitrary paths.
+
+Snapshot construction uses one 64-KiB buffer, not archive-sized RAM. It needs
+up to one additional compressed-archive size of free staging disk while active;
+space/I/O failure returns no snapshot before any partition write. Vendor-kernel
+exFAT/procfs execution and target storage/performance remain acceptance gates.
+
+**C1 remains open.** The snapshot closes later source-inode mutation but is not
+protection from malicious local root or raw writes to its backing filesystem.
+Extraction destinations, some legacy record reads, extracted raw payloads and
+the raw/early writer are not yet an immutable descriptor-owned transaction.
+USB p3 exclusion, isolated writer,
 signed-target runtime/rootfs binding, protected tickets, early fail-closed apply,
 private app staging and device/crash/release gates remain mandatory. Do not ship
 this partial system-API improvement as the completed security migration.
