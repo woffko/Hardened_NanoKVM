@@ -115,25 +115,35 @@ impl ValidatedRestore {
 #[cfg(test)]
 fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArchive> {
     let source = SourceRoot::open(source_root)?;
-    capture_canonical(&source, private_staging, &[])
+    capture_canonical(&source, private_staging, &[], &[])
 }
 
 // Only the effective-state normalizer can supply canonical replacements. A
 // missing optional replacement suppresses stale state at its old default path.
-pub(super) struct CanonicalSetting {
-    pub path: &'static str,
+pub(super) struct CanonicalSetting<'a> {
+    pub path: &'a str,
     pub bytes: Option<Zeroizing<Vec<u8>>>,
+}
+
+// An inventory already captured and validated as a whole must not be scanned
+// again: later files would bypass that snapshot's semantic checks.
+pub(super) enum SnapshottedTree {
+    SshdConfig,
 }
 
 pub(super) fn capture_canonical(
     source: &SourceRoot,
     private_staging: &Path,
-    overrides: &[CanonicalSetting],
+    overrides: &[CanonicalSetting<'_>],
+    snapshotted_trees: &[SnapshottedTree],
 ) -> Result<CapturedArchive> {
     let mut override_paths = BTreeSet::new();
     for replacement in overrides {
         if !(policy::REQUIRED.contains(&replacement.path)
-            || policy::FIXED.contains(&replacement.path))
+            || policy::FIXED.contains(&replacement.path)
+            || policy::PRESENCE.contains(&replacement.path)
+            || (replacement.path.starts_with("etc/ssh/sshd_config.d/")
+                && policy::allowed(replacement.path)))
             || !override_paths.insert(replacement.path)
             || (policy::REQUIRED.contains(&replacement.path) && replacement.bytes.is_none())
         {
@@ -152,8 +162,16 @@ pub(super) fn capture_canonical(
     }
     let mut scanned = 0;
     for tree in policy::TREES {
+        if snapshotted_trees.iter().any(|snapshot| match snapshot {
+            SnapshottedTree::SshdConfig => *tree == "etc/ssh/sshd_config.d",
+        }) {
+            continue;
+        }
         collect_tree(source, tree, &mut paths, 0, &mut scanned)?;
     }
+    // Tree inventories may contain the dynamic SSH config paths already pinned
+    // in canonical snapshots. Never append a second live/unchecked copy.
+    paths.retain(|path| !override_paths.contains(path.as_str()));
     let mut present = BTreeSet::new();
     let mut planned = Vec::with_capacity(paths.len() + policy::PRESENCE.len() + overrides.len());
     let mut length = BLOCK + rounded(FORMAT.len() as u64)? + 2 * BLOCK;
@@ -184,7 +202,10 @@ pub(super) fn capture_canonical(
         };
         let size = bytes.len() as u64;
         check_size(size)?;
-        if size == 0 {
+        if size == 0
+            && (policy::REQUIRED.contains(&replacement.path)
+                || replacement.path == "etc/kvm/session_secret")
+        {
             return Err(RestoreArchiveError::Incomplete);
         }
         length = length
@@ -502,7 +523,7 @@ impl SourceRoot {
         }
     }
 
-    fn metadata(&self, relative: &str) -> Result<Option<fs::Metadata>> {
+    pub(super) fn metadata(&self, relative: &str) -> Result<Option<fs::Metadata>> {
         let Some(file) = self.open_path(relative, OFlags::PATH)? else {
             return Ok(None);
         };
@@ -566,7 +587,7 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
         && a.ctime_nsec() == b.ctime_nsec()
 }
 
-fn collect_tree(
+pub(super) fn collect_tree(
     root: &SourceRoot,
     relative: &str,
     out: &mut BTreeSet<String>,

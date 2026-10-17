@@ -6,3 +6,4 @@ mod restore_fs;
 pub mod restore_identity;
 pub mod restore_native;
 mod restore_policy;
+pub mod restore_ssh;

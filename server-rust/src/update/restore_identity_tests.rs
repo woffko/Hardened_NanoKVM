@@ -46,6 +46,18 @@ fn fixture() -> (TempDir, Config) {
     put(root.path(), "etc/passwd", NATIVE_PASSWD);
     put(root.path(), "etc/group", NATIVE_GROUP);
     put(root.path(), "etc/shadow", NATIVE_SHADOW);
+    put(
+        root.path(),
+        "etc/ssh/sshd_config",
+        include_bytes!(
+            "../../../buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/ssh/sshd_config"
+        ),
+    );
+    put(
+        root.path(),
+        "etc/ssh/ssh_host_ed25519_key",
+        b"synthetic path-guard fixture, not a valid host key",
+    );
     let account = Account {
         username: "operator".to_string(),
         password: bcrypt::hash("synthetic fixture password", 4).unwrap(),
@@ -828,4 +840,131 @@ fn authenticated_native_rows_are_rechecked_not_trusted_as_opaque_payload() {
     ] {
         assert!(checked(&alter(&bytes, path, Some(data))).is_err());
     }
+}
+
+#[test]
+fn ssh_fragments_empty_trust_files_and_root_password_policy_survive_authenticated_roundtrip() {
+    let (root, config) = fixture();
+    let main = b"Include sshd_config.d/*.conf\nPermitRootLogin yes\nPasswordAuthentication yes\nBanner /etc/ssh/banner\nTrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub\n";
+    let fragment = "etc/ssh/sshd_config.d/operator.conf";
+    put(root.path(), "etc/ssh/sshd_config", main);
+    put(
+        root.path(),
+        fragment,
+        b"Match User root\n  MaxAuthTries 3\n",
+    );
+    let empty_paths = [
+        "root/.ssh/authorized_keys",
+        "root/.ssh/authorized_keys2",
+        "etc/ssh/banner",
+        "etc/ssh/trusted-user-ca-keys.pub",
+    ];
+    for path in empty_paths {
+        put(root.path(), path, b"");
+    }
+    let key = fs::read(root.path().join("etc/ssh/ssh_host_ed25519_key")).unwrap();
+    let mut restored = checked(&captured(root.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    assert_eq!(member(&mut restored, "etc/ssh/sshd_config"), main);
+    assert_eq!(
+        member(&mut restored, fragment),
+        b"Match User root\n  MaxAuthTries 3\n"
+    );
+    assert_eq!(member(&mut restored, "etc/ssh/ssh_host_ed25519_key"), key);
+    for path in empty_paths {
+        assert!(member(&mut restored, path).is_empty());
+        assert_eq!(
+            restored.members().iter().filter(|m| m.path == path).count(),
+            1
+        );
+    }
+    assert_eq!(member(&mut restored, "etc/shadow"), NATIVE_SHADOW);
+    assert_eq!(
+        fs::read(root.path().join("etc/ssh/sshd_config")).unwrap(),
+        main
+    );
+}
+
+#[test]
+fn ssh_unsupported_authority_and_aliases_fail_before_capture_without_source_mutation() {
+    for kind in 0..6 {
+        let (root, config) = fixture();
+        let path = "etc/ssh/sshd_config";
+        match kind {
+            0 => put(
+                root.path(),
+                path,
+                b"Banner /etc/shadow # synthetic-marker\n",
+            ),
+            1 => put(
+                root.path(),
+                "etc/ssh/sshd_config.d/latent.conf",
+                b"Match User nobody\nAuthorizedKeysCommand /data/synthetic-marker\n",
+            ),
+            2 => put(root.path(), "root/.ssh/rc", b"synthetic-marker\n"),
+            3 => put(
+                root.path(),
+                "root/.ssh/environment",
+                b"ENV=/data/synthetic-marker\n",
+            ),
+            4 => {
+                fs::remove_file(root.path().join(path)).unwrap();
+                put(root.path(), "etc/ssh/real.conf", b"PermitRootLogin yes\n");
+                symlink("real.conf", root.path().join(path)).unwrap();
+            }
+            _ => put(root.path(), path, &vec![b'x'; 64 * 1024 + 1]),
+        }
+        let before = fs::read(root.path().join(path)).unwrap();
+        let staging = tempdir().unwrap();
+        let error = capture_effective(
+            root.path(),
+            staging.path(),
+            &config,
+            Path::new(CWD),
+            Path::new(CONFIG_PATH),
+            &signed_accounts(),
+        )
+        .err()
+        .unwrap();
+        assert!(!format!("{error:?} {error}").contains("synthetic-marker"));
+        assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+        assert_eq!(fs::read(root.path().join(path)).unwrap(), before);
+    }
+}
+
+#[test]
+fn authenticated_ssh_state_is_rechecked_and_keyless_start_once_never_passes_preflight() {
+    let (root, config) = fixture();
+    let fragment = "etc/ssh/sshd_config.d/operator.conf";
+    put(root.path(), fragment, b"PasswordAuthentication yes\n");
+    let bytes = captured(root.path(), &config, CWD, CONFIG_PATH);
+    for (path, replacement) in [
+        ("etc/ssh/sshd_config", Some(&b"Include /data/*.conf\n"[..])),
+        (
+            fragment,
+            Some(&b"Match User nobody\nForceCommand /data/helper\n"[..]),
+        ),
+        ("etc/ssh/ssh_host_ed25519_key", None),
+    ] {
+        assert!(matches!(
+            checked(&alter(&bytes, path, replacement)),
+            Err(RestoreIdentityError::Ssh(_))
+        ));
+    }
+    fs::remove_file(root.path().join("etc/ssh/ssh_host_ed25519_key")).unwrap();
+    put(root.path(), "etc/kvm/ssh_stop", b"");
+    checked(&captured(root.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    put(root.path(), "boot/start_ssh_once", b"");
+    let staging = tempdir().unwrap();
+    assert!(matches!(
+        capture_effective(
+            root.path(),
+            staging.path(),
+            &config,
+            Path::new(CWD),
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
+        ),
+        Err(RestoreIdentityError::Ssh(_))
+    ));
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
 }

@@ -19,6 +19,7 @@ use super::restore_archive::{
     ValidatedRestore,
 };
 use super::restore_native::{self, AccountFiles};
+use super::restore_ssh;
 use crate::{
     auth::password::Account,
     config::{Config, Paths},
@@ -52,13 +53,15 @@ pub enum RestoreIdentityError {
     Archive(#[from] RestoreArchiveError),
     #[error(transparent)]
     Native(#[from] restore_native::NativeAccountError),
+    #[error(transparent)]
+    Ssh(#[from] restore_ssh::SshRestoreError),
 }
 type Result<T> = std::result::Result<T, RestoreIdentityError>;
 
 // No Debug/Clone/serialization: the snapshot remains private. This wrapper is
 // proof of identity/config checks, not proof of ticket authorization or replay.
-// SSH policy/host-key parsing and signed-image executable/ownership checks are
-// separate mandatory preflight gates; native table consistency cannot prove them.
+// Full SSH syntax/key/effective-policy and signed-image executable/ownership
+// checks remain mandatory; the restore authority guard cannot prove them.
 pub struct IdentityCheckedRestore {
     archive: ValidatedRestore,
 }
@@ -181,7 +184,9 @@ pub fn capture_effective(
     let mut secret = Zeroizing::new(Vec::with_capacity(effective.jwt.secret_key.len() + 1));
     secret.extend_from_slice(effective.jwt.secret_key.as_bytes());
     secret.push(b'\n');
-    let replacements = [
+    let mut ssh = restore_ssh::Snapshot::capture(&source)?;
+    let mut replacements = Vec::with_capacity(9 + ssh.len());
+    replacements.extend([
         CanonicalSetting {
             path: CONFIG,
             bytes: Some(yaml),
@@ -206,11 +211,13 @@ pub fn capture_effective(
         native_group,
         native_shadow,
         native_gshadow,
-    ];
+    ]);
+    replacements.extend(ssh.take_settings());
     Ok(restore_archive::capture_canonical(
         &source,
         private_staging,
         &replacements,
+        &[restore_archive::SnapshottedTree::SshdConfig],
     )?)
 }
 
@@ -268,6 +275,7 @@ pub fn check_identity(
         },
         signed_accounts,
     )?;
+    restore_ssh::check_archive(&mut archive)?;
     Ok(IdentityCheckedRestore { archive })
 }
 

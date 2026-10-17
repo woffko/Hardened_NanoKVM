@@ -47,7 +47,7 @@ pub struct MergedAccounts {
     gshadow: Option<Zeroizing<Vec<u8>>>,
 }
 impl MergedAccounts {
-    pub(super) fn into_settings(self) -> [CanonicalSetting; 4] {
+    pub(super) fn into_settings(self) -> [CanonicalSetting<'static>; 4] {
         [
             CanonicalSetting {
                 path: "etc/passwd",

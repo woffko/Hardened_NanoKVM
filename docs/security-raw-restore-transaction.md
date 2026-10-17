@@ -2,9 +2,10 @@
 
 Status: implementation in progress on the security remediation branch. Capsule
 crypto, closed-schema archive capture/validation, canonical app/native-identity
-checks, protected ticket persistence and descriptor-relative source I/O are implemented
-and host-tested. Existing raw writer and early boot still
-use legacy preservation and must not be released as fixed C1.
+checks, SSH configuration-path guards/snapshots, protected ticket persistence and
+descriptor-relative source I/O are implemented and host-tested. Existing raw
+writer and early boot still use legacy preservation and must not be released as
+fixed C1.
 
 ## Trust boundaries
 
@@ -178,8 +179,8 @@ their input. This does not claim complete third-party parser memory erasure.
 After AEAD and structural archive validation, `check_identity` checks canonical
 paths, account/hash syntax, exact key/file consistency, bounded sizes and TLS
 again, returning a private `IdentityCheckedRestore`. It also requires the native
-account checks below. It does not authenticate a ticket, validate SSH policy/host
-keys, apply files or stop provisioning.
+account checks and the SSH configuration-path guard below. It does not authenticate
+a ticket, prove full SSH policy/key validity, apply files or stop provisioning.
 In-memory web sessions are not restored across reboot.
 
 References checked for the implementation:
@@ -241,6 +242,60 @@ passwd/shadow rows is not a promise to preserve their files.
 SSH host keys/config/includes, actual `sshd -t`/effective root-password policy,
 and login after restore remain mandatory separate checks. No native-table test
 proves SSH availability or complete C1 closure.
+
+## SSH configuration-path guard (implemented, not full SSH acceptance)
+
+`restore_ssh` checks a bounded immutable snapshot before archive creation and
+rechecks authenticated archive contents before returning `IdentityCheckedRestore`.
+The closed directive/alias inventory matches the pinned OpenSSH 10.5p1 parser;
+unknown directives require explicit verified migration. Its lexical guard follows
+the pinned keyword/argument splitting rules, including quotes, escapes, equals
+and token-start comments. It is not a replacement sshd syntax parser.
+
+Host keys/certificates, root authorized-key files, banner, CA, revocation,
+principals and host-based trust data are restricted to purpose-specific fixed
+protected destinations. A banner cannot refer to another captured secret such
+as a host private key or the session secret. Includes are limited to flat
+`/etc/ssh/sshd_config.d/*.conf`-style patterns or their `sshd_config.d/` relative
+equivalents. Every captured server `.d` file and every Match branch is checked,
+even if currently unselected. This deliberately preserves latent operator state
+without allowing an unchecked branch to become active later; it does not resolve
+the real Include graph, cycles, selected options or Match connection semantics.
+
+Mutable external helpers, host-key agents, chroots and security-key providers
+are not imported as executable authority. The initial policy permits disabled
+command hooks/agents/chroot, the internal provider, fixed signed-image SSH
+session/auth/xauth/sftp paths and constrained internal-sftp commands. PAM and
+PermitUserEnvironment must stay disabled for this pinned layout. Existing
+`sshrc`, root `.ssh/rc` or `.ssh/environment` requires explicit migration, not
+silent deletion or automatic activation. Valid custom key/trust/helper layouts
+outside this schema also stop preflight; they are not silently rewritten.
+
+The snapshot owns the exact checked bytes and records absence of all selected
+fixed SSH files. It also pins both SSH enablement flags. Canonical archive capture
+uses these replacements and the completed `.d` inventory, never a second live
+tree scan. A file appearing after preflight cannot be imported unchecked, and
+later flag changes cannot silently enable a keyless snapshot. Optional empty
+authorized-key/trust/banner/config files remain representable. Enabled SSH needs
+at least one nonempty selected host-key file; disabled SSH may remain keyless.
+This is a presence check only, not key parsing or proof of the selected key.
+
+Budgets: 128 present snapshot files, 64 KiB per config/private host key, 512 KiB
+total config, 4 MiB per other data file, 8 MiB total selected data, 8192-byte
+lines, 64-byte keywords and 128 arguments per line. Owned config/key bytes are
+zeroizing, errors do not echo their input, and the guard never executes helpers,
+loads a provider, opens an arbitrary configured path or connects to an agent.
+The caller must still quiesce all writers under the common transaction lock.
+
+Mandatory remaining preflight: actual signed sshd `-t`/`-T` with a safe isolated
+snapshot, Include resolution, effective root-password/authentication policy,
+host-key/public-key/certificate parsing and matching, authorized_keys/principals
+options (including command/environment effects), SetEnv/AcceptEnv session effects,
+signed executable/library provenance and complete custom-user-home handling.
+Client SSH config/keys remain operator data, not authority to execute them during
+restore. Follow with actual preserved-identity login and disabled/start-once
+runtime tests. The synthetic host-key fixtures used here intentionally do not
+claim cryptographic key validity. No host test establishes target SSH acceptance.
 
 ## Protected boot ticket v1 (implemented, not wired into boot/writer)
 
@@ -313,7 +368,9 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
    collision-free native merge and unknown-field
    reject/migration preflight; do not claim arbitrary YAML is losslessly copied
    or bypass the error by normalizing the source file in place.
-   Validate SSH host identity/config/effective policy and signed-image shell/home
+   Use the implemented immutable SSH snapshot/path guard without rescanning its
+   completed tree or rereading its pinned enablement flags. Validate full SSH
+   host identity/config/effective policy and signed-image shell/home
    executable/ownership requirements before writing; native row checks alone
    are not proof of a working SSH service.
    Installed optional apps need a verified
