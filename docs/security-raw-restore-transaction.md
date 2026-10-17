@@ -297,6 +297,43 @@ restore. Follow with actual preserved-identity login and disabled/start-once
 runtime tests. The synthetic host-key fixtures used here intentionally do not
 claim cryptographic key validity. No host test establishes target SSH acceptance.
 
+### Native private-key possession probe
+
+`IdentityCheckedRestore::check_native_host_keys` is a separate asynchronous
+preflight over the already-authenticated immutable archive. It checks every
+preserved RSA/ECDSA/Ed25519 private host key and any public companion, without
+regenerating or changing their bytes. Orphan public files, empty/invalid private
+keys, wrong algorithms and mismatched companions stop preflight. Disabled SSH
+may stay keyless; any private key it does retain is still checked.
+
+OpenSSH `ssh-keygen -y` extracts stored public fields; it does not universally
+prove their mathematical agreement with private components. The pinned Ed25519
+deserializer, for example, does not derive its public key from the seed. Likewise,
+`sshd -t` public/private comparison is not a signature-possession test. The probe
+therefore also signs a fresh 32-byte synthetic challenge and verifies it through
+OpenSSH SSHSIG with a fixed namespace/principal and an exact allowed-signers
+record built from the selected public identity. This uses OpenSSH cryptography,
+not a custom signature scheme. A regression changes only an Ed25519 seed while
+retaining its stored public fields: `-y` passes, but the possession probe fails.
+
+Only fixed `/usr/bin/ssh-keygen` is executed, never a shell or configured hook.
+Its environment is scrubbed, including SSH_AUTH_SOCK and loader/provider variables;
+an agent cannot supply the signature instead of the private file. The key,
+signature and allowed-signers inputs use anonymous private rootfs descriptors
+exposed through the live parent's `/proc/<pid>/fd/<n>`, with no named plaintext
+files. No key bytes enter argv/environment or diagnostic output. Output buffers
+are zeroizing and capped at 16 KiB; stdin/stdout/exit share an eight-second
+per-child deadline, followed by bounded kill/reap on failure. Cancellation kills
+the single child and leaves no detached pipe-reader task.
+
+This method is not implicitly run by synchronous capture or `check_identity`.
+The isolated writer/early helper must require it before applying/writing state,
+inside the exact verified target runtime with trusted executable/libraries,
+private staging, caller-held update serialization and a working protected
+proc-fd view. Current host tests use native host OpenSSH and prove this component,
+not target provenance, target timing/RAM, certificate policy, full sshd semantics
+or actual login. No production writer/boot integration is implied.
+
 ## Protected boot ticket v1 (implemented, not wired into boot/writer)
 
 `restore_capsule::ticket` is deliberately a child of the capsule module. It can
@@ -372,7 +409,10 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
    completed tree or rereading its pinned enablement flags. Validate full SSH
    host identity/config/effective policy and signed-image shell/home
    executable/ownership requirements before writing; native row checks alone
-   are not proof of a working SSH service.
+   are not proof of a working SSH service. Require the implemented private-key
+   possession probe within the verified target runtime as well as signed sshd
+   config/effective-policy/certificate checks; `-y`/`sshd -t` alone are not a
+   mathematical private-key proof.
    Installed optional apps need a verified
    replacement/provenance check before flashing; silently dropping them is not
    acceptable preservation. Regenerate shell-sourced defaults and runtime links

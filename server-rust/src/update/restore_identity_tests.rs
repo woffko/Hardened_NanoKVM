@@ -968,3 +968,102 @@ fn authenticated_ssh_state_is_rechecked_and_keyless_start_once_never_passes_pref
     ));
     assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
 }
+
+#[tokio::test]
+async fn native_key_probe_checks_the_authenticated_archive_without_changing_identity_bytes() {
+    let (root, config) = fixture();
+    let key_path = root.path().join("etc/ssh/ssh_host_ed25519_key");
+    fs::remove_file(&key_path).unwrap();
+    assert!(
+        std::process::Command::new("/usr/bin/ssh-keygen")
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("PATH", "/usr/bin:/bin")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "synthetic archive fixture",
+                "-f"
+            ])
+            .arg(&key_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let key = Zeroizing::new(fs::read(&key_path).unwrap());
+    let public_path = root.path().join("etc/ssh/ssh_host_ed25519_key.pub");
+    let public = Zeroizing::new(fs::read(&public_path).unwrap());
+    let bytes = Zeroizing::new(captured(root.path(), &config, CWD, CONFIG_PATH));
+    let mut restored = checked(&bytes).unwrap();
+    let staging = tempdir().unwrap();
+    restored
+        .check_native_host_keys(staging.path())
+        .await
+        .unwrap();
+    assert!(
+        Zeroizing::new(member(&mut restored, "etc/ssh/ssh_host_ed25519_key")).as_slice()
+            == key.as_slice()
+    );
+    assert!(
+        Zeroizing::new(member(&mut restored, "etc/ssh/ssh_host_ed25519_key.pub")).as_slice()
+            == public.as_slice()
+    );
+    assert!(Zeroizing::new(fs::read(key_path).unwrap()).as_slice() == key.as_slice());
+    assert!(Zeroizing::new(fs::read(public_path).unwrap()).as_slice() == public.as_slice());
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    let changed = Zeroizing::new(alter(
+        &bytes,
+        "etc/ssh/ssh_host_ed25519_key.pub",
+        Some(b"ssh-ed25519 AAAA synthetic-marker\n"),
+    ));
+    let mut restored = checked(&changed).unwrap();
+    let error = restored
+        .check_native_host_keys(staging.path())
+        .await
+        .err()
+        .unwrap();
+    assert!(!format!("{error:?} {error}").contains("synthetic-marker"));
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn native_key_probe_keeps_disabled_ssh_keyless_but_rejects_invalid_latent_identity() {
+    for kind in 0..4 {
+        let (root, config) = fixture();
+        put(root.path(), "etc/kvm/ssh_stop", b"");
+        match kind {
+            0 | 1 => {
+                fs::remove_file(root.path().join("etc/ssh/ssh_host_ed25519_key")).unwrap();
+                if kind == 1 {
+                    put(
+                        root.path(),
+                        "etc/ssh/ssh_host_ed25519_key.pub",
+                        b"ssh-ed25519 AAAA",
+                    );
+                }
+            }
+            2 => put(root.path(), "etc/ssh/ssh_host_ed25519_key", b""),
+            _ => put(
+                root.path(),
+                "etc/ssh/ssh_host_ed25519_key.pub",
+                &vec![b'x'; 16 * 1024 + 1],
+            ),
+        }
+        let mut restored = checked(&captured(root.path(), &config, CWD, CONFIG_PATH)).unwrap();
+        let staging = tempdir().unwrap();
+        let result = restored.check_native_host_keys(staging.path()).await;
+        if kind == 0 {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(RestoreIdentityError::Ssh(_))));
+        }
+        assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+}

@@ -66,6 +66,14 @@ pub struct IdentityCheckedRestore {
     archive: ValidatedRestore,
 }
 impl IdentityCheckedRestore {
+    /// Probe every preserved private host key using native ssh-keygen and a
+    /// sign/verify challenge, without modifying the archive or source identity.
+    /// Target compatibility requires execution within the exact verified target
+    /// runtime. This is not full sshd config/certificate/policy acceptance.
+    pub async fn check_native_host_keys(&mut self, private_staging: &Path) -> Result<()> {
+        restore_ssh::check_host_keys(&mut self.archive, private_staging).await?;
+        Ok(())
+    }
     pub fn members(&self) -> &[restore_archive::RestoreMember] {
         self.archive.members()
     }

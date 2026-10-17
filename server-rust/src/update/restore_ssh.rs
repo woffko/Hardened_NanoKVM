@@ -7,9 +7,12 @@ use super::restore_archive::{
 use std::{
     collections::BTreeSet,
     io::{self, Write},
+    path::Path,
 };
 use zeroize::Zeroizing;
 
+#[path = "restore_ssh_key_probe.rs"]
+mod key_probe;
 #[path = "restore_ssh_lexer.rs"]
 mod lexer;
 #[path = "restore_ssh_policy.rs"]
@@ -61,6 +64,12 @@ pub enum SshRestoreError {
     Limit,
     #[error("SSH restore authority/layout requires an explicit verified migration")]
     Unsupported,
+    #[error("SSH private key is invalid, unusable or does not match its public identity")]
+    InvalidKey,
+    #[error("SSH key preflight runtime failed")]
+    ProbeRuntime,
+    #[error("SSH key preflight exceeded its time budget")]
+    ProbeTimeout,
     #[error(transparent)]
     Archive(#[from] RestoreArchiveError),
 }
@@ -182,6 +191,56 @@ pub(super) fn check_archive(archive: &mut ValidatedRestore) -> Result<()> {
         &files,
         !present("etc/kvm/ssh_stop") || present("boot/start_ssh_once"),
     )
+}
+
+pub(super) async fn check_host_keys(
+    archive: &mut ValidatedRestore,
+    private_staging: &Path,
+) -> Result<()> {
+    use key_probe::Algorithm;
+    for (index, path) in HOST_KEYS.iter().enumerate() {
+        let private_index = archive.members().iter().position(|m| m.path == *path);
+        let public_path = format!("{path}.pub");
+        let public_index = archive.members().iter().position(|m| m.path == public_path);
+        let Some(private_index) = private_index else {
+            if public_index.is_some() {
+                return Err(SshRestoreError::InvalidKey);
+            }
+            continue;
+        };
+        let member = &archive.members()[private_index];
+        if member.action != RestoreAction::Write
+            || member.size == 0
+            || member.size > MAX_CONFIG as u64
+        {
+            return Err(SshRestoreError::InvalidKey);
+        }
+        let mut private = super::restore_capsule::create_private_spool(private_staging)
+            .map_err(|_| SshRestoreError::ProbeRuntime)?;
+        archive.copy_file(private_index, &mut private)?;
+        let public = if let Some(public_index) = public_index {
+            let member = &archive.members()[public_index];
+            if member.action != RestoreAction::Write || member.size > key_probe::MAX_PUBLIC as u64 {
+                return Err(SshRestoreError::InvalidKey);
+            }
+            let mut output = BoundedBytes {
+                bytes: Zeroizing::new(Vec::with_capacity(member.size as usize)),
+                limit: key_probe::MAX_PUBLIC,
+            };
+            archive.copy_file(public_index, &mut output)?;
+            Some(output.bytes)
+        } else {
+            None
+        };
+        key_probe::check_pair(
+            &private,
+            public.as_deref().map(|b| b.as_slice()),
+            [Algorithm::Rsa, Algorithm::Ecdsa, Algorithm::Ed25519][index],
+            private_staging,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn is_config(path: &str) -> bool {
