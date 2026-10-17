@@ -10,7 +10,7 @@ usage() {
 [ "$#" -eq 3 ] || usage
 LEFT_ROOT="$(readlink -f "$1")"
 RIGHT_ROOT="$(readlink -f "$2")"
-REPORT_DIR="$3"
+REPORT_DIR="$(readlink -m "$3")"
 
 for command in cmp diff find sha256sum sort readlink xargs
 do
@@ -35,8 +35,8 @@ inventory_paths() {
 		cd "$root"
 		for relative in "$@"
 		do
-			[ -f "$relative" ] || {
-				echo "missing artifact: $root/$relative" >&2
+			[ -s "$relative" ] || {
+				echo "missing or empty artifact: $root/$relative" >&2
 				exit 1
 			}
 			sha256sum "$relative"
@@ -47,9 +47,32 @@ inventory_paths() {
 inventory_tree() {
 	root="$1"
 	(
+		list="$(mktemp "$REPORT_DIR/.inventory-paths.XXXXXX")"
+		trap 'rm -f "$list"' EXIT
 		cd "$root"
-		find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+		find . -type f -print0 | LC_ALL=C sort -z > "$list"
+		[ -s "$list" ] || {
+			echo "empty artifact tree: $root" >&2
+			exit 1
+		}
+		xargs -0 -r sha256sum < "$list"
+		find . -type l -printf 'SYMLINK %p -> %l\n' | LC_ALL=C sort
 	)
+}
+
+require_module_set() {
+	module_root="$1"
+	expected_count="$2"
+	module_count="$(find "$module_root" -type f -name '*.ko' -printf '.\n' | wc -l)"
+	[ "$module_count" -eq "$expected_count" ] || {
+		echo "incomplete module inventory: $module_root (expected $expected_count, got $module_count)" >&2
+		exit 1
+	}
+	empty_module="$(find "$module_root" -type f -name '*.ko' -empty -print -quit)"
+	[ -z "$empty_module" ] || {
+		echo "empty module in inventory: $module_root" >&2
+		exit 1
+	}
 }
 
 compare_inventory() {
@@ -68,7 +91,7 @@ kernel_inventory() {
 	output="$2"
 	(
 		cd "$root/kernel"
-		for relative in \
+		inventory_paths . \
 			.config \
 			Module.symvers \
 			System.map \
@@ -77,12 +100,17 @@ kernel_inventory() {
 			arch/riscv/boot/dts/cvitek/sg2000_duo_sd.dtb \
 			arch/riscv/boot/dts/cvitek/sg2002_duo_sd.dtb \
 			arch/riscv/boot/dts/cvitek/sg2002_licheervnano_sd.dtb
-		do
-			sha256sum "$relative"
-		done
-		find . -type f -name '*.ko' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+		find . -type f -name '*.ko' -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
 	) > "$output"
 }
+
+for candidate in "$LEFT_ROOT" "$RIGHT_ROOT"
+do
+	require_module_set "$candidate/kernel" 24
+	require_module_set "$candidate/external/artifacts" 30
+	require_module_set "$candidate/media/artifacts" 3
+	require_module_set "$candidate/runtime/system/ko" 57
+done
 
 kernel_inventory "$LEFT_ROOT" "$REPORT_DIR/kernel-left.tsv"
 kernel_inventory "$RIGHT_ROOT" "$REPORT_DIR/kernel-right.tsv"
