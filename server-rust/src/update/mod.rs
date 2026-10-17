@@ -6,6 +6,7 @@ pub mod restore_capsule;
 pub mod restore_effective;
 mod restore_fs;
 pub mod restore_identity;
+pub mod restore_job;
 pub mod restore_native;
 mod restore_policy;
 pub mod restore_preflight;

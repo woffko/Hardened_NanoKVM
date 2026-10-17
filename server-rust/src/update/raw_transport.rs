@@ -58,6 +58,28 @@ pub struct TransferContext {
 }
 
 impl TransferContext {
+    /// Fixed public helper CLI fields; no descriptor numbers or secrets.
+    pub(super) fn append_helper_arguments(&self, command: &mut std::process::Command) {
+        let mut transaction = String::with_capacity(32);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in self.transaction {
+            transaction.push(HEX[(byte >> 4) as usize] as char);
+            transaction.push(HEX[(byte & 15) as usize] as char);
+        }
+        // new() admits only ASCII version bytes; the field remains private.
+        use std::os::unix::ffi::OsStrExt;
+        let version = std::ffi::OsStr::from_bytes(&self.version[..self.version_length as usize]);
+        command
+            .arg("--transaction")
+            .arg(transaction)
+            .arg("--version")
+            .arg(version)
+            .arg("--boot-size")
+            .arg(self.sizes[0].to_string())
+            .arg("--rootfs-size")
+            .arg(self.sizes[1].to_string());
+    }
+
     pub fn new(
         transaction: [u8; 16],
         version: &str,

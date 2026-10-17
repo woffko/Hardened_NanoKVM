@@ -143,6 +143,82 @@ fn private_ssh_root_uses_only_authenticated_native_identity_and_inert_server_dat
 }
 
 #[test]
+fn owned_ssh_job_cleans_typed_identity_on_success_cancel_transfer_and_native_failure() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::owned_ssh_job_cleans_typed_identity_on_success_cancel_transfer_and_native_failure"
+    )) {
+        return;
+    }
+    use crate::update::{
+        raw_transport::TransferContext,
+        restore_job::{Check, JobError, Outcome, PinnedSshHelper, SshPreflightJob},
+        restore_preflight::prepare_sshd_root,
+    };
+    use std::{fs::File, io::Write, os::fd::AsRawFd, sync::atomic::AtomicBool};
+    fn image(size: usize) -> File {
+        let mut writable = tempfile::tempfile().unwrap();
+        writable.write_all(&vec![0x42; size]).unwrap();
+        let readonly = File::open(format!("/proc/self/fd/{}", writable.as_raw_fd())).unwrap();
+        drop(writable);
+        readonly
+    }
+    let (source, config) = fixture();
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    for (program, cancelled, bad_images, unexpected) in [
+        ("/usr/bin/true", false, false, false),
+        ("/usr/bin/true", true, false, false),
+        ("/usr/bin/true", false, true, false),
+        ("/usr/bin/false", false, false, false),
+        ("/usr/bin/true", false, false, true),
+    ] {
+        let target = tempdir().unwrap();
+        let prepared = prepare_sshd_root(&mut identity, target.path()).unwrap();
+        if unexpected {
+            put(
+                target.path(),
+                "etc/ssh/unexpected.conf",
+                b"do not remove unknown recovery state",
+            );
+        }
+        // Unit-only helper provenance bypass. These installed host programs do
+        // NOT validate SSH/images: the test establishes lifecycle/cleanup only.
+        let helper = PinnedSshHelper::host_fixture(Path::new(program), target.path());
+        let result = SshPreflightJob {
+            helper,
+            identity: prepared,
+            images: if bad_images {
+                [File::open("/dev/null").unwrap(), image(65537)]
+            } else {
+                [image(1025), image(65537)]
+            },
+            transfer: TransferContext::new([42; 16], "0.3.0-raw.fixture", [1025, 65537]).unwrap(),
+            image_mountpoint: target.path().join("unused-host-fixture-mountpoint"),
+            check: Check::Syntax,
+        }
+        .run(&AtomicBool::new(cancelled));
+        if unexpected {
+            assert!(matches!(result, Err(JobError::Cleanup)));
+            assert_eq!(
+                fs::read(target.path().join("etc/ssh/unexpected.conf")).unwrap(),
+                b"do not remove unknown recovery state"
+            );
+        } else {
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+            if cancelled {
+                assert!(matches!(result, Err(JobError::Cancelled)));
+            } else if bad_images {
+                assert!(matches!(result, Err(JobError::Process)));
+            } else if program.ends_with("false") {
+                assert!(matches!(result, Err(JobError::Native)));
+            } else {
+                assert!(matches!(result, Ok(Outcome::Syntax)));
+            }
+        }
+    }
+}
+
+#[test]
 fn private_ssh_root_rejects_existing_unsafe_redirected_or_nested_mount_roots() {
     if !preflight_namespace(concat!(
         module_path!(),

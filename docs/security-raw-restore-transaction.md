@@ -638,7 +638,8 @@ pathname, arbitrary command, arbitrary FD number or secret CLI input is accepted
 Public transaction context is NOT a signature. The trusted parent still must
 authenticate both immutable snapshots, close writable/Command aliases, build
 protected identity staging, hold the common lock and bound wall time/kill/reap.
-No production parent currently invokes this mode.
+The blocking supervisor below invokes this mode as a component; the production
+system API and release packaging do not yet invoke it.
 
 Feature-gated host fixtures bind a synthetic readonly/noexec source and exercise
 the same import/pivot/native boundary, including actual host sshd valid/invalid
@@ -681,13 +682,13 @@ plaintext archive spool, boot marker or durable restore commit. After abrupt
 process/power loss, any residual private directory cannot authorize apply; exact
 transaction-owned crash cleanup is still required in the future orchestrator.
 The builder does not itself prove native key possession/effective SSH policy,
-signature/ticket authorization, or successful restoration. No production parent
-currently invokes it. Host tests authenticate a synthetic capsule, build this
+signature/ticket authorization, or successful restoration. No production system
+API currently invokes it. Host tests authenticate a synthetic capsule, build this
 root, import the host runtime through the same image fixture boundary, and run
 real sshd syntax successfully; target loop/image provenance is intentionally not
 claimed. Kernel EFBIG after copied native tables verifies partial-input cleanup.
 
-### Private effective SSH policy (component; parent integration open)
+### Private effective SSH policy (component; system-API integration open)
 
 The image-only helper mode may append `--effective-root FIXED_ROOT_CONNECTION_SPEC`.
 It executes only the signed `/usr/sbin/sshd -e -T -f /etc/ssh/sshd_config -C SPEC`,
@@ -725,10 +726,69 @@ or successful root password login. No login policy is force-enabled.
 Before accepting a result the parent must concurrently drain the private pipe,
 enforce a wall deadline, kill/reap on cancellation/overflow/error, and require
 native success plus EOF. The reader's byte cap is NOT a time bound. Production
-parent orchestration, isolated key-possession integration, the complete Match
+system-API integration, isolated key-possession integration, the complete Match
 matrix and real target login remain required. Host tests exercise repeated equal
 contexts, a differing Match Address branch and invalid output descriptor modes;
 they do not substitute for signed-image/loop/target acceptance.
+
+### Owned blocking SSH preflight supervisor (component; system API not wired)
+
+`restore_job::SshPreflightJob` connects the typed private identity root, the two
+readonly image descriptors, public transfer context and fixed syntax/effective
+helper mode. It consumes its inputs and keeps the identity guard until the
+direct child has exited and been reaped. One fixed small SCM_RIGHTS packet is
+queued before spawn, then the sender and local image owners close; a failed
+spawn drops the receiver/queued descriptors. The configured Command is dropped
+immediately after spawn so it cannot retain stdin/stdio aliases. A successful
+send remains only a queued transport record, not native acceptance or authority.
+
+`PinnedSshHelper::capture` copies at most 32 MiB through a 64-KiB buffer into
+rootfs-only anonymous O_TMPFILE storage, checking exact size/EOF and SHA-256.
+**The expected size/hash must come from trusted build/release authority, not p3
+or the helper's own manifest.** This constructor is not signature verification;
+the protected packaging/authority caller is still missing. It requires ELF64,
+little-endian RV64 ET_EXEC, a bounded program-header table and a LOAD, with no
+PT_INTERP/PT_DYNAMIC. This intentionally admits the current static build, not
+an unreviewed future static-PIE layout. No ambient loader/vendor library is used.
+After fsync/chmod0500 it independently reopens the exact anonymous inode as
+O_RDONLY/CLOEXEC, closes the only writable owner, and pins the descriptor above
+stdio. Exec uses actual procfs `/proc/self/fd/N`, never the mutable source path.
+Source replacement/overwrite after capture cannot change executed bytes; this
+does not contain hostile local root or raw backing-store writes.
+
+Native stdout is always a newly created private pipe, stderr is null. The parent
+drains nonblocking while checking child status, cancellation and a 15-second
+helper-execution deadline (not a whole transaction/capture deadline). Effective
+output has a strict 64-KiB cap; syntax mode rejects any output. Native exit zero
+AND output EOF are required, followed by the existing zeroizing parser for
+effective mode. Raw output never enters ordinary logs/errors/results. Cancellation
+uses a caller-owned AtomicBool with SeqCst loads/stores, checked at most every
+20 ms while waiting, after bounded reads and again after checked cleanup. The
+pre-spawn transport has its separate two-second socket timeout.
+
+Every child-owning error/unwind path kills and synchronously waits before the
+root can drop. Ordinary Result paths then explicitly check exact-inventory
+cleanup, and cleanup failure overrides a successful native result. Unwind has
+only best-effort root Drop; it returns no outcome. Persistent kernel wait/I/O
+failure may prevent completion: ownership is retained instead of abandoning a
+live reader or claiming a finite reap guarantee. Unexpected recovery entries are
+preserved, not recursively deleted. Abrupt process/power loss still needs the
+future protected transaction-owned crash cleanup; residual files grant no apply
+authority.
+
+This API is synchronous and creates no async/detached worker. Its caller must
+run it on the dedicated blocking transaction owner, retain the common lock and
+quiesced writers, signal cancellation and join that owner. Dropping a Tokio
+spawn_blocking JoinHandle does not cancel it and is not a valid integration.
+The native sandbox cannot fork; this supervisor is not a process-tree manager
+for arbitrary untrusted programs. Host lifecycle tests use explicit unit-only
+host-ELF bypasses, not production provenance. They cover size/hash/ELF rejection,
+source mutation/proc-fd exec, exact output bounds, cancellation, timeout, reaping,
+zero exit without EOF, and real typed-root cleanup including unknown-file
+preservation. Capturing the retained static RV64 helper does not execute it on
+the host. Target loop/exec/kernel cleanup, runtime trust binding, isolated native
+key possession, full Match matrix and actual SSH login remain open. The legacy
+raw writer/early apply are unchanged: **C1 remains OPEN**.
 
 ### Fresh-process SSH syntax sandbox (component only)
 
@@ -743,7 +803,7 @@ the exact signed target executable/loader/libraries and authenticated immutable
 identity snapshot, materialize them into a quiesced private root on `/`, protect
 that directory and its ancestors, and hold the transaction lock throughout.
 The separate exact-image entry imports its runtime, and the builder above
-prepares its identity inputs; their production caller is still missing. A pathname,
+prepares its identity inputs; their production system-API caller is still missing. A pathname,
 private mode, ELF header or successful syntax exit never grants restore authority.
 
 The root is owner-0 and private, with no setid/sticky bits; the bounded tree
@@ -785,8 +845,9 @@ with a scrubbed environment and no native output forwarded or logged. Its exit
 code is only a syntax result. Seccomp necessarily admits the initial `execve`;
 it is not an executable-pathname filter and a compromised native process can
 re-exec within the same closed root. This is not a general-purpose daemon,
-connection/session or `Authorized*Command` sandbox. No `-T` output/policy parser,
-certificate/Match matrix or root-password availability proof is implemented.
+connection/session or `Authorized*Command` sandbox. The separate image-only
+effective mode/parser above is not a certificate/full Match matrix or
+root-password availability proof.
 
 Build this helper only through `server-rust/scripts/build-restore-runtime.sh`:
 locked/offline static musl, no ELF interpreter, DT_NEEDED, RPATH or RUNPATH. The
