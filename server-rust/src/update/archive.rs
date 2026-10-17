@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
@@ -24,9 +24,13 @@ pub fn safe_join(root: &Path, member_name: &Path) -> Result<PathBuf> {
 }
 
 pub fn extract_tar_gz_safe(src: &Path, dest: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(dest)?;
     let file = fs::File::open(src)?;
-    let gz = GzDecoder::new(file);
+    extract_tar_gz_reader(file, dest)
+}
+
+pub(crate) fn extract_tar_gz_reader(src: impl Read, dest: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(dest)?;
+    let gz = GzDecoder::new(src);
     let mut archive = Archive::new(gz);
     let mut first_top_level = None;
 

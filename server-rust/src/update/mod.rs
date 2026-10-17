@@ -8,3 +8,5 @@ pub mod restore_native;
 mod restore_policy;
 pub mod restore_runtime;
 pub mod restore_ssh;
+pub(crate) mod staged_archive;
+pub(crate) mod staged_metadata;

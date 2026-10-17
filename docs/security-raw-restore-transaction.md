@@ -23,6 +23,62 @@ fixed C1.
   Losing p1's ticket must never cause an untrusted p3 preserve tree to restore
   privileged files or the system to fall back silently to a default identity.
 
+## Exact system metadata at install (connected to the system API)
+
+The online system downloader retains the selected channel's exact JSON bytes
+and detached signature, rather than re-serializing `SystemLatest`. After archive
+and manifest validation it publishes one rootfs receipt:
+`/etc/kvm/update-trust/system-metadata.v1`. The directory is owner-0 `0700`, the
+regular single-link record is `0600`, and neither may be reached through a
+symlink or nested mount. The bounded binary framing carries at most 64 KiB JSON
+and 16 KiB signature; it is not a new signing format or a trust-policy change.
+
+Publication uses a private random exclusive temporary file, file fsync,
+descriptor-relative rename, then directory fsync under an exclusive store lock.
+Malformed existing canonical receipts are preserved and require operator
+recovery, never silently overwritten. Deterministic I/O fault tests establish
+complete old/new records at these boundaries, not physical power-loss proof.
+Process termination may leave an untrusted random temporary record, which is
+never imported as authority.
+
+Every system install rereads persisted Config without falling back to stale
+startup policy, reparses the exact receipt, resolves the current allowed key and
+verifies the detached signature again. Explicit laboratory unsigned permission
+is also rechecked; a cached success cannot grant it. The mutable p3 stage record
+must match the authenticated metadata but is not itself authentication. Legacy
+staging without a protected receipt requires **Download and Verify again**;
+there is no automatic trust import of an old JSON/hash/marker.
+
+New downloads no longer recursively delete the system stage root. Backups,
+preserve state, old archives and unknown recovery files remain. Any existing
+root pending record or legacy raw marker, including malformed data or dangling
+links, conservatively blocks a new download/install until recovery is inspected.
+This is denial/retry protection, not authorization from a legacy marker.
+
+Archive downloads use a pinned stage directory and a random exclusive `0600`
+file. Curl receives no output pathname, user curlrc or stdin; only HTTPS and
+HTTPS redirects are allowed. Stdout streams through one 64-KiB buffer with an
+exact signed-size limit (maximum 2 GiB), a wall deadline and direct-child
+kill/reap handling. There is no stdout append/retry; a failed transfer is retried
+as a fresh download by the caller/user. No whole-archive memory buffer is used.
+Only the owned temporary member is removed on failure. The canonical archive,
+progress and stage-record names are replaced by rename, never opened through
+old symlinks/hardlinks for writing; outside target contents are left unchanged.
+
+Fresh verification and extraction read the same open archive descriptor. Cache
+reuse and install open regular single-link archives beneath the pinned directory
+with `openat2` confinement and rehash them against authenticated metadata. Same
+size plus a valid extracted tree is insufficient. SHA-256/SHA-512 and the
+production key IDs/algorithm are unchanged.
+
+**C1 remains open.** A pinned descriptor prevents pathname replacement, not an
+in-place write by another holder of the inode or raw p3. Extraction destinations,
+some legacy record reads, payload consumers and the raw/early writer are not yet
+an immutable descriptor-owned transaction. USB p3 exclusion, isolated writer,
+signed-target runtime/rootfs binding, protected tickets, early fail-closed apply,
+private app staging and device/crash/release gates remain mandatory. Do not ship
+this partial system-API improvement as the completed security migration.
+
 ## Capsule v1 (implemented core)
 
 `server-rust/src/update/restore_capsule.rs` uses ChaCha20-Poly1305 with RustCrypto

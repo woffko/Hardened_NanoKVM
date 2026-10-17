@@ -6,7 +6,7 @@ use std::{
     cmp::Ordering,
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         process::CommandExt,
@@ -26,7 +26,12 @@ use crate::{
     error::ApiResponse,
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
-    update::{archive::extract_tar_gz_safe, keys::resolve_update_public_key},
+    update::{
+        archive::extract_tar_gz_reader,
+        keys::resolve_update_public_key,
+        staged_archive::{StageDirectory, StagedDownload},
+        staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
+    },
 };
 
 const SYSTEM_VERSION_FILE: &str = "/etc/kvm/system-version.json";
@@ -269,6 +274,14 @@ struct SystemStageRecord {
     manifest: SystemManifest,
 }
 
+// Constructed only after exact metadata/signature verification. Do not derive
+// Deserialize or build it from the mutable stage receipt.
+struct VerifiedSystemMetadata {
+    latest: SystemLatest,
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SystemManifest {
     format: String,
@@ -500,8 +513,10 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     }
 
     let guard = acquire_update_lock()?;
+    ensure_no_pending_system_update()?;
     let current = read_current_system_version();
-    let latest = get_latest_system(is_preview_enabled(), &state.config).await?;
+    let verified = get_verified_latest_system(is_preview_enabled(), &state.config).await?;
+    let latest = verified.latest.clone();
     enforce_required_application_version(&latest)?;
 
     if latest.target != current.target {
@@ -526,6 +541,15 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         })
         .await?
     {
+        let receipt_stage_dir = stage_dir.clone();
+        run_blocking_system_update_with_guard("commit cached system metadata", guard, move || {
+            ensure_no_pending_system_update()?;
+            let mut archive =
+                StageDirectory::open(&receipt_stage_dir)?.open_archive(&verified.latest.name)?;
+            verify_system_archive(&mut archive, &verified.latest)?;
+            persist_verified_system_metadata(&verified)
+        })
+        .await?;
         remove_update_progress(&stage_dir)?;
         return Ok(Json(ApiResponse::ok(SystemDownloadRsp {
             current,
@@ -550,19 +574,21 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         ),
     )?;
 
-    let archive = stage_dir.join(&latest.name);
-    if let Err(err) = download_system_asset(&latest, &archive).await {
-        let _ = write_update_progress(
-            &stage_dir,
-            SystemUpdateProgress::new(
-                "download",
-                "failed",
-                Some(latest.version.clone()),
-                Some("download failed".to_string()),
-            ),
-        );
-        return Err(err);
-    }
+    let mut downloaded = match download_system_asset(&latest, &stage_dir).await {
+        Ok(downloaded) => downloaded,
+        Err(err) => {
+            let _ = write_update_progress(
+                &stage_dir,
+                SystemUpdateProgress::new(
+                    "download",
+                    "failed",
+                    Some(latest.version.clone()),
+                    Some("download failed".to_string()),
+                ),
+            );
+            return Err(err);
+        }
+    };
 
     write_update_progress(
         &stage_dir,
@@ -570,25 +596,28 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     )?;
 
     let stage_dir_for_verify = stage_dir.clone();
-    let latest_for_verify = latest.clone();
     let staged = match run_blocking_system_update_with_guard(
         "verify and stage system update",
         guard,
         move || {
-            let archive = stage_dir_for_verify.join(&latest_for_verify.name);
-            verify_system_archive(&archive, &latest_for_verify)?;
+            ensure_no_pending_system_update()?;
+            verify_system_archive(downloaded.file_mut(), &verified.latest)?;
+            downloaded.publish(&verified.latest.name)?;
 
             let manifest = extract_and_verify_system_bundle(
-                &archive,
+                downloaded.file_mut(),
                 &stage_dir_for_verify,
-                &latest_for_verify,
+                &verified.latest,
             )?;
             let record = SystemStageRecord {
                 staged_at: now_unix_seconds(),
-                latest: latest_for_verify,
+                latest: verified.latest.clone(),
                 manifest,
             };
             write_stage_record(&stage_dir_for_verify, &record)?;
+            // Publish authority last, after archive/manifest checks. A crash
+            // with mismatched generations fails closed and requires re-download.
+            persist_verified_system_metadata(&verified)?;
             Ok(staged_summary(&record))
         },
     )
@@ -620,16 +649,25 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
 
 pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let guard = acquire_update_lock()?;
+    ensure_no_pending_system_update()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
     let staged_version = read_staged_update(&stage_dir)
         .ok()
         .flatten()
         .map(|staged| staged.version);
-    let config = Config::read().unwrap_or_else(|err| {
-        tracing::warn!(error = %err, "failed to refresh config before system update install");
-        (*state.config).clone()
-    });
+    let config = Config::read()?;
+    let receipt = {
+        let store =
+            MetadataStore::open().map_err(|error| AppError::BadRequest(error.to_string()))?;
+        required_system_metadata_receipt(&store)?
+    };
+    let verified = authenticate_stored_system_metadata(receipt, &config).await?;
+    if verified.latest.target != read_current_system_version().target {
+        return Err(AppError::BadRequest(
+            "system update target no longer matches the device".to_string(),
+        ));
+    }
     write_update_progress(
         &stage_dir,
         SystemUpdateProgress::new(
@@ -643,7 +681,7 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
     let installed = match run_blocking_system_update_with_guard(
         "install staged system update",
         guard,
-        move || match install_staged_update(&stage_dir, &config) {
+        move || match install_staged_update(&stage_dir, &config, verified) {
             Ok(installed) => Ok(installed),
             Err(err) => {
                 let _ = write_update_progress(
@@ -723,6 +761,13 @@ pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse>
 }
 
 async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLatest> {
+    Ok(get_verified_latest_system(preview, config).await?.latest)
+}
+
+async fn get_verified_latest_system(
+    preview: bool,
+    config: &Config,
+) -> Result<VerifiedSystemMetadata> {
     if preview {
         match fetch_latest_system(GITHUB_SYSTEM_PREVIEW_JSON, config).await {
             Ok(preview_latest) => {
@@ -751,22 +796,71 @@ async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLates
     fetch_latest_system(GITHUB_SYSTEM_LATEST_JSON, config).await
 }
 
-fn newer_system_release(left: SystemLatest, right: SystemLatest) -> SystemLatest {
-    match compare_system_versions(&left.version, &right.version) {
+fn newer_system_release(
+    left: VerifiedSystemMetadata,
+    right: VerifiedSystemMetadata,
+) -> VerifiedSystemMetadata {
+    match compare_system_versions(&left.latest.version, &right.latest.version) {
         Some(Ordering::Less) => right,
         _ => left,
     }
 }
 
-async fn fetch_latest_system(url: &str, config: &Config) -> Result<SystemLatest> {
+async fn fetch_latest_system(url: &str, config: &Config) -> Result<VerifiedSystemMetadata> {
     validate_metadata_url(url)?;
     let metadata = fetch_system_metadata(url).await?;
 
-    let latest: SystemLatest = serde_json::from_slice(&metadata)
-        .map_err(|err| AppError::Internal(format!("invalid system-latest.json: {err}")))?;
+    let latest = parse_exact_system_metadata(&metadata)?;
+    let signature = enforce_system_metadata_signature(url, &metadata, &latest, config).await?;
+    Ok(VerifiedSystemMetadata {
+        latest,
+        metadata,
+        signature,
+    })
+}
+
+fn parse_exact_system_metadata(metadata: &[u8]) -> Result<SystemLatest> {
+    if metadata.is_empty() || metadata.len() > MAX_METADATA {
+        return Err(AppError::BadRequest(
+            "invalid system update metadata size".to_string(),
+        ));
+    }
+    let latest = serde_json::from_slice(metadata)
+        .map_err(|_| AppError::BadRequest("invalid system update metadata".to_string()))?;
     validate_latest_system(&latest)?;
-    enforce_system_metadata_signature(url, &metadata, &latest, config).await?;
     Ok(latest)
+}
+
+fn persist_verified_system_metadata(verified: &VerifiedSystemMetadata) -> Result<()> {
+    let store = MetadataStore::open().map_err(|error| AppError::BadRequest(error.to_string()))?;
+    store
+        .replace(&verified.metadata, &verified.signature)
+        .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn required_system_metadata_receipt(store: &MetadataStore) -> Result<MetadataReceipt> {
+    store
+        .read()
+        .map_err(|error| AppError::BadRequest(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "no protected system update metadata; run Download and Verify again".to_string(),
+            )
+        })
+}
+
+async fn authenticate_stored_system_metadata(
+    receipt: MetadataReceipt,
+    config: &Config,
+) -> Result<VerifiedSystemMetadata> {
+    let latest = parse_exact_system_metadata(&receipt.metadata)?;
+    verify_system_metadata_with_policy(&receipt.metadata, &receipt.signature, &latest, config)
+        .await?;
+    Ok(VerifiedSystemMetadata {
+        latest,
+        metadata: receipt.metadata,
+        signature: receipt.signature,
+    })
 }
 
 async fn fetch_system_metadata(url: &str) -> Result<Vec<u8>> {
@@ -794,8 +888,29 @@ async fn enforce_system_metadata_signature(
     metadata: &[u8],
     latest: &SystemLatest,
     config: &Config,
+) -> Result<Vec<u8>> {
+    let signature = if system_metadata_is_unsigned(latest) {
+        Vec::new()
+    } else {
+        let signature_url = metadata_signature_url(metadata_url)?;
+        fetch_system_metadata_signature(&signature_url).await?
+    };
+    verify_system_metadata_with_policy(metadata, &signature, latest, config).await?;
+    Ok(signature)
+}
+
+async fn verify_system_metadata_with_policy(
+    metadata: &[u8],
+    signature: &[u8],
+    latest: &SystemLatest,
+    config: &Config,
 ) -> Result<()> {
     if system_metadata_is_unsigned(latest) {
+        if !signature.is_empty() {
+            return Err(AppError::BadRequest(
+                "unsigned system metadata cannot carry a signature receipt".to_string(),
+            ));
+        }
         if config.security.allow_unsigned_updates {
             tracing::warn!(
                 version = %latest.version,
@@ -814,14 +929,17 @@ async fn enforce_system_metadata_signature(
             "unsupported system update metadata signature algorithm".to_string(),
         ));
     }
+    if signature.is_empty() || signature.len() > MAX_SIGNATURE {
+        return Err(AppError::BadRequest(
+            "invalid system update metadata signature size".to_string(),
+        ));
+    }
     let public_key = resolve_update_public_key(
         &config.paths.system_update_public_key,
         &latest.signature_key_id,
     )?;
 
-    let signature_url = metadata_signature_url(metadata_url)?;
-    let signature = fetch_system_metadata_signature(&signature_url).await?;
-    verify_system_metadata_signature(metadata, &signature, &public_key).await
+    verify_system_metadata_signature(metadata, signature, &public_key).await
 }
 
 async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
@@ -894,43 +1012,108 @@ fn system_metadata_is_unsigned(latest: &SystemLatest) -> bool {
         && latest.signature_key_id == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
 }
 
-async fn download_system_asset(latest: &SystemLatest, target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let output = run_allowed(
-        AllowedCommand::Curl,
-        [
-            "-fL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "600",
-            "--output",
-            path_arg(target)?,
-            latest.url.as_str(),
-        ],
-        DOWNLOAD_TIMEOUT,
-    )
-    .await?;
-    ensure_success(&output, "download system update archive")?;
-
-    let size = fs::metadata(target)?.len();
-    if size == 0 || size > MAX_SYSTEM_UPDATE_BYTES {
+async fn download_system_asset(latest: &SystemLatest, stage: &Path) -> Result<StagedDownload> {
+    if latest.size == 0 || latest.size > MAX_SYSTEM_UPDATE_BYTES {
         return Err(AppError::BadRequest(
             "invalid system update archive size".to_string(),
         ));
     }
-    if size != latest.size {
-        return Err(AppError::BadRequest(format!(
-            "system update archive size mismatch: got {size}, expected {}",
-            latest.size
-        )));
-    }
+    let downloaded = StageDirectory::open(stage)?.create_download()?;
+    // No output pathname, curlrc, shell or inherited stdin. Curl cannot follow
+    // an archive-name symlink. Retries require a fresh descriptor/empty file;
+    // never let a stdout retry append a second response to the same archive.
+    let mut command = tokio::process::Command::new("/usr/bin/curl");
+    command.args([
+        "--disable",
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "600",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--",
+        latest.url.as_str(),
+    ]);
+    receive_system_archive(&mut command, latest.size, &downloaded, DOWNLOAD_TIMEOUT).await?;
+    Ok(downloaded)
+}
 
+async fn receive_system_archive(
+    command: &mut tokio::process::Command,
+    size: u64,
+    downloaded: &StagedDownload,
+    deadline: Duration,
+) -> Result<()> {
+    let mut destination = tokio::fs::File::from_std(downloaded.writer()?);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut source = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal("missing archive stream".into()))?;
+    let result = tokio::time::timeout(deadline, async {
+        let (_, status) = tokio::try_join!(
+            copy_system_archive(&mut source, &mut destination, size),
+            async { child.wait().await.map_err(AppError::from) },
+        )?;
+        if !status.success() {
+            return Err(AppError::BadRequest(
+                "download system update archive failed".into(),
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::Internal(
+            "system archive download timed out".into(),
+        ))
+    });
+    if result.is_err() {
+        // Stop/reap the one fixed direct child, including size-limit failures.
+        // Cancellation also drops kill_on_drop. No detached transfer task or
+        // external child owns the destination; Tokio may finish one in-flight
+        // bounded filesystem write to the now-unlinked owned temporary inode.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    result
+}
+
+async fn copy_system_archive(
+    source: &mut (impl tokio::io::AsyncRead + Unpin),
+    destination: &mut (impl tokio::io::AsyncWrite + Unpin),
+    size: u64,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut remaining = size;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = source.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        if count as u64 > remaining {
+            return Err(AppError::BadRequest(
+                "system update archive exceeds signed size".into(),
+            ));
+        }
+        destination.write_all(&buffer[..count]).await?;
+        remaining -= count as u64;
+    }
+    if remaining != 0 {
+        return Err(AppError::BadRequest(
+            "system update archive is shorter than signed size".into(),
+        ));
+    }
+    destination.flush().await?;
     Ok(())
 }
 
@@ -1007,8 +1190,15 @@ fn read_cached_staged_update(
     stage_dir: &Path,
     latest: &SystemLatest,
 ) -> Result<Option<SystemStagedUpdate>> {
-    let Some(record) = read_stage_record(stage_dir)? else {
-        return Ok(None);
+    let record = match read_stage_record(stage_dir) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(None),
+        Err(_) => {
+            // A legacy/malformed p3 receipt is not authority and cannot prevent
+            // a fresh authenticated download. Do not delete its recovery data.
+            tracing::warn!("invalid cached system staging cannot be reused");
+            return Ok(None);
+        }
     };
     if record.latest != *latest {
         return Ok(None);
@@ -1017,7 +1207,12 @@ fn read_cached_staged_update(
         return Ok(None);
     };
 
-    match validate_cached_system_extract(stage_dir, &record) {
+    let reusable = (|| {
+        let mut archive = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
+        verify_system_archive(&mut archive, latest)?;
+        validate_cached_system_extract(stage_dir, &record)
+    })();
+    match reusable {
         Ok(()) => Ok(Some(staged)),
         Err(err) => {
             tracing::warn!(error = %err, "cached staged system update is not reusable");
@@ -1197,8 +1392,17 @@ fn validate_system_metadata_signature_fields(latest: &SystemLatest) -> Result<()
     Ok(())
 }
 
-fn verify_system_archive(path: &Path, latest: &SystemLatest) -> Result<()> {
-    let hashes = hash_file(path)?;
+fn verify_system_archive(file: &mut fs::File, latest: &SystemLatest) -> Result<()> {
+    if file.metadata()?.len() != latest.size
+        || latest.size == 0
+        || latest.size > MAX_SYSTEM_UPDATE_BYTES
+    {
+        return Err(AppError::BadRequest(
+            "system update archive size mismatch".into(),
+        ));
+    }
+    file.rewind()?;
+    let hashes = hash_reader(&mut (&mut *file).take(latest.size + 1))?;
     if !hashes.sha256.eq_ignore_ascii_case(&latest.sha256) {
         return Err(AppError::BadRequest(
             "system update sha256 mismatch".to_string(),
@@ -1209,18 +1413,19 @@ fn verify_system_archive(path: &Path, latest: &SystemLatest) -> Result<()> {
             "system update sha512 mismatch".to_string(),
         ));
     }
+    file.rewind()?;
     Ok(())
 }
 
 fn extract_and_verify_system_bundle(
-    archive: &Path,
+    archive: &mut fs::File,
     stage_dir: &Path,
     latest: &SystemLatest,
 ) -> Result<SystemManifest> {
     let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
     remove_dir_if_exists(&extract_dir)?;
     fs::create_dir_all(&extract_dir)?;
-    extract_tar_gz_safe(archive, &extract_dir)?;
+    extract_tar_gz_reader(archive, &extract_dir)?;
 
     validate_system_extract_root(&extract_dir)?;
 
@@ -1233,18 +1438,21 @@ fn extract_and_verify_system_bundle(
     Ok(manifest)
 }
 
-fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPendingUpdate> {
+fn install_staged_update(
+    stage_dir: &Path,
+    config: &Config,
+    verified: VerifiedSystemMetadata,
+) -> Result<SystemPendingUpdate> {
     let record = read_stage_record(stage_dir)?
         .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
-    validate_latest_system(&record.latest)?;
-    enforce_required_application_version(&record.latest)?;
-
-    let archive = stage_dir.join(&record.latest.name);
-    if !archive.is_file() {
-        return Err(AppError::BadRequest(
-            "staged system update archive is missing".to_string(),
-        ));
+    if record.latest != verified.latest {
+        return Err(AppError::BadRequest("staged system update differs from authenticated metadata; run Download and Verify again".to_string()));
     }
+    ensure_no_pending_system_update()?;
+    let latest = verified.latest;
+    enforce_required_application_version(&latest)?;
+
+    let mut archive = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(
@@ -1254,7 +1462,7 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
             Some("verifying staged system update archive".to_string()),
         ),
     )?;
-    verify_system_archive(&archive, &record.latest)?;
+    verify_system_archive(&mut archive, &latest)?;
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(
@@ -1264,7 +1472,7 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
             Some("extracting staged system update payload".to_string()),
         ),
     )?;
-    let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
+    let manifest = extract_and_verify_system_bundle(&mut archive, stage_dir, &latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
 
     write_update_progress(
@@ -2479,8 +2687,27 @@ fn prepare_stage_dir(stage_dir: &Path) -> Result<()> {
             "invalid system update staging directory".to_string(),
         ));
     }
-    remove_dir_if_exists(stage_dir)?;
-    fs::create_dir_all(stage_dir)?;
+    // Old backups/preserve/unknown recovery material are not disposable cache.
+    // New verified extraction replaces only its exact generated extract member.
+    StageDirectory::prepare(stage_dir)?;
+    Ok(())
+}
+
+fn ensure_no_pending_system_update() -> Result<()> {
+    reject_pending_system_paths(&[
+        Path::new(SYSTEM_PENDING_FILE),
+        Path::new(SYSTEM_RAW_INSTALL_MARKER),
+    ])
+}
+
+fn reject_pending_system_paths(paths: &[&Path]) -> Result<()> {
+    for path in paths {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(AppError::Conflict("unfinished system update or legacy raw state exists; inspect recovery status before another download/install".to_string())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -2526,7 +2753,7 @@ where
 fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
     let data = serde_json::to_vec_pretty(record)
         .map_err(|err| AppError::Internal(format!("encode staged system update: {err}")))?;
-    fs::write(stage_dir.join(SYSTEM_STAGE_RECORD), data)?;
+    StageDirectory::prepare(stage_dir)?.replace_generated(SYSTEM_STAGE_RECORD, &data)?;
     Ok(())
 }
 
@@ -2759,6 +2986,10 @@ fn validate_text_field(name: &str, value: &str, max_len: usize) -> Result<()> {
 
 fn hash_file(path: &Path) -> Result<FileHashes> {
     let mut file = fs::File::open(path)?;
+    hash_reader(&mut file)
+}
+
+fn hash_reader(file: &mut impl Read) -> Result<FileHashes> {
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     let mut buf = [0_u8; 64 * 1024];
@@ -2917,15 +3148,18 @@ fn read_update_progress(stage_dir: &Path) -> Result<Option<SystemUpdateProgress>
 
 fn write_update_progress(stage_dir: &Path, progress: SystemUpdateProgress) -> Result<()> {
     validate_update_progress(&progress)?;
-    fs::create_dir_all(stage_dir)?;
     let data = serde_json::to_vec_pretty(&progress)
         .map_err(|err| AppError::Internal(format!("encode system update progress: {err}")))?;
-    fs::write(stage_dir.join(SYSTEM_PROGRESS_RECORD), data)?;
+    StageDirectory::prepare(stage_dir)?.replace_generated(SYSTEM_PROGRESS_RECORD, &data)?;
     Ok(())
 }
 
 fn remove_update_progress(stage_dir: &Path) -> Result<()> {
-    remove_file_if_exists(&stage_dir.join(SYSTEM_PROGRESS_RECORD))
+    match StageDirectory::open(stage_dir) {
+        Ok(stage) => Ok(stage.remove_generated(SYSTEM_PROGRESS_RECORD)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn validate_update_progress(progress: &SystemUpdateProgress) -> Result<()> {
@@ -3444,10 +3678,14 @@ fn non_empty(value: Option<String>) -> Option<String> {
 }
 
 #[cfg(test)]
+#[path = "system_update_trust_tests.rs"]
+mod trust_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn valid_latest() -> SystemLatest {
+    pub(super) fn valid_latest() -> SystemLatest {
         SystemLatest {
             kind: "hardened-nanokvm-system-update".to_string(),
             format: 1,
@@ -3467,7 +3705,7 @@ mod tests {
         }
     }
 
-    fn valid_manifest(file: SystemManifestFile) -> SystemManifest {
+    pub(super) fn valid_manifest(file: SystemManifestFile) -> SystemManifest {
         SystemManifest {
             format: "hardened-nanokvm-system-update-v1".to_string(),
             version: "0.1.0".to_string(),
@@ -3778,7 +4016,23 @@ mod tests {
         let mut stable = valid_latest();
         stable.version = "0.2.0-raw.1".to_string();
 
-        assert_eq!(newer_system_release(preview, stable).version, "0.2.0-raw.1");
+        // Selection must retain each candidate's exact signed bytes, not
+        // serialize a new JSON representation after choosing its version.
+        let selected = newer_system_release(
+            VerifiedSystemMetadata {
+                latest: preview,
+                metadata: b"preview exact".to_vec(),
+                signature: b"preview signature".to_vec(),
+            },
+            VerifiedSystemMetadata {
+                latest: stable,
+                metadata: b"stable exact".to_vec(),
+                signature: b"stable signature".to_vec(),
+            },
+        );
+        assert_eq!(selected.latest.version, "0.2.0-raw.1");
+        assert_eq!(selected.metadata, b"stable exact");
+        assert_eq!(selected.signature, b"stable signature");
     }
 
     #[test]
