@@ -13,6 +13,8 @@ const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone)]
 pub enum AllowedCommand {
     Reboot,
+    Mount,
+    Umount,
     Hostname,
     Passwd,
     ServiceFirewall,
@@ -61,6 +63,8 @@ impl AllowedCommand {
     fn program(&self) -> &OsStr {
         match self {
             AllowedCommand::Reboot => OsStr::new("reboot"),
+            AllowedCommand::Mount => OsStr::new("/bin/mount"),
+            AllowedCommand::Umount => OsStr::new("/bin/umount"),
             AllowedCommand::Hostname => OsStr::new("hostname"),
             AllowedCommand::Passwd => OsStr::new("passwd"),
             AllowedCommand::ServiceFirewall => OsStr::new("/etc/init.d/S40firewall"),

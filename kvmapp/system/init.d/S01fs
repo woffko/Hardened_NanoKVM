@@ -17,12 +17,17 @@ then
         mount_data_partition() {
                 [ -e "$DATA_DEVICE" ] || return 0
                 mkdir -p "$DATA_MOUNT"
-                grep -q " $DATA_MOUNT " /proc/mounts && return 0
+                if grep -q " $DATA_MOUNT " /proc/mounts
+                then
+                        # The backend migration verifies effective options.
+                        # Vendor exFAT ignores new masks during remount.
+                        return 0
+                fi
 
                 i=0
                 while [ "$i" -lt 5 ]
                 do
-                        if mount -t exfat "$DATA_DEVICE" "$DATA_MOUNT" >> "$DATA_LOG" 2>&1
+                        if mount -t exfat -o nosuid,nodev,noexec,uid=0,gid=0,fmask=0177,dmask=0077 "$DATA_DEVICE" "$DATA_MOUNT" >> "$DATA_LOG" 2>&1
                         then
                                 return 0
                         fi
@@ -47,8 +52,6 @@ then
         }
 
         ensure_data_partition() {
-                [ -e /boot/usb.disk0 ] || return 0
-
                 if [ -e "$DATA_DEVICE" ]
                 then
                         touch /etc/kvm.disk0
@@ -67,7 +70,7 @@ then
                         return 1
                 fi
 
-                mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || true
+                mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || return 1
                 touch /etc/kvm.disk0
                 return 0
         }
@@ -188,7 +191,7 @@ then
         . /etc/profile
         printf "mounting filesystem : "
         mkdir -p /boot
-        mount -t vfat /dev/mmcblk0p1 /boot
+        mount -t vfat -o nosuid,nodev,noexec,uid=0,gid=0,fmask=0177,dmask=0077 /dev/mmcblk0p1 /boot || exit 1
         mount -t configfs configfs /sys/kernel/config
         mount -t debugfs debugfs /sys/kernel/debug
 

@@ -56,6 +56,18 @@ usb_wakeup_enabled() {
     [ -e /boot/usb.wakeup ]
 }
 
+configure_empty_storage() {
+    [ -d functions/mass_storage.disk0 ] || mkdir functions/mass_storage.disk0 || return 1
+    # Close before changing mode/linking. If the target has locked its medium,
+    # do not reconnect the old backing file after a failed close.
+    echo '' > functions/mass_storage.disk0/lun.0/file || return 1
+    echo 1 > functions/mass_storage.disk0/lun.0/removable || return 1
+    echo 0 > functions/mass_storage.disk0/lun.0/ro || return 1
+    echo 0 > functions/mass_storage.disk0/lun.0/cdrom || return 1
+    echo "NanoKVM USB Mass Storage0520" > functions/mass_storage.disk0/lun.0/inquiry_string || return 1
+    [ -L configs/c.1/mass_storage.disk0 ] || ln -s functions/mass_storage.disk0 configs/c.1/ || return 1
+}
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -173,27 +185,13 @@ start_usb_dev(){
 
     if [ -e /boot/usb.disk0 ]
     then
-            mkdir functions/mass_storage.disk0
-            ln -s functions/mass_storage.disk0 configs/c.1/
-            echo 1 > functions/mass_storage.disk0/lun.0/removable
-            if [ -e /boot/usb.disk0.ro ]
-            then
-                    echo 1 > functions/mass_storage.disk0/lun.0/ro
-                    echo 0 > functions/mass_storage.disk0/lun.0/cdrom
-            fi
-            echo "NanoKVM USB Mass Storage0520" > functions/mass_storage.disk0/lun.0/inquiry_string
-            disk=$(cat /boot/usb.disk0)
-            if [ -z "${disk}" ]
-            then
-                    # if [ ! -e /mnt/usbdisk.img ]
-                    # then
-                    #         fallocate -l 8G /mnt/usbdisk.img
-                    #         mkfs.vfat /mnt/usbdisk.img
-                    # fi
-                    echo /dev/mmcblk0p3 > functions/mass_storage.disk0/lun.0/file
-            else
-                    cat /boot/usb.disk0 > functions/mass_storage.disk0/lun.0/file
-            fi
+            # usb.disk0 enables the function, not a backing path. Historical
+            # empty/raw/custom flags are deliberately ignored. Only the API
+            # may select a validated file-backed ISO/IMG after startup.
+            configure_empty_storage || {
+                    start_usb_host
+                    return 1
+            }
     fi
 
     ls /sys/class/udc/ | cat > UDC

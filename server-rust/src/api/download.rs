@@ -23,7 +23,10 @@ use crate::{
     config::Config,
     error::ApiResponse,
     state::AppState,
-    system::command::{AllowedCommand, run_allowed},
+    system::{
+        command::{AllowedCommand, run_allowed},
+        media, usb,
+    },
 };
 
 pub const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024 * 1024;
@@ -113,12 +116,12 @@ pub async fn download_image(
     }
 
     let remote = validate_remote_iso_url(&req.file)?;
-    let target = safe_upload_target(&state.config.paths.image_directory, &remote.filename)?;
+    safe_upload_target(&state.config.paths.image_directory, &remote.filename)?;
     let guard = DownloadGuard::acquire(&remote.url)?;
     let root = state.config.paths.image_directory.clone();
 
     tokio::spawn(async move {
-        if let Err(err) = download_remote_iso(remote, root, target, guard).await {
+        if let Err(err) = download_remote_iso(remote, root, guard).await {
             tracing::error!(error = %err, "remote ISO download failed");
         }
     });
@@ -166,7 +169,7 @@ pub async fn upload_image_file(
         let filename = valid_upload_filename(field.file_name().unwrap_or_default())?;
         guard.update(&filename, 0, content_length)?;
 
-        let target = safe_upload_target(&state.config.paths.image_directory, &filename)?;
+        safe_upload_target(&state.config.paths.image_directory, &filename)?;
         let mut temp = TempUpload::create(&state.config.paths.image_directory, &filename)?;
         let mut file = temp.open()?;
         let mut total = 0_usize;
@@ -189,9 +192,7 @@ pub async fn upload_image_file(
 
         validate_uploaded_image(temp.path(), &filename)?;
 
-        fs::rename(temp.path(), &target)?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
-        temp.keep();
+        publish_image(&mut temp, &state.config.paths.image_directory, &filename).await?;
         uploaded = true;
     }
 
@@ -218,7 +219,6 @@ struct RemoteIso {
 async fn download_remote_iso(
     remote: RemoteIso,
     root: PathBuf,
-    target: PathBuf,
     _guard: DownloadGuard,
 ) -> Result<()> {
     let mut temp = TempUpload::create(&root, &remote.filename)?;
@@ -243,9 +243,7 @@ async fn download_remote_iso(
         ));
     }
 
-    fs::rename(temp.path(), &target)?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
-    temp.keep();
+    publish_image(&mut temp, &root, &remote.filename).await?;
     Ok(())
 }
 
@@ -424,6 +422,7 @@ struct TempUpload {
 
 impl TempUpload {
     fn create(root: &Path, filename: &str) -> Result<Self> {
+        media::checked_media_root(root)?;
         let path = root.join(format!(".{filename}.{}.upload", random_suffix()));
         Ok(Self { path, keep: false })
     }
@@ -455,6 +454,9 @@ impl Drop for TempUpload {
 }
 
 fn storage_writable(root: &Path) -> bool {
+    if media::checked_media_root(root).is_err() {
+        return false;
+    }
     let path = root.join(format!(".nanokvm-write-test-{}", random_suffix()));
     let result = fs::OpenOptions::new()
         .write(true)
@@ -496,7 +498,8 @@ fn upload_image_kind(filename: &str) -> Option<UploadImageKind> {
 }
 
 fn safe_upload_target(root: &Path, filename: &str) -> Result<PathBuf> {
-    let root = fs::canonicalize(root)?;
+    valid_upload_filename(filename)?;
+    let root = media::checked_media_root(root)?;
     let target = root.join(filename);
 
     if let Ok(metadata) = fs::symlink_metadata(&target) {
@@ -506,6 +509,26 @@ fn safe_upload_target(root: &Path, filename: &str) -> Result<PathBuf> {
     }
 
     Ok(target)
+}
+
+async fn publish_image(temp: &mut TempUpload, root: &Path, filename: &str) -> Result<()> {
+    let root = root.to_path_buf();
+    let filename = filename.to_string();
+    let source = temp.path().to_path_buf();
+    usb::run_exclusive(async move {
+        // Revalidate under the same lock used by mount/delete. Uploading a new
+        // file must not replace a backing image still owned by the target.
+        let target = safe_upload_target(&root, &filename)?;
+        if target.exists() {
+            super::storage::ensure_image_not_in_use(&target)?;
+        }
+        fs::rename(source, &target)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    })
+    .await?;
+    temp.keep();
+    Ok(())
 }
 
 fn is_iso9660(path: &Path) -> Result<bool> {
@@ -751,6 +774,19 @@ mod tests {
 
         let err = safe_upload_target(dir.path(), "link.iso").unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn upload_rejects_symlinked_media_root_and_path_names() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        unix_fs::symlink(&real, &alias).unwrap();
+        assert!(safe_upload_target(&alias, "disk.img").is_err());
+        assert!(TempUpload::create(&alias, "disk.img").is_err());
+        assert!(!storage_writable(&alias));
+        assert!(safe_upload_target(&real, "../private.img").is_err());
     }
 
     #[test]

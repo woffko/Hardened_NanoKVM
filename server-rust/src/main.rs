@@ -11,11 +11,14 @@ use nanokvm_rust_server::{
         tls::{self, ClientAddr},
     },
     state::AppState,
+    system::media,
     update::keys::install_bundled_update_trust,
 };
+use rand_core::{OsRng, RngCore};
 use std::{
-    fs, io,
-    os::unix::fs::PermissionsExt,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process,
 };
@@ -50,9 +53,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     tls::install_crypto_provider();
 
+    nanokvm_rust_server::api::storage::secure_existing_storage()?;
+    install_runtime_boot_scripts()?;
+    media::secure_device_mounts().await?;
     let config = Config::load()?;
     config.log_runtime_warnings();
-    install_runtime_boot_scripts();
+    let migration = media::prepare_and_migrate(Path::new("/data"), Path::new(media::MEDIA_ROOT))?;
+    if migration.moved > 0 || migration.collisions > 0 {
+        info!(
+            moved = migration.moved,
+            collisions = migration.collisions,
+            "prepared isolated media storage; colliding legacy originals retained in /data"
+        );
+    }
     install_runtime_update_trust(&config);
     initialize_kvm();
     install_shutdown_signal_handler();
@@ -128,7 +141,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn install_runtime_boot_scripts() {
+fn install_runtime_boot_scripts() -> io::Result<()> {
     for script in BOOT_INIT_SCRIPTS {
         let src = Path::new("/kvmapp/system/init.d").join(script);
         let dst = Path::new("/etc/init.d").join(script);
@@ -139,36 +152,57 @@ fn install_runtime_boot_scripts() {
                 "installed runtime boot script"
             ),
             Ok(false) => {}
-            Err(err) => warn!(
-                source = %src.display(),
-                target = %dst.display(),
-                error = %err,
-                "failed to install runtime boot script"
-            ),
+            Err(err) => {
+                return Err(io::Error::other(format!(
+                    "cannot install required boot script {script}: {err}"
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 fn install_runtime_boot_script(src: &Path, dst: &Path) -> io::Result<bool> {
-    if !src.is_file() {
-        return Ok(false);
+    if !fs::symlink_metadata(src)?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "required bundled boot script missing",
+        ));
     }
+
+    let bytes = fs::read(src)?;
 
     if let Ok(meta) = fs::symlink_metadata(dst) {
         if !meta.file_type().is_file() {
             return Err(io::Error::other("target exists but is not a regular file"));
         }
-        if fs::read(src)? == fs::read(dst)? {
+        if bytes == fs::read(dst)? {
             fs::set_permissions(dst, fs::Permissions::from_mode(0o755))?;
             return Ok(false);
         }
     }
 
     let temp = temp_boot_script_path(dst)?;
-    fs::copy(src, &temp)?;
-    fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&temp, dst)?;
-    Ok(true)
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, dst)?;
+        fs::File::open(
+            dst.parent()
+                .ok_or_else(|| io::Error::other("boot script has no parent"))?,
+        )?
+        .sync_all()?;
+        Ok(true)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
 }
 
 fn temp_boot_script_path(dst: &Path) -> io::Result<PathBuf> {
@@ -176,7 +210,8 @@ fn temp_boot_script_path(dst: &Path) -> io::Result<PathBuf> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::other("target has invalid file name"))?;
-    Ok(dst.with_file_name(format!(".{file_name}.tmp")))
+    let suffix = OsRng.next_u64();
+    Ok(dst.with_file_name(format!(".{file_name}.{suffix:016x}.tmp")))
 }
 
 fn initialize_kvm() {
@@ -317,7 +352,39 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::redirect_host;
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn boot_script_install_is_idempotent_and_preserves_old_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("S03usbdev");
+        let old_temp = dir.path().join(".S03usbdev.tmp");
+        fs::write(&src, b"new script\n").unwrap();
+        fs::write(&dst, b"old script\n").unwrap();
+        fs::write(&old_temp, b"unrelated\n").unwrap();
+        assert!(install_runtime_boot_script(&src, &dst).unwrap());
+        assert_eq!(fs::read(&dst).unwrap(), b"new script\n");
+        assert!(!install_runtime_boot_script(&src, &dst).unwrap());
+        assert_eq!(fs::read(&old_temp).unwrap(), b"unrelated\n");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn boot_script_install_rejects_missing_or_symlinked_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dst = dir.path().join("target");
+        assert!(install_runtime_boot_script(&src, &dst).is_err());
+        fs::write(&src, b"script\n").unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&src, &alias).unwrap();
+        assert!(install_runtime_boot_script(&alias, &dst).is_err());
+        symlink(&src, &dst).unwrap();
+        assert!(install_runtime_boot_script(&src, &dst).is_err());
+        assert_eq!(fs::read(&src).unwrap(), b"script\n");
+    }
 
     #[test]
     fn redirect_host_replaces_http_port() {

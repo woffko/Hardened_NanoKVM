@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{AppError, Result, state::AppState, ws::origin::validate_ws_origin};
+use crate::{AppError, Result, state::AppState, system::usb, ws::origin::validate_ws_origin};
 
 const HID_KEYBOARD: &str = "/dev/hidg0";
 const HID_MOUSE_RELATIVE: &str = "/dev/hidg1";
@@ -181,6 +181,12 @@ impl HidDevices {
     }
 
     fn recover_usb_device(&self, path: &str) -> io::Result<()> {
+        let _gadget_guard = usb::GADGET_LOCK.try_lock().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "USB gadget operation is in progress",
+            )
+        })?;
         let _guard = self
             .recovery
             .lock()

@@ -11,7 +11,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{AppError, Result};
+use crate::{AppError, Result, system::media::MEDIA_ROOT};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/kvm/server.yaml";
 const DEFAULT_SECRET_PATH: &str = "/etc/kvm/session_secret";
@@ -203,7 +203,7 @@ impl Default for Paths {
             account_file: PathBuf::from("/etc/kvm/pwd"),
             session_secret_file: PathBuf::from(DEFAULT_SECRET_PATH),
             web_root: PathBuf::from("/kvmapp/server/web"),
-            image_directory: PathBuf::from("/data"),
+            image_directory: PathBuf::from(MEDIA_ROOT),
             update_cache_dir: PathBuf::from("/data/.hardened-kvmcache"),
             system_update_public_key: PathBuf::from("/etc/kvm/system-update-signing.pub.pem"),
         }
@@ -230,6 +230,7 @@ impl Config {
             Config::default()
         };
         config.normalize_legacy_fields();
+        config.validate_media_directory()?;
         Ok(config)
     }
 
@@ -316,6 +317,18 @@ impl Config {
         if self.paths.update_cache_dir == PathBuf::from("/root/.kvmcache") {
             self.paths.update_cache_dir = PathBuf::from("/data/.hardened-kvmcache");
         }
+        if self.paths.image_directory == Path::new("/data") {
+            self.paths.image_directory = PathBuf::from(MEDIA_ROOT);
+        }
+    }
+
+    fn validate_media_directory(&self) -> Result<()> {
+        if self.paths.image_directory != Path::new(MEDIA_ROOT) {
+            return Err(AppError::Config(format!(
+                "image_directory must be {MEDIA_ROOT}; private trees and block devices cannot be media storage"
+            )));
+        }
+        Ok(())
     }
 
     fn ensure_session_secret(&mut self) -> Result<()> {
@@ -451,6 +464,24 @@ fn random_tmp_suffix() -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn media_namespace_cannot_be_broadened_by_runtime_config() {
+        let mut config = Config::default();
+        assert!(config.validate_media_directory().is_ok());
+        config.paths.image_directory = PathBuf::from("/data");
+        config.normalize_legacy_fields();
+        assert_eq!(config.paths.image_directory, Path::new(MEDIA_ROOT));
+        for path in [
+            "/",
+            "/dev",
+            "/data/.hardened-kvmcache",
+            "/data/media/../.hardened-kvmcache",
+        ] {
+            config.paths.image_directory = PathBuf::from(path);
+            assert!(config.validate_media_directory().is_err(), "{path}");
+        }
+    }
 
     #[test]
     fn default_disables_legacy_admin_bootstrap() {

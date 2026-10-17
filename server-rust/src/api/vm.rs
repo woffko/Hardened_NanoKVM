@@ -44,7 +44,10 @@ use crate::{
         tls,
     },
     state::{AppState, is_allowed_session_lock_duration},
-    system::command::{AllowedCommand, run_allowed},
+    system::{
+        command::{AllowedCommand, run_allowed},
+        usb,
+    },
     ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
@@ -564,25 +567,58 @@ pub async fn get_virtual_device() -> Result<impl IntoResponse> {
 pub async fn update_virtual_device(
     Json(req): Json<UpdateVirtualDeviceReq>,
 ) -> Result<impl IntoResponse> {
+    let on = usb::run_exclusive(update_virtual_device_locked(req)).await?;
+    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp { on })))
+}
+
+async fn update_virtual_device_locked(req: UpdateVirtualDeviceReq) -> Result<bool> {
     let (flag, config_dir) = match req.device.as_str() {
         "network" => (VIRTUAL_NETWORK_FLAG, VIRTUAL_NETWORK_CONFIG),
         "disk" => (VIRTUAL_DISK_FLAG, VIRTUAL_DISK_CONFIG),
         _ => return Err(AppError::BadRequest("invalid virtual device".to_string())),
     };
 
-    let exists = Path::new(flag).exists();
-    run_usbdev("stop").await?;
-    if exists {
-        remove_dir_if_exists(config_dir)?;
-        remove_file_if_exists(flag)?;
-    } else {
-        fs::write(flag, b"")?;
+    let old_flag = match fs::read(flag) {
+        Ok(contents) => Some(contents),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.into()),
+    };
+    hid_ws::close_cached_hid_devices()?;
+    if let Err(stop_error) = run_usbdev("stop").await {
+        // stop may already have disconnected UDC before its later failure.
+        // Attempt recovery even though no configuration change was made.
+        run_usbdev("start").await?;
+        return Err(stop_error);
     }
-    run_usbdev("start").await?;
-
-    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp {
-        on: Path::new(flag).exists(),
-    })))
+    let change = (|| -> Result<()> {
+        if old_flag.is_some() {
+            // A configfs function link is a symlink, not a directory tree.
+            remove_file_if_exists(config_dir)?;
+            remove_file_if_exists(flag)?;
+        } else {
+            fs::write(flag, b"")?;
+        }
+        Ok(())
+    })();
+    // Always try to reconnect, including after a failed flag/config change.
+    let restart = run_usbdev("start").await;
+    if change.is_err() || restart.is_err() {
+        // A failed start may have partly linked/rebound functions. Disconnect
+        // again before restoring flags and retrying, rather than editing a
+        // live composite gadget.
+        let restop = run_usbdev("stop").await;
+        let restore = match old_flag {
+            Some(contents) => fs::write(flag, contents).map_err(AppError::from),
+            None => remove_file_if_exists(flag).and_then(|()| remove_file_if_exists(config_dir)),
+        };
+        let recovery = run_usbdev("start").await;
+        restore?;
+        restop?;
+        recovery?;
+        change?;
+        restart?;
+    }
+    Ok(Path::new(flag).exists())
 }
 
 pub async fn reboot() -> Result<impl IntoResponse> {
@@ -1340,14 +1376,6 @@ where
 
 fn remove_file_if_exists(path: &str) -> Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn remove_dir_if_exists(path: &str) -> Result<()> {
-    match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),

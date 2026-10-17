@@ -14,7 +14,10 @@ use tokio::time;
 use crate::{
     AppError, Result,
     error::ApiResponse,
-    system::command::{AllowedCommand, run_allowed},
+    system::{
+        command::{AllowedCommand, run_allowed},
+        usb,
+    },
     ws::hid as hid_ws,
 };
 
@@ -184,9 +187,14 @@ pub async fn get_mode() -> Result<impl IntoResponse> {
 }
 
 pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoResponse> {
+    usb::run_exclusive(set_mode_locked(req)).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+async fn set_mode_locked(req: SetHidModeReq) -> Result<()> {
     let mode = validate_hid_mode(&req.mode)?;
     if read_hid_mode().ok().as_deref() == Some(mode) {
-        return Ok(Json(ApiResponse::<()>::ok_empty()));
+        return Ok(());
     }
 
     copy_hid_mode_file(mode)?;
@@ -203,7 +211,7 @@ pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoRespons
         }
     });
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn get_usb_wakeup() -> Result<impl IntoResponse> {
@@ -213,8 +221,12 @@ pub async fn get_usb_wakeup() -> Result<impl IntoResponse> {
 }
 
 pub async fn set_usb_wakeup(Json(req): Json<SetUsbWakeupReq>) -> Result<impl IntoResponse> {
-    write_usb_wakeup_config(req.enabled)?;
-    apply_usb_wakeup_live(req.enabled)?;
+    usb::run_exclusive(async move {
+        write_usb_wakeup_config(req.enabled)?;
+        apply_usb_wakeup_live(req.enabled)?;
+        Ok(())
+    })
+    .await?;
 
     Ok(Json(ApiResponse::ok(UsbWakeupRsp {
         enabled: req.enabled,
@@ -222,6 +234,12 @@ pub async fn set_usb_wakeup(Json(req): Json<SetUsbWakeupReq>) -> Result<impl Int
 }
 
 pub async fn reset_hid() -> Result<impl IntoResponse> {
+    usb::run_exclusive(reset_hid_locked()).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+async fn reset_hid_locked() -> Result<()> {
+    hid_ws::close_cached_hid_devices()?;
     let output = run_allowed(
         AllowedCommand::ServiceUsbDev,
         ["restart_phy"],
@@ -235,7 +253,7 @@ pub async fn reset_hid() -> Result<impl IntoResponse> {
         )));
     }
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn paste(Json(req): Json<PasteReq>) -> Result<impl IntoResponse> {
