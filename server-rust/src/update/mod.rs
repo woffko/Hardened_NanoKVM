@@ -3,6 +3,7 @@ pub mod keys;
 pub mod raw_transport;
 pub mod restore_archive;
 pub mod restore_capsule;
+pub mod restore_effective;
 mod restore_fs;
 pub mod restore_identity;
 pub mod restore_native;

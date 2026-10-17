@@ -496,7 +496,9 @@ impl Store {
     #[cfg(test)]
     fn inject(&self, step: PublishStep) -> io::Result<()> {
         if self.pause_at == Some(step) {
-            println!("TICKET_FIXTURE_READY");
+            // libtest may print its test-name prefix without a final newline.
+            // Keep the fixture protocol marker on its own line in every mode.
+            println!("\nTICKET_FIXTURE_READY");
             io::stdout().flush()?;
             // Finite safety timeout if the parent fails before killing us.
             std::thread::sleep(std::time::Duration::from_secs(20));

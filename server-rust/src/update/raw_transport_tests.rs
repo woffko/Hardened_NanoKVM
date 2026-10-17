@@ -219,6 +219,23 @@ fn socket_kind_and_expected_peer_are_not_inferred_from_arbitrary_owned_fds() {
 
 #[test]
 fn peer_close_before_record_is_an_error_and_never_an_empty_success() {
+    if std::env::var_os("NANOKVM_PEER_CLOSE_FIXTURE").is_none() {
+        // Parallel harness forks can transiently inherit a CLOEXEC peer until
+        // exec. Test actual last-peer-close semantics only AFTER our own exec.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "update::raw_transport::tests::peer_close_before_record_is_an_error_and_never_an_empty_success", "--test-threads=1", "--nocapture"])
+            .env_clear().env("NANOKVM_PEER_CLOSE_FIXTURE", "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated peer-close fixture failed: {output:?}"
+        );
+        let stdout = std::str::from_utf8(&output.stdout).unwrap();
+        assert!(
+            stdout.contains("running 1 test\n") && stdout.contains("1 passed; 0 failed;"),
+            "peer-close fixture did not execute exactly one test"
+        );
+        return;
+    }
     let (sender, receiver) = channel().unwrap();
     drop(sender);
     assert!(receiver.receive(&context()).is_err());

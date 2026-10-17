@@ -323,6 +323,108 @@ fn authenticated_identity_builder_feeds_real_sshd_through_the_image_sandbox() {
     );
     // exec replaces the child (no Rust Drop); this fixture's parent TempDir owns
     // cleanup after wait. The production parent must retain its own root guard.
+    use nanokvm_rust_server::update::restore_effective::{RootContext, RootLogin, read_policy};
+    fs::write(
+        identity.join("etc/ssh/sshd_config.d/specific.conf"),
+        b"Match Address 198.51.100.7\nPasswordAuthentication no\n",
+    )
+    .unwrap();
+    let mut policies = Vec::new();
+    for (index, address) in ["198.51.100.8", "198.51.100.7", "198.51.100.8"]
+        .into_iter()
+        .enumerate()
+    {
+        let root = prepared
+            ._temporary
+            .path()
+            .join(format!("effective-{index}"));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let context = RootContext::new(
+            "fixture.example",
+            address.parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+            22,
+            None,
+        )
+        .unwrap();
+        let output = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user"])
+            .arg(env!("CARGO_BIN_EXE_nanokvm-image-runtime-fixture"))
+            .arg(root)
+            .arg(&source)
+            .arg(std::process::id().to_string())
+            .arg("--prepare-identity")
+            .arg(&identity)
+            .arg("--effective-root")
+            .arg(context.as_argument())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "private effective-policy child failed"
+        );
+        assert!(output.stderr.is_empty());
+        let policy = read_policy(&mut std::io::Cursor::new(output.stdout), &context).unwrap();
+        assert_eq!(policy.summary().root_login, RootLogin::Yes);
+        assert_eq!(policy.summary().password_authentication, index != 1);
+        assert_eq!(policy.summary().max_auth_tries, 3);
+        policies.push(policy);
+    }
+    assert!(policies[0].same_policy_as(&policies[2]));
+    assert!(!policies[0].same_policy_as(&policies[1]));
+    let sink = prepared._temporary.path().join("not-a-pipe");
+    let rejected = Command::new("/usr/bin/unshare")
+        .args(["--user", "--map-root-user"])
+        .arg(env!("CARGO_BIN_EXE_nanokvm-image-runtime-fixture"))
+        .arg(&prepared.root)
+        .arg(&source)
+        .arg(std::process::id().to_string())
+        .arg("--effective-root")
+        .arg("user=root,host=fixture.example,addr=198.51.100.8,laddr=192.0.2.2,lport=22")
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&sink).unwrap())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(rejected.code(), Some(72));
+    assert_eq!(fs::metadata(sink).unwrap().len(), 0);
+    for nonblocking in [false, true] {
+        let flags = nix::fcntl::OFlag::O_CLOEXEC
+            | if nonblocking {
+                nix::fcntl::OFlag::O_NONBLOCK
+            } else {
+                nix::fcntl::OFlag::empty()
+            };
+        let (read, write) = nix::unistd::pipe2(flags).unwrap();
+        let (bad_stdout, retained) = if nonblocking {
+            (write, read)
+        } else {
+            (read, write)
+        };
+        let rejected = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user"])
+            .arg(env!("CARGO_BIN_EXE_nanokvm-image-runtime-fixture"))
+            .arg(&prepared.root)
+            .arg(&source)
+            .arg(std::process::id().to_string())
+            .arg("--effective-root")
+            .arg("user=root,host=fixture.example,addr=198.51.100.8,laddr=192.0.2.2,lport=22")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(bad_stdout))
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(
+            rejected.code(),
+            Some(72),
+            "read-end/nonblocking output must fail before native output"
+        );
+        drop(retained);
+    }
+    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
 }
 
 #[test]

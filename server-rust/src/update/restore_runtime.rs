@@ -2,7 +2,7 @@
 //! origin of its prepared root. Signed-image extraction/binding is mandatory at
 //! the caller and is not inferred from a pathname or a successful native test.
 
-use super::{restore_fs, restore_rootfs::RootfsView};
+use super::{restore_effective::RootContext, restore_fs, restore_rootfs::RootfsView};
 use nix::{
     fcntl::{FcntlArg, FdFlag, fcntl},
     mount::{MntFlags, MsFlags, mount, umount2},
@@ -22,7 +22,7 @@ use std::{
     convert::Infallible,
     ffi::CString,
     fs::{self, File},
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, OwnedFd},
     os::unix::fs::MetadataExt,
     path::Path,
 };
@@ -66,7 +66,7 @@ impl SandboxError {
 /// The parent must already authenticate/bind the target runtime and snapshot;
 /// this is NOT a signature-verification or restore-authorization API.
 pub fn exec_sshd_syntax(root: &Path, expected_parent: u32) -> Result<Infallible, SandboxError> {
-    exec_sshd(root, expected_parent, None)
+    exec_sshd(root, expected_parent, None, Check::Syntax)
 }
 
 /// Separate provenance-aware entry. The caller must authenticate the immutable
@@ -77,7 +77,38 @@ pub fn exec_sshd_syntax_from_image(
     expected_parent: u32,
     image: RootfsView,
 ) -> Result<Infallible, SandboxError> {
-    exec_sshd(root, expected_parent, Some(ImageSource::Verified(image)))
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Verified(image)),
+        Check::Syntax,
+    )
+}
+
+/// Native -T/-C for root at ONE explicit connection context. Output must be a
+/// private anonymous write pipe; parent drains bounded/zeroizing, checks native
+/// success+EOF and wall timeout/kill/reap. No raw output belongs in diagnostics.
+pub fn exec_sshd_effective_from_image(
+    root: &Path,
+    expected_parent: u32,
+    image: RootfsView,
+    context: RootContext,
+    output: OwnedFd,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Verified(image)),
+        Check::Effective { context, output },
+    )
+}
+
+enum Check {
+    Syntax,
+    Effective {
+        context: RootContext,
+        output: OwnedFd,
+    },
 }
 
 enum ImageSource {
@@ -97,6 +128,24 @@ pub fn exec_sshd_syntax_image_fixture(
         root,
         expected_parent,
         Some(ImageSource::Fixture(image.to_path_buf())),
+        Check::Syntax,
+    )
+}
+
+#[doc(hidden)]
+#[cfg(feature = "sandbox-test-fixture")]
+pub fn exec_sshd_effective_image_fixture(
+    root: &Path,
+    expected_parent: u32,
+    image: &Path,
+    context: RootContext,
+    output: OwnedFd,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Fixture(image.to_path_buf())),
+        Check::Effective { context, output },
     )
 }
 
@@ -104,6 +153,7 @@ fn exec_sshd(
     root: &Path,
     expected_parent: u32,
     image: Option<ImageSource>,
+    check: Check,
 ) -> Result<Infallible, SandboxError> {
     if !geteuid().is_root()
         || expected_parent <= 1
@@ -118,6 +168,27 @@ fn exec_sshd(
     prctl::set_pdeathsig(Signal::SIGKILL).map_err(|_| SandboxError::Process)?;
     if getppid().as_raw() as u32 != expected_parent {
         return Err(SandboxError::Process);
+    }
+    if let Check::Effective { output, .. } = &check {
+        let stat = rustix::fs::fstat(output)
+            .map_err(|_| SandboxError::Isolation("private output pipe"))?;
+        let flags = rustix::fs::fcntl_getfl(output)
+            .map_err(|_| SandboxError::Isolation("private output pipe"))?;
+        if output.as_raw_fd() <= 2
+            || stat.st_uid != 0
+            || rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo
+            || rustix::fs::fstatfs(output)
+                .map_err(|_| SandboxError::Isolation("private output pipe"))?
+                .f_type as u64
+                != u64::from(linux_raw_sys::general::PIPEFS_MAGIC)
+            || flags & OFlags::ACCMODE != OFlags::WRONLY
+            || flags.contains(OFlags::NONBLOCK)
+            || !rustix::io::fcntl_getfd(output)
+                .map_err(|_| SandboxError::Isolation("private output pipe"))?
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        {
+            return Err(SandboxError::Isolation("private output pipe"));
+        }
     }
     let pinned = restore_fs::open_root(root, true).map_err(|_| SandboxError::Layout)?;
     let original = pinned.metadata().map_err(|_| SandboxError::Layout)?;
@@ -259,17 +330,38 @@ fn exec_sshd(
         return Err(SandboxError::Process);
     }
     seccompiler::apply_filter(&bpf).map_err(|_| SandboxError::Filter)?;
-    // No native config/error/output is forwarded to diagnostics. Its exit code
-    // alone is the syntax result; later effective-policy output needs its own
-    // private bounded typed parser, not a log stream.
-    for fd in 0..=2 {
-        dup2(null.as_raw_fd(), fd).map_err(|_| SandboxError::Exec)?;
-    }
+    // Only -T has private stdout. Stderr always stays silent; no native config
+    // or failure text is diagnostics. Pipe owner must enforce bounded reading.
+    let context = match check {
+        Check::Syntax => {
+            for fd in 0..=2 {
+                dup2(null.as_raw_fd(), fd).map_err(|_| SandboxError::Exec)?;
+            }
+            None
+        }
+        Check::Effective { context, output } => {
+            dup2(null.as_raw_fd(), 0).map_err(|_| SandboxError::Exec)?;
+            dup2(null.as_raw_fd(), 2).map_err(|_| SandboxError::Exec)?;
+            dup2(output.as_raw_fd(), 1).map_err(|_| SandboxError::Exec)?;
+            drop(output);
+            Some(context)
+        }
+    };
     drop(null);
-    let args = ["/usr/sbin/sshd", "-e", "-t", "-f", "/etc/ssh/sshd_config"]
-        .into_iter()
-        .map(|s| CString::new(s).map_err(|_| SandboxError::Exec))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut args = [
+        "/usr/sbin/sshd",
+        "-e",
+        if context.is_some() { "-T" } else { "-t" },
+        "-f",
+        "/etc/ssh/sshd_config",
+    ]
+    .into_iter()
+    .map(|s| CString::new(s).map_err(|_| SandboxError::Exec))
+    .collect::<Result<Vec<_>, _>>()?;
+    if let Some(context) = context {
+        args.push(CString::new("-C").map_err(|_| SandboxError::Exec)?);
+        args.push(CString::new(context.as_argument()).map_err(|_| SandboxError::Exec)?);
+    }
     let env = [
         "LC_ALL=C",
         "PATH=/usr/bin:/bin",

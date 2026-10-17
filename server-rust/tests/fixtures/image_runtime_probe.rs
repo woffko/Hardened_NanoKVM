@@ -2,13 +2,14 @@ use nanokvm_rust_server::{
     config::Config,
     update::{
         restore_archive, restore_capsule,
+        restore_effective::RootContext,
         restore_identity::{capture_effective, check_identity},
         restore_native::AccountFiles,
         restore_preflight::{PreparedSshRoot, prepare_sshd_root},
-        restore_runtime::exec_sshd_syntax_image_fixture,
+        restore_runtime::{exec_sshd_effective_image_fixture, exec_sshd_syntax_image_fixture},
     },
 };
-use std::{io::Cursor, path::Path, process::ExitCode};
+use std::{io::Cursor, os::fd::AsFd, path::Path, process::ExitCode};
 
 // Synthetic host-only provenance: build and authenticate our own fixture
 // capsule, then use the REAL typed identity builder. This does not verify a
@@ -47,15 +48,29 @@ fn prepare_fixture(
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().collect();
-    if !matches!(arguments.len(), 4 | 6)
-        || (arguments.len() == 6 && arguments[4] != "--prepare-identity")
-    {
+    if !matches!(arguments.len(), 4 | 6 | 8) {
         return ExitCode::from(64);
     }
     let Some(parent) = arguments[3].to_str().and_then(|s| s.parse().ok()) else {
         return ExitCode::from(64);
     };
-    let _prepared = if arguments.len() == 6 {
+    let with_identity = arguments.len() >= 6 && arguments[4] == "--prepare-identity";
+    let query_index = if with_identity { 6 } else { 4 };
+    let query =
+        if arguments.len() == query_index + 2 && arguments[query_index] == "--effective-root" {
+            match arguments[query_index + 1]
+                .to_str()
+                .and_then(|v| RootContext::parse(v).ok())
+            {
+                Some(q) => Some(q),
+                None => return ExitCode::from(64),
+            }
+        } else if arguments.len() == query_index {
+            None
+        } else {
+            return ExitCode::from(64);
+        };
+    let _prepared = if with_identity {
         match prepare_fixture(Path::new(&arguments[5]), Path::new(&arguments[1])) {
             Ok(prepared) => Some(prepared),
             Err(_) => {
@@ -66,8 +81,21 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    match exec_sshd_syntax_image_fixture(Path::new(&arguments[1]), parent, Path::new(&arguments[2]))
-    {
+    let result = if let Some(query) = query {
+        let Ok(output) = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3) else {
+            return ExitCode::from(78);
+        };
+        exec_sshd_effective_image_fixture(
+            Path::new(&arguments[1]),
+            parent,
+            Path::new(&arguments[2]),
+            query,
+            output,
+        )
+    } else {
+        exec_sshd_syntax_image_fixture(Path::new(&arguments[1]), parent, Path::new(&arguments[2]))
+    };
+    match result {
         Ok(never) => match never {},
         Err(error) => {
             eprintln!("{error}");

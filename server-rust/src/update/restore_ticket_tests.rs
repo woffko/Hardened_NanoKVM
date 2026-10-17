@@ -636,6 +636,7 @@ fn actual_process_kill_releases_lock_and_recovers_before_and_after_rename() {
                 "--exact",
                 "update::restore_capsule::ticket::tests::ticket_process_crash_child",
                 "--nocapture",
+                "--test-threads=1",
             ])
             .env("NANOKVM_TICKET_CRASH_FIXTURE_ROOT", root.path())
             .env("NANOKVM_TICKET_CRASH_FIXTURE_STEP", step)
@@ -649,20 +650,24 @@ fn actual_process_kill_releases_lock_and_recovers_before_and_after_rename() {
             let mut stdout = BufReader::new(stdout);
             let mut line = String::new();
             while stdout.read_line(&mut line).unwrap_or(0) > 0 {
-                if line.trim() == "TICKET_FIXTURE_READY" {
-                    let _ = tx.send(());
+                if line.trim_end().ends_with("TICKET_FIXTURE_READY") {
+                    // Report framing as a boolean, never dump private child I/O.
+                    let _ = tx.send(line.trim() == "TICKET_FIXTURE_READY");
                     break;
                 }
                 line.clear();
             }
         });
         let ready = rx.recv_timeout(Duration::from_secs(5));
-        let _ = child.kill();
-        child.wait().unwrap();
+        let early_exit = child.try_wait().unwrap();
+        if early_exit.is_none() {
+            let _ = child.kill();
+        }
+        let terminal = child.wait().unwrap();
         reader.join().unwrap();
         assert!(
-            ready.is_ok(),
-            "child did not reach the synthetic publication checkpoint"
+            matches!(ready, Ok(true)),
+            "child did not reach standalone synthetic checkpoint {step}; frame={ready:?}, early={early_exit:?}, terminal={terminal}"
         );
         let mut store = open_fixture(root.path()).unwrap();
         assert_eq!(store.load().unwrap().unwrap().phase(), expected);

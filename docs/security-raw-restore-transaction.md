@@ -687,6 +687,49 @@ root, import the host runtime through the same image fixture boundary, and run
 real sshd syntax successfully; target loop/image provenance is intentionally not
 claimed. Kernel EFBIG after copied native tables verifies partial-input cleanup.
 
+### Private effective SSH policy (component; parent integration open)
+
+The image-only helper mode may append `--effective-root FIXED_ROOT_CONNECTION_SPEC`.
+It executes only the signed `/usr/sbin/sshd -e -T -f /etc/ssh/sshd_config -C SPEC`,
+inside the same root/caps/FD/seccomp boundary. Legacy pathname-only mode cannot
+select it. SPEC is a bounded fixed root-user profile: host, numeric peer/local
+addresses, nonzero local port and optional rdomain. No other username, command,
+extra connection key or environment is accepted. `Match version` uses sshd's own
+compiled version, not an invented `-C version=` key. This contract was checked
+against pinned [OpenSSH 10.5p1 source](https://github.com/openssh/openssh-portable/blob/V_10_5_P1/servconf.c).
+
+Native stdin/stderr stay `/dev/null`; effective stdout must be an owned root-owned,
+blocking write-only anonymous PIPEFS descriptor above stdio, CLOEXEC until its
+final dup2 into stdout. Files, read ends, nonblocking pipes and ttys are rejected.
+This checks descriptor shape, not reader confidentiality:
+the trusted parent still must own a private reader and close unrelated aliases.
+No native output may be routed through ordinary Longrun/application diagnostics.
+
+`restore_effective::read_policy` reads at most 64 KiB + one overflow byte and
+512 lines, requires complete newline framing and exactly one occurrence of each
+selected field (case-insensitive). Missing/duplicate fields, invalid booleans,
+numbers/root-login values, NUL/CR, malformed startup triples or overflow fail.
+It returns an immutable typed auth/rate summary, never the raw dump. Raw buffers
+and opaque method suffixes are zeroizing; error messages contain no input bytes.
+Authentication-method suffixes/chain counts follow the native formatter rather
+than a narrower invented syntax; the total output budget remains enforced.
+
+The private comparison binds the WHOLE raw native dump and canonical context,
+including unknown fields and repeated arrays. It is not a comparison of only
+the summary. The caller must bind both results to the same exact verified native
+runtime; the parser does not authenticate an executable/version/image hash or
+make cross-version equivalence claims. One context covers only its Match branch,
+not every possible connection, authentication factor, authorized-key condition
+or successful root password login. No login policy is force-enabled.
+
+Before accepting a result the parent must concurrently drain the private pipe,
+enforce a wall deadline, kill/reap on cancellation/overflow/error, and require
+native success plus EOF. The reader's byte cap is NOT a time bound. Production
+parent orchestration, isolated key-possession integration, the complete Match
+matrix and real target login remain required. Host tests exercise repeated equal
+contexts, a differing Match Address branch and invalid output descriptor modes;
+they do not substitute for signed-image/loop/target acceptance.
+
 ### Fresh-process SSH syntax sandbox (component only)
 
 `nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID` is a separate,

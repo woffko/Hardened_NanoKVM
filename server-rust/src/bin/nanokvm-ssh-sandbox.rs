@@ -1,7 +1,10 @@
 use nanokvm_rust_server::update::{
     raw_transport::{ImageReceiver, TransferContext},
+    restore_effective::RootContext,
     restore_rootfs::{RootfsError, RootfsView},
-    restore_runtime::{SandboxError, exec_sshd_syntax, exec_sshd_syntax_from_image},
+    restore_runtime::{
+        SandboxError, exec_sshd_effective_from_image, exec_sshd_syntax, exec_sshd_syntax_from_image,
+    },
 };
 use std::{
     convert::Infallible,
@@ -22,6 +25,7 @@ enum Mode<'a> {
         parent: u32,
         mountpoint: &'a Path,
         context: TransferContext,
+        query: Option<RootContext>,
     },
 }
 
@@ -49,7 +53,7 @@ impl RunError {
 }
 
 fn parse(args: &[OsString]) -> Option<Mode<'_>> {
-    if !matches!(args.len(), 5 | 15) || args[1] != "--root" || args[3] != "--parent-pid" {
+    if !matches!(args.len(), 5 | 15 | 17) || args[1] != "--root" || args[3] != "--parent-pid" {
         return None;
     }
     let root = Path::new(&args[2]);
@@ -91,16 +95,25 @@ fn parse(args: &[OsString]) -> Option<Mode<'_>> {
         args[14].to_str()?.parse::<u64>().ok()?,
     ];
     let context = TransferContext::new(transaction, args[10].to_str()?, sizes).ok()?;
+    let query = if args.len() == 17 {
+        if args[15] != "--effective-root" {
+            return None;
+        }
+        Some(RootContext::parse(args[16].to_str()?).ok()?)
+    } else {
+        None
+    };
     Some(Mode::Image {
         root,
         parent,
         mountpoint: Path::new(&args[6]),
         context,
+        query,
     })
 }
 
 fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
-    let (root, parent, mountpoint, context) = match mode {
+    let (root, parent, mountpoint, context, query) = match mode {
         Mode::Prepared { root, parent } => {
             return exec_sshd_syntax(root, parent).map_err(Into::into);
         }
@@ -109,7 +122,8 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
             parent,
             mountpoint,
             context,
-        } => (root, parent, mountpoint, context),
+            query,
+        } => (root, parent, mountpoint, context, query),
     };
     if nix::unistd::getppid().as_raw() as u32 != parent {
         return Err(RootfsError::Process.into());
@@ -126,19 +140,33 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
         .map_err(|_| RunError::Transfer)?;
     let null = File::open("/dev/null").map_err(|_| RunError::Transfer)?;
     nix::unistd::dup2(null.as_raw_fd(), 0).map_err(|_| RunError::Transfer)?;
+    let output = if query.is_some() {
+        let output = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3)
+            .map_err(|_| RunError::Transfer)?;
+        nix::unistd::dup2(null.as_raw_fd(), 1).map_err(|_| RunError::Transfer)?;
+        Some(output)
+    } else {
+        None
+    };
     drop(null);
     let receiver = ImageReceiver::adopt(socket, parent).map_err(|_| RunError::Transfer)?;
     let [boot, rootfs] = receiver.receive(&context).map_err(|_| RunError::Transfer)?;
     drop(boot); // Syntax preflight never boots or writes either image.
     let view = RootfsView::mount(rootfs, mountpoint, parent)?;
-    exec_sshd_syntax_from_image(root, parent, view).map_err(Into::into)
+    match (query, output) {
+        (Some(query), Some(output)) => {
+            exec_sshd_effective_from_image(root, parent, view, query, output).map_err(Into::into)
+        }
+        (None, None) => exec_sshd_syntax_from_image(root, parent, view).map_err(Into::into),
+        _ => Err(RunError::Transfer),
+    }
 }
 
 fn main() -> ExitCode {
-    let args: Vec<_> = std::env::args_os().take(16).collect();
+    let args: Vec<_> = std::env::args_os().take(18).collect();
     let Some(mode) = parse(&args) else {
         eprintln!(
-            "usage: nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID [--image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION --boot-size BYTES --rootfs-size BYTES]"
+            "usage: nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID [--image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION --boot-size BYTES --rootfs-size BYTES [--effective-root FIXED_ROOT_CONNECTION_SPEC]]"
         );
         return ExitCode::from(64);
     };
@@ -227,5 +255,23 @@ mod tests {
                 assert!(parse(&invalid).is_none(), "index {index}");
             }
         }
+    }
+
+    #[test]
+    fn effective_mode_requires_image_context_and_fixed_root_spec() {
+        let mut image = args();
+        image.extend([
+            "--effective-root".into(),
+            "user=root,host=fixture.example,addr=198.51.100.7,laddr=192.0.2.1,lport=22".into(),
+        ]);
+        assert!(matches!(
+            parse(&image),
+            Some(Mode::Image { query: Some(_), .. })
+        ));
+        let mut legacy = args()[..5].to_vec();
+        legacy.extend_from_slice(&image[15..]);
+        assert!(parse(&legacy).is_none());
+        image[16] = "user=admin,host=x,addr=198.51.100.7,laddr=192.0.2.1,lport=22".into();
+        assert!(parse(&image).is_none());
     }
 }
