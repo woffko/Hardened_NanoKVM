@@ -2,6 +2,7 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+. "$ROOT/scripts/lib/build-security.sh"
 DEFCONFIG="$ROOT/buildroot-external/hardened-sg2002/configs/hardened_sg2002_licheervnano_defconfig"
 PATCH_ROOT="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/patches"
 PREPARE="$ROOT/scripts/prepare-buildroot-2026.05.1-security-source.sh"
@@ -73,7 +74,7 @@ test "$(openssl pkey -pubin \
 for key_id in hardened-system-dev hardened-system-test hardened-system-prod-2026q3; do
 	grep -qx "$key_id" "$ROOT/kvmapp/system/keys/update-key-policy"
 done
-! find "$ROOT/kvmapp" -type f -exec grep -Il -m 1 -- 'BEGIN .*PRIVATE KEY' {} + | grep -q .
+build_assert_no_private_keys "$ROOT/kvmapp" || exit 1
 test -f "$PATCH_ROOT/libopenssl/3.6.3/0001-CVE-2026-54876-fix-OCSP-response-leak.patch"
 test -f "$PATCH_ROOT/busybox/1.38.0/0012-CVE-2026-38753-fix-awk-sub-use-after-free.patch"
 test -f "$PATCH_ROOT/busybox/1.38.0/0013-CVE-2026-38755-limit-ash-function-recursion.patch"

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/lib/build-security.sh"
 VERSION=2026.05.1
 ARCHIVE="${BUILDROOT_ARCHIVE:-$ROOT/build/downloads/buildroot-${VERSION}.tar.xz}"
 PROBE_ROOT="${LATEST_BUILDROOT_PROBE_ROOT:-$ROOT/build/latestbuildroot}"
@@ -50,6 +51,7 @@ if [ -e "$OUTPUT_DIR" ]; then
 			exit 1
 		}
 	done
+	build_verify_security_recipes "$OUTPUT_DIR" || exit 1
 	printf 'Buildroot security source already prepared: %s\n' "$OUTPUT_DIR"
 	exit 0
 fi
@@ -86,9 +88,7 @@ rm -f \
 	"$SOURCE/package/hostapd/0001-RADIUS-Drop-pending-request-only-when-accepting-the-response.patch" \
 	"$SOURCE/package/hostapd/0002-RADIUS-Fix-pending-request-dropping.patch"
 
-grep -q '^OPENSSH_VERSION_MAJOR = 10.5$' "$SOURCE/package/openssh/openssh.mk"
-grep -q '^HOSTAPD_VERSION = 2.12$' "$SOURCE/package/hostapd/hostapd.mk"
-! grep -q 'CONFIG_IEEE80211BE' "$SOURCE/package/hostapd/hostapd.mk"
+build_verify_security_recipes "$SOURCE" || exit 1
 
 if [ -e "$SOURCE/dl" ]; then
 	echo "unexpected dl entry in pristine Buildroot source" >&2
