@@ -1,5 +1,85 @@
 #!/bin/sh
 
+build_file_sha256() {
+	if digest_line=$(sha256sum -- "$1"); then
+		:
+	else
+		echo "SHA-256 calculation failed" >&2
+		return 1
+	fi
+	digest_hex=${digest_line%% *}
+	case "$digest_hex" in
+		'' | *[!0-9a-f]*) echo "invalid SHA-256 output" >&2; return 1 ;;
+	esac
+	[ "${#digest_hex}" -eq 64 ] || {
+		echo "invalid SHA-256 length" >&2
+		return 1
+	}
+	printf '%s\n' "$digest_hex"
+}
+
+build_file_sha512_base64() (
+	digest_tmp=$(mktemp "${TMPDIR:-/tmp}/nanokvm-sha512.XXXXXX") || exit 1
+	trap 'rm -f "$digest_tmp"' 0
+	if ! openssl dgst -sha512 -binary -out "$digest_tmp" "$1"; then
+		echo "SHA-512 calculation failed" >&2
+		exit 1
+	fi
+	[ "$(wc -c < "$digest_tmp")" -eq 64 ] || {
+		echo "invalid SHA-512 length" >&2
+		exit 1
+	}
+	if digest_base64=$(openssl base64 -A -in "$digest_tmp"); then
+		:
+	else
+		echo "SHA-512 encoding failed" >&2
+		exit 1
+	fi
+	[ "${#digest_base64}" -eq 88 ] || {
+		echo "invalid SHA-512 encoding length" >&2
+		exit 1
+	}
+	printf '%s\n' "$digest_base64"
+)
+
+# Hold one metadata output transaction; callers publish the JSON last.
+build_begin_metadata_output() {
+	metadata_output=$1
+	metadata_lock="$metadata_output.lock"
+	metadata_work=
+	mkdir "$metadata_lock" || {
+		echo "metadata output is already locked: $metadata_output" >&2
+		return 1
+	}
+	trap '[ -z "$metadata_work" ] || rm -rf "$metadata_work"; rmdir "$metadata_lock"' 0
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	for metadata_suffix in '' .sha256 .sig .sig.base64; do
+		if [ -e "$metadata_output$metadata_suffix" ] || [ -L "$metadata_output$metadata_suffix" ]; then
+			echo "refusing to overwrite metadata output: $metadata_output$metadata_suffix" >&2
+			return 1
+		fi
+	done
+	metadata_work=$(mktemp -d "$(dirname "$metadata_output")/.nanokvm-metadata.XXXXXX") || return 1
+}
+
+build_publish_metadata_output() {
+	metadata_hash=$(build_file_sha256 "$metadata_work/metadata.json") || return 1
+	printf '%s  %s\n' "$metadata_hash" "$metadata_output" > "$metadata_work/checksum" || return 1
+	if [ -n "$SIGNING_KEY" ]; then
+		openssl dgst -sha256 -sign "$SIGNING_KEY" \
+			-out "$metadata_work/signature" "$metadata_work/metadata.json" || return 1
+		[ -s "$metadata_work/signature" ] || return 1
+		openssl base64 -A -in "$metadata_work/signature" \
+			-out "$metadata_work/signature.base64" || return 1
+		[ -s "$metadata_work/signature.base64" ] || return 1
+		mv "$metadata_work/signature" "$metadata_output.sig" || return 1
+		mv "$metadata_work/signature.base64" "$metadata_output.sig.base64" || return 1
+	fi
+	mv "$metadata_work/checksum" "$metadata_output.sha256" || return 1
+	mv "$metadata_work/metadata.json" "$metadata_output" || return 1
+}
+
 # Return failure both for a policy match and for an incomplete inspection.
 build_reject_pattern() {
 	policy_pattern=$1
