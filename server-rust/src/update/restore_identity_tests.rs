@@ -13,6 +13,18 @@ use tempfile::{TempDir, tempdir};
 
 const CONFIG_PATH: &str = "/etc/kvm/server.yaml";
 const CWD: &str = "/etc/kvm";
+const NATIVE_PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n";
+const NATIVE_GROUP: &[u8] = b"root:x:0:\n";
+const NATIVE_SHADOW: &[u8] = b"root:!:::::::\n";
+
+fn signed_accounts() -> AccountFiles<'static> {
+    AccountFiles {
+        passwd: NATIVE_PASSWD,
+        group: NATIVE_GROUP,
+        shadow: NATIVE_SHADOW,
+        gshadow: None,
+    }
+}
 
 fn put(root: &Path, path: &str, bytes: &[u8]) {
     let path = root.join(path.trim_start_matches('/'));
@@ -31,6 +43,9 @@ fn fixture() -> (TempDir, Config) {
     for path in restore_policy::REQUIRED {
         put(root.path(), path, b"synthetic OS identity\n");
     }
+    put(root.path(), "etc/passwd", NATIVE_PASSWD);
+    put(root.path(), "etc/group", NATIVE_GROUP);
+    put(root.path(), "etc/shadow", NATIVE_SHADOW);
     let account = Account {
         username: "operator".to_string(),
         password: bcrypt::hash("synthetic fixture password", 4).unwrap(),
@@ -49,6 +64,7 @@ fn captured(root: &Path, config: &Config, cwd: &str, config_path: &str) -> Vec<u
         config,
         Path::new(cwd),
         Path::new(config_path),
+        &signed_accounts(),
     )
     .unwrap();
     let mut bytes = Vec::new();
@@ -58,6 +74,9 @@ fn captured(root: &Path, config: &Config, cwd: &str, config_path: &str) -> Vec<u
     bytes
 }
 fn checked(bytes: &[u8]) -> Result<IdentityCheckedRestore> {
+    checked_for_image(bytes, &signed_accounts())
+}
+fn checked_for_image(bytes: &[u8], signed: &AccountFiles<'_>) -> Result<IdentityCheckedRestore> {
     let staging = tempdir().unwrap();
     let mut ciphertext = Vec::new();
     let secret = prepare_capsule(
@@ -68,7 +87,7 @@ fn checked(bytes: &[u8]) -> Result<IdentityCheckedRestore> {
     )
     .unwrap();
     let plaintext = open_capsule(&secret, &mut Cursor::new(ciphertext), staging.path()).unwrap();
-    check_identity(restore_archive::validate(plaintext).unwrap())
+    check_identity(restore_archive::validate(plaintext).unwrap(), signed)
 }
 fn member(archive: &mut IdentityCheckedRestore, path: &str) -> Vec<u8> {
     let index = archive
@@ -338,7 +357,8 @@ fn pending_identity_changes_fail_before_creating_any_capture_spool() {
                 staging.path(),
                 &effective,
                 Path::new(CWD),
-                Path::new(CONFIG_PATH)
+                Path::new(CONFIG_PATH),
+                &signed_accounts()
             ),
             Err(RestoreIdentityError::InvalidState)
         ));
@@ -358,6 +378,7 @@ fn malformed_account_or_config_has_no_fallback_and_no_secret_in_error() {
             &config,
             Path::new(CWD),
             Path::new(CONFIG_PATH),
+            &signed_accounts(),
         )
         .err()
         .unwrap();
@@ -412,7 +433,8 @@ fn https_missing_malformed_and_mismatched_keys_are_rejected() {
             staging.path(),
             &config,
             Path::new(CWD),
-            Path::new(CONFIG_PATH)
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
         )
         .is_err()
     );
@@ -424,7 +446,8 @@ fn https_missing_malformed_and_mismatched_keys_are_rejected() {
             staging.path(),
             &config,
             Path::new(CWD),
-            Path::new(CONFIG_PATH)
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
         )
         .is_err()
     );
@@ -438,7 +461,8 @@ fn https_missing_malformed_and_mismatched_keys_are_rejected() {
             staging.path(),
             &config,
             Path::new(CWD),
-            Path::new(CONFIG_PATH)
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
         )
         .is_err()
     );
@@ -497,7 +521,8 @@ fn custom_source_aliases_traversal_and_oversized_state_fail_closed() {
             staging.path(),
             &config,
             Path::new(CWD),
-            Path::new(CONFIG_PATH)
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
         )
         .is_err()
     );
@@ -513,7 +538,8 @@ fn custom_source_aliases_traversal_and_oversized_state_fail_closed() {
             staging.path(),
             &config,
             Path::new(CWD),
-            Path::new(CONFIG_PATH)
+            Path::new(CONFIG_PATH),
+            &signed_accounts()
         )
         .is_err()
     );
@@ -572,6 +598,7 @@ fn unknown_config_fields_never_disappear_silently_during_capture() {
             &effective,
             Path::new(CWD),
             Path::new(CONFIG_PATH),
+            &signed_accounts(),
         );
         assert!(result.is_err(), "unknown field in {section} was dropped");
         let error = result.err().unwrap();
@@ -667,5 +694,138 @@ fn duplicate_aliases_wrong_types_and_multiple_documents_have_no_fallback() {
     ] {
         let error = parse_config(yaml.as_bytes()).err().unwrap();
         assert!(!format!("{error:?} {error}").contains("synthetic-marker"));
+    }
+}
+
+#[test]
+fn capture_merges_signed_native_services_without_mutating_source_or_root_hash() {
+    let (root, config) = fixture();
+    let original_shadow =
+        b"root:$5$synthetic$...........................................:20000:0:99999:7:::\n";
+    put(root.path(), "etc/shadow", original_shadow);
+    let signed = AccountFiles {
+        passwd: b"root:x:0:0:root:/root:/bin/sh\npicoclaw:x:200:200:Service:/var/lib/picoclaw:/bin/false\n",
+        group: b"root:x:0:\npicoclaw:x:200:\n",
+        shadow: b"root:*:::::::\npicoclaw:!:::::::\n",
+        gshadow: None,
+    };
+    let staging = tempdir().unwrap();
+    let mut snapshot = capture_effective(
+        root.path(),
+        staging.path(),
+        &config,
+        Path::new(CWD),
+        Path::new(CONFIG_PATH),
+        &signed,
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    snapshot.read_to_end(&mut bytes).unwrap();
+    let mut restored = checked_for_image(&bytes, &signed).unwrap();
+    assert_eq!(member(&mut restored, "etc/passwd"), signed.passwd);
+    assert!(member(&mut restored, "etc/shadow").starts_with(original_shadow));
+    assert_eq!(
+        fs::read(root.path().join("etc/passwd")).unwrap(),
+        NATIVE_PASSWD
+    );
+    assert_eq!(
+        fs::read(root.path().join("etc/shadow")).unwrap(),
+        original_shadow
+    );
+    assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    for (path, mode) in [
+        ("etc/passwd", 0o644),
+        ("etc/group", 0o644),
+        ("etc/shadow", 0o600),
+    ] {
+        assert_eq!(
+            restored
+                .members()
+                .iter()
+                .find(|m| m.path == path)
+                .unwrap()
+                .mode,
+            mode
+        );
+    }
+    // Fully authenticated, internally consistent old tables are still invalid
+    // if they omit the service identities required by the exact signed image.
+    let missing = alter(
+        &alter(
+            &alter(&bytes, "etc/passwd", Some(NATIVE_PASSWD)),
+            "etc/group",
+            Some(NATIVE_GROUP),
+        ),
+        "etc/shadow",
+        Some(original_shadow),
+    );
+    assert!(matches!(
+        checked_for_image(&missing, &signed),
+        Err(RestoreIdentityError::Native(
+            restore_native::NativeAccountError::Conflict
+        ))
+    ));
+}
+
+#[test]
+fn native_preflight_failures_leave_source_unchanged_and_create_no_capture_spool() {
+    for kind in 0..4 {
+        let (root, config) = fixture();
+        match kind {
+            0 => put(
+                root.path(),
+                "etc/passwd",
+                b"root:x:0:0:root:/root:/bin/false\n",
+            ),
+            1 => put(
+                root.path(),
+                "etc/shadow",
+                b"root:$unknown$salt$synthetic-marker:::::::\n",
+            ),
+            2 => put(
+                root.path(),
+                "etc/shadow",
+                &vec![b'x'; restore_native::MAX_TABLE_BYTES + 1],
+            ),
+            _ => {
+                fs::rename(
+                    root.path().join("etc/passwd"),
+                    root.path().join("etc/original-passwd"),
+                )
+                .unwrap();
+                symlink("original-passwd", root.path().join("etc/passwd")).unwrap();
+            }
+        }
+        let before = fs::read(root.path().join("etc/shadow")).unwrap();
+        let staging = tempdir().unwrap();
+        let error = capture_effective(
+            root.path(),
+            staging.path(),
+            &config,
+            Path::new(CWD),
+            Path::new(CONFIG_PATH),
+            &signed_accounts(),
+        )
+        .err()
+        .unwrap();
+        assert!(!format!("{error:?} {error}").contains("synthetic-marker"));
+        assert_eq!(fs::read(root.path().join("etc/shadow")).unwrap(), before);
+        assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn authenticated_native_rows_are_rechecked_not_trusted_as_opaque_payload() {
+    let (root, config) = fixture();
+    let bytes = captured(root.path(), &config, CWD, CONFIG_PATH);
+    for (path, data) in [
+        ("etc/passwd", &b"root:x:0:0:root:/root:/bin/false\n"[..]),
+        (
+            "etc/shadow",
+            &b"root:$unknown$salt$synthetic-marker:::::::\n"[..],
+        ),
+        ("etc/group", &b"root:x:0:missing-user\n"[..]),
+    ] {
+        assert!(checked(&alter(&bytes, path, Some(data))).is_err());
     }
 }

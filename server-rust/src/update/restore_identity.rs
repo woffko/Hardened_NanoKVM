@@ -18,6 +18,7 @@ use super::restore_archive::{
     self, CanonicalSetting, CapturedArchive, RestoreAction, RestoreArchiveError, SourceRoot,
     ValidatedRestore,
 };
+use super::restore_native::{self, AccountFiles};
 use crate::{
     auth::password::Account,
     config::{Config, Paths},
@@ -49,11 +50,15 @@ pub enum RestoreIdentityError {
     Limit,
     #[error(transparent)]
     Archive(#[from] RestoreArchiveError),
+    #[error(transparent)]
+    Native(#[from] restore_native::NativeAccountError),
 }
 type Result<T> = std::result::Result<T, RestoreIdentityError>;
 
 // No Debug/Clone/serialization: the snapshot remains private. This wrapper is
 // proof of identity/config checks, not proof of ticket authorization or replay.
+// SSH policy/host-key parsing and signed-image executable/ownership checks are
+// separate mandatory preflight gates; native table consistency cannot prove them.
 pub struct IdentityCheckedRestore {
     archive: ValidatedRestore,
 }
@@ -71,6 +76,8 @@ impl IdentityCheckedRestore {
 /// Callers must hold the common update lock and quiesce all settings writers.
 /// working_dir is the running process's logical absolute cwd, not source_root.
 /// config_path is the exact active NANOKVM_CONFIG/default path selected at boot.
+/// signed_accounts must be extracted from the exact verified immutable target
+/// rootfs, after build-time user generation, not a mutable staging description.
 /// No live file, credential or setting is changed by capture.
 pub fn capture_effective(
     source_root: &Path,
@@ -78,6 +85,7 @@ pub fn capture_effective(
     effective: &Config,
     working_dir: &Path,
     config_path: &Path,
+    signed_accounts: &AccountFiles<'_>,
 ) -> Result<CapturedArchive> {
     if effective.jwt.secret_key.is_empty() || effective.jwt.secret_key.len() > MAX_SECRET {
         return Err(RestoreIdentityError::InvalidState);
@@ -147,6 +155,26 @@ pub fn capture_effective(
         canonical.0.jwt.secret_key = effective.jwt.secret_key.clone();
     }
     canonical.0.jwt.secret_key_legacy.zeroize();
+    let passwd = source
+        .read_setting("etc/passwd", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let group = source
+        .read_setting("etc/group", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let shadow = source
+        .read_setting("etc/shadow", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let gshadow = source.read_setting("etc/gshadow", restore_native::MAX_TABLE_BYTES)?;
+    let [native_passwd, native_group, native_shadow, native_gshadow] = restore_native::merge(
+        &AccountFiles {
+            passwd: &passwd,
+            group: &group,
+            shadow: &shadow,
+            gshadow: gshadow.as_deref().map(|v| v.as_slice()),
+        },
+        signed_accounts,
+    )?
+    .into_settings();
     // Keep the effective key embedded verbatim. In particular, embedded keys
     // containing whitespace must not be changed by session-file trim behavior.
     let yaml = encode_config(&canonical.0)?;
@@ -174,6 +202,10 @@ pub fn capture_effective(
             path: KEY,
             bytes: key,
         },
+        native_passwd,
+        native_group,
+        native_shadow,
+        native_gshadow,
     ];
     Ok(restore_archive::capture_canonical(
         &source,
@@ -184,7 +216,10 @@ pub fn capture_effective(
 
 /// Run only after complete capsule authentication and archive validation.
 /// A later applier must consume this type together with an authorized ticket.
-pub fn check_identity(mut archive: ValidatedRestore) -> Result<IdentityCheckedRestore> {
+pub fn check_identity(
+    mut archive: ValidatedRestore,
+    signed_accounts: &AccountFiles<'_>,
+) -> Result<IdentityCheckedRestore> {
     let yaml =
         read_member(&mut archive, CONFIG, MAX_CONFIG)?.ok_or(RestoreIdentityError::InvalidState)?;
     let config = parse_config(&yaml)?;
@@ -216,6 +251,22 @@ pub fn check_identity(mut archive: ValidatedRestore) -> Result<IdentityCheckedRe
         config.0.proto == "https",
         cert.as_deref().map(|v| v.as_slice()),
         key.as_deref().map(|v| v.as_slice()),
+    )?;
+    let passwd = read_member(&mut archive, "etc/passwd", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let group = read_member(&mut archive, "etc/group", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let shadow = read_member(&mut archive, "etc/shadow", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(RestoreIdentityError::InvalidState)?;
+    let gshadow = read_member(&mut archive, "etc/gshadow", restore_native::MAX_TABLE_BYTES)?;
+    restore_native::check_for_image(
+        &AccountFiles {
+            passwd: &passwd,
+            group: &group,
+            shadow: &shadow,
+            gshadow: gshadow.as_deref().map(|v| v.as_slice()),
+        },
+        signed_accounts,
     )?;
     Ok(IdentityCheckedRestore { archive })
 }

@@ -1,8 +1,8 @@
 # Authenticated raw restore transaction
 
 Status: implementation in progress on the security remediation branch. Capsule
-crypto, closed-schema archive capture/validation, canonical app-identity checks,
-protected ticket persistence and descriptor-relative source I/O are implemented
+crypto, closed-schema archive capture/validation, canonical app/native-identity
+checks, protected ticket persistence and descriptor-relative source I/O are implemented
 and host-tested. Existing raw writer and early boot still
 use legacy preservation and must not be released as fixed C1.
 
@@ -177,14 +177,70 @@ their input. This does not claim complete third-party parser memory erasure.
 
 After AEAD and structural archive validation, `check_identity` checks canonical
 paths, account/hash syntax, exact key/file consistency, bounded sizes and TLS
-again, returning a private `IdentityCheckedRestore`. It does not authenticate a
-ticket, validate native passwd/SSH semantics, apply files or stop provisioning.
+again, returning a private `IdentityCheckedRestore`. It also requires the native
+account checks below. It does not authenticate a ticket, validate SSH policy/host
+keys, apply files or stop provisioning.
 In-memory web sessions are not restored across reboot.
 
 References checked for the implementation:
 
 - [RustCrypto ChaCha20Poly1305 0.10.1](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
 - [RustCrypto STREAM implementation at aead-v0.5.2](https://github.com/RustCrypto/traits/blob/aead-v0.5.2/aead/src/stream.rs)
+
+## Native account preflight (implemented, SSH/runtime gates still open)
+
+Capture and authenticated validation now require native `AccountFiles` from the
+exact verified immutable signed target rootfs. This carrier does not verify its
+origin. A pre-fakeroot Buildroot `target/` directory is not a valid substitute:
+package users, including OpenSSH's dynamically assigned sshd user, can be added
+only during final image assembly. Current Picoclaw has no fixed service UID;
+its future dedicated account must be defined by signed packaging, not invented
+or allocated by the restore helper.
+
+`restore_native` parses passwd/group/shadow and optional gshadow with 64-KiB
+per-table, 512-line and 4096-byte line limits. Names/UIDs/GIDs are unique,
+primary groups and supplementary members must exist, passwd/shadow entries
+correspond, and gshadow membership must agree with group. Controls, malformed
+rows, inline passwd/group hashes, empty native user passwords, duplicate IDs,
+extra UID 0 and unsupported root layout require an explicit migration.
+
+Root remains UID/GID 0 with `/root` and a recognized shell. Existing password
+rows, expiry fields, account locks and root shell are preserved, never replaced
+with image defaults, unlocked, regenerated or rehashed. New signed-image users
+must have unused nonzero UID/GID, a locked password and non-login shell. Common
+users must retain UID/GID; non-root service home/shell and a required locked state
+cannot silently disagree with the image. Conflicts stop capture rather than
+renumbering existing files or changing account policy behind the operator's back.
+
+Existing group membership is retained and extended by exact signed-image member
+requirements in stable order. gshadow retains existing password/admin state and
+synchronizes membership; a new common-group admin requirement needs explicit
+migration. Output is revalidated as a whole. Authenticated validation requires an
+already complete, idempotent merged result; it cannot silently repair a capsule
+that omitted required signed service identities. Native capture uses these exact
+bounded snapshots as archive replacements instead of rereading their source.
+
+Unlocked native hash syntax/parameters are checked against the pinned target's
+musl 1.2.6 crypt implementation: DES/BSD-DES, MD5, SHA-256/SHA-512 and bcrypt
+2a/2b/2x/2y. This is preservation compatibility, not a recommendation to generate
+weak legacy hashes. SHA rounds are 1000..9,999,999; bcrypt cost 4..19, matching
+the pinned implementation's bounds. Encoded lengths and unused bits must be
+canonical. Literal shadow-safe salt punctuation, spaces and UTF-8 are retained.
+Noncanonical SHA rounds are rejected: musl rewrites that prefix and OpenSSH uses
+exact stored/result comparison. Locked `!`/`*` suffixes stay opaque and locked.
+No password is supplied, calculated or verified by this preflight. Owned table
+buffers and decoded bcrypt bytes are bounded/zeroizing; errors do not echo data.
+
+The isolated writer/helper must still prove signature/image binding, executable
+availability and ownership for preserved shells/service homes, source quiescence,
+and the actual linked crypt provider. In particular, accepting a recognized
+`/bin/bash` source shell does not prove bash is installed in the new image.
+Custom non-root homes/SSH state outside the fixed archive allowlist require an
+explicit verified preservation/reinstall or migration gate; keeping only their
+passwd/shadow rows is not a promise to preserve their files.
+SSH host keys/config/includes, actual `sshd -t`/effective root-password policy,
+and login after restore remain mandatory separate checks. No native-table test
+proves SSH availability or complete C1 closure.
 
 ## Protected boot ticket v1 (implemented, not wired into boot/writer)
 
@@ -253,10 +309,13 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
    read/copy/space error aborts before partition writes. Preserve optional app
    configuration/state, never downloaded binaries, caches or init scripts.
    Use the implemented canonical app-state capture/checks with the exact active
-   config/cwd; validate native SSH/passwd semantics and merge any new signed
-   service accounts without UID collisions. Use the implemented unknown-field
+   config/cwd and exact signed-image native account tables. Use the implemented
+   collision-free native merge and unknown-field
    reject/migration preflight; do not claim arbitrary YAML is losslessly copied
    or bypass the error by normalizing the source file in place.
+   Validate SSH host identity/config/effective policy and signed-image shell/home
+   executable/ownership requirements before writing; native row checks alone
+   are not proof of a working SSH service.
    Installed optional apps need a verified
    replacement/provenance check before flashing; silently dropping them is not
    acceptable preservation. Regenerate shell-sourced defaults and runtime links
