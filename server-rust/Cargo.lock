@@ -1382,6 +1382,7 @@ dependencies = [
  "bcrypt",
  "bytes",
  "cbc",
+ "chacha20poly1305",
  "cipher",
  "flate2",
  "futures-util",
@@ -1407,6 +1408,7 @@ dependencies = [
  "url",
  "urlencoding",
  "webrtc",
+ "zeroize",
 ]
 
 [[package]]
