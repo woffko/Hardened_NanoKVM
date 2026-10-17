@@ -35,7 +35,8 @@ cipher = "0.4"
 flate2 = "1"
 futures-util = { version = "0.3.32", features = ["sink"] }
 md-5 = "0.10"
-nix = { version = "0.29.0", features = ["fs", "mount", "net", "process", "resource", "sched", "signal", "term", "user"] }
+linux-raw-sys = { version = "=0.12.1", default-features = false, features = ["std", "general", "ioctl", "loop_device"] }
+nix = { version = "0.29.0", features = ["fs", "ioctl", "mount", "net", "process", "resource", "sched", "signal", "term", "user"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rcgen = "0.13"
 rtcp = "0.17.1"

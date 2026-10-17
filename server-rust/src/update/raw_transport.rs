@@ -304,6 +304,14 @@ pub struct ImageReader {
     position: u64,
 }
 
+impl ImageReader {
+    // Crate-internal ownership transfer to the fixed readonly loop adapter.
+    // No descriptor/path/Clone API is exposed to native commands or callers.
+    pub(super) fn into_rootfs_backing(self) -> (File, u64) {
+        (self.file, self.size)
+    }
+}
+
 impl Read for ImageReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         let limit = (self.size - self.position).min(out.len() as u64) as usize;

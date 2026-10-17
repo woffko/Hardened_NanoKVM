@@ -1386,6 +1386,7 @@ dependencies = [
  "cipher",
  "flate2",
  "futures-util",
+ "linux-raw-sys",
  "md-5",
  "nix 0.29.0",
  "rand_core 0.6.4",

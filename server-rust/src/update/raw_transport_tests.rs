@@ -280,6 +280,32 @@ fn adopted_endpoint_and_received_images_always_have_cloexec() {
 
 #[test]
 fn closing_one_shot_receiver_releases_fds_in_unprocessed_extra_packets() {
+    if std::env::var_os("NANOKVM_QUEUED_FD_CLEANUP_FIXTURE").is_none() {
+        // Other parallel tests can fork while the CLOEXEC pipe exists: that
+        // child briefly owns a writer until exec. Create the pipe only inside
+        // an already-execed isolated test process, not in the shared harness.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::raw_transport::tests::closing_one_shot_receiver_releases_fds_in_unprocessed_extra_packets",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("NANOKVM_QUEUED_FD_CLEANUP_FIXTURE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated queued-FD cleanup failed: {output:?}"
+        );
+        let stdout = std::str::from_utf8(&output.stdout).unwrap();
+        assert!(
+            stdout.contains("running 1 test\n") && stdout.contains("1 passed; 0 failed;"),
+            "queued-FD fixture did not execute exactly one test"
+        );
+        return;
+    }
     let (sender, receiver) = channel().unwrap();
     let files = images();
     raw_send(&sender.socket, &record(&context(), &files), &files);
@@ -342,5 +368,10 @@ fn rejected_truncated_and_overflow_packets_do_not_leak_received_descriptors() {
     assert!(
         output.status.success(),
         "isolated descriptor cleanup fixture failed"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+    assert!(
+        stdout.contains("running 1 test\n") && stdout.contains("1 passed; 0 failed;"),
+        "descriptor cleanup fixture did not execute exactly one test"
     );
 }

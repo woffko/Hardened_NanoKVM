@@ -519,6 +519,79 @@ proc-fd view. Current host tests use native host OpenSSH and prove this componen
 not target provenance, target timing/RAM, certificate policy, full sshd semantics
 or actual login. No production writer/boot integration is implied.
 
+### Exact ROOTFS readonly view (component; production integration open)
+
+`restore_rootfs::RootfsView` consumes a ROOTFS `ImageReader` from the one-shot
+descriptor channel. The trusted transaction must first authenticate the archive
+and close every writable snapshot alias; the transport and this view do not
+verify signatures or authorize restoration. BOOT/ROOTFS role selection remains
+the trusted caller's responsibility. No mutable `target/` tree or p3 ELF is used
+as a substitute for the exact final, packaged ROOTFS bytes.
+
+This is a fresh, single-threaded, privileged-child API, never a live-server call.
+It checks the real parent around a parent-death SIGKILL lease, creates private
+mount/network namespaces, makes mount propagation private and verifies procfs.
+The caller supplies a root-owned, private, empty mountpoint on the current rootfs
+and must protect its ancestors, hold the transaction lock, enforce a wall timeout
+and exit the child after failure. The guard is not Send/Sync. It does not yet
+remove capabilities or close inherited vendor FDs: those belong to the separate
+native-execution boundary and must precede any target executable.
+
+The narrow loop adapter uses generated `linux-raw-sys = 0.12.1` UAPI definitions
+(already locked transitively; now a direct exact dependency, Apache/MIT-compatible)
+and the pinned nix ioctl feature. The isolated unsafe ioctl boundary is required
+for Linux loop hardware control, not for performance. All pointer objects are
+initialized exact ABI types with owned live descriptors and documented safety
+invariants. No hand-written ABI layout, shell, losetup command or named backing
+path is accepted. Source checks require a positive 512-aligned size from 4 KiB
+through 2 GiB, regular anonymous nlink-0 inode, exact length/current owner, safe
+mode, kernel O_RDONLY and CLOEXEC.
+
+Only checked root-owned `/dev/loop-control` (char 10:237) and `/dev/loopN` (block
+7:N), without symlinks/nested mounts, are opened. Setid/sticky/world-writable
+device nodes are rejected; standard privileged group-device permissions are
+not treated as an unprivileged-user isolation boundary. Atomic `LOOP_CONFIGURE`
+sets READ_ONLY|AUTOCLEAR, zero offset, exact size limit and no PARTSCAN/encryption.
+An EBUSY selection race permits at most eight attempts. Before mounting, kernel
+status must match backing device/inode, size/offset/number/exact flags, no
+encryption; BLKROGET and BLKGETSIZE64 must confirm readonly/exact byte size.
+Unsupported ioctl, absent device nodes or unexpected flags fail before writes.
+Kernel `loop.max_part` can nevertheless force PARTSCAN during configure, before
+status is checked. This component does not yet preflight that global setting;
+production integration must require actual max_part=0 before claiming a device,
+and test the nonzero rejection before ioctl. Rejecting the resulting status is
+not proof that partition scanning never occurred.
+
+The view mounts ext4 with `ro,nodev,nosuid,noexec,noload`; journal replay and native
+execution are not allowed. Reopening must identify exactly the loop device,
+ext4 superblock type and all four mount flags. Fixed passwd/group/shadow and
+optional gshadow are read through no-symlink/no-cross-mount descriptors, bounded
+to 64 KiB each, root-owned safe single-link regular files, into zeroizing buffers;
+the existing cross-file native-account validator is mandatory. Preserved root
+home/shell are checked against this image: real safe root home and regular safe
+shell, both with owner-execute/search permission, with shell symlinks resolved
+only under openat2 IN_ROOT|NO_MAGICLINKS|
+NO_XDEV. This metadata check is not password-login or ELF/interpreter validation.
+
+Drop lazy-detaches the exact pinned mount, then closes mount/loop/backing refs;
+AUTOCLEAR and fresh-child namespace teardown are the cleanup mechanisms. It never
+issues LOOP_CLR_FD against a potentially reused device and never cleans unrelated
+loops. Actual cleanup after a successful mount or process kill remains a runtime
+gate. The retained RC12 kernel build config has LOOP=y (eight initial devices),
+EXT4_FS/DEVTMPFS/PROC_FS and mount/network namespace support; this is build evidence,
+not a current-device `/proc/config.gz` observation. This WSL has no loop-control
+or loop nodes: successful LOOP_CONFIGURE/ext4 mount/AUTOCLEAR are NOT host-tested.
+
+Host tests cover generated ABI/request framing, readonly/anonymous/size/mode/
+CLOEXEC guards, status mutations and real ENOTTY on regular files, plus bounded
+account/layout/shell containment cases as mapped root in disposable userns
+children. The helper asserts that exactly one requested nested test executed,
+preventing a zero-test filter false pass. No real host account files are copied.
+Exact raw.12 target mount, vendor/exFAT behavior, native runtime binding, sshd/
+key-possession/effective-policy checks and production writer/early-restore use
+remain open. The existing system API still uses the transitional legacy writer;
+this component does NOT close C1 or make a releasable raw update.
+
 ### Fresh-process SSH syntax sandbox (component only)
 
 `nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID` is a separate,
@@ -531,7 +604,8 @@ This component checks isolation, not authenticity. The future caller must bind
 the exact signed target executable/loader/libraries and authenticated immutable
 identity snapshot, materialize them into a quiesced private root on `/`, protect
 that directory and its ancestors, and hold the transaction lock throughout.
-There is no signed-image root builder or production caller yet. A pathname,
+The readonly image view above does not yet build this native root or connect a
+production caller. A pathname,
 private mode, ELF header or successful syntax exit never grants restore authority.
 
 The root is owner-0 and private, with no setid/sticky bits; the bounded tree
@@ -539,8 +613,10 @@ rejects symlinks, special files, hard-linked regular files, writable group/world
 modes and nested mounts. Limits are 1024 members, 64 MiB, depth 16, path 240 bytes.
 `.oldroot`, `proc`, `sys` and `data` must be empty. `/dev/null` starts as an empty
 regular placeholder. Fixed `usr/sbin/sshd` must be a regular executable. Signed
-library symlinks must eventually be resolved/materialized as checked regular
-files, not copied as ambient path authority. Hostile concurrent local root is
+library symlinks must be resolved/materialized as checked regular files on this
+prepared-root path, not copied as ambient path authority. Future exact-image
+binds need a separate provenance-checked path; do not relax this generic
+pathname-only tree validator to admit them. Hostile concurrent local root is
 not a boundary this private-directory contract can contain.
 
 Only mount and network namespaces are used. The retained target enables those
