@@ -42,6 +42,27 @@ fn sha256_only_image_capture_keeps_exact_length_digest_and_kernel_readonly_guard
 }
 
 #[test]
+fn actual_public_snapshots_move_through_one_shot_image_channel_without_named_reopen() {
+    use crate::update::raw_transport::{TransferContext, channel};
+    let root = tempdir().unwrap();
+    let stage = StageDirectory::prepare(&root.path().join("system")).unwrap();
+    let first = vec![0x35; 1025];
+    let second = vec![0x77; 65537];
+    let PublicSnapshot { file: boot } = capture(&stage, &first);
+    let PublicSnapshot { file: rootfs } = capture(&stage, &second);
+    let (sender, receiver) = channel().unwrap();
+    let context = TransferContext::new([42; 16], "0.3.0-raw.fixture", [1025, 65537]).unwrap();
+    sender.send(&context, [boot, rootfs]).unwrap();
+    let received = receiver.receive(&context).unwrap();
+    for (mut source, expected) in received.into_iter().zip([first, second]) {
+        let mut actual = Vec::new();
+        source.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(fs::read_dir(root.path().join("system")).unwrap().count(), 0);
+}
+
+#[test]
 fn snapshot_has_no_name_and_is_kernel_readonly_not_merely_a_read_api() {
     let root = tempdir().unwrap();
     let stage = StageDirectory::prepare(&root.path().join("system")).unwrap();

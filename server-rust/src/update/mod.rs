@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod keys;
+pub mod raw_transport;
 pub mod restore_archive;
 pub mod restore_capsule;
 mod restore_fs;

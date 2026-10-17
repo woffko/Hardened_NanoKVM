@@ -154,6 +154,60 @@ signed-target runtime/rootfs binding, protected tickets, early fail-closed apply
 private app staging and device/crash/release gates remain mandatory. Do not ship
 this partial system-API improvement as the completed security migration.
 
+## Public raw-image descriptor channel (component, not production writer)
+
+`update/raw_transport.rs` supplies a one-shot `AF_UNIX/SOCK_SEQPACKET` pair,
+with no socket pathname, listener or network port. It uses the already pinned
+`rustix 1.1.4` safe `SCM_RIGHTS` APIs (`net` feature, no lockfile/version change
+or new unsafe code). This does not authorize an update: the caller must supply
+already authenticated immutable BOOT/ROOTFS snapshots, with all writable owners
+closed and p3 excluded from raw export. Readonly/nlink checks alone cannot prove
+those prerequisites or protect against malicious local root/backing-store writes.
+
+The fixed 137-byte public record is independent of machine endianness:
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 8 | `NKRAW001` transport format |
+| 8 | 16 | Expected public transaction ID |
+| 24 | 1 | Expected version length, 1–64 |
+| 25 | 64 | ASCII version, zero-padded |
+| 89 | 16 | BOOT/ROOTFS sizes, big-endian u64 |
+| 105 | 32 | BOOT/ROOTFS device/inode pairs, big-endian u64 |
+
+Context comes from the trusted transaction, not deserialized p3 state. Total
+image size is bounded to 2 GiB. Sender and receiver are consumed by their one
+operation. Source/received FDs must be distinct anonymous regular files, same
+effective UID, exact sizes, safe mode, actual `O_RDONLY` and `FD_CLOEXEC`.
+The receiver checks the record against its expected context, exact FD count,
+inode identities and kernel `MSG_TRUNC/MSG_CTRUNC`; received FDs are atomically
+`CMSG_CLOEXEC`. Failed validation closes completed/unconsumed ancillary FDs.
+Endpoints have two-second socket send/receive timeouts and expected creator
+PID/UID checks. `SO_PEERCRED` identifies the socket-pair creator, not the child
+PID after fork/exec. These checks are not signature/ticket authentication.
+
+The returned bounded image cursors use `pread`, not the shared open-description
+offset inherited through `SCM_RIGHTS`. They expose no File/FD/write/Clone API.
+Only one packet is processed, then the receiver closes; queued extra packets
+cannot become further commands/inputs and their queued FD references are freed.
+This is not a claim that all possible packet suffixes were read/rejected as EOF.
+
+The child endpoint moves into `Command` stdin without `pre_exec` or raw-fd
+ownership conversion. A fresh helper must duplicate stdin with
+`F_DUPFD_CLOEXEC`, redirect/close the original fd0 alias, then adopt its owned
+endpoint. The parent must drop the configured `Command` after spawn, not retain
+another endpoint alias. No process-global stdio/fd closing is performed by the
+library. Sending successfully means **queued only**; job ownership/child terminal
+state and durable transaction acceptance must be checked separately.
+
+Current evidence includes host unit tests, actual PublicSnapshot transfer and a
+real exec-boundary fixture. The fixture is **not** an isolated production writer
+and is compiled only with `sandbox-test-fixture`. There is no production raw
+caller, native runtime provenance, partition write, secret capsule/ticket handoff
+or early restore connected to this transport yet. C1 and all device/release gates
+remain open. The future writer must also close unrelated inherited vendor FDs
+and run from a protected retained runtime before the running rootfs is destroyed.
+
 ## Capsule v1 (implemented core)
 
 `server-rust/src/update/restore_capsule.rs` uses ChaCha20-Poly1305 with RustCrypto
