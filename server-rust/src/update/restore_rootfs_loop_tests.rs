@@ -1,9 +1,110 @@
 use super::*;
 use std::{
+    fs,
     io::Write,
     mem::{align_of, offset_of, size_of},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
 };
+
+#[test]
+fn wrong_filesystem_cannot_impersonate_kernel_loop_parameters() {
+    let temporary = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        check_sysfs(&File::open(temporary.path()).unwrap()),
+        Err(RootfsError::Device)
+    ));
+    assert!(check_sysfs(&File::open("/sys").unwrap()).is_ok());
+}
+
+#[test]
+fn max_part_requires_exact_zero_kernel_rendering_and_closed_fixed_path() {
+    if !super::super::tests::in_user_namespace(concat!(
+        module_path!(),
+        "::max_part_requires_exact_zero_kernel_rendering_and_closed_fixed_path"
+    )) {
+        return;
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let root = File::open(temporary.path()).unwrap();
+    let directory = temporary.path().join("module/loop/parameters");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("max_part");
+    assert!(read_zero_parameter(&root).is_err());
+    for value in [
+        b"0\n".as_slice(),
+        b"1\n",
+        b"256\n",
+        b"-1\n",
+        b"+0\n",
+        b"00\n",
+        b"0",
+        b"",
+        b"0\nextra",
+        b"0\0",
+        &[b'0'; 8192],
+    ] {
+        if path.exists() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::write(&path, value).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(read_zero_parameter(&root).is_ok(), value == b"0\n");
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&path, b"0\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(read_zero_parameter(&root).is_ok());
+    assert!(check_sysfs(&root).is_err()); // file fixture is not kernel authority.
+    for mode in [0o644, 0o666, 0o4644] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(read_zero_parameter(&root).is_err());
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    let alias = temporary.path().join("alias");
+    fs::hard_link(&path, &alias).unwrap();
+    assert!(read_zero_parameter(&root).is_err());
+    fs::remove_file(&alias).unwrap();
+    fs::remove_file(&path).unwrap();
+    symlink("/sys/module/loop/parameters/max_part", &path).unwrap();
+    assert!(read_zero_parameter(&root).is_err());
+    fs::remove_file(&path).unwrap();
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap();
+    assert!(read_zero_parameter(&root).is_err()); // NONBLOCK: no FIFO read hang.
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(read_zero_parameter(&root).is_err());
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, b"0\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    let replacement = temporary.path().join("replacement");
+    fs::write(&replacement, b"0\n").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o444)).unwrap();
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS).unwrap();
+    nix::mount::mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        nix::mount::MsFlags::MS_PRIVATE | nix::mount::MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .unwrap();
+    // Reopen in the NEW namespace; the old root fd cannot observe its binds.
+    let current = File::open(temporary.path()).unwrap();
+    nix::mount::mount(
+        Some(replacement.as_path()),
+        &path,
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .unwrap();
+    let result = read_zero_parameter(&current);
+    nix::mount::umount2(&path, nix::mount::MntFlags::empty()).unwrap();
+    assert!(
+        result.is_err(),
+        "even a same-filesystem zero-valued bind is not kernel authority"
+    );
+}
 
 fn readonly_image() -> File {
     let mut writable = tempfile::tempfile().unwrap();

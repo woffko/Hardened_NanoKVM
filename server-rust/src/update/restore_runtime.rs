@@ -2,7 +2,7 @@
 //! origin of its prepared root. Signed-image extraction/binding is mandatory at
 //! the caller and is not inferred from a pathname or a successful native test.
 
-use super::restore_fs;
+use super::{restore_fs, restore_rootfs::RootfsView};
 use nix::{
     fcntl::{FcntlArg, FdFlag, fcntl},
     mount::{MntFlags, MsFlags, mount, umount2},
@@ -66,6 +66,45 @@ impl SandboxError {
 /// The parent must already authenticate/bind the target runtime and snapshot;
 /// this is NOT a signature-verification or restore-authorization API.
 pub fn exec_sshd_syntax(root: &Path, expected_parent: u32) -> Result<Infallible, SandboxError> {
+    exec_sshd(root, expected_parent, None)
+}
+
+/// Separate provenance-aware entry. The caller must authenticate the immutable
+/// ROOTFS first; this function binds its runtime, not a mutable p3/target tree.
+/// Prepared identity is still strictly inspected BEFORE any fixed image binds.
+pub fn exec_sshd_syntax_from_image(
+    root: &Path,
+    expected_parent: u32,
+    image: RootfsView,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(root, expected_parent, Some(ImageSource::Verified(image)))
+}
+
+enum ImageSource {
+    Verified(RootfsView),
+    #[cfg(feature = "sandbox-test-fixture")]
+    Fixture(std::path::PathBuf),
+}
+
+#[doc(hidden)]
+#[cfg(feature = "sandbox-test-fixture")]
+pub fn exec_sshd_syntax_image_fixture(
+    root: &Path,
+    expected_parent: u32,
+    image: &Path,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Fixture(image.to_path_buf())),
+    )
+}
+
+fn exec_sshd(
+    root: &Path,
+    expected_parent: u32,
+    image: Option<ImageSource>,
+) -> Result<Infallible, SandboxError> {
     if !geteuid().is_root()
         || expected_parent <= 1
         || getppid().as_raw() as u32 != expected_parent
@@ -99,13 +138,15 @@ pub fn exec_sshd_syntax(root: &Path, expected_parent: u32) -> Result<Infallible,
     if !placeholder.is_file() || placeholder.len() != 0 {
         return Err(SandboxError::Layout);
     }
-    let sshd = restore_fs::open_beneath(&pinned, "usr/sbin/sshd", OFlags::RDONLY)
-        .map_err(|_| SandboxError::Layout)?;
-    let executable = sshd.metadata().map_err(|_| SandboxError::Layout)?;
-    if !executable.is_file() || executable.mode() & 0o111 == 0 {
-        return Err(SandboxError::Layout);
+    if image.is_none() {
+        let sshd = restore_fs::open_beneath(&pinned, "usr/sbin/sshd", OFlags::RDONLY)
+            .map_err(|_| SandboxError::Layout)?;
+        let executable = sshd.metadata().map_err(|_| SandboxError::Layout)?;
+        if !executable.is_file() || executable.mode() & 0o111 == 0 {
+            return Err(SandboxError::Layout);
+        }
+        drop(sshd);
     }
-    drop(sshd);
     drop(null_placeholder);
     let bpf = filter::compile()?;
     mark_inherited_close_on_exec()?;
@@ -119,6 +160,20 @@ pub fn exec_sshd_syntax(root: &Path, expected_parent: u32) -> Result<Infallible,
         None::<&str>,
     )
     .map_err(|_| SandboxError::Isolation("mount propagation"))?;
+    let setup = restore_fs::open_root(root, true)
+        .map_err(|_| SandboxError::Isolation("setup root reopen"))?;
+    let actual = setup.metadata().map_err(|_| SandboxError::Layout)?;
+    if actual.dev() != original.dev() || actual.ino() != original.ino() {
+        return Err(SandboxError::Isolation("setup root identity"));
+    }
+    if let Some(image) = &image {
+        let result = match image {
+            ImageSource::Verified(view) => view.bind_ssh_runtime(&setup),
+            #[cfg(feature = "sandbox-test-fixture")]
+            ImageSource::Fixture(path) => super::restore_rootfs::bind_fixture_runtime(path, &setup),
+        };
+        result.map_err(|_| SandboxError::Isolation("image runtime binding"))?;
+    }
     // Open only after CLONE_NEWNS: a proc-fd opened in the previous mount
     // namespace still refers to that old mount and is not a valid bind source.
     let null = File::options()
@@ -185,6 +240,8 @@ pub fn exec_sshd_syntax(root: &Path, expected_parent: u32) -> Result<Infallible,
     .map_err(|_| SandboxError::Isolation("root flags"))?;
     drop(pinned);
     drop(bound);
+    drop(setup);
+    drop(image); // all outside image/loop owners closed before native execution.
     for (resource, maximum) in [
         (Resource::RLIMIT_CORE, 0),
         (Resource::RLIMIT_FSIZE, 0),

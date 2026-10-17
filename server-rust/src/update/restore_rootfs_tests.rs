@@ -10,7 +10,7 @@ const SHADOW: &[u8] = b"root:!:0:0:99999:7:::\nsshd:!:0:0:99999:7:::\n";
 
 // Run owner-sensitive filesystem checks as mapped root in a disposable child.
 // No host root, loop device, real account file or parent namespace is modified.
-fn in_user_namespace(name: &str) -> bool {
+pub(super) fn in_user_namespace(name: &str) -> bool {
     if std::env::var_os("NANOKVM_ROOTFS_OWNER_FIXTURE").is_some() {
         return true;
     }

@@ -24,13 +24,15 @@ use std::{
     io::{self, Read},
     marker::PhantomData,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 use zeroize::Zeroizing;
 
 #[path = "restore_rootfs_loop.rs"]
 mod loop_device;
+#[path = "restore_rootfs_runtime.rs"]
+mod runtime;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RootfsError {
@@ -77,6 +79,7 @@ impl RootfsAccounts {
 /// once our mount/fd refs close. The child must exit on any setup/teardown error.
 pub struct RootfsView {
     root: File,
+    mountpoint: PathBuf,
     _device: loop_device::ReadonlyLoop,
     _process_scoped: PhantomData<Rc<()>>,
 }
@@ -148,6 +151,7 @@ impl RootfsView {
         }
         Ok(Self {
             root,
+            mountpoint: mountpoint.to_path_buf(),
             _device: device,
             _process_scoped: PhantomData,
         })
@@ -165,6 +169,87 @@ impl RootfsView {
     pub fn check_root_login_paths(&self, restored: &AccountFiles<'_>) -> Result<(), RootfsError> {
         check_root_login_paths(&self.root, restored)
     }
+
+    pub(super) fn bind_ssh_runtime(&self, prepared: &File) -> Result<(), RootfsError> {
+        // Private restore tables must already include the signed service users;
+        // this validates, never silently normalizes or installs factory passwords.
+        let restored = read_accounts(prepared)?;
+        let signed = self.accounts()?;
+        restore_native::check_for_image(&restored.as_files(), &signed.as_files())
+            .map_err(|_| RootfsError::Accounts)?;
+        self.check_root_login_paths(&restored.as_files())?;
+        // The sandbox created a new mount namespace. Reopen the inherited image
+        // mount there, rather than using an old-namespace proc-fd as bind source.
+        // The path selects no new authority: exact pinned inode/dev + readonly
+        // source flags + retained loop owner must match before any import.
+        let source =
+            restore_fs::open_root(&self.mountpoint, false).map_err(|_| RootfsError::Mount)?;
+        let old = self.root.metadata()?;
+        let actual = source.metadata()?;
+        if actual.dev() != old.dev()
+            || actual.ino() != old.ino()
+            || actual.dev() != self._device.device.metadata()?.rdev()
+            || fstatfs(&source).map_err(io::Error::from)?.f_type as u64
+                != u64::from(linux_raw_sys::general::EXT4_SUPER_MAGIC)
+            || !fstatvfs(&source).map_err(io::Error::from)?.f_flag.contains(
+                StatVfsMountFlags::RDONLY
+                    | StatVfsMountFlags::NOSUID
+                    | StatVfsMountFlags::NODEV
+                    | StatVfsMountFlags::NOEXEC,
+            )
+        {
+            return Err(RootfsError::Mount);
+        }
+        runtime::bind_runtime(&source, prepared)
+    }
+}
+
+// Host-only fixture path has no signed/loop provenance. Never compiled into a
+// default/release helper; it exercises the same fixed bind/exec mechanics only.
+#[cfg(feature = "sandbox-test-fixture")]
+pub(super) fn bind_fixture_runtime(path: &Path, prepared: &File) -> Result<(), RootfsError> {
+    let source = restore_fs::open_root(path, false).map_err(|_| RootfsError::Layout)?;
+    // Disposable host fixture only: simulate the source's readonly/noexec mount.
+    // The production path above never manufactures provenance from a pathname.
+    let identity = source.metadata()?;
+    let source_path = format!("/proc/self/fd/{}", source.as_raw_fd());
+    mount(
+        Some(source_path.as_str()),
+        path,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|_| RootfsError::Mount)?;
+    // Reopen after bind in this namespace before remounting the clone.
+    let bound = restore_fs::open_root(path, false).map_err(|_| RootfsError::Layout)?;
+    let actual = bound.metadata()?;
+    if actual.dev() != identity.dev() || actual.ino() != identity.ino() {
+        return Err(RootfsError::Mount);
+    }
+    let bound_path = format!("/proc/self/fd/{}", bound.as_raw_fd());
+    mount(
+        None::<&str>,
+        bound_path.as_str(),
+        None::<&str>,
+        MsFlags::MS_BIND
+            | MsFlags::MS_REMOUNT
+            | MsFlags::MS_RDONLY
+            | MsFlags::MS_NODEV
+            | MsFlags::MS_NOSUID
+            | MsFlags::MS_NOEXEC,
+        None::<&str>,
+    )
+    .map_err(|_| RootfsError::Mount)?;
+    if !fstatvfs(&bound).map_err(io::Error::from)?.f_flag.contains(
+        StatVfsMountFlags::RDONLY
+            | StatVfsMountFlags::NODEV
+            | StatVfsMountFlags::NOSUID
+            | StatVfsMountFlags::NOEXEC,
+    ) {
+        return Err(RootfsError::Mount);
+    }
+    runtime::bind_runtime(&bound, prepared)
 }
 
 impl Drop for RootfsView {

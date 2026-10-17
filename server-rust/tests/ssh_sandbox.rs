@@ -15,6 +15,57 @@ struct PreparedRoot {
 }
 
 impl PreparedRoot {
+    fn split_image_runtime(&self) -> PathBuf {
+        let source = self._temporary.path().join("synthetic-image");
+        fs::create_dir(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        for path in ["usr", "lib", "lib64", "bin", "sbin"] {
+            if self.root.join(path).exists() {
+                fs::rename(self.root.join(path), source.join(path)).unwrap();
+            }
+        }
+        for path in ["usr", "lib", "usr/bin", "etc/ssl"] {
+            fs::create_dir_all(source.join(path)).unwrap();
+        }
+        symlink("usr/bin", source.join("bin")).unwrap();
+        fs::write(
+            source.join("usr/runtime-proof"),
+            b"synthetic signed-runtime bytes",
+        )
+        .unwrap();
+        symlink("runtime-proof", source.join("usr/runtime-link")).unwrap();
+        symlink(&self.outside, source.join("usr/link-outside")).unwrap();
+        fs::write(
+            source.join("etc/ssl/runtime-proof"),
+            b"synthetic provider config",
+        )
+        .unwrap();
+        fs::copy(
+            env!("CARGO_BIN_EXE_nanokvm-sandbox-fixture"),
+            source.join("etc/ssl/exec-probe"),
+        )
+        .unwrap();
+        fs::set_permissions(
+            source.join("etc/ssl/exec-probe"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::write(source.join("etc/ld-musl-riscv64.path"), b"/lib:/usr/lib\n").unwrap();
+        fs::write(self.root.join("etc/runtime-bind-probe"), []).unwrap();
+        source
+    }
+
+    fn run_image(&self, source: &Path) -> Output {
+        Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user"])
+            .arg(env!("CARGO_BIN_EXE_nanokvm-image-runtime-fixture"))
+            .arg(&self.root)
+            .arg(source)
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
     fn new(executable: &Path) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("root");
@@ -93,6 +144,96 @@ impl PreparedRoot {
             b"SSH sandbox root is not a bounded private prepared runtime\n"
         );
     }
+}
+
+#[test]
+fn image_bind_runtime_keeps_private_identity_and_same_native_isolation() {
+    let prepared = PreparedRoot::new(Path::new(env!("CARGO_BIN_EXE_nanokvm-sandbox-fixture")));
+    let source = prepared.split_image_runtime();
+    let before = fs::read("/proc/self/mountinfo").unwrap();
+    let source_bytes = fs::read(source.join("usr/runtime-proof")).unwrap();
+    let output = prepared.run_image(&source);
+    assert_eq!(output.status.code(), Some(0), "image runtime: {output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
+    assert_eq!(
+        fs::read(source.join("usr/runtime-proof")).unwrap(),
+        source_bytes
+    );
+    assert_eq!(
+        fs::read_dir(prepared.root.join("usr")).unwrap().count(),
+        0,
+        "child runtime mount leaked to parent (empty placeholder is expected)"
+    );
+    assert!(
+        !prepared.root.join("etc/ld-musl-riscv64.path").exists()
+            || fs::metadata(prepared.root.join("etc/ld-musl-riscv64.path"))
+                .unwrap()
+                .len()
+                == 0
+    );
+
+    // A mutable prepopulated runtime/loader override cannot be covered up.
+    fs::create_dir_all(prepared.root.join("usr")).unwrap();
+    fs::write(prepared.root.join("usr/untrusted"), b"synthetic").unwrap();
+    let output = prepared.run_image(&source);
+    assert_eq!(output.status.code(), Some(72), "nonempty slot: {output:?}");
+    fs::remove_dir_all(prepared.root.join("usr")).unwrap();
+    fs::write(
+        prepared.root.join("etc/ld-musl-riscv64.path"),
+        b"/data/untrusted\n",
+    )
+    .unwrap();
+    let output = prepared.run_image(&source);
+    assert_eq!(
+        output.status.code(),
+        Some(72),
+        "loader override: {output:?}"
+    );
+}
+
+#[test]
+fn real_host_sshd_uses_readonly_image_runtime_not_private_executable_tree() {
+    let prepared = PreparedRoot::new(Path::new("/usr/sbin/sshd"));
+    fs::create_dir_all(prepared.root.join("run/sshd")).unwrap();
+    fs::write(
+        prepared.root.join("etc/passwd"),
+        b"root:x:0:0:root:/root:/bin/sh\nsshd:x:999:999:sshd:/:/bin/false\n",
+    )
+    .unwrap();
+    fs::write(prepared.root.join("etc/group"), b"root:x:0:\nsshd:x:999:\n").unwrap();
+    fs::write(
+        prepared.root.join("etc/nsswitch.conf"),
+        b"passwd: files\ngroup: files\nhosts: files\n",
+    )
+    .unwrap();
+    let key = prepared.root.join("etc/ssh/ssh_host_ed25519_key");
+    let generated = Command::new("/usr/bin/ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+    fs::write(prepared.root.join("etc/ssh/sshd_config"),
+        b"HostKey /etc/ssh/ssh_host_ed25519_key\nUsePAM no\nPermitRootLogin yes\nPasswordAuthentication yes\n").unwrap();
+    let source = prepared.split_image_runtime();
+    let before = fs::read("/proc/self/mountinfo").unwrap();
+    let output = prepared.run_image(&source);
+    assert_eq!(output.status.code(), Some(0), "image host sshd: {output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    fs::write(
+        prepared.root.join("etc/ssh/sshd_config"),
+        b"InvalidSyntheticDirective yes\n",
+    )
+    .unwrap();
+    let output = prepared.run_image(&source);
+    assert_eq!(
+        output.status.code(),
+        Some(255),
+        "invalid image host sshd: {output:?}"
+    );
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
 }
 
 #[test]

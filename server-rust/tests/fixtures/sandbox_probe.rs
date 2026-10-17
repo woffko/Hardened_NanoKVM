@@ -124,5 +124,38 @@ fn main() -> ExitCode {
             return ExitCode::from(17);
         }
     }
+    if fs::metadata("/etc/runtime-bind-probe").is_ok() {
+        if fs::read("/usr/runtime-link").unwrap() != b"synthetic signed-runtime bytes"
+            || fs::read("/etc/ssl/runtime-proof").unwrap() != b"synthetic provider config"
+            || fs::read("/etc/ld-musl-riscv64.path").unwrap() != b"/lib:/usr/lib\n"
+            || fs::read("/usr/link-outside").is_ok()
+        {
+            return ExitCode::from(24);
+        }
+        for path in [
+            "/usr/runtime-proof",
+            "/etc/ssl/runtime-proof",
+            "/etc/ld-musl-riscv64.path",
+        ] {
+            if fs::write(path, b"synthetic")
+                .err()
+                .and_then(|e| e.raw_os_error())
+                != Some(nix::libc::EROFS)
+            {
+                return ExitCode::from(25);
+            }
+        }
+        // execve is intentionally admitted by the shared filter. This exact
+        // config mount must still be NOEXEC. If broken, the copied probe exits20
+        // via this argument (not a false-success /bin/true or recursive run).
+        let args = [
+            std::ffi::CString::new("/etc/ssl/exec-probe").unwrap(),
+            std::ffi::CString::new("--expect-inherited-fd128").unwrap(),
+        ];
+        let env: [std::ffi::CString; 0] = [];
+        if nix::unistd::execve(&args[0], &args, &env) != Err(nix::errno::Errno::EACCES) {
+            return ExitCode::from(26);
+        }
+    }
     ExitCode::SUCCESS
 }

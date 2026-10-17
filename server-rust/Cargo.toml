@@ -21,6 +21,12 @@ path = "tests/fixtures/raw_transfer_probe.rs"
 required-features = ["sandbox-test-fixture"]
 test = false
 
+[[bin]]
+name = "nanokvm-image-runtime-fixture"
+path = "tests/fixtures/image_runtime_probe.rs"
+required-features = ["sandbox-test-fixture"]
+test = false
+
 [dependencies]
 aes = "0.8"
 argon2 = { version = "0.5", features = ["std"] }

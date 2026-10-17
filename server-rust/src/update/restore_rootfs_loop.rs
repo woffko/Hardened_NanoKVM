@@ -11,12 +11,12 @@ use linux_raw_sys::{
     },
 };
 use rustix::{
-    fs::{OFlags, fcntl_getfl, major, minor},
+    fs::{OFlags, fcntl_getfl, fstatfs, major, minor},
     io::{FdFlags, fcntl_getfd},
 };
 use std::{
     fs::File,
-    io,
+    io::{self, Read},
     os::{
         fd::AsRawFd,
         unix::fs::{FileTypeExt, MetadataExt},
@@ -58,6 +58,10 @@ pub(super) struct ReadonlyLoop {
 impl ReadonlyLoop {
     pub(super) fn attach(backing: File, size: u64) -> Result<Self, RootfsError> {
         let identity = check_backing(&backing, size)?;
+        // loop.c can force PARTSCAN from the global max_part/part_shift value
+        // during CONFIGURE, before GET_STATUS64 could reject the extra flag.
+        // Check the readonly kernel parameter before even GET_FREE/device opens.
+        require_no_partscan()?;
         let devices =
             restore_fs::open_root(Path::new("/dev"), false).map_err(|_| RootfsError::Device)?;
         let control =
@@ -121,6 +125,53 @@ impl ReadonlyLoop {
         }
         Ok(())
     }
+}
+
+fn require_no_partscan() -> Result<(), RootfsError> {
+    let sysfs = restore_fs::open_root(Path::new("/sys"), false).map_err(|_| RootfsError::Device)?;
+    check_sysfs(&sysfs)?;
+    read_zero_parameter(&sysfs)
+}
+
+fn check_sysfs(root: &File) -> Result<(), RootfsError> {
+    if fstatfs(root).map_err(io::Error::from)?.f_type as u64
+        != u64::from(linux_raw_sys::general::SYSFS_MAGIC)
+    {
+        return Err(RootfsError::Device);
+    }
+    Ok(())
+}
+
+fn read_zero_parameter(sysfs: &File) -> Result<(), RootfsError> {
+    let mut parameter = restore_fs::open_beneath(
+        sysfs,
+        "module/loop/parameters/max_part",
+        OFlags::RDONLY | OFlags::NONBLOCK,
+    )
+    .map_err(|_| RootfsError::Device)?;
+    let metadata = parameter.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o444
+    {
+        return Err(RootfsError::Device);
+    }
+    // Sysfs reports PAGE_SIZE as st_size, not the value's length. Read only the
+    // exact kernel rendering and one EOF byte, never an unbounded string/file.
+    let mut value = [0; 2];
+    parameter
+        .read_exact(&mut value)
+        .map_err(|_| RootfsError::Device)?;
+    if value != *b"0\n"
+        || parameter
+            .read(&mut [0; 1])
+            .map_err(|_| RootfsError::Device)?
+            != 0
+    {
+        return Err(RootfsError::Device);
+    }
+    Ok(())
 }
 
 fn check_backing(file: &File, size: u64) -> Result<[u64; 2], RootfsError> {

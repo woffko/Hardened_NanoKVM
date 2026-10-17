@@ -556,11 +556,15 @@ An EBUSY selection race permits at most eight attempts. Before mounting, kernel
 status must match backing device/inode, size/offset/number/exact flags, no
 encryption; BLKROGET and BLKGETSIZE64 must confirm readonly/exact byte size.
 Unsupported ioctl, absent device nodes or unexpected flags fail before writes.
-Kernel `loop.max_part` can nevertheless force PARTSCAN during configure, before
-status is checked. This component does not yet preflight that global setting;
-production integration must require actual max_part=0 before claiming a device,
-and test the nonzero rejection before ioctl. Rejecting the resulting status is
-not proof that partition scanning never occurred.
+Kernel `loop.max_part` can force PARTSCAN during configure, before status is
+checked. The adapter therefore first opens actual sysfs and the fixed
+`module/loop/parameters/max_part` path, with no symlinks or crossed mounts. It
+requires a root-owned single-link regular mode-0444 parameter containing exactly
+`0\n` and EOF, using at most three bytes of bounded input. This check precedes
+even loop-control/device opens and GET_FREE; it does not change a global kernel
+setting. Missing/nonzero/malformed parameters, fake filesystem roots and even
+same-filesystem bind replacements fail closed. Successful target loop operation
+and absence of partition scanning still need runtime acceptance.
 
 The view mounts ext4 with `ro,nodev,nosuid,noexec,noload`; journal replay and native
 execution are not allowed. Reopening must identify exactly the loop device,
@@ -587,10 +591,62 @@ CLOEXEC guards, status mutations and real ENOTTY on regular files, plus bounded
 account/layout/shell containment cases as mapped root in disposable userns
 children. The helper asserts that exactly one requested nested test executed,
 preventing a zero-test filter false pass. No real host account files are copied.
-Exact raw.12 target mount, vendor/exFAT behavior, native runtime binding, sshd/
-key-possession/effective-policy checks and production writer/early-restore use
-remain open. The existing system API still uses the transitional legacy writer;
-this component does NOT close C1 or make a releasable raw update.
+Exact raw.12 target mount, vendor/exFAT behavior, target sshd/key-possession/
+effective-policy checks and production writer/early-restore use remain open.
+The existing system API still uses the transitional legacy writer; this
+component does NOT close C1 or make a releasable raw update.
+
+### Exact-image SSH runtime binding (component; caller integration open)
+
+`exec_sshd_syntax_from_image` consumes a `RootfsView`, separately from the generic
+prepared-runtime entry below. The same bounded no-symlink/no-special-file/
+no-hardlink/no-cross-mount validator inspects the private identity root BEFORE
+image imports. Existing executable trees or loader-path overrides cannot be
+hidden under bind mounts. Prepared native account tables must validate against
+the exact image's service users, and preserved root home/shell must exist there;
+no factory password substitution, account normalization or live `/etc` fallback.
+
+After the sandbox unshares again, it reopens the image mount in that namespace
+and requires the exact pinned root inode/device, retained loop device, ext4 type
+and readonly/nosuid/nodev/noexec flags. Fixed imports are `usr`, `lib`, `bin`,
+optional `sbin`/`lib64`, `etc/ssl`, `var/empty`, and the two known RV64 musl path
+files. Source symlinks resolve only IN_ROOT|NO_MAGICLINKS|NO_XDEV. Whole signed
+runtime directories preserve library, loader, provider and internal-link layout;
+host `ldd`, a mutable Buildroot target tree or a guessed library closure cannot
+establish production provenance. Directory contents derive authority from the
+authenticated immutable image, not recursive per-file policy validation.
+
+Targets are absent or safe empty private placeholders. After each fixed bind,
+the new mount is reopened and inode/device matched before remounting the clone
+readonly/nodev/nosuid. Code imports become executable; config/empty imports stay
+noexec. The original image remains noexec. Generic tree validation is not relaxed
+to admit uploaded symlinks or arbitrary preexisting mounts. The same root pivot,
+capability removal, inherited-FD closure, limits and seccomp boundary then apply.
+All owned image/loop/setup descriptors close before native execution; imported
+mount clones retain filesystem references until child exit. Actual successful
+loop AUTOCLEAR with those clones, including kill/failure teardown, is NOT tested
+by the host bind fixtures and remains a mandatory target gate.
+
+The static `nanokvm-ssh-sandbox` also accepts a fixed image mode: append
+`--image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION
+--boot-size BYTES --rootfs-size BYTES` after the legacy arguments. Its only image
+input is the private stdin SEQPACKET channel above, duplicated CLOEXEC with the
+original stdin redirected to `/dev/null`. Expected context/peer/descriptors must
+match before privileged image setup; BOOT is closed unused, ROOTFS enters the
+readonly view. Parent-death lease is installed before receive. No mutable image
+pathname, arbitrary command, arbitrary FD number or secret CLI input is accepted.
+Public transaction context is NOT a signature. The trusted parent still must
+authenticate both immutable snapshots, close writable/Command aliases, build
+protected identity staging, hold the common lock and bound wall time/kill/reap.
+No production parent currently invokes this mode.
+
+Feature-gated host fixtures bind a synthetic readonly/noexec source and exercise
+the same import/pivot/native boundary, including actual host sshd valid/invalid
+syntax, internal links, readonly denial and config noexec. They intentionally
+bypass image signature/loop/account provenance and are excluded from the static
+release helper. A real exec test rejects a mismatched transaction before any
+privileged setup. These tests do not prove target ELF compatibility, SSH login,
+exact raw.12 mounting, isolated writing or early restore.
 
 ### Fresh-process SSH syntax sandbox (component only)
 
@@ -604,8 +660,8 @@ This component checks isolation, not authenticity. The future caller must bind
 the exact signed target executable/loader/libraries and authenticated immutable
 identity snapshot, materialize them into a quiesced private root on `/`, protect
 that directory and its ancestors, and hold the transaction lock throughout.
-The readonly image view above does not yet build this native root or connect a
-production caller. A pathname,
+The separate exact-image entry above imports its runtime but still has no
+production caller or identity-root builder. A pathname,
 private mode, ELF header or successful syntax exit never grants restore authority.
 
 The root is owner-0 and private, with no setid/sticky bits; the bounded tree
@@ -614,8 +670,8 @@ modes and nested mounts. Limits are 1024 members, 64 MiB, depth 16, path 240 byt
 `.oldroot`, `proc`, `sys` and `data` must be empty. `/dev/null` starts as an empty
 regular placeholder. Fixed `usr/sbin/sshd` must be a regular executable. Signed
 library symlinks must be resolved/materialized as checked regular files on this
-prepared-root path, not copied as ambient path authority. Future exact-image
-binds need a separate provenance-checked path; do not relax this generic
+prepared-root path, not copied as ambient path authority. Exact-image
+binds use the separate provenance-checked entry; do not relax this generic
 pathname-only tree validator to admit them. Hostile concurrent local root is
 not a boundary this private-directory contract can contain.
 
