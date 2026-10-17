@@ -431,6 +431,24 @@ fn canonical_valid_record_wins_over_partial_next_but_corruption_preserves_eviden
 }
 
 #[test]
+fn dropping_store_releases_lock_even_while_an_incidental_fd_alias_is_alive() {
+    let root = tempdir().unwrap();
+    let store = open_fixture(root.path()).unwrap();
+    // dup and a pre-exec fork share exactly the same open file description.
+    // CLOEXEC does not prevent that temporary child/alias from retaining flock.
+    let incidental_alias = store.directory.try_clone().unwrap();
+    assert!(matches!(open_fixture(root.path()), Err(TicketError::Busy)));
+    drop(store);
+    let successor = open_fixture(root.path())
+        .expect("an incidental inherited descriptor must not extend Store ownership");
+    assert!(matches!(open_fixture(root.path()), Err(TicketError::Busy)));
+    drop(incidental_alias);
+    assert!(matches!(open_fixture(root.path()), Err(TicketError::Busy)));
+    drop(successor);
+    assert!(open_fixture(root.path()).is_ok());
+}
+
+#[test]
 fn publication_faults_poison_handle_and_reopen_observes_actual_old_or_new_state() {
     for step in [
         PublishStep::BeforeCreate,

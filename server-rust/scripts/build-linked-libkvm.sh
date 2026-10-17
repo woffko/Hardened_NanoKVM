@@ -49,5 +49,7 @@ cargo build \
   --manifest-path "$ROOT/Cargo.toml" \
   --release \
   --target "$TARGET" \
+  --bin nanokvm-rust-server \
+  --bin nanokvm-hwmon \
   --features linked-libkvm \
   "$@"

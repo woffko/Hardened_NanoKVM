@@ -225,6 +225,16 @@ pub struct Store {
     #[cfg(test)]
     pause_at: Option<PublishStep>,
 }
+impl Drop for Store {
+    fn drop(&mut self) {
+        // flock belongs to the open file description, not this fd. A sibling
+        // pre-exec child can momentarily inherit it despite CLOEXEC. End the
+        // ownership lease explicitly; closing an incidental alias must neither
+        // extend this lease nor affect a successor's separate description.
+        // Store is deliberately non-Clone and never lends its lock descriptor.
+        let _ = flock(&self.directory, FlockOperation::Unlock);
+    }
+}
 #[cfg(test)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PublishStep {

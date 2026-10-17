@@ -334,6 +334,83 @@ proc-fd view. Current host tests use native host OpenSSH and prove this componen
 not target provenance, target timing/RAM, certificate policy, full sshd semantics
 or actual login. No production writer/boot integration is implied.
 
+### Fresh-process SSH syntax sandbox (component only)
+
+`nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID` is a separate,
+single-threaded privileged process, never a function to call in the live server.
+It checks its real parent before/after installing a parent-death SIGKILL lease
+and before native execution. The caller must additionally enforce a bounded
+wall-clock deadline and kill/reap; the helper's CPU limit is not a wall timeout.
+
+This component checks isolation, not authenticity. The future caller must bind
+the exact signed target executable/loader/libraries and authenticated immutable
+identity snapshot, materialize them into a quiesced private root on `/`, protect
+that directory and its ancestors, and hold the transaction lock throughout.
+There is no signed-image root builder or production caller yet. A pathname,
+private mode, ELF header or successful syntax exit never grants restore authority.
+
+The root is owner-0 and private, with no setid/sticky bits; the bounded tree
+rejects symlinks, special files, hard-linked regular files, writable group/world
+modes and nested mounts. Limits are 1024 members, 64 MiB, depth 16, path 240 bytes.
+`.oldroot`, `proc`, `sys` and `data` must be empty. `/dev/null` starts as an empty
+regular placeholder. Fixed `usr/sbin/sshd` must be a regular executable. Signed
+library symlinks must eventually be resolved/materialized as checked regular
+files, not copied as ambient path authority. Hostile concurrent local root is
+not a boundary this private-directory contract can contain.
+
+Only mount and network namespaces are used. The retained target enables those
+and seccomp, but not USER/PID/UTS/IPC namespaces or cgroups; no kernel change is
+made or silently assumed. Mount propagation becomes private; `/dev/null` is
+opened in the new namespace and bound read-only/nosuid/noexec; the new root is
+recursively bound, reopened with exact inode/device comparison, pivoted, and the
+old root detached. Root is then read-only/nodev/nosuid, with only the explicit
+null child mount permitting a device. Host `/proc`, `/sys`, p3 and other mounts
+are absent. All inherited fds above stdio become CLOEXEC; pinned outside root
+fds are dropped; native stdio is replaced by `/dev/null` before exec.
+
+All effective/permitted/inheritable, ambient and bounding capabilities are
+removed. Locked no-root/no-setuid-fixup/no-ambient-raise securebits and
+no-new-privileges prevent reacquisition despite retained UID 0. Hard resource
+limits: core/file size 0, fd table 64, address space 128 MiB, CPU 10 seconds.
+The native-architecture seccomp allowlist denies socket/connect, clone/fork,
+signals, ptrace/process-vm access, namespaces/mounts and privilege changes.
+`dup2`/`dup3` destinations are limited to stdio; `fcntl` admits only F_GETFD,
+F_SETFD and F_GETFL, not signal ownership/leases/dnotify. Fixed harmless ioctl
+queries, self prlimit and read-only prctl
+queries are admitted alongside bounded-runtime file/memory/signal setup syscalls.
+File writes remain impossible through the read-only root and closed
+outside descriptors, not through an open-path string filter.
+
+The one initial command is fixed: `/usr/sbin/sshd -e -t -f /etc/ssh/sshd_config`,
+with a scrubbed environment and no native output forwarded or logged. Its exit
+code is only a syntax result. Seccomp necessarily admits the initial `execve`;
+it is not an executable-pathname filter and a compromised native process can
+re-exec within the same closed root. This is not a general-purpose daemon,
+connection/session or `Authorized*Command` sandbox. No `-T` output/policy parser,
+certificate/Match matrix or root-password availability proof is implemented.
+
+Build this helper only through `server-rust/scripts/build-restore-runtime.sh`:
+locked/offline static musl, no ELF interpreter, DT_NEEDED, RPATH or RUNPATH. The
+default output is under `server-rust/target/restore-runtime/`, separate from an
+ordinary Cargo build so a generic dynamic helper cannot overwrite that result.
+The
+regular linked vendor build now selects only backend/hwmon, avoiding an ambient
+`/kvmapp/server/dl_lib` loader path for this privileged helper. The build host,
+compiler/toolchain/environment still require release provenance/A-B acceptance;
+these ELF checks are not signature or reproducibility verification. Protected
+rootfs installation and packaging are not yet wired. Exact new dependency:
+`seccompiler = 0.5.0` (Apache-2.0 OR BSD-3-Clause, locked checksum); no new unsafe.
+
+Opt-in `sandbox-test-fixture` tests execute real host namespaces/seccomp, not a
+mock: root/capability/bounding/fd/network/fork/signal restrictions, rejected
+unsafe layouts, real host sshd valid/invalid config and invalid synthetic key.
+Host userns only grants disposable fixture privilege and is not target evidence.
+The fake native executable is excluded without the opt-in feature. Target
+kernel execution, signed-runtime provenance and actual SSH login remain gates.
+The previous possession-probe API uses a parent proc-fd view; it cannot be run
+unchanged in this no-proc sandbox. Its required isolated input transport/native
+command mode must be integrated without reintroducing host proc or outside fds.
+
 ## Protected boot ticket v1 (implemented, not wired into boot/writer)
 
 `restore_capsule::ticket` is deliberately a child of the capsule module. It can
@@ -348,6 +425,10 @@ fmask 0177/dmask 0077. Bind subtrees, duplicate mounts, symlinks, nested mounts,
 shared permissions and a different device are rejected. A kernel exclusive
 nonblocking flock on the pinned `.nanokvm-restore` directory serializes owners;
 the restore job must own its lifetime, not an HTTP request future.
+`Store::drop` explicitly unlocks before closing its private descriptor: CLOEXEC
+does not prevent a sibling pre-exec child from momentarily inheriting the same
+open file description and retaining its lock. `Store` is non-Clone and never
+lends that descriptor; while a Store is live, concurrent owners still get Busy.
 
 The 512-byte `state` record contains the transaction, source/new boot IDs,
 device identity digest, exact encrypted capsule/boot image/rootfs image digests,
