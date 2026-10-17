@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT_DIR/scripts/lib/build-security.sh"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build}"
 STAGE_DIR="${STAGE_DIR:-$BUILD_DIR/kvmapp-rust}"
 KVMAPP_STAGE="$STAGE_DIR/kvmapp"
@@ -103,6 +104,14 @@ if [ ! -f "$NATIVE_LIB_DIR/libkvm.so" ]; then
   exit 1
 fi
 
+STAGE_LOCK="$STAGE_DIR.lock"
+mkdir -p "$(dirname "$STAGE_DIR")"
+mkdir "$STAGE_LOCK" || { echo "application stage is already locked" >&2; exit 1; }
+PACKAGE_WORK=
+PACKAGE_LOCK=
+trap '[ -z "$PACKAGE_WORK" ] || rm -rf "$PACKAGE_WORK"; [ -z "$PACKAGE_LOCK" ] || rmdir "$PACKAGE_LOCK"; rmdir "$STAGE_LOCK"' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
 rm -rf "$STAGE_DIR"
 mkdir -p "$KVMAPP_STAGE/server" "$KVMAPP_STAGE/backends" "$KVMAPP_STAGE/hwmon" "$OUT_DIR"
 cp -R "$ROOT_DIR/kvmapp/." "$KVMAPP_STAGE/"
@@ -173,13 +182,16 @@ else
   echo "warning: frontend dist not found at $WEB_DIST; package has no server/web assets" >&2
 fi
 
+rust_binary_sha256=$(build_file_sha256 "$KVMAPP_STAGE/server/NanoKVM-Server")
+hwmon_binary_sha256=$(build_file_sha256 "$KVMAPP_STAGE/hwmon/nanokvm-hwmon")
+kvm_system_sha256=$(build_file_sha256 "$KVMAPP_STAGE/kvm_system/kvm_system")
 {
   printf 'artifact: kvmapp-rust\n'
   printf 'source: %s\n' "$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf unknown)"
   printf 'rust_binary: kvmapp/server/NanoKVM-Server\n'
-  printf 'rust_binary_sha256: %s\n' "$(sha256sum "$KVMAPP_STAGE/server/NanoKVM-Server" | awk '{print $1}')"
+  printf 'rust_binary_sha256: %s\n' "$rust_binary_sha256"
   printf 'hwmon_binary: kvmapp/hwmon/nanokvm-hwmon\n'
-  printf 'hwmon_binary_sha256: %s\n' "$(sha256sum "$KVMAPP_STAGE/hwmon/nanokvm-hwmon" | awk '{print $1}')"
+  printf 'hwmon_binary_sha256: %s\n' "$hwmon_binary_sha256"
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"
   printf 'web_dist: kvmapp/server/web\n'
   printf 'app_version: %s\n' "$(cat "$KVMAPP_STAGE/version")"
@@ -190,7 +202,7 @@ fi
     printf 'extra_native_libs: none\n'
   fi
   printf 'kvm_system_helper: kvmapp/kvm_system/kvm_system\n'
-  printf 'kvm_system_sha256: %s\n' "$(sha256sum "$KVMAPP_STAGE/kvm_system/kvm_system" | awk '{print $1}')"
+  printf 'kvm_system_sha256: %s\n' "$kvm_system_sha256"
   printf 'source_date_epoch: %s\n' "$SOURCE_DATE_EPOCH"
 } > "$STAGE_DIR/MANIFEST.txt"
 
@@ -205,6 +217,22 @@ if find "$KVMAPP_STAGE" \( -name 'NanoKVM-Server.go' -o -name 'NanoKVM-Server.go
 fi
 
 ARCHIVE="$OUT_DIR/$ARTIFACT_NAME"
+case "$ARTIFACT_NAME" in
+  '' | *[!A-Za-z0-9._+-]*) echo "invalid artifact filename: $ARTIFACT_NAME" >&2; exit 1 ;;
+esac
+package_lock_candidate="$ARCHIVE.lock"
+mkdir "$package_lock_candidate" || { echo "application artifact is already locked" >&2; exit 1; }
+PACKAGE_LOCK=$package_lock_candidate
+for artifact in "$ARCHIVE" "$ARCHIVE.sha256"; do
+  if [ -e "$artifact" ] || [ -L "$artifact" ]; then
+    echo "refusing to overwrite application artifact: $artifact" >&2
+    exit 1
+  fi
+done
+build_assert_no_private_keys "$KVMAPP_STAGE" || exit 1
+PACKAGE_WORK=$(mktemp -d "$OUT_DIR/.nanokvm-package.XXXXXX")
+# A regular intermediate tar makes both producer and compressor errors visible
+# under POSIX sh; an unguarded tar | gzip pipeline only reports gzip's status.
 tar -C "$STAGE_DIR" \
   --sort=name \
   --format=gnu \
@@ -215,14 +243,20 @@ tar -C "$STAGE_DIR" \
   --mode='u+rwX,go+rX,go-w' \
   --dereference \
   --hard-dereference \
-  -cf - kvmapp MANIFEST.txt | gzip -n -9 > "$ARCHIVE"
-if tar -tzvf "$ARCHIVE" | awk '
+  -cf "$PACKAGE_WORK/archive.tar" kvmapp MANIFEST.txt
+gzip -n -9 -c "$PACKAGE_WORK/archive.tar" > "$PACKAGE_WORK/archive.tar.gz"
+tar -tzvf "$PACKAGE_WORK/archive.tar.gz" > "$PACKAGE_WORK/entries"
+[ -s "$PACKAGE_WORK/entries" ] || { echo "application archive inventory is empty" >&2; exit 1; }
+if ! awk '
   substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { bad = 1 }
-  END { exit bad ? 0 : 1 }
-'; then
+  END { exit bad ? 1 : 0 }
+' "$PACKAGE_WORK/entries"; then
   echo "application archive contains an entry type rejected by the hardened updater" >&2
   exit 1
 fi
-sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+archive_sha256=$(build_file_sha256 "$PACKAGE_WORK/archive.tar.gz")
+printf '%s  %s\n' "$archive_sha256" "$ARCHIVE" > "$PACKAGE_WORK/checksum"
+mv "$PACKAGE_WORK/checksum" "$ARCHIVE.sha256"
+mv "$PACKAGE_WORK/archive.tar.gz" "$ARCHIVE"
 
 echo "$ARCHIVE"

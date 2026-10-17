@@ -104,7 +104,7 @@ build_assert_no_private_keys() {
 		return 1
 	}
 	# Only filenames reach this capture; never print matched key contents.
-	if key_scan_matches=$(find "$key_scan_root" -type f -exec sh -c '
+	if key_scan_matches=$(find -L "$key_scan_root" -type f -exec sh -c '
 		for key_scan_file do
 			if grep -alE -m 1 -- "-----BEGIN ([[:alnum:]_]+ )*PRIVATE KEY-----" "$key_scan_file"; then
 				:
