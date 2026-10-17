@@ -5,10 +5,10 @@
 //! those are separate responsibilities of the early-boot transaction helper.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::{Component, Path, PathBuf},
+    os::unix::fs::MetadataExt,
+    path::Path,
 };
 
 use chacha20poly1305::{
@@ -16,7 +16,12 @@ use chacha20poly1305::{
     aead::stream::{DecryptorBE32, EncryptorBE32},
 };
 use rand_core::{OsRng, RngCore};
+use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 use zeroize::{Zeroize, Zeroizing};
+
+use super::restore_fs;
+#[cfg(test)]
+use std::fs;
 
 const MAGIC: &[u8; 8] = b"NKCAP001";
 const VERSION_BYTES: usize = 64;
@@ -173,22 +178,7 @@ pub fn open_capsule<R: Read>(
     if header != secret.header(&nonce) {
         return Err(CapsuleError::HeaderMismatch);
     }
-    check_private_root(private_root)?;
-    let mut random = [0; 8];
-    OsRng
-        .try_fill_bytes(&mut random)
-        .map_err(|_| CapsuleError::Entropy)?;
-    let suffix = u64::from_be_bytes(random);
-    let path = private_root.join(format!(".restore-{suffix:016x}.spool"));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(&path)?;
-    fs::remove_file(&path)?;
-    File::open(private_root)?.sync_all()?;
+    let file = create_private_spool(private_root)?;
     let mut spool = VerifiedPayload { file };
     let mut decryptor =
         DecryptorBE32::<ChaCha20Poly1305>::new((&*secret.key).into(), (&nonce).into());
@@ -214,6 +204,26 @@ pub fn open_capsule<R: Read>(
     spool.file.sync_all()?;
     spool.file.seek(SeekFrom::Start(0))?;
     Ok(spool)
+}
+
+// Shared with archive capture: a private, unlinked rootfs descriptor is the
+// only permitted staging medium for plaintext restoration material.
+pub(super) fn create_private_spool(private_root: &Path) -> Result<File> {
+    let directory = check_private_root(private_root)?;
+    // O_TMPFILE never creates a directory entry, including the interval before
+    // a possible crash or I/O error. EXCL also prevents later linking of the fd.
+    // Unsupported kernels/filesystems fail closed; do not fall back to a named
+    // plaintext file or to /data/tmpfs.
+    let file: File = openat2(
+        &directory,
+        ".",
+        OFlags::RDWR | OFlags::TMPFILE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+        ResolveFlags::BENEATH | ResolveFlags::NO_XDEV | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(io::Error::from)?
+    .into();
+    Ok(file)
 }
 
 fn require_eof<R: Read>(source: &mut R) -> Result<()> {
@@ -242,29 +252,27 @@ fn validate_context(version: &str, length: u64) -> Result<()> {
     Ok(())
 }
 
-fn check_private_root(root: &Path) -> Result<()> {
-    if !root.is_absolute() {
-        return Err(CapsuleError::InvalidStaging);
-    }
-    let mut current = PathBuf::new();
-    for component in root.components() {
-        match component {
-            Component::RootDir | Component::Normal(_) => current.push(component),
-            _ => return Err(CapsuleError::InvalidStaging),
+fn check_private_root(root: &Path) -> Result<File> {
+    let directory = restore_fs::open_root(root, true).map_err(|err| {
+        if err.kind() == io::ErrorKind::InvalidInput
+            || matches!(
+                err.raw_os_error(),
+                Some(nix::libc::ELOOP | nix::libc::EXDEV | nix::libc::ENOTDIR)
+            )
+        {
+            CapsuleError::InvalidStaging
+        } else {
+            err.into()
         }
-        let metadata = fs::symlink_metadata(&current)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(CapsuleError::InvalidStaging);
-        }
-    }
-    let metadata = fs::metadata(root)?;
+    })?;
+    let metadata = directory.metadata()?;
     if metadata.uid() != nix::unistd::geteuid().as_raw()
         || metadata.mode() & 0o777 != 0o700
-        || metadata.dev() != fs::metadata("/")?.dev()
+        || metadata.dev() != File::open("/")?.metadata()?.dev()
     {
         return Err(CapsuleError::InvalidStaging);
     }
-    Ok(())
+    Ok(directory)
 }
 
 #[cfg(test)]

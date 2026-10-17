@@ -217,6 +217,22 @@ fn private_spool_is_owner_only_and_removed_on_drop() {
 }
 
 #[test]
+fn plaintext_spool_has_no_directory_entry_even_before_its_first_write() {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("sentinel"), b"unrelated fixture").unwrap();
+    let file = create_private_spool(root.path()).unwrap();
+    assert_eq!(file.metadata().unwrap().nlink(), 0);
+    assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    drop(file);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(root.path().join("sentinel")).unwrap(),
+        b"unrelated fixture"
+    );
+}
+
+#[test]
 fn shared_or_symlinked_staging_is_rejected_without_touching_existing_files() {
     let (secret, ciphertext) = seal(b"synthetic state");
     let parent = tempdir().unwrap();

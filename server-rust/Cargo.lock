@@ -1391,6 +1391,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rcgen",
  "rtcp",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",

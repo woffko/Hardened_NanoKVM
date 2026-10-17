@@ -1,8 +1,9 @@
 # Authenticated raw restore transaction
 
-Status: implementation in progress on the security remediation branch. Only
-the capsule core below is implemented/tested so far. Existing raw writer and
-early boot still use legacy preservation and must not be released as fixed C1.
+Status: implementation in progress on the security remediation branch. Capsule
+crypto, closed-schema archive capture/validation and descriptor-relative source
+I/O are implemented and host-tested. Existing raw writer and early boot still
+use legacy preservation and must not be released as fixed C1.
 
 ## Trust boundaries
 
@@ -52,8 +53,9 @@ No growing whole-message buffer or decompression is used by the capsule layer.
 This bound is for the crypto buffer, not a claim about whole-process peak RSS.
 
 Decryption checks trusted context, all tags, final-frame state and exact EOF.
-It writes into an owner-only rootfs file unlinked and directory-synced **before**
-the first plaintext write. Only after full authentication/fsync/rewind does it
+It writes into an owner-only rootfs `O_TMPFILE|O_EXCL` file: no directory entry
+exists even before the first write, and the descriptor cannot be linked later.
+Only after full authentication/fsync/rewind does it
 return a read-only `Read + Seek` descriptor wrapper. It exposes no filename or
 write API. Errors and process termination cannot leave a named partial plaintext
 spool. A failed output/flush does not return a usable restore secret.
@@ -61,6 +63,65 @@ spool. A failed output/flush does not return a usable restore secret.
 Replay protection is deliberately not claimed by encryption: it belongs to the
 durable protected ticket state machine below. AEAD also does not validate an
 archive's filenames, entry types, modes or account semantics.
+
+## Restore archive v1 (implemented capture/validation)
+
+`restore_archive.rs` consumes authenticated private plaintext, not a pathname
+that a USB host can replace. It retains that descriptor and exposes an immutable
+member index plus bounded copying of an indexed file. It does **not** unpack or
+write any live destination. Capture also returns a private anonymous descriptor.
+
+The uncompressed USTAR format starts with `restore-format`, containing exactly
+`nanokvm-restore-v1\n`. Only regular-file entries are admitted:
+
+- `files/<canonical-relative-path>` carries an allowlisted setting.
+- `absent/<canonical-relative-path>` is an empty record for a closed set of
+  presence-controlled flags. Exactly one write/absence record is mandatory for
+  each such path; it is not a general delete operation and cannot delete trust
+  or identity files.
+
+The schema in `restore_policy.rs` selects account state, SSH host identity and
+existing root SSH client configuration/keys, network/firewall/DNS/time/syslog,
+TLS/session settings, AP credentials and video preferences, HID/USB settings,
+and recognized optional-app configuration/state. These are sensitive local
+operator data, encrypted by the capsule, never release assets or logs. Required
+identity files must be present and nonempty. Presence of `session_secret` or
+`server.yaml` is a structural minimum, **not** semantic validation of effective
+authentication configuration.
+
+Boot disk enablement is represented by an empty `boot/usb.disk0` record. Its old
+contents can never become a restored raw/custom LUN backing path. A missing flag
+is explicit, so an image default cannot silently re-enable a disabled function.
+
+Rootfs executables, init code, update trust, legacy markers, caches and generated
+Picoclaw control profile/skill are excluded. User script uploads and Picoclaw
+workspace data are retained with mode `0600`, without execute/set-ID bits; their
+contents are not asserted to be harmless. Nothing in this layer executes them.
+The terminal capability gate, disabled historical autostart behavior and Pico
+local-host privilege boundary remain mandatory WP-10/WP-15 integration gates.
+Unsupported state under a selected tree aborts capture rather than being silently
+dropped (except the explicitly regenerated control profile/skill).
+
+Limits are 128 MiB total, 32 MiB per file, 4,096 file/absence records, 240-byte
+paths and 16 components; directory scanning has a separate bounded entry budget.
+Validation rejects traversal, aliases, duplicates, ancestor/file conflicts,
+links, devices, FIFOs, sparse/GNU/PAX extensions, unexpected owners/modes, hidden
+concatenated archives, nonzero padding and missing two-block trailers. Raw tar
+iteration rejects extension types before reading their potentially huge bodies.
+No decompression or whole-archive allocation is used.
+
+Source directories and private staging are pinned by file descriptors. Exact
+locked `rustix 1.1.4` safe APIs use Linux `openat2` with `BENEATH`, `NO_SYMLINKS`
+and `NO_MAGICLINKS`; member lookup also requires `NO_XDEV`. `/boot` is the one
+separately pinned source mount; nested mounts and bind aliases are rejected.
+Private staging must stay on rootfs, owner-only `0700`, owned by the effective
+user. Files must be regular, single-link and match the captured inode/size/
+timestamps before and after a bounded copy. This does not replace stopping all
+writers: coherent multi-file state remains the caller's responsibility.
+
+There is no weaker pathname/named-temp fallback if `openat2` or `O_TMPFILE` is
+unsupported. Their successful execution on the actual vendor kernel/ext4, free
+space and I/O failure behavior are still target acceptance requirements.
 
 References checked for the implementation:
 
@@ -76,6 +137,11 @@ References checked for the implementation:
    network and application state from live trusted rootfs/bootfs. Any critical
    read/copy/space error aborts before partition writes. Preserve optional app
    configuration/state, never downloaded binaries, caches or init scripts.
+   Resolve custom account/session/TLS paths into protected canonical state and
+   validate effective configuration. Installed optional apps need a verified
+   replacement/provenance check before flashing; silently dropping them is not
+   acceptable preservation. Regenerate shell-sourced defaults and runtime links
+   from authoritative time/syslog/network settings using signed-image code.
 3. Build and validate a bounded regular-file archive in private rootfs staging.
    Reject traversal, duplicate paths, links, special files, sparse/extension
    entries, unauthorized paths/modes and expansion/count/size violations before
@@ -109,7 +175,11 @@ path; restoring disk enablement can only enable an empty file-backed drive.
 
 Core fixtures cover header/body/tag mutation, chunk reorder/duplicate/drop,
 truncation/trailing data, wrong key/context, size limits, read/write/flush errors,
-private spool ownership and actual process-kill cleanup. The real early helper,
-archive allowlist, persistent tickets/replay, raw writer capture, p1 overwrite,
+private spool ownership and actual process-kill cleanup. Archive fixtures cover
+synthetic capture -> seal -> authenticate -> validate -> indexed read, explicit
+absence, sensitive configuration preservation, canonical modes, malformed tar
+and resource limits, static aliases and concurrent parent-directory swaps.
+The real early helper/applier, semantic auth validation, persistent tickets/
+replay, raw writer integration, p1 overwrite,
 crash/reboot boundaries, ENOSPC/sync failures and full device preservation are
 separate remaining gates. No capsule test is device/raw-update acceptance.
