@@ -34,12 +34,17 @@ const MAX_SECRET: usize = 16 * 1024;
 const MAX_CERT: usize = 256 * 1024;
 const MAX_KEY: usize = 64 * 1024;
 
+#[path = "restore_config_schema.rs"]
+mod config_schema;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreIdentityError {
     #[error("restore authentication or TLS state is invalid or incomplete")]
     InvalidState,
     #[error("restore runtime layout requires an explicit migration")]
     UnsupportedLayout,
+    #[error("restore config contains unsupported extensions; explicit migration is required")]
+    UnsupportedConfig,
     #[error("restore identity exceeds its resource budget")]
     Limit,
     #[error(transparent)]
@@ -78,13 +83,11 @@ pub fn capture_effective(
         return Err(RestoreIdentityError::InvalidState);
     }
     let source = SourceRoot::open(source_root)?;
-    let mut canonical = PrivateConfig(
+    let mut canonical =
         match source.read_setting(&source_path(config_path, working_dir)?, MAX_CONFIG)? {
-            Some(bytes) => serde_yaml::from_slice::<Config>(&bytes)
-                .map_err(|_| RestoreIdentityError::InvalidState)?,
-            None => Config::default(),
-        },
-    );
+            Some(bytes) => parse_config(&bytes)?,
+            None => PrivateConfig(Config::default()),
+        };
     canonical.0.normalize_legacy_fields();
     validate_layout(&canonical.0)?;
     // Never overwrite newer disk settings with the immutable startup Config.
@@ -184,9 +187,7 @@ pub fn capture_effective(
 pub fn check_identity(mut archive: ValidatedRestore) -> Result<IdentityCheckedRestore> {
     let yaml =
         read_member(&mut archive, CONFIG, MAX_CONFIG)?.ok_or(RestoreIdentityError::InvalidState)?;
-    let config = PrivateConfig(
-        serde_yaml::from_slice::<Config>(&yaml).map_err(|_| RestoreIdentityError::InvalidState)?,
-    );
+    let config = parse_config(&yaml)?;
     validate_layout(&config.0)?;
     if config.0.paths.account_file != Path::new(&format!("/{ACCOUNT}"))
         || config.0.paths.session_secret_file != Path::new(&format!("/{SESSION}"))
@@ -227,6 +228,19 @@ impl Drop for PrivateConfig {
         self.0.turn.turn_user.zeroize();
         self.0.turn.turn_cred.zeroize();
     }
+}
+
+fn parse_config(bytes: &[u8]) -> Result<PrivateConfig> {
+    if bytes.len() > MAX_CONFIG {
+        return Err(RestoreIdentityError::Limit);
+    }
+    let config = PrivateConfig(
+        serde_yaml::from_slice(bytes).map_err(|_| RestoreIdentityError::InvalidState)?,
+    );
+    // Runtime Config deliberately tolerates unknown YAML. A canonical restore
+    // cannot round-trip those extensions, so stop before producing a snapshot.
+    config_schema::check(bytes).map_err(|_| RestoreIdentityError::UnsupportedConfig)?;
+    Ok(config)
 }
 
 fn validate_layout(config: &Config) -> Result<()> {

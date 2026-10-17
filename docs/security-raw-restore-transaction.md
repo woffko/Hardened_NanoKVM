@@ -157,6 +157,17 @@ validated with the same rustls provider before accepting it. This is not proof
 of the certificate loaded in RAM by the current listener. HTTP without any TLS
 pair is valid; a partial or broken pair is rejected instead of silently dropped.
 
+Unknown top-level or nested YAML fields are not silently discarded. A separate
+restore-only closed-schema streaming pass checks every Config section after
+normal typed parsing; unsupported extensions require explicit migration before
+capture, without changing their source file. The same check runs after capsule
+authentication. All existing fields and legacy aliases remain supported, along
+with normal partial defaults, comments and anchors over known fields. Merge keys
+are unsupported rather than silently ignored. The 64-KiB input budget is checked
+before parsing; no generic YAML value tree is built by the inventory pass and
+errors do not echo input. Normal runtime Config parsing is unchanged. A new
+Config field requires explicit restore inventory review, not automatic omission.
+
 Non-default web/media/update-cache/trust layouts fail with an explicit migration
 requirement. Source traversal, symlinks, mount aliases, missing/invalid identity
 and oversized data also fail before snapshot output. Limits: config/key 64 KiB,
@@ -243,9 +254,9 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
    configuration/state, never downloaded binaries, caches or init scripts.
    Use the implemented canonical app-state capture/checks with the exact active
    config/cwd; validate native SSH/passwd semantics and merge any new signed
-   service accounts without UID collisions. Opaque config extensions outside
-   the current Rust schema still need an explicit reject/migration policy before
-   production integration; do not claim arbitrary YAML is losslessly copied.
+   service accounts without UID collisions. Use the implemented unknown-field
+   reject/migration preflight; do not claim arbitrary YAML is losslessly copied
+   or bypass the error by normalizing the source file in place.
    Installed optional apps need a verified
    replacement/provenance check before flashing; silently dropping them is not
    acceptable preservation. Regenerate shell-sourced defaults and runtime links

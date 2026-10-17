@@ -544,3 +544,128 @@ fn identity_resource_limits_and_secret_consistency_are_enforced() {
     assert!(out.write_all(b"5").is_err());
     assert_eq!(&*out.bytes, b"1234");
 }
+
+#[test]
+fn unknown_config_fields_never_disappear_silently_during_capture() {
+    for section in [
+        "", "port", "cert", "logger", "jwt", "turn", "security", "paths",
+    ] {
+        let (root, effective) = fixture();
+        let staging = tempdir().unwrap();
+        let original = serde_yaml::to_string(&effective).unwrap();
+        let changed = if section.is_empty() {
+            format!("{original}future_extension: synthetic-extension-marker\n")
+        } else {
+            original.replacen(
+                &format!("{section}:\n"),
+                &format!("{section}:\n  future_extension: synthetic-extension-marker\n"),
+                1,
+            )
+        };
+        // Normal server parsing is intentionally unchanged and historically
+        // ignores these fields. Restore must stop, not silently discard them.
+        assert!(serde_yaml::from_str::<Config>(&changed).is_ok());
+        put(root.path(), CONFIG, changed.as_bytes());
+        let result = capture_effective(
+            root.path(),
+            staging.path(),
+            &effective,
+            Path::new(CWD),
+            Path::new(CONFIG_PATH),
+        );
+        assert!(result.is_err(), "unknown field in {section} was dropped");
+        let error = result.err().unwrap();
+        assert!(matches!(error, RestoreIdentityError::UnsupportedConfig));
+        assert!(!format!("{error:?} {error}").contains("synthetic-extension-marker"));
+        assert_eq!(
+            fs::read(root.path().join(CONFIG)).unwrap(),
+            changed.as_bytes()
+        );
+        assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn authenticated_restore_still_rejects_unknown_config_extensions() {
+    let (root, effective) = fixture();
+    let bytes = captured(root.path(), &effective, CWD, CONFIG_PATH);
+    let mut canonical = checked(&bytes).unwrap();
+    let original = String::from_utf8(member(&mut canonical, CONFIG)).unwrap();
+    for section in [
+        "", "port", "cert", "logger", "jwt", "turn", "security", "paths",
+    ] {
+        let changed = if section.is_empty() {
+            format!("{original}future_extension: synthetic-extension-marker\n")
+        } else {
+            original.replacen(
+                &format!("{section}:\n"),
+                &format!("{section}:\n  future_extension: synthetic-extension-marker\n"),
+                1,
+            )
+        };
+        assert!(checked(&alter(&bytes, CONFIG, Some(changed.as_bytes()))).is_err());
+    }
+}
+
+#[test]
+fn all_legacy_config_aliases_remain_supported_by_the_restore_inventory() {
+    let yaml = b"jwt:\n  secretKey: synthetic-key\n  refreshTokenDuration: 123\n  revokeTokensOnLogout: false\nturn:\n  turnAddr: relay.invalid\n  turnUser: synthetic-user\n  turnCred: synthetic-credential\nsecurity:\n  loginLockoutDuration: 23\n  loginMaxFailures: 7\n";
+    let mut config = parse_config(yaml).unwrap();
+    config.0.normalize_legacy_fields();
+    assert_eq!(config.0.jwt.secret_key, "synthetic-key");
+    assert_eq!(config.0.jwt.refresh_token_duration, 123);
+    assert!(!config.0.jwt.revoke_tokens_on_logout);
+    assert_eq!(config.0.turn.turn_addr, "relay.invalid");
+    assert_eq!(config.0.turn.turn_user, "synthetic-user");
+    assert_eq!(config.0.turn.turn_cred, "synthetic-credential");
+    assert_eq!(config.0.security.login_lockout_duration, 23);
+    assert_eq!(config.0.security.login_max_failures, 7);
+}
+
+#[test]
+fn supported_config_comments_partial_defaults_and_known_anchors_still_parse() {
+    for yaml in [
+        "{}",
+        "",
+        "# comment only\n",
+        "host: &host 0.0.0.0\nstun: *host\n",
+        "security: {allowed_origins: ['https://fixture.invalid']}\n",
+        "jwt: {secret_key: 'synthetic # quoted : key'}\n",
+        "port: {http: 8080}\n",
+    ] {
+        let normal = serde_yaml::from_str::<Config>(yaml).unwrap();
+        let restored = parse_config(yaml.as_bytes()).unwrap();
+        assert_eq!(
+            serde_yaml::to_string(&normal).unwrap(),
+            serde_yaml::to_string(&restored.0).unwrap()
+        );
+    }
+}
+
+#[test]
+fn unsupported_yaml_merge_fields_are_not_silently_discarded() {
+    let yaml = b"security: {<<: {future_extension: synthetic-marker}}\n";
+    assert!(serde_yaml::from_slice::<Config>(yaml).is_ok());
+    assert!(matches!(
+        parse_config(yaml),
+        Err(RestoreIdentityError::UnsupportedConfig)
+    ));
+}
+
+#[test]
+fn duplicate_aliases_wrong_types_and_multiple_documents_have_no_fallback() {
+    for yaml in [
+        "null\n",
+        "host: 0.0.0.0\nhost: 127.0.0.1\n",
+        "jwt: {refreshTokenDuration: 1, refresh_token_duration: 2}\n",
+        "turn: {turnAddr: one.invalid, turn_addr: two.invalid}\n",
+        "security: {loginMaxFailures: 3, login_max_failures: 4}\n",
+        "port: {http: {future_extension: synthetic-marker}}\n",
+        "security: {allowed_origins: [{future_extension: synthetic-marker}]}\n",
+        "{}\n---\n{future_extension: synthetic-marker}\n",
+        "{[future_extension]: synthetic-marker}\n",
+    ] {
+        let error = parse_config(yaml.as_bytes()).err().unwrap();
+        assert!(!format!("{error:?} {error}").contains("synthetic-marker"));
+    }
+}
