@@ -1,9 +1,9 @@
 # Authenticated raw restore transaction
 
 Status: implementation in progress on the security remediation branch. Capsule
-crypto, closed-schema archive capture/validation, canonical app-identity checks
-and descriptor-relative source I/O are implemented and host-tested. Existing raw
-writer and early boot still
+crypto, closed-schema archive capture/validation, canonical app-identity checks,
+protected ticket persistence and descriptor-relative source I/O are implemented
+and host-tested. Existing raw writer and early boot still
 use legacy preservation and must not be released as fixed C1.
 
 ## Trust boundaries
@@ -175,6 +175,63 @@ References checked for the implementation:
 - [RustCrypto ChaCha20Poly1305 0.10.1](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
 - [RustCrypto STREAM implementation at aead-v0.5.2](https://github.com/RustCrypto/traits/blob/aead-v0.5.2/aead/src/stream.rs)
 
+## Protected boot ticket v1 (implemented, not wired into boot/writer)
+
+`restore_capsule::ticket` is deliberately a child of the capsule module. It can
+encode the private key into one fixed protected record without exposing a key
+getter or general-purpose serialization. Tickets and secrets have no Debug,
+Clone or serde implementation. p3 files/markers cannot be imported as tickets.
+
+`Store::open_boot` is the production entry point. It requires root and pins the
+whole `/dev/mmcblk0p1` vfat mount at `/boot`, checking the actual block device,
+mountinfo, owner and private mode. The mount must be rw/nosuid/nodev/noexec with
+fmask 0177/dmask 0077. Bind subtrees, duplicate mounts, symlinks, nested mounts,
+shared permissions and a different device are rejected. A kernel exclusive
+nonblocking flock on the pinned `.nanokvm-restore` directory serializes owners;
+the restore job must own its lifetime, not an HTTP request future.
+
+The 512-byte `state` record contains the transaction, source/new boot IDs,
+device identity digest, exact encrypted capsule/boot image/rootfs image digests,
+system/app versions, target, phase and active key. Reserved bytes/string padding
+must be zero. The final SHA-256 detects corruption; it is **not** authentication.
+Authorization comes from the private expected p1 store and verified caller
+context. Device identity must come from stable hardware, not a cloned machine-id.
+
+Publication creates the fixed `.state.next` with CREATE|EXCL, writes and fsyncs
+the complete record, renames it to `state`, then fsyncs the directory. All I/O is
+relative to pinned descriptors; records must be private, single-link regular
+files on that device. An ambiguous error poisons the handle. Reopen and inspect
+the actual canonical state before any retry. A valid canonical record wins over
+an interrupted replacement; only that exact reserved temporary file is removed.
+An initial temporary record without canonical state is neither promoted nor
+deleted automatically. Corrupt canonical state preserves the temporary evidence.
+
+The durable lifecycle is `prepared -> applying -> restored -> committed`:
+
+- A fresh prepared ticket is published only into an empty store or over a
+  committed receipt. A different pending transaction is busy; the same ID is
+  replay. A new transaction must use fresh capsule entropy.
+- Every decrypt/transition reloads and checks the full current record. A stale
+  in-memory ticket cannot bypass a later transition/commit. Current boot must
+  differ from the source boot and match device, system/app versions and target.
+- Decrypt checks the complete encrypted-file digest as well as full AEAD before
+  returning private plaintext. Prepared/applying allow the future applier;
+  restored allows re-verification only and cannot return to applying.
+- Applying can resume on another matching new boot. Marking restored requires
+  that same applying boot and a caller that already durably applied/verified
+  state. Commit additionally requires real runtime health supplied by the future
+  integration, not a mutable marker or this state-machine API alone.
+- Commit durably replaces the record with a key-free receipt before dropping the
+  in-memory key. Committed records cannot decrypt. This is logical key removal,
+  not a claim of forensic secure erase on an SD controller.
+
+`Binding` is only a trusted-context carrier. It does not verify signatures, and
+`BootObservation` is not independent proof of the image digests stored in the
+record. Exact signed metadata/payload checks and trusted live observations must
+be connected by the writer/early helper; none may be taken from p3 JSON or HTTP
+parameters. Host fixtures do not exercise the production `/boot` entry point or
+prove vendor FAT flock/rename/fsync and physical power-loss behavior.
+
 ## Required writer/boot integration (not implemented yet)
 
 1. Hold the common update transaction lock. Retain exact metadata/signature;
@@ -201,13 +258,23 @@ References checked for the implementation:
 4. Seal to a private unpublished capsule; sync all bytes and the containing
    directory. Publish its one-time protected ticket only after successful sealing.
    Retain ticket/key/runtime helpers outside overwritten partitions while flashing.
-5. Write verified immutable raw images. Restore ticket to new p1 with the tested
-   FAT mount masks and sync. On any ambiguous I/O failure, inspect durable state
+5. Write verified immutable raw images. The signed raw rootfs must already carry
+   an explicit restore-required discriminator, distinct from factory/full-SD
+   provisioning, before the first partition write. Its absence cannot be inferred
+   from mutable p3 markers. A raw image missing its protected ticket must fail
+   closed, not look like a fresh installation. The current packaging has no such
+   discriminator; distinct raw/factory rootfs variants and hashes must be handled
+   explicitly rather than patched after writing. Drop old bootfs descriptors
+   before unmount/overwrite; retain the ticket privately across that boundary.
+   Reopen new p1, republish prepared state with the tested FAT mount masks and
+   sync. On any ambiguous I/O failure, inspect durable state
    before retry; never pretend whole-device power-loss rollback is automatic.
 6. Run a minimal signed-image helper before network/SSH/backend/provisioning.
    Verify target version, authorized transaction, source/new boot identity and
    ticket state; authenticate the whole capsule and validate the archive into a
    private staging area. Preflight free space and required identity files.
+   Failure must stop the whole management/provisioning boot path: merely returning
+   nonzero from S01fs is not sufficient if rcS continues to later init scripts.
    Disable the complete legacy preserve/marker restore path, including its
    permission fixups: old S01fs can chmod server.yaml 0644. No later boot script
    may overwrite authenticated state or weaken its required 0600 permissions.
@@ -215,9 +282,9 @@ References checked for the implementation:
    state is `prepared -> applying -> restored -> committed`. Restarts continue
    the same authorized transaction idempotently. Pending/invalid restore cannot
    start management/provisioning with incomplete or default identity.
-8. After durable commit, remove the one-time key/ticket and exact managed capsule
-   paths. Retain a non-secret receipt that rejects replay. Do not broadly delete
-   legacy preserve/cache or other users' recovery data.
+8. After durable commit, retain only the key-free protected receipt and remove
+   exact managed capsule paths. Do not broadly delete legacy preserve/cache or
+   other users' recovery data.
 
 Rootfs executables, init scripts, update keys and policy come from the signed
 image. Optional apps need verified provenance/reinstall. `/etc/resolv.conf` and
@@ -233,7 +300,14 @@ private spool ownership and actual process-kill cleanup. Archive fixtures cover
 synthetic capture -> seal -> authenticate -> validate -> indexed read, explicit
 absence, sensitive configuration preservation, canonical modes, malformed tar
 and resource limits, static aliases and concurrent parent-directory swaps.
-The real early helper/applier, remaining config/native semantics, persistent tickets/
-replay, native SSH/service-account validation, raw writer integration, p1 overwrite,
-crash/reboot boundaries, ENOSPC/sync failures and full device preservation are
-separate remaining gates. No capsule test is device/raw-update acceptance.
+Ticket fixtures cover the fixed record, every-byte corruption, invalid inner
+fields, lifecycle/replay/stale handles, wrong boot/device/version/target before
+ciphertext reads, exact encrypted digest, privacy/aliases/locks and pinned-parent
+renames. I/O faults at six publication boundaries poison the handle and reopening
+observes actual old/new canonical state. Actual child-process kills before/after
+rename also prove host lock release and recovery; they are not power-cut tests.
+The real early helper/applier, remaining config/native semantics, production
+ticket integration, native SSH/service-account validation, raw writer integration,
+p1 overwrite, physical crash/reboot boundaries, ENOSPC/sync failures and full
+device preservation are separate remaining gates. No capsule test is
+device/raw-update acceptance.

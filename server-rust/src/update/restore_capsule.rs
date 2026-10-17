@@ -51,8 +51,8 @@ pub enum CapsuleError {
 
 type Result<T> = std::result::Result<T, CapsuleError>;
 
-// Deliberately no Debug, Clone or serialization of a secret. A later boot ticket
-// serializer must write this only to protected p1/runtime state, never to p3.
+// No Debug, Clone or general serialization. The ticket child module alone can
+// encode the key into its fixed protected p1 record; never into a p3 capsule.
 pub struct RestoreSecret {
     transaction_id: [u8; 16],
     target_version: String,
@@ -141,8 +141,8 @@ pub fn prepare_capsule<R: Read, W: Write>(
 
 /// Read-only, fully authenticated plaintext held by an open private descriptor.
 /// No path, mutable file or write operation is exposed to restore consumers.
-/// The temporary name is unlinked before any plaintext is written. Closing the
-/// descriptor (including process termination) releases the spool; no pathname
+/// The anonymous spool has no directory entry, even before the first write.
+/// Closing the descriptor (including process termination) releases the spool; no pathname
 /// with partial plaintext can survive a failed verification or crashed helper.
 pub struct VerifiedPayload {
     file: File,
@@ -274,6 +274,9 @@ fn check_private_root(root: &Path) -> Result<File> {
     }
     Ok(directory)
 }
+
+#[path = "restore_ticket.rs"]
+pub mod ticket;
 
 #[cfg(test)]
 #[path = "restore_capsule_tests.rs"]

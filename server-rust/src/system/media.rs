@@ -63,7 +63,13 @@ pub async fn secure_device_mounts() -> Result<()> {
     Ok(())
 }
 
-fn has_expected_mount(mounts: &str, target: &str, source: &str, kind: &str, private: bool) -> bool {
+pub(crate) fn has_expected_mount(
+    mounts: &str,
+    target: &str,
+    source: &str,
+    kind: &str,
+    private: bool,
+) -> bool {
     let mut entries = mounts
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>())
