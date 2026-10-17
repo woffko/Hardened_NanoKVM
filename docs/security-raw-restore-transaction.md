@@ -1,8 +1,9 @@
 # Authenticated raw restore transaction
 
 Status: implementation in progress on the security remediation branch. Capsule
-crypto, closed-schema archive capture/validation and descriptor-relative source
-I/O are implemented and host-tested. Existing raw writer and early boot still
+crypto, closed-schema archive capture/validation, canonical app-identity checks
+and descriptor-relative source I/O are implemented and host-tested. Existing raw
+writer and early boot still
 use legacy preservation and must not be released as fixed C1.
 
 ## Trust boundaries
@@ -85,9 +86,10 @@ existing root SSH client configuration/keys, network/firewall/DNS/time/syslog,
 TLS/session settings, AP credentials and video preferences, HID/USB settings,
 and recognized optional-app configuration/state. These are sensitive local
 operator data, encrypted by the capsule, never release assets or logs. Required
-identity files must be present and nonempty. Presence of `session_secret` or
+identity files must be present and nonempty. At the structural archive layer,
+presence of `session_secret` or
 `server.yaml` is a structural minimum, **not** semantic validation of effective
-authentication configuration.
+authentication configuration; the separate app-identity layer below is required.
 
 Boot disk enablement is represented by an empty `boot/usb.disk0` record. Its old
 contents can never become a restored raw/custom LUN backing path. A missing flag
@@ -123,6 +125,51 @@ There is no weaker pathname/named-temp fallback if `openat2` or `O_TMPFILE` is
 unsupported. Their successful execution on the actual vendor kernel/ext4, free
 space and I/O failure behavior are still target acceptance requirements.
 
+## Canonical app identity (implemented, not connected to raw writer)
+
+`restore_identity::capture_effective` requires the running `Config::load()`
+result, its actual logical cwd and the exact active config path (including a
+custom `NANOKVM_CONFIG`). It reads the latest persisted config with pinned,
+bounded source I/O instead of serializing the immutable startup preferences.
+Legacy key/media aliases are normalized by the same pure Config helper.
+
+The current account path and effective embedded/file-backed session key must
+agree with the running identity. Pending account-path or key changes fail
+preflight and require the ordinary server restart first; there is no default
+account, secret generation or stale-config fallback. Account JSON and supported
+Argon2/bcrypt hash syntax are checked without a password, expensive hashing or
+rehashing. Existing account bytes/hashes are retained unchanged.
+
+Custom protected rootfs account, config and TLS sources are captured into fixed
+`/etc/kvm/{pwd,server.yaml,session_secret,server.crt,server.key}` destinations.
+The effective key is embedded verbatim, including meaningful whitespace, and
+the canonical session file must contain that same value plus a newline. All
+secret-bearing output files are `0600`. Stale unused default copies never win
+over the actual custom source. The source files are not modified or migrated
+in place by this operation.
+
+All known Rust Config fields are retained except these fixed paths and the
+redundant legacy key alias. In particular, unchanged persisted HTTP stays HTTP:
+there is no forced HTTPS conversion or certificate generation. Latest explicitly
+persisted TLS/protocol preferences are the requested next-boot state and may
+differ from the running listener; a complete matching certificate/key pair is
+validated with the same rustls provider before accepting it. This is not proof
+of the certificate loaded in RAM by the current listener. HTTP without any TLS
+pair is valid; a partial or broken pair is rejected instead of silently dropped.
+
+Non-default web/media/update-cache/trust layouts fail with an explicit migration
+requirement. Source traversal, symlinks, mount aliases, missing/invalid identity
+and oversized data also fail before snapshot output. Limits: config/key 64 KiB,
+account/secret 16 KiB, certificate chain 256 KiB. Owned sensitive buffers and
+parsed key/credential strings are zeroized on drop; parser errors never echo
+their input. This does not claim complete third-party parser memory erasure.
+
+After AEAD and structural archive validation, `check_identity` checks canonical
+paths, account/hash syntax, exact key/file consistency, bounded sizes and TLS
+again, returning a private `IdentityCheckedRestore`. It does not authenticate a
+ticket, validate native passwd/SSH semantics, apply files or stop provisioning.
+In-memory web sessions are not restored across reboot.
+
 References checked for the implementation:
 
 - [RustCrypto ChaCha20Poly1305 0.10.1](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
@@ -137,8 +184,12 @@ References checked for the implementation:
    network and application state from live trusted rootfs/bootfs. Any critical
    read/copy/space error aborts before partition writes. Preserve optional app
    configuration/state, never downloaded binaries, caches or init scripts.
-   Resolve custom account/session/TLS paths into protected canonical state and
-   validate effective configuration. Installed optional apps need a verified
+   Use the implemented canonical app-state capture/checks with the exact active
+   config/cwd; validate native SSH/passwd semantics and merge any new signed
+   service accounts without UID collisions. Opaque config extensions outside
+   the current Rust schema still need an explicit reject/migration policy before
+   production integration; do not claim arbitrary YAML is losslessly copied.
+   Installed optional apps need a verified
    replacement/provenance check before flashing; silently dropping them is not
    acceptable preservation. Regenerate shell-sourced defaults and runtime links
    from authoritative time/syslog/network settings using signed-image code.
@@ -157,6 +208,9 @@ References checked for the implementation:
    Verify target version, authorized transaction, source/new boot identity and
    ticket state; authenticate the whole capsule and validate the archive into a
    private staging area. Preflight free space and required identity files.
+   Disable the complete legacy preserve/marker restore path, including its
+   permission fixups: old S01fs can chmod server.yaml 0644. No later boot script
+   may overwrite authenticated state or weaken its required 0600 permissions.
 7. Apply only from the already-verified open descriptor/private snapshot. Durable
    state is `prepared -> applying -> restored -> committed`. Restarts continue
    the same authorized transaction idempotently. Pending/invalid restore cannot
@@ -179,7 +233,7 @@ private spool ownership and actual process-kill cleanup. Archive fixtures cover
 synthetic capture -> seal -> authenticate -> validate -> indexed read, explicit
 absence, sensitive configuration preservation, canonical modes, malformed tar
 and resource limits, static aliases and concurrent parent-directory swaps.
-The real early helper/applier, semantic auth validation, persistent tickets/
-replay, raw writer integration, p1 overwrite,
+The real early helper/applier, remaining config/native semantics, persistent tickets/
+replay, native SSH/service-account validation, raw writer integration, p1 overwrite,
 crash/reboot boundaries, ENOSPC/sync failures and full device preservation are
 separate remaining gates. No capsule test is device/raw-update acceptance.

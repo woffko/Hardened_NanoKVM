@@ -310,7 +310,7 @@ impl Config {
         }
     }
 
-    fn normalize_legacy_fields(&mut self) {
+    pub(crate) fn normalize_legacy_fields(&mut self) {
         if self.jwt.secret_key.is_empty() && !self.jwt.secret_key_legacy.is_empty() {
             self.jwt.secret_key = self.jwt.secret_key_legacy.clone();
         }

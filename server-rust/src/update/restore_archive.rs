@@ -9,6 +9,7 @@ use std::{
     path::Path,
 };
 use tar::{Archive, Builder, EntryType, Header};
+use zeroize::Zeroizing;
 
 use super::{
     restore_capsule::{self, CapsuleError, VerifiedPayload},
@@ -111,27 +112,50 @@ impl ValidatedRestore {
     }
 }
 
-/// Capture only the fixed schema from a quiesced source root. The caller must
-/// stop all settings writers and hold the common update lock first. Required
-/// authentication state must already use canonical protected paths.
-pub fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArchive> {
+#[cfg(test)]
+fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArchive> {
     let source = SourceRoot::open(source_root)?;
+    capture_canonical(&source, private_staging, &[])
+}
+
+// Only the effective-state normalizer can supply canonical replacements. A
+// missing optional replacement suppresses stale state at its old default path.
+pub(super) struct CanonicalSetting {
+    pub path: &'static str,
+    pub bytes: Option<Zeroizing<Vec<u8>>>,
+}
+
+pub(super) fn capture_canonical(
+    source: &SourceRoot,
+    private_staging: &Path,
+    overrides: &[CanonicalSetting],
+) -> Result<CapturedArchive> {
+    let mut override_paths = BTreeSet::new();
+    for replacement in overrides {
+        if !(policy::REQUIRED.contains(&replacement.path)
+            || policy::FIXED.contains(&replacement.path))
+            || !override_paths.insert(replacement.path)
+            || (policy::REQUIRED.contains(&replacement.path) && replacement.bytes.is_none())
+        {
+            return Err(RestoreArchiveError::Unauthorized);
+        }
+    }
     let mut paths = BTreeSet::new();
     for path in policy::REQUIRED
         .iter()
         .chain(policy::FIXED)
         .chain(policy::PRESENCE)
     {
-        if source.metadata(path)?.is_some() {
+        if !override_paths.contains(path) && source.metadata(path)?.is_some() {
             paths.insert((*path).to_string());
         }
     }
     let mut scanned = 0;
     for tree in policy::TREES {
-        collect_tree(&source, tree, &mut paths, 0, &mut scanned)?;
+        collect_tree(source, tree, &mut paths, 0, &mut scanned)?;
     }
     let mut present = BTreeSet::new();
-    let mut planned = Vec::with_capacity(paths.len() + policy::PRESENCE.len());
+    let mut planned = Vec::with_capacity(paths.len() + policy::PRESENCE.len() + overrides.len());
     let mut length = BLOCK + rounded(FORMAT.len() as u64)? + 2 * BLOCK;
     for path in &paths {
         let metadata = source
@@ -152,14 +176,34 @@ pub fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArc
             .checked_add(BLOCK + rounded(size)?)
             .ok_or(RestoreArchiveError::Limit)?;
         present.insert(path.clone());
-        planned.push((path.clone(), Some(metadata), size));
+        planned.push((path.clone(), Some(metadata), size, None));
+    }
+    for replacement in overrides {
+        let Some(bytes) = &replacement.bytes else {
+            continue;
+        };
+        let size = bytes.len() as u64;
+        check_size(size)?;
+        if size == 0 {
+            return Err(RestoreArchiveError::Incomplete);
+        }
+        length = length
+            .checked_add(BLOCK + rounded(size)?)
+            .ok_or(RestoreArchiveError::Limit)?;
+        present.insert(replacement.path.to_string());
+        planned.push((
+            replacement.path.to_string(),
+            None,
+            size,
+            Some(bytes.as_slice()),
+        ));
     }
     for path in policy::PRESENCE {
         if !present.contains(*path) {
             length = length
                 .checked_add(BLOCK)
                 .ok_or(RestoreArchiveError::Limit)?;
-            planned.push(((*path).to_string(), None, 0));
+            planned.push(((*path).to_string(), None, 0, None));
         }
     }
     check_required(&present)?;
@@ -177,7 +221,17 @@ pub fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArc
             0o600,
             &mut &FORMAT[..],
         )?;
-        for (path, metadata, size) in planned {
+        for (path, metadata, size, bytes) in planned {
+            if let Some(bytes) = bytes {
+                append(
+                    &mut builder,
+                    &format!("files/{path}"),
+                    size,
+                    policy::mode(&path),
+                    &mut &bytes[..],
+                )?;
+                continue;
+            }
             match metadata {
                 Some(metadata) => {
                     let mut file = source.open_file(&path, &metadata)?;
@@ -415,13 +469,13 @@ fn check_required(paths: &BTreeSet<String>) -> Result<()> {
     Ok(())
 }
 
-struct SourceRoot {
+pub(super) struct SourceRoot {
     root: File,
     boot: Option<File>,
 }
 
 impl SourceRoot {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let root = restore_fs::open_root(path, false).map_err(source_error)?;
         let boot = match restore_fs::open_boot(&root) {
             Ok(file) => Some(file),
@@ -467,6 +521,26 @@ impl SourceRoot {
             return Err(RestoreArchiveError::InvalidSource);
         }
         Ok(file)
+    }
+
+    pub(super) fn read_setting(
+        &self,
+        relative: &str,
+        limit: usize,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let Some(metadata) = self.metadata(relative)? else {
+            return Ok(None);
+        };
+        if metadata.len() > limit as u64 {
+            return Err(RestoreArchiveError::Limit);
+        }
+        let mut file = self.open_file(relative, &metadata)?;
+        let mut bytes = Zeroizing::new(vec![0; metadata.len() as usize]);
+        file.read_exact(&mut bytes)?;
+        if file.read(&mut [0])? != 0 || !same_file(&metadata, &file.metadata()?) {
+            return Err(RestoreArchiveError::InvalidSource);
+        }
+        Ok(Some(bytes))
     }
 }
 
