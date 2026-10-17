@@ -39,12 +39,49 @@ impl PublicSnapshot {
         sha256: &[u8; 32],
         sha512: &[u8; 64],
     ) -> Result<Self, SnapshotError> {
+        Self::capture_hashed(
+            directory,
+            source,
+            size,
+            ReleaseDigests {
+                hash256: Sha256::new(),
+                hash512: Sha512::new(),
+                sha256,
+                sha512,
+            },
+        )
+    }
+
+    /// Raw-image SHA-256 must come from the manifest inside an authenticated
+    /// archive, not from a second, mutable p3 JSON file. This does not itself
+    /// establish that provenance or a target-device authorization.
+    pub fn capture_sha256(
+        directory: &StageDirectory,
+        source: &mut impl Read,
+        size: u64,
+        sha256: &[u8; 32],
+    ) -> Result<Self, SnapshotError> {
+        Self::capture_hashed(
+            directory,
+            source,
+            size,
+            ImageDigest {
+                hash: Sha256::new(),
+                expected: sha256,
+            },
+        )
+    }
+
+    fn capture_hashed(
+        directory: &StageDirectory,
+        source: &mut impl Read,
+        size: u64,
+        mut hashes: impl SnapshotDigests,
+    ) -> Result<Self, SnapshotError> {
         if size == 0 || size > MAX_BYTES {
             return Err(SnapshotError::Length);
         }
         let mut output = directory.create_public_spool()?;
-        let mut hash256 = Sha256::new();
-        let mut hash512 = Sha512::new();
         let mut remaining = size;
         let mut buffer = [0_u8; 64 * 1024];
         while remaining != 0 {
@@ -54,16 +91,13 @@ impl PublicSnapshot {
                 return Err(SnapshotError::Length);
             }
             output.write_all(&buffer[..count])?;
-            hash256.update(&buffer[..count]);
-            hash512.update(&buffer[..count]);
+            hashes.update(&buffer[..count]);
             remaining -= count as u64;
         }
         if source.read(&mut [0; 1])? != 0 {
             return Err(SnapshotError::Length);
         }
-        let actual256: [u8; 32] = hash256.finalize().into();
-        let actual512: [u8; 64] = hash512.finalize().into();
-        if actual256 != *sha256 || actual512 != *sha512 {
+        if !hashes.matches() {
             return Err(SnapshotError::Digest);
         }
         output.sync_all()?;
@@ -72,6 +106,49 @@ impl PublicSnapshot {
         // O_RDONLY description survives; capture never lends a writable alias.
         drop(output);
         Ok(Self { file })
+    }
+}
+
+// Statically selected outside the copy loop: image snapshots do not calculate
+// an unused SHA-512 over multi-GB expanded image data.
+trait SnapshotDigests {
+    fn update(&mut self, bytes: &[u8]);
+    fn matches(self) -> bool;
+}
+
+struct ImageDigest<'a> {
+    hash: Sha256,
+    expected: &'a [u8; 32],
+}
+
+impl SnapshotDigests for ImageDigest<'_> {
+    fn update(&mut self, bytes: &[u8]) {
+        self.hash.update(bytes);
+    }
+
+    fn matches(self) -> bool {
+        let actual: [u8; 32] = self.hash.finalize().into();
+        actual == *self.expected
+    }
+}
+
+struct ReleaseDigests<'a> {
+    hash256: Sha256,
+    hash512: Sha512,
+    sha256: &'a [u8; 32],
+    sha512: &'a [u8; 64],
+}
+
+impl SnapshotDigests for ReleaseDigests<'_> {
+    fn update(&mut self, bytes: &[u8]) {
+        self.hash256.update(bytes);
+        self.hash512.update(bytes);
+    }
+
+    fn matches(self) -> bool {
+        let actual256: [u8; 32] = self.hash256.finalize().into();
+        let actual512: [u8; 64] = self.hash512.finalize().into();
+        actual256 == *self.sha256 && actual512 == *self.sha512
     }
 }
 

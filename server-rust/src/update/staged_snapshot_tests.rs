@@ -14,6 +14,34 @@ fn capture(stage: &StageDirectory, bytes: &[u8]) -> PublicSnapshot {
 }
 
 #[test]
+fn sha256_only_image_capture_keeps_exact_length_digest_and_kernel_readonly_guards() {
+    let root = tempdir().unwrap();
+    let stage = StageDirectory::prepare(&root.path().join("system")).unwrap();
+    let data = b"expanded public image";
+    let hash = Sha256::digest(data).into();
+    let snapshot =
+        PublicSnapshot::capture_sha256(&stage, &mut Cursor::new(data), data.len() as u64, &hash)
+            .unwrap();
+    assert_eq!(snapshot.file.metadata().unwrap().nlink(), 0);
+    assert_eq!(
+        fcntl_getfl(&snapshot.file).unwrap() & OFlags::ACCMODE,
+        OFlags::RDONLY
+    );
+    assert!(snapshot.file.try_clone().unwrap().write_all(b"x").is_err());
+    for (size, hash) in [
+        (0, hash),
+        (data.len() as u64 - 1, hash),
+        (data.len() as u64 + 1, hash),
+        (data.len() as u64, [0; 32]),
+    ] {
+        assert!(
+            PublicSnapshot::capture_sha256(&stage, &mut Cursor::new(data), size, &hash).is_err()
+        );
+    }
+    assert_eq!(fs::read_dir(root.path().join("system")).unwrap().count(), 0);
+}
+
+#[test]
 fn snapshot_has_no_name_and_is_kernel_readonly_not_merely_a_read_api() {
     let root = tempdir().unwrap();
     let stage = StageDirectory::prepare(&root.path().join("system")).unwrap();

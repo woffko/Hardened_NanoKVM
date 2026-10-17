@@ -508,8 +508,8 @@ fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction()
     downloaded.file_mut().write_all(&bytes).unwrap();
     verify_system_archive(downloaded.file_mut(), &latest).unwrap();
     downloaded.publish(&latest.name).unwrap();
-    let extracted =
-        extract_and_verify_system_bundle(downloaded.file_mut(), &stage_path, &latest).unwrap();
+    let mut snapshot = freeze_system_archive(downloaded.file_mut(), &stage_path, &latest).unwrap();
+    let extracted = extract_and_verify_system_bundle(&mut snapshot, &stage_path, &latest).unwrap();
     assert_eq!(extracted, manifest);
     write_stage_record(
         &stage_path,

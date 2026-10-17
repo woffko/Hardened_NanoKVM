@@ -90,6 +90,61 @@ up to one additional compressed-archive size of free staging disk while active;
 space/I/O failure returns no snapshot before any partition write. Vendor-kernel
 exFAT/procfs execution and target storage/performance remain acceptance gates.
 
+## Direct bundle manifest and raw-image preflight (connected, transitional)
+
+`server-rust/src/api/system_update_bundle.rs` reads the first `manifest.json`
+directly from the authenticated anonymous archive, with a 128-KiB bound before
+allocation. The API uses that manifest after extraction; it no longer reparses
+an extracted p3 manifest. Format v1/v2, release version, target and required app
+version must match the authenticated metadata. Cached receipt commitment also
+runs this preflight. The public RSA keys and signing format are unchanged.
+
+For raw bundles, exactly one BOOT and one ROOTFS image are required, with no
+file-install entries. Only `payload/`, `payload/images/` and the two exact image
+paths are admitted after the first manifest. Image order is independent of JSON
+order. Existing plain and gzip image forms are supported, including mixed
+compression. Both total stored and expanded image sizes are checked against a
+2-GiB budget; declarations cannot cause image-sized memory allocations.
+
+The reader checks raw GNU/USTAR headers before consuming any extension body.
+It rejects links, devices, FIFO, sparse/GNU/PAX extensions, other members,
+duplicates, aliases, non-octal size/mode/checksum fields and unsafe mode bits.
+Header ownership/timestamps are signed bytes but never applied as authority.
+Member padding must be zero. Two zero tar blocks are required, followed by only
+complete zero blocks up to 64 KiB total trailer padding, then actual gzip EOF.
+Hidden concatenated tar archives, a second gzip member, arbitrary suffix bytes,
+truncation and bad gzip CRC/ISIZE are rejected.
+
+Each image is copied into its own anonymous, independently reopened kernel
+`O_RDONLY` snapshot. Gzip images require the stored member's exact size/SHA-256
+and the expanded image's exact size/SHA-256, plus footer/EOF validation. Plain
+images require exact size/SHA-256. Expected hashes come from the direct manifest
+inside the already authenticated archive, not from stage JSON. Only after the
+whole bundle passes are both descriptors returned, in BOOT/ROOTFS order. Failed
+validation drops every in-progress/completed image snapshot. The SHA-256-only
+image capture uses static dispatch and does not calculate an unused SHA-512.
+
+This currently costs up to two archive sizes (canonical/download plus frozen
+archive) and the combined expanded image size, in addition to retained staging,
+recovery and other data. All are disk spools, not whole-image RAM buffers. There
+is no reservation/physical free-space guarantee; ENOSPC fails preflight before
+partition writing. In the transitional production path the expanded snapshots
+are discarded **before** legacy extraction, avoiding an additional simultaneous
+extracted-payload copy. Target card latency, wear, free-space requirements,
+exFAT/vendor-kernel behavior and power-loss cleanup still need acceptance.
+For retained raw.12 the expanded pair is 1,627,389,952 bytes; with two
+57,144,130-byte archive copies, preflight alone can occupy about 1.62 GiB.
+The historical manifest's 640-MiB `required_free_bytes` is not an adequate budget
+for this new path. Compute/check the transaction's actual peak requirements
+before release; do not silently treat that old hint as a storage reservation.
+
+**The legacy raw writer does not yet consume these descriptors.** It still
+reopens extracted payload paths; verification here cannot authorize later reads
+from that mutable tree. An isolated descriptor-bound writer and signed runtime
+binding remain required before C1 closure. File-update bundles use the direct
+bounded manifest but retain their legacy remaining payload/framing validator;
+the closed raw framing claims above do not apply to the non-raw early return.
+
 **C1 remains open.** The snapshot closes later source-inode mutation but is not
 protection from malicious local root or raw writes to its backing filesystem.
 Extraction destinations, some legacy record reads, extracted raw payloads and

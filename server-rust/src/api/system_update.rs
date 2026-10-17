@@ -35,6 +35,9 @@ use crate::{
     },
 };
 
+#[path = "system_update_bundle.rs"]
+mod bundle;
+
 const SYSTEM_VERSION_FILE: &str = "/etc/kvm/system-version.json";
 const BOOT_VERSION_FILE: &str = "/boot/ver";
 const KERNEL_RELEASE_FILE: &str = "/proc/sys/kernel/osrelease";
@@ -547,8 +550,13 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
             ensure_no_pending_system_update()?;
             let mut archive =
                 StageDirectory::open(&receipt_stage_dir)?.open_archive(&verified.latest.name)?;
-            let _snapshot =
+            let mut snapshot =
                 freeze_system_archive(&mut archive, &receipt_stage_dir, &verified.latest)?;
+            let _checked = bundle::capture(
+                &mut snapshot,
+                &StageDirectory::open(&receipt_stage_dir)?,
+                &verified.latest,
+            )?;
             persist_verified_system_metadata(&verified)
         })
         .await?;
@@ -1461,10 +1469,20 @@ fn freeze_system_archive(
 }
 
 fn extract_and_verify_system_bundle(
-    archive: &mut impl Read,
+    archive: &mut PublicSnapshot,
     stage_dir: &Path,
     latest: &SystemLatest,
 ) -> Result<SystemManifest> {
+    let bundle::BundlePreflight {
+        manifest,
+        raw_images,
+    } = bundle::capture(archive, &StageDirectory::open(stage_dir)?, latest)?;
+    // Transitional preflight only: these checked image FDs are not yet passed
+    // to the legacy detached shell writer. Keep C1 open until that path and
+    // early restoration are replaced; a checked p3 pathname is not authority.
+    // Avoid retaining two expanded image snapshots alongside legacy extraction.
+    drop(raw_images);
+    archive.rewind()?;
     let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
     remove_dir_if_exists(&extract_dir)?;
     fs::create_dir_all(&extract_dir)?;
@@ -1472,9 +1490,8 @@ fn extract_and_verify_system_bundle(
 
     validate_system_extract_root(&extract_dir)?;
 
-    let manifest_path = extract_dir.join("manifest.json");
-    let manifest: SystemManifest = serde_json::from_slice(&fs::read(&manifest_path)?)
-        .map_err(|err| AppError::BadRequest(format!("invalid system update manifest: {err}")))?;
+    // The extracted manifest is not input: the only manifest parsed above
+    // came directly from the authenticated, bounded anonymous snapshot.
     let payload_dir = extract_dir.join("payload");
     validate_system_manifest(&manifest, latest, &payload_dir)?;
 
@@ -3772,7 +3789,7 @@ mod tests {
         }
     }
 
-    fn valid_raw_manifest() -> SystemManifest {
+    pub(super) fn valid_raw_manifest() -> SystemManifest {
         SystemManifest {
             format: "hardened-nanokvm-system-update-v1".to_string(),
             version: "0.1.0-raw.1".to_string(),
