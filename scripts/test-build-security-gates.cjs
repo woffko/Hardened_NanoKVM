@@ -46,7 +46,7 @@ try {
   const scripts = path.join(fixture, 'scripts');
   fs.mkdirSync(scripts, { recursive: true });
   fs.cpSync(path.join(root, 'kvmapp'), path.join(fixture, 'kvmapp'), { recursive: true });
-  for (const name of ['buildroot-external', 'support', 'server-rust']) {
+  for (const name of ['buildroot-external', 'support', 'server-rust', 'docs']) {
     fs.symlinkSync(path.join(root, name), path.join(fixture, name));
   }
   for (const name of fs.readdirSync(path.join(root, 'scripts'))) {
@@ -62,6 +62,24 @@ try {
     const result = run('sh', [policy]);
     assert.equal(result.status, 0, result.stderr);
   });
+  if (!baseline) {
+    const docs = path.join(fixture, 'docs');
+    fs.unlinkSync(docs);
+    fs.mkdirSync(docs);
+    check('missing writer inventory rejects source policy', () => {
+      const result = run('sh', [policy]);
+      assert.notEqual(result.status, 0, 'policy accepted a missing writer inventory');
+    });
+    const inventory = JSON.parse(fs.readFileSync(path.join(root, 'docs/security-state-writers.json')));
+    inventory.groups[0].members.REQUIRED.pop();
+    fs.writeFileSync(path.join(docs, 'security-state-writers.json'), JSON.stringify(inventory));
+    check('unclassified restore source rejects policy', () => {
+      const result = run('sh', [policy]);
+      assert.notEqual(result.status, 0, 'policy accepted an unclassified restore source');
+    });
+    fs.rmSync(docs, { recursive: true });
+    fs.symlinkSync(path.join(root, 'docs'), docs);
+  }
   const sentinel = path.join(fixture, 'kvmapp', '.synthetic-private-marker');
   for (const [label, content] of [
     ['text', '-----BEGIN TEST PRIVATE KEY-----\nsynthetic fixture, not a key\n'],

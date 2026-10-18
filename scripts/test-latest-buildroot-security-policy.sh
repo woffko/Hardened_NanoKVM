@@ -12,6 +12,9 @@ AVAHI_CONFIG="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/
 POST_BUILD="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/post-build.sh"
 KVM_CMAKE="$ROOT/support/sg2002/additional/kvm/CMakeLists.txt"
 
+# Source coverage only, not proof that services/writers are quiescent.
+python3 "$ROOT/scripts/validate-state-writer-inventory.py" --root "$ROOT"
+
 require_line() {
 	line=$1
 	file=$2

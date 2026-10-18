@@ -196,6 +196,11 @@ test-system-update-v2:
 test-latest-buildroot-security-policy:
 	@scripts/test-latest-buildroot-security-policy.sh
 
+.PHONY: test-state-writer-inventory
+test-state-writer-inventory:
+	@python3 scripts/validate-state-writer-inventory.py
+	@python3 scripts/test-state-writer-inventory.py
+
 # Build hardware support libraries
 support: check-root builder-image
 	@echo "Building support..."
