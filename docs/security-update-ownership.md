@@ -355,6 +355,11 @@ host/device networking, transmit real WOL packets or test physical connectivity.
 
 ## Explicit remaining boundaries
 
+The [native owner component](security-native-owner.md) supplies separate-process
+child-tree Stop/reap machinery. It is not yet the service broker, retained raw
+writer or a caller of the composed writer drain. Its presence does not close the
+following production boundaries.
+
 - The front-end kernel lease is cooperative cross-process admission, not a
   durable install journal, idempotency receipt or power-loss recovery protocol.
   It does not survive destruction/replacement of rootfs and has not been handed

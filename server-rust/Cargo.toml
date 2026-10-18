@@ -27,6 +27,12 @@ path = "tests/fixtures/image_runtime_probe.rs"
 required-features = ["sandbox-test-fixture"]
 test = false
 
+[[bin]]
+name = "nanokvm-native-owner-fixture"
+path = "tests/fixtures/native_owner_probe.rs"
+required-features = ["sandbox-test-fixture"]
+test = false
+
 [dependencies]
 aes = "0.8"
 argon2 = { version = "0.5", features = ["std"] }
