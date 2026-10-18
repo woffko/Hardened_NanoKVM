@@ -5,13 +5,13 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
 use std::{
     ffi::OsStr,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time;
@@ -23,7 +23,8 @@ use crate::{
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
     update::{
-        archive::extract_tar_gz_safe,
+        app_stage::{AppArchive, AppDownload, AppStage, MAX_ARCHIVE_BYTES as MAX_UPDATE_BYTES},
+        archive::extract_app_tar_gz,
         keys::resolve_update_public_key,
         operation::{Kind, Snapshot, UpdateOwner},
     },
@@ -39,10 +40,8 @@ const GITHUB_RELEASE_LATEST_JSON: &str =
 const GITHUB_PREVIEW_LATEST_JSON: &str = "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-rust-preview/latest.json";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/";
-const MAX_UPDATE_BYTES: u64 = 128 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
-const APPLICATION_UPDATE_CACHE_DIR_NAME: &str = "application-update";
 const APP_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const APP_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
 
@@ -155,18 +154,26 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
     let owner = state.updates.acquire(Kind::ApplicationOnline)?;
     owner
         .run(move |job| async move {
-            let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
-            let prepare_dir = cache_dir.clone();
-            job.blocking("prepare app cache", move || prepare_cache_dir(&prepare_dir))
-                .await?;
             let latest = get_latest(is_preview_enabled(), &state.config).await?;
-            let archive = cache_dir.join(&latest.name);
-            download_release_asset(&latest, &archive).await?;
+            let (stage, archive) = job
+                .blocking("prepare private app staging", || {
+                    let stage = AppStage::prepare()?;
+                    let archive = stage.create_archive()?;
+                    Ok((stage, archive))
+                })
+                .await?;
+            let archive = download_release_asset(&latest, archive, &job).await?;
             job.blocking("verify and install app", move || {
-                verify_sha512(&archive, &latest.sha512)?;
-                install_package(&archive, &cache_dir)?;
-                let _ = remove_dir_if_exists(&cache_dir);
-                Ok(())
+                let archive = archive
+                    .finish_online(latest.size, &decode_sha512(&latest.sha512)?)
+                    .map_err(|error| {
+                        if error.kind() == io::ErrorKind::InvalidData {
+                            AppError::BadRequest("update archive size or checksum mismatch".into())
+                        } else {
+                            error.into()
+                        }
+                    })?;
+                install_package(archive, stage)
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -184,22 +191,21 @@ pub async fn offline_update(
     let owner = state.updates.acquire(Kind::ApplicationOffline)?;
     owner
         .run(move |job| async move {
-            let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
-            let prepare_dir = cache_dir.clone();
-            job.blocking("prepare offline app cache", move || {
-                prepare_cache_dir(&prepare_dir)
-            })
-            .await?;
+            let (stage, archive) = job
+                .blocking("prepare private offline app staging", || {
+                    let stage = AppStage::prepare()?;
+                    let archive = stage.create_archive()?;
+                    Ok((stage, archive))
+                })
+                .await?;
             let archive = time::timeout(
                 DOWNLOAD_TIMEOUT,
-                save_uploaded_update(&cache_dir, &mut multipart, &job),
+                save_uploaded_update(archive, &mut multipart, &job),
             )
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
             job.blocking("install offline app", move || {
-                install_package(&archive, &cache_dir)?;
-                let _ = remove_dir_if_exists(&cache_dir);
-                Ok(())
+                install_package(archive, stage)
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -291,52 +297,101 @@ async fn fetch_latest_metadata(url: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-async fn download_release_asset(latest: &LatestRelease, target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
+async fn download_release_asset(
+    latest: &LatestRelease,
+    archive: AppDownload,
+    owner: &UpdateOwner,
+) -> Result<AppDownload> {
+    let mut command = tokio::process::Command::new("/usr/bin/curl");
+    // No output pathname, curlrc, stdin, retry append, or non-HTTPS redirect.
+    command.args([
+        "--disable",
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "600",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--",
+        &latest.url,
+    ]);
+    receive_app_archive(&mut command, latest.size, archive, owner, DOWNLOAD_TIMEOUT).await
+}
 
-    let output = run_allowed(
-        AllowedCommand::Curl,
-        [
-            "-fL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "600",
-            "--output",
-            path_arg(target)?,
-            latest.url.as_str(),
-        ],
-        DOWNLOAD_TIMEOUT,
-    )
-    .await?;
-    ensure_success(&output, "download update archive")?;
-
-    let size = fs::metadata(target)?.len();
+async fn receive_app_archive(
+    command: &mut tokio::process::Command,
+    size: u64,
+    mut archive: AppDownload,
+    owner: &UpdateOwner,
+    deadline: Duration,
+) -> Result<AppDownload> {
+    use tokio::io::AsyncReadExt;
     if size == 0 || size > MAX_UPDATE_BYTES {
-        return Err(AppError::BadRequest(
-            "invalid update archive size".to_string(),
-        ));
+        return Err(AppError::BadRequest("invalid app archive size".into()));
     }
-    if latest.size != 0 && size != latest.size {
-        return Err(AppError::BadRequest(format!(
-            "update archive size mismatch: got {size}, expected {}",
-            latest.size
-        )));
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let Some(mut source) = child.stdout.take() else {
+        let _ = child.start_kill();
+        child.wait().await?;
+        return Err(AppError::Internal("missing app archive stream".into()));
+    };
+    let result = time::timeout(deadline, async {
+        let mut remaining = size;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            if count as u64 > remaining {
+                return Err(AppError::BadRequest(
+                    "app archive exceeds signed size".into(),
+                ));
+            }
+            let chunk = buffer[..count].to_vec();
+            archive = owner
+                .blocking("write online app archive", move || {
+                    archive.append(&chunk)?;
+                    Ok(archive)
+                })
+                .await?;
+            remaining -= count as u64;
+        }
+        if remaining != 0 {
+            return Err(AppError::BadRequest(
+                "app archive is shorter than signed size".into(),
+            ));
+        }
+        if !child.wait().await?.success() {
+            return Err(AppError::BadRequest("download app archive failed".into()));
+        }
+        Ok(archive)
+    })
+    .await
+    .unwrap_or_else(|_| Err(AppError::BadRequest("app download timed out".into())));
+    if result.is_err() {
+        let _ = child.start_kill();
+        // Retain the registered job through direct-child reap, even when kill
+        // races natural exit. No detached download owns a writable descriptor.
+        child.wait().await?;
     }
-
-    Ok(())
+    result
 }
 
 async fn save_uploaded_update(
-    cache_dir: &Path,
+    mut archive: AppDownload,
     multipart: &mut Multipart,
     owner: &UpdateOwner,
-) -> Result<PathBuf> {
-    let mut archive = None;
+) -> Result<AppArchive> {
+    let mut found = false;
 
     while let Some(mut field) = multipart
         .next_field()
@@ -346,6 +401,12 @@ async fn save_uploaded_update(
         if field.name() != Some("file") {
             continue;
         }
+        if found {
+            return Err(AppError::BadRequest(
+                "multiple update files uploaded".into(),
+            ));
+        }
+        found = true;
 
         let filename = field
             .file_name()
@@ -353,13 +414,6 @@ async fn save_uploaded_update(
             .ok_or_else(|| AppError::BadRequest("missing update filename".to_string()))?;
         validate_update_filename(&filename)?;
 
-        let target = cache_dir.join(&filename);
-        let create_target = target.clone();
-        let mut file = owner
-            .blocking("create offline app archive", move || {
-                Ok(fs::File::create(create_target)?)
-            })
-            .await?;
         let mut written = 0_u64;
 
         while let Some(chunk) = field
@@ -373,38 +427,38 @@ async fn save_uploaded_update(
                     "update archive is too large".to_string(),
                 ));
             }
-            file = owner
+            archive = owner
                 .blocking("write offline app archive", move || {
-                    file.write_all(&chunk)?;
-                    Ok(file)
+                    archive.append(&chunk)?;
+                    Ok(archive)
                 })
                 .await?;
         }
-        owner
-            .blocking("sync offline app archive", move || {
-                file.sync_all()?;
-                Ok(())
-            })
-            .await?;
 
         if written == 0 {
             return Err(AppError::BadRequest("empty update archive".to_string()));
         }
-        archive = Some(target);
     }
 
-    archive.ok_or_else(|| AppError::BadRequest("no update file uploaded".to_string()))
+    if !found {
+        return Err(AppError::BadRequest("no update file uploaded".into()));
+    }
+    owner
+        .blocking("seal manual app import", move || {
+            Ok(archive.finish_manual_import()?)
+        })
+        .await
 }
 
-fn install_package(source: &Path, cache_dir: &Path) -> Result<()> {
-    let extract_dir = cache_dir.join("extract");
-    remove_dir_if_exists(&extract_dir)?;
-    fs::create_dir_all(&extract_dir)?;
-
-    let extracted = extract_tar_gz_safe(source, &extract_dir)?;
+fn install_package(source: AppArchive, mut stage: AppStage) -> Result<()> {
+    let extract_dir = stage.extraction_path()?;
+    let extracted = extract_app_tar_gz(source, &extract_dir)?;
     let update_root = resolve_update_root(&extracted)?;
     validate_update_root(&update_root)?;
 
+    // From the first live-slot/backup mutation onward, retain the candidate on
+    // every error (including failed backup restore). No cleanup is recovery.
+    stage.preserve_recovery();
     let app_dir = Path::new(APP_DIR);
     let backup_dir = Path::new(BACKUP_DIR);
     remove_dir_if_exists(backup_dir)?;
@@ -421,6 +475,7 @@ fn install_package(source: &Path, cache_dir: &Path) -> Result<()> {
     }
 
     chmod_recursively(app_dir, 0o755)?;
+    stage.discard_after_success();
     Ok(())
 }
 
@@ -482,7 +537,7 @@ fn validate_update_root(root: &Path) -> Result<()> {
 fn validate_latest_release(latest: &LatestRelease) -> Result<()> {
     validate_version(&latest.version)?;
     validate_update_filename(&latest.name)?;
-    validate_sha512(&latest.sha512)?;
+    decode_sha512(&latest.sha512)?;
 
     if latest.size == 0 || latest.size > MAX_UPDATE_BYTES {
         return Err(AppError::BadRequest(
@@ -690,33 +745,13 @@ fn validate_version(version: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_sha512(value: &str) -> Result<()> {
+fn decode_sha512(value: &str) -> Result<[u8; 64]> {
     let decoded = STANDARD
         .decode(value)
         .map_err(|_| AppError::BadRequest("invalid release sha512".to_string()))?;
-    if decoded.len() != 64 {
-        return Err(AppError::BadRequest("invalid release sha512".to_string()));
-    }
-    Ok(())
-}
-
-fn verify_sha512(path: &Path, expected: &str) -> Result<()> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha512::new();
-    let mut buf = [0_u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-
-    let actual = STANDARD.encode(hasher.finalize());
-    if actual != expected {
-        return Err(AppError::BadRequest("update checksum mismatch".to_string()));
-    }
-    Ok(())
+    decoded
+        .try_into()
+        .map_err(|_| AppError::BadRequest("invalid release sha512".into()))
 }
 
 fn validate_update_tree_has_no_symlinks(root: &Path) -> Result<()> {
@@ -747,21 +782,6 @@ fn validate_update_tree_has_no_symlinks(root: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn prepare_cache_dir(cache_dir: &Path) -> Result<()> {
-    if cache_dir == Path::new("/") || cache_dir.as_os_str().is_empty() {
-        return Err(AppError::Config(
-            "invalid update cache directory".to_string(),
-        ));
-    }
-    remove_dir_if_exists(cache_dir)?;
-    fs::create_dir_all(cache_dir)?;
-    Ok(())
-}
-
-fn application_update_cache_dir(cache_root: &Path) -> PathBuf {
-    cache_root.join(APPLICATION_UPDATE_CACHE_DIR_NAME)
 }
 
 fn ensure_success(output: &CommandOutput, action: &str) -> Result<()> {
@@ -930,6 +950,7 @@ fn now_unix_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
         use axum::{body::Body, extract::FromRequest, http::Request};
@@ -950,16 +971,22 @@ mod tests {
         use crate::update::operation::{Phase, UpdateCoordinator};
         use std::sync::Arc;
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().to_path_buf();
+        let stage = AppStage::fixture(temporary.path()).unwrap();
+        let download = stage.create_archive().unwrap();
         let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let payload = b"synthetic archive bytes, not an installable archive";
         let mut multipart = upload_fixture(payload, true).await;
-        let archive = owner
-            .run(move |job| async move { save_uploaded_update(&path, &mut multipart, &job).await })
-            .await
-            .unwrap();
-        assert_eq!(fs::read(archive).unwrap(), payload);
+        let mut archive =
+            owner
+                .run(move |job| async move {
+                    save_uploaded_update(download, &mut multipart, &job).await
+                })
+                .await
+                .unwrap();
+        let mut actual = Vec::new();
+        archive.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, payload);
         let snapshot = coordinator.snapshot().unwrap();
         assert!(snapshot.active.is_none() && snapshot.last.unwrap().phase == Phase::Finished);
     }
@@ -969,15 +996,303 @@ mod tests {
         use crate::update::operation::{Phase, UpdateCoordinator};
         use std::sync::Arc;
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().to_path_buf();
+        let stage = AppStage::fixture(temporary.path()).unwrap();
+        let download = stage.create_archive().unwrap();
         let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let mut multipart = upload_fixture(b"synthetic truncated body", false).await;
-        assert!(owner.run(move |job| async move {
-            save_uploaded_update(&path, &mut multipart, &job).await
-        }).await.is_err());
+        assert!(
+            owner
+                .run(move |job| async move {
+                    save_uploaded_update(download, &mut multipart, &job).await
+                })
+                .await
+                .is_err()
+        );
         let snapshot = coordinator.snapshot().unwrap();
         assert!(snapshot.active.is_none() && snapshot.last.unwrap().phase == Phase::Failed);
+    }
+
+    #[tokio::test]
+    async fn app_stream_is_exactly_bounded_and_does_not_use_archive_names() {
+        use crate::update::operation::UpdateCoordinator;
+        use sha2::{Digest, Sha512};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let sentinel = root.path().join("sentinel");
+        fs::write(&sentinel, b"untouched").unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+        for (program, args, size, success) in [
+            ("/usr/bin/printf", vec!["%s", "exact"], 5, true),
+            ("/usr/bin/printf", vec!["%s", "short"], 6, false),
+            ("/usr/bin/printf", vec!["%s", "oversized"], 8, false),
+            ("/usr/bin/false", vec![], 1, false),
+            ("/usr/bin/true", vec![], 1, false),
+        ] {
+            let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+            let archive = stage.create_archive().unwrap();
+            let mut command = tokio::process::Command::new(program);
+            command.args(args);
+            let result = owner
+                .run(move |job| async move {
+                    receive_app_archive(&mut command, size, archive, &job, Duration::from_secs(5))
+                        .await
+                })
+                .await;
+            assert_eq!(result.is_ok(), success);
+            if let Ok(download) = result {
+                let mut archive = download
+                    .finish_online(5, &Sha512::digest(b"exact").into())
+                    .unwrap();
+                let mut bytes = Vec::new();
+                archive.read_to_end(&mut bytes).unwrap();
+                assert_eq!(bytes, b"exact");
+            }
+        }
+        assert_eq!(fs::read(sentinel).unwrap(), b"untouched");
+        assert_eq!(
+            fs::read_dir(stage.extraction_path().unwrap().parent().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn app_stream_child_fixture() {
+        let Ok(mode) = std::env::var("NANOKVM_APP_STREAM_TEST_MODE") else {
+            return;
+        };
+        fs::write(
+            std::env::var_os("NANOKVM_APP_STREAM_TEST_PID").unwrap(),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        match mode.as_str() {
+            "hang" => std::thread::sleep(Duration::from_secs(30)),
+            "failed-exit" => {
+                std::io::stdout().write_all(b"bytes").unwrap();
+                std::io::stdout().flush().unwrap();
+                std::process::exit(1);
+            }
+            "oversized-hang" => {
+                std::io::stdout().write_all(&[b'x'; 2048]).unwrap();
+                std::io::stdout().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            _ => panic!("unknown app stream test mode"),
+        }
+    }
+
+    #[tokio::test]
+    async fn app_stream_failure_and_deadline_reap_direct_child_before_releasing_admission() {
+        use crate::update::operation::{Phase, UpdateCoordinator};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+        for mode in ["hang", "failed-exit", "oversized-hang"] {
+            let pid_path = root.path().join(format!("{mode}.pid"));
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .env_clear()
+                .args([
+                    "--exact",
+                    "api::application::tests::app_stream_child_fixture",
+                    "--nocapture",
+                ])
+                .env("NANOKVM_APP_STREAM_TEST_MODE", mode)
+                .env("NANOKVM_APP_STREAM_TEST_PID", &pid_path);
+            let size = if mode == "failed-exit" {
+                let control = command.output().await.unwrap();
+                assert_eq!(control.status.code(), Some(1));
+                fs::remove_file(&pid_path).unwrap();
+                control.stdout.len() as u64
+            } else {
+                1024
+            };
+            let archive = stage.create_archive().unwrap();
+            let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+            let error = owner
+                .run(move |job| async move {
+                    receive_app_archive(
+                        &mut command,
+                        size,
+                        archive,
+                        &job,
+                        Duration::from_millis(500),
+                    )
+                    .await
+                })
+                .await
+                .err()
+                .unwrap();
+            let expected = match mode {
+                "hang" => "app download timed out",
+                "failed-exit" => "download app archive failed",
+                "oversized-hang" => "app archive exceeds signed size",
+                _ => unreachable!(),
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            let pid = fs::read_to_string(pid_path)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "direct child not reaped"
+            );
+            let status = coordinator.snapshot().unwrap();
+            assert!(status.active.is_none() && status.last.unwrap().phase == Phase::Failed);
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_offline_files_are_rejected_without_selecting_the_last_one() {
+        use crate::update::operation::UpdateCoordinator;
+        use axum::{body::Body, extract::FromRequest, http::Request};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let download = stage.create_archive().unwrap();
+        let part = "--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"nanokvm_fixture.tar.gz\"\r\n\r\nbytes\r\n";
+        let request = Request::builder()
+            .header("content-type", "multipart/form-data; boundary=fixture")
+            .body(Body::from(format!("{part}{part}--fixture--\r\n")))
+            .unwrap();
+        let mut multipart = Multipart::from_request(request, &()).await.unwrap();
+        let owner = Arc::new(UpdateCoordinator::in_process_fixture())
+            .acquire(Kind::ApplicationOffline)
+            .unwrap();
+        assert!(
+            owner
+                .run(move |job| async move {
+                    save_uploaded_update(download, &mut multipart, &job).await
+                })
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("multiple update files")
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_app_stream_reply_retains_stage_and_admission_until_child_cleanup() {
+        use crate::update::operation::{Phase, UpdateCoordinator};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let stage_path = stage
+            .extraction_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let archive = stage.create_archive().unwrap();
+        let pid_path = root.path().join("pid");
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .env_clear()
+            .args([
+                "--exact",
+                "api::application::tests::app_stream_child_fixture",
+                "--nocapture",
+            ])
+            .env("NANOKVM_APP_STREAM_TEST_MODE", "hang")
+            .env("NANOKVM_APP_STREAM_TEST_PID", &pid_path);
+        let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+        let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+        let reply = tokio::spawn(owner.run(move |job| async move {
+            let result = receive_app_archive(
+                &mut command,
+                1024,
+                archive,
+                &job,
+                Duration::from_millis(800),
+            )
+            .await;
+            drop(stage);
+            result.map(|_| ())
+        }));
+        time::timeout(Duration::from_secs(3), async {
+            while !pid_path.exists() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = fs::read_to_string(pid_path)
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        reply.abort();
+        assert!(reply.await.unwrap_err().is_cancelled());
+        assert!(stage_path.is_dir());
+        assert!(coordinator.acquire(Kind::ApplicationOffline).is_err());
+        time::timeout(Duration::from_secs(5), async {
+            while coordinator.snapshot().unwrap().active.is_some() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert!(!stage_path.exists());
+        assert_eq!(
+            coordinator.snapshot().unwrap().last.unwrap().phase,
+            Phase::Failed
+        );
+    }
+
+    #[test]
+    #[ignore = "requires retained historical public app archives"]
+    fn historical_bridge_package_extracts_in_private_stage_without_installing() {
+        use sha2::{Digest, Sha256};
+        let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for (path, hash, version) in [
+            (
+                "build/release/combined-rc11-3cca4d8/hardened-nanokvm-kvmapp-2.0.40.tar.gz",
+                "85e6aa195ccf7274203462a0488c9e251c567a523519fd50d4973eb60ddd65d5",
+                "2.0.40",
+            ),
+            (
+                "build/key-transition-2.0.42-bootstrap/legacy-inputs/hardened-nanokvm-kvmapp-2.0.41.tar.gz",
+                "c8520306d70b3c6998a486e84faf82f1a8509f7a97f621d14dfc34af368ae18d",
+                "2.0.41",
+            ),
+            (
+                "build/key-transition-2.0.42-bootstrap/app-a/out/hardened-nanokvm-kvmapp-2.0.42.tar.gz",
+                "aa0cd78c1b2e9951f216826c44b4b7ff2fb211fc1980540366f8f5b1f7e0dd20",
+                "2.0.42",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let stage = AppStage::fixture(root.path()).unwrap();
+            let mut download = stage.create_archive().unwrap();
+            let mut source = fs::File::open(project.join(path)).unwrap();
+            assert!(source.metadata().unwrap().len() <= MAX_UPDATE_BYTES);
+            let mut actual = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = source.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                actual.update(&buffer[..count]);
+                download.append(&buffer[..count]).unwrap();
+            }
+            assert_eq!(format!("{:x}", actual.finalize()), hash);
+            let archive = download.finish_manual_import().unwrap();
+            let extracted = extract_app_tar_gz(archive, &stage.extraction_path().unwrap()).unwrap();
+            let app = resolve_update_root(&extracted).unwrap();
+            validate_update_root(&app).unwrap();
+            assert_eq!(
+                fs::read_to_string(app.join("version")).unwrap().trim(),
+                version
+            );
+        }
     }
     use std::os::unix::fs::symlink;
 

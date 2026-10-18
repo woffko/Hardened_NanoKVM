@@ -164,7 +164,7 @@ impl Seek for PublicSnapshot {
     }
 }
 
-fn reopen_readonly(source: &File, size: u64) -> Result<File, SnapshotError> {
+pub(super) fn reopen_readonly(source: &File, size: u64) -> Result<File, SnapshotError> {
     let expected = source.metadata()?;
     if !expected.is_file()
         || expected.nlink() != 0

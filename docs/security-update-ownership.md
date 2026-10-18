@@ -82,8 +82,11 @@ same-device bind-mount negative testing remain separate gates.
    own work ownership; ordinary returned upload files have no deferred writes.
    Later root-task success cannot overwrite an already observed child/restart
    failure. Public status does not reproduce panic or callback error text.
-5. App upload create/write/sync, hashing, install and exact cache cleanup run
-   through owned blocking callbacks. Offline reception is bounded to the existing
+5. App upload create/write/sync, hashing and install run through owned blocking
+   callbacks. Cleanup of a populated stage, when allowed, stays inside the
+   install callback; earlier reception failures can drop an empty stage in the
+   registered async job.
+   Offline reception is bounded to the existing
    archive limit and a fifteen-minute total timeout. Interrupted/incomplete
    bodies do not reach installation; pending filesystem work retains admission.
 6. App restart is scheduled **inside** the registered worker, before it replies,
@@ -91,6 +94,76 @@ same-device bind-mount negative testing remain separate gates.
    cannot skip restart scheduling or open a second-update gap in that delay.
 7. Only the last owner releases active admission. Follow-up ownership must not
    be sent back through the HTTP reply and then scheduled by a cancelable handler.
+
+## Private application staging
+
+The remediation source now routes both online and administrative offline app
+updates through `/etc/kvm/application-update/stage-<random128>`, not the
+configurable `/data` cache. This is source/host acceptance, not a shipped security
+release or completed C1. Root, `/etc` and `/etc/kvm` are opened without symlinks,
+magic links or mount crossings and require protected root ownership. The fixed
+staging parent and each fresh operation directory require mode0700 on rootfs.
+An unsafe existing object is rejected, not repaired. No previous stage or p3
+cache is reused, scanned, or deleted to prepare a new operation.
+
+The compressed archive is an anonymous rootfs `O_TMPFILE|EXCL`, mode0600. Only
+the staging module owns its writable file, with no public pathname or exposed
+writable clone. Curl receives HTTPS-only arguments, disabled curlrc, null stdin
+and a pipe, not an output filename. The registered job bounds each received
+chunk against the signed size before an owned blocking write; short/long data,
+nonzero exit and deadline errors refuse installation and reap the fixed direct
+child. No stdout retry can append a second response. This is direct-child
+supervision, not a claim of generic descendant quiescence.
+
+Online metadata still passes the existing RSA/policy gate; its exact size and
+decoded SHA-512 are checked against the retained anonymous inode. After sync,
+verified procfs is used to reopen that same inode with an independent O_RDONLY
+description; the sole writable owner closes before the opaque archive can be
+extracted. Extraction never reopens an archive pathname after hashing. Current
+policy reauthorization and a durable signed app-slot receipt are separate,
+still-open work; private staging is not that receipt. The explicit lab-only
+unsigned-update setting and production key IDs/algorithms are unchanged.
+
+Offline upload deliberately remains an authenticated administrator's manual
+import, with external checksum verification as documented for the bridge. It
+does not acquire an invented signature proof or fall back from online signature
+failure. It uses the same anonymous/readonly archive and private extraction,
+rejects multiple `file` fields rather than selecting the last, and retains the
+existing fifteen-minute upload deadline and 128 MiB compressed limit.
+
+App extraction admits GNU/ustar directories, regular files and bounded GNU long
+names, matching the published packages. The ordinary top-level `MANIFEST.txt`
+is allowed alongside the single app root, but is never trust authority. Links,
+sparse/PAX/special entries, duplicate file overwrite and other top-level roots
+are rejected. Limits are 256 MiB of decoded tar (including padding), 8192 raw
+members and distinct output paths including implicit parents, 4096-byte paths
+and depth64. All regular outputs sync before installation. Extraction drains
+through the gzip footer/CRC and rejects nonzero tar tail, a second gzip stream
+or other trailing compressed bytes. The generic system-archive extractor is
+not changed by this app-specific parser.
+
+Output names are used only beneath the fresh private rootfs stage. This assumes
+a cooperative protected OS, not a hostile local root changing mounts/ancestors.
+Before live slot/backup mutation, best-effort cleanup checks the owned stage's
+inode/binding and removes only that generated subtree. Once mutation may start,
+ordinary failure instead retains the validated candidate, including failure of
+backup restoration; only successful completion explicitly consumes the stage
+for cleanup. A replaced binding, crash orphan or cleanup failure is preserved;
+it is not a success or durable recovery receipt. This in-memory cleanup flag
+does not implement restart recovery or authorize reuse of any retained stage.
+Production never infers authorization from old staging presence.
+
+Historical retained app 2.0.40, 2.0.41 and corrected bridge 2.0.42 are individually
+hash-pinned in a manual host fixture and pass this extraction/structure path
+without invoking live install. Host tests also cover readonly descriptors,
+unsafe/replaced staging, archive budgets/framing, direct-child error/deadline
+reap and lost reply ownership. Actual HTTP FIN/RST/HTTP2 and target filesystem
+checks remain separate gates.
+
+The subsequent `/kvmapp`/`/root/old` swap is still the legacy path: it has no
+durable journal/early recovery and is not an atomic or accepted crash-safe
+transaction. Slot provenance, independent startup recovery and first restart
+acceptance must be implemented before claiming WP-04 or C1 complete.
 
 ## Command lifetime within the update worker
 

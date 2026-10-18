@@ -1,3 +1,4 @@
+pub(crate) mod app_stage;
 pub mod archive;
 pub mod keys;
 pub mod operation;

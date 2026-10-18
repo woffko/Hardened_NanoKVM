@@ -81,8 +81,12 @@ Known exceptions:
 
 - Account file: `/etc/kvm/pwd`, mode `0600`.
 - Session secret: `/etc/kvm/session_secret`, generated and written `0600`.
-- Update cache: `/data/.hardened-kvmcache`; application updates use
-  `application-update`, system updates use `system-update`.
+- System-update public cache: `/data/.hardened-kvmcache/system-update`.
+  Remediation source stages app updates in fresh private rootfs directories
+  under `/etc/kvm/application-update`, with anonymous readonly-bound archives;
+  it no longer trusts or cleans the old p3 application cache. This is not yet a
+  released/fully accepted app transaction: durable slot swap/recovery and C1
+  integration remain open. See [update ownership](security-update-ownership.md#private-application-staging).
 - System-update archives are constrained to declared payload roots and reject
   runtime/cache roots such as `/dev`, `/proc`, `/sys`, `/run`, `/tmp`, `/data`,
   `/kvmapp`, and `/root/.kvmcache`.

@@ -152,6 +152,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         b"do not preserve trust material",
     );
     for path in [
+        "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/native-runtime-owner/control.sock",
@@ -190,6 +191,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         assert_eq!(validated.members()[index].mode, 0o600);
     }
     for forbidden in [
+        "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/bin/picoclaw",
         "etc/init.d/S96picoclaw",
         "etc/default/syslogd",
@@ -457,6 +459,7 @@ fn append_never_consumes_more_than_the_declared_size() {
 #[test]
 fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
     for path in [
+        "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/bin/picoclaw",
         "etc/init.d/S96picoclaw",
         "etc/default/syslogd",
@@ -488,6 +491,7 @@ fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
 #[test]
 fn absent_records_cannot_delete_identity_or_authorize_unknown_paths() {
     for path in [
+        "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "etc/passwd",
         "etc/kvm/pwd",
         "etc/kvm/server.yaml",
