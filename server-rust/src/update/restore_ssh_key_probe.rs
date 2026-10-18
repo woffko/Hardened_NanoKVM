@@ -1,13 +1,13 @@
-//! Native OpenSSH private-key possession proof, not signed-runtime provenance.
-//! Must run inside the verified target runtime before target compatibility is
-//! claimed. No configured helper, agent, shell or provider is invoked here.
+//! Host-native possession diagnostic through parent proc-fds, not the isolated
+//! signed-image target gate. Production preflight uses restore_job HostKeys.
+//! No configured helper, agent, shell or provider is invoked here.
 
 use super::{Result, SshRestoreError};
 use crate::update::restore_capsule::create_private_spool;
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
-};
+pub(super) use crate::update::restore_key::MAX_PUBLIC;
+use crate::update::restore_key::{HostKey as Algorithm, NAMESPACE, PRINCIPAL, parse_public};
+#[cfg(test)]
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand_core::{OsRng, RngCore};
 use std::{fs::File, io::Write, os::fd::AsRawFd, path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -17,23 +17,8 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-pub(super) const MAX_PUBLIC: usize = 16 * 1024;
 const DEADLINE: Duration = Duration::from_secs(8);
 const REAP_DEADLINE: Duration = Duration::from_secs(2);
-const NAMESPACE: &str = "hardened-nanokvm-restore-key-proof-v1";
-const PRINCIPAL: &str = "restore-probe";
-
-#[derive(Clone, Copy)]
-pub(super) enum Algorithm {
-    Rsa,
-    Ecdsa,
-    Ed25519,
-}
-
-struct PublicIdentity {
-    kind: &'static str,
-    blob: Zeroizing<Vec<u8>>,
-}
 
 pub(super) async fn check_pair(
     private: &File,
@@ -77,9 +62,8 @@ pub(super) async fn check_pair(
         .map_err(|_| SshRestoreError::ProbeRuntime)?;
     let mut allowed =
         create_private_spool(private_staging).map_err(|_| SshRestoreError::ProbeRuntime)?;
-    let mut encoded = Zeroizing::new(String::with_capacity(MAX_PUBLIC));
-    STANDARD.encode_string(&identity.blob, &mut encoded);
-    writeln!(allowed, "{PRINCIPAL} {} {}", identity.kind, *encoded)
+    allowed
+        .write_all(identity.allowed_signers().as_bytes())
         .map_err(|_| SshRestoreError::ProbeRuntime)?;
     let signature_path = format!(
         "/proc/{}/fd/{}",
@@ -105,55 +89,6 @@ pub(super) async fn check_pair(
     )
     .await?;
     Ok(())
-}
-
-fn parse_public(bytes: &[u8], algorithm: Algorithm) -> Result<PublicIdentity> {
-    if bytes.is_empty() || bytes.len() > MAX_PUBLIC || bytes.contains(&0) {
-        return Err(SshRestoreError::InvalidKey);
-    }
-    // OpenSSH public files may have comments/blank lines and a trailing comment.
-    // Preserve source bytes separately; compare decoded identity, not formatting.
-    let line = bytes
-        .split(|b| *b == b'\n')
-        .find(|line| {
-            let line = line.trim_ascii();
-            !line.is_empty() && !line.starts_with(b"#")
-        })
-        .ok_or(SshRestoreError::InvalidKey)?;
-    let mut fields = line
-        .split(u8::is_ascii_whitespace)
-        .filter(|s| !s.is_empty());
-    let kind = fields.next().ok_or(SshRestoreError::InvalidKey)?;
-    let encoded = fields.next().ok_or(SshRestoreError::InvalidKey)?;
-    let kind = match (algorithm, kind) {
-        (Algorithm::Rsa, b"ssh-rsa") => "ssh-rsa",
-        (Algorithm::Ed25519, b"ssh-ed25519") => "ssh-ed25519",
-        (Algorithm::Ecdsa, b"ecdsa-sha2-nistp256") => "ecdsa-sha2-nistp256",
-        (Algorithm::Ecdsa, b"ecdsa-sha2-nistp384") => "ecdsa-sha2-nistp384",
-        (Algorithm::Ecdsa, b"ecdsa-sha2-nistp521") => "ecdsa-sha2-nistp521",
-        _ => return Err(SshRestoreError::InvalidKey),
-    };
-    let mut blob = Zeroizing::new(vec![0; encoded.len() / 4 * 3 + 3]);
-    let length = STANDARD
-        .decode_slice(encoded, &mut blob)
-        .or_else(|_| STANDARD_NO_PAD.decode_slice(encoded, &mut blob))
-        .map_err(|_| SshRestoreError::InvalidKey)?;
-    blob.truncate(length);
-    let prefix: [u8; 4] = blob
-        .get(..4)
-        .ok_or(SshRestoreError::InvalidKey)?
-        .try_into()
-        .map_err(|_| SshRestoreError::InvalidKey)?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    if blob.get(
-        4..4_usize
-            .checked_add(length)
-            .ok_or(SshRestoreError::InvalidKey)?,
-    ) != Some(kind.as_bytes())
-    {
-        return Err(SshRestoreError::InvalidKey);
-    }
-    Ok(PublicIdentity { kind, blob })
 }
 
 async fn keygen(args: &[&str], input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {

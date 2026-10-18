@@ -2,7 +2,12 @@
 //! origin of its prepared root. Signed-image extraction/binding is mandatory at
 //! the caller and is not inferred from a pathname or a successful native test.
 
-use super::{restore_effective::RootContext, restore_fs, restore_rootfs::RootfsView};
+use super::{
+    restore_effective::RootContext,
+    restore_fs,
+    restore_key::{CHALLENGE, KeyOperation, KeyStage},
+    restore_rootfs::RootfsView,
+};
 use nix::{
     fcntl::{FcntlArg, FdFlag, fcntl},
     mount::{MntFlags, MsFlags, mount, umount2},
@@ -103,10 +108,31 @@ pub fn exec_sshd_effective_from_image(
     )
 }
 
+/// Fixed native public/sign/verify mode, in the SAME exact-image boundary.
+/// Challenge/allowed/signature inputs must already be in the private root.
+pub fn exec_host_key_from_image(
+    root: &Path,
+    expected_parent: u32,
+    image: RootfsView,
+    operation: KeyOperation,
+    output: OwnedFd,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Verified(image)),
+        Check::Key { operation, output },
+    )
+}
+
 enum Check {
     Syntax,
     Effective {
         context: RootContext,
+        output: OwnedFd,
+    },
+    Key {
+        operation: KeyOperation,
         output: OwnedFd,
     },
 }
@@ -149,6 +175,23 @@ pub fn exec_sshd_effective_image_fixture(
     )
 }
 
+#[doc(hidden)]
+#[cfg(feature = "sandbox-test-fixture")]
+pub fn exec_host_key_image_fixture(
+    root: &Path,
+    expected_parent: u32,
+    image: &Path,
+    operation: KeyOperation,
+    output: OwnedFd,
+) -> Result<Infallible, SandboxError> {
+    exec_sshd(
+        root,
+        expected_parent,
+        Some(ImageSource::Fixture(image.to_path_buf())),
+        Check::Key { operation, output },
+    )
+}
+
 fn exec_sshd(
     root: &Path,
     expected_parent: u32,
@@ -169,7 +212,7 @@ fn exec_sshd(
     if getppid().as_raw() as u32 != expected_parent {
         return Err(SandboxError::Process);
     }
-    if let Check::Effective { output, .. } = &check {
+    if let Check::Effective { output, .. } | Check::Key { output, .. } = &check {
         let stat = rustix::fs::fstat(output)
             .map_err(|_| SandboxError::Isolation("private output pipe"))?;
         let flags = rustix::fs::fcntl_getfl(output)
@@ -313,6 +356,24 @@ fn exec_sshd(
     drop(bound);
     drop(setup);
     drop(image); // all outside image/loop owners closed before native execution.
+    // Open only after pivot: native stdin is a readonly descriptor INSIDE the
+    // isolated root, not a proc-fd/old mount reference or a live parent pipe.
+    let input = if matches!(&check, Check::Key { operation, .. } if operation.stage != KeyStage::Public)
+    {
+        let file = File::open(CHALLENGE).map_err(|_| SandboxError::Layout)?;
+        let metadata = file.metadata().map_err(|_| SandboxError::Layout)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != 0
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.len() != 32
+        {
+            return Err(SandboxError::Layout);
+        }
+        Some(file)
+    } else {
+        None
+    };
     for (resource, maximum) in [
         (Resource::RLIMIT_CORE, 0),
         (Resource::RLIMIT_FSIZE, 0),
@@ -330,34 +391,42 @@ fn exec_sshd(
         return Err(SandboxError::Process);
     }
     seccompiler::apply_filter(&bpf).map_err(|_| SandboxError::Filter)?;
-    // Only -T has private stdout. Stderr always stays silent; no native config
+    // -T and fixed key probes have private stdout. Stderr stays silent; no native config
     // or failure text is diagnostics. Pipe owner must enforce bounded reading.
-    let context = match check {
+    let (arguments, context) = match check {
         Check::Syntax => {
             for fd in 0..=2 {
                 dup2(null.as_raw_fd(), fd).map_err(|_| SandboxError::Exec)?;
             }
-            None
+            (
+                vec!["/usr/sbin/sshd", "-e", "-t", "-f", "/etc/ssh/sshd_config"],
+                None,
+            )
         }
         Check::Effective { context, output } => {
             dup2(null.as_raw_fd(), 0).map_err(|_| SandboxError::Exec)?;
             dup2(null.as_raw_fd(), 2).map_err(|_| SandboxError::Exec)?;
             dup2(output.as_raw_fd(), 1).map_err(|_| SandboxError::Exec)?;
             drop(output);
-            Some(context)
+            (
+                vec!["/usr/sbin/sshd", "-e", "-T", "-f", "/etc/ssh/sshd_config"],
+                Some(context),
+            )
+        }
+        Check::Key { operation, output } => {
+            dup2(input.as_ref().unwrap_or(&null).as_raw_fd(), 0).map_err(|_| SandboxError::Exec)?;
+            dup2(null.as_raw_fd(), 2).map_err(|_| SandboxError::Exec)?;
+            dup2(output.as_raw_fd(), 1).map_err(|_| SandboxError::Exec)?;
+            drop(output);
+            (operation.native_arguments(), None)
         }
     };
+    drop(input);
     drop(null);
-    let mut args = [
-        "/usr/sbin/sshd",
-        "-e",
-        if context.is_some() { "-T" } else { "-t" },
-        "-f",
-        "/etc/ssh/sshd_config",
-    ]
-    .into_iter()
-    .map(|s| CString::new(s).map_err(|_| SandboxError::Exec))
-    .collect::<Result<Vec<_>, _>>()?;
+    let mut args = arguments
+        .into_iter()
+        .map(|s| CString::new(s).map_err(|_| SandboxError::Exec))
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(context) = context {
         args.push(CString::new("-C").map_err(|_| SandboxError::Exec)?);
         args.push(CString::new(context.as_argument()).map_err(|_| SandboxError::Exec)?);

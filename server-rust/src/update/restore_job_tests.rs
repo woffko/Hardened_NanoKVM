@@ -28,7 +28,11 @@ fn check_reaped(
         cancel,
         Instant::now(),
         deadline,
-        effective,
+        if effective {
+            restore_effective::MAX_OUTPUT
+        } else {
+            0
+        },
     );
     assert_eq!(
         nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)),
@@ -320,7 +324,7 @@ fn successful_exit_without_output_eof_is_not_accepted() {
         &AtomicBool::new(false),
         Instant::now(),
         Duration::from_millis(80),
-        true,
+        restore_effective::MAX_OUTPUT,
     );
     drop(writer); // deliberate extra writer: EOF never arrived during collection
     assert!(matches!(result, Err(JobError::Timeout)));

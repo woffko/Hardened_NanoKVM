@@ -4,12 +4,24 @@ use nanokvm_rust_server::{
         restore_archive, restore_capsule,
         restore_effective::RootContext,
         restore_identity::{capture_effective, check_identity},
+        restore_job::{Check, Outcome, run_host_ssh_job_fixture},
+        restore_key::KeyOperation,
         restore_native::AccountFiles,
         restore_preflight::{PreparedSshRoot, prepare_sshd_root},
-        restore_runtime::{exec_sshd_effective_image_fixture, exec_sshd_syntax_image_fixture},
+        restore_runtime::{
+            exec_host_key_image_fixture, exec_sshd_effective_image_fixture,
+            exec_sshd_syntax_image_fixture,
+        },
     },
 };
-use std::{io::Cursor, os::fd::AsFd, path::Path, process::ExitCode};
+use std::{io::Cursor, os::fd::AsFd, path::Path, process::ExitCode, sync::atomic::AtomicBool};
+
+enum Action {
+    Syntax,
+    Effective(RootContext),
+    Key(KeyOperation),
+    Owned(Check),
+}
 
 // Synthetic host-only provenance: build and authenticate our own fixture
 // capsule, then use the REAL typed identity builder. This does not verify a
@@ -48,7 +60,7 @@ fn prepare_fixture(
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().collect();
-    if !matches!(arguments.len(), 4 | 6 | 8) {
+    if !matches!(arguments.len(), 4 | 6 | 7 | 8) {
         return ExitCode::from(64);
     }
     let Some(parent) = arguments[3].to_str().and_then(|s| s.parse().ok()) else {
@@ -56,21 +68,32 @@ fn main() -> ExitCode {
     };
     let with_identity = arguments.len() >= 6 && arguments[4] == "--prepare-identity";
     let query_index = if with_identity { 6 } else { 4 };
-    let query =
-        if arguments.len() == query_index + 2 && arguments[query_index] == "--effective-root" {
-            match arguments[query_index + 1]
-                .to_str()
-                .and_then(|v| RootContext::parse(v).ok())
-            {
-                Some(q) => Some(q),
-                None => return ExitCode::from(64),
-            }
-        } else if arguments.len() == query_index {
-            None
-        } else {
-            return ExitCode::from(64);
-        };
-    let _prepared = if with_identity {
+    let action = if arguments.len() == query_index + 1 && arguments[query_index] == "--owned-keys" {
+        Action::Owned(Check::HostKeys)
+    } else if arguments.len() == query_index + 1 && arguments[query_index] == "--owned-syntax" {
+        Action::Owned(Check::Syntax)
+    } else if arguments.len() == query_index + 2 && arguments[query_index] == "--host-key-proof" {
+        match arguments[query_index + 1]
+            .to_str()
+            .and_then(KeyOperation::parse)
+        {
+            Some(operation) => Action::Key(operation),
+            None => return ExitCode::from(64),
+        }
+    } else if arguments.len() == query_index + 2 && arguments[query_index] == "--effective-root" {
+        match arguments[query_index + 1]
+            .to_str()
+            .and_then(|v| RootContext::parse(v).ok())
+        {
+            Some(q) => Action::Effective(q),
+            None => return ExitCode::from(64),
+        }
+    } else if arguments.len() == query_index {
+        Action::Syntax
+    } else {
+        return ExitCode::from(64);
+    };
+    let prepared = if with_identity {
         match prepare_fixture(Path::new(&arguments[5]), Path::new(&arguments[1])) {
             Ok(prepared) => Some(prepared),
             Err(_) => {
@@ -81,19 +104,59 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    let result = if let Some(query) = query {
-        let Ok(output) = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3) else {
-            return ExitCode::from(78);
-        };
-        exec_sshd_effective_image_fixture(
+    let result = match action {
+        Action::Owned(check) => {
+            let Some(prepared) = prepared else {
+                return ExitCode::from(64);
+            };
+            let helper = std::env::current_exe().unwrap();
+            return match run_host_ssh_job_fixture(
+                prepared,
+                &helper,
+                Path::new(&arguments[2]),
+                check,
+                &AtomicBool::new(false),
+            ) {
+                Ok(Outcome::HostKeys(proof)) => {
+                    println!("keys={}", proof.keys_checked());
+                    ExitCode::SUCCESS
+                }
+                Ok(Outcome::Syntax) => ExitCode::SUCCESS,
+                _ => {
+                    eprintln!("owned native SSH fixture rejected");
+                    ExitCode::from(78)
+                }
+            };
+        }
+        Action::Key(operation) => {
+            let Ok(output) = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3) else {
+                return ExitCode::from(78);
+            };
+            exec_host_key_image_fixture(
+                Path::new(&arguments[1]),
+                parent,
+                Path::new(&arguments[2]),
+                operation,
+                output,
+            )
+        }
+        Action::Effective(query) => {
+            let Ok(output) = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3) else {
+                return ExitCode::from(78);
+            };
+            exec_sshd_effective_image_fixture(
+                Path::new(&arguments[1]),
+                parent,
+                Path::new(&arguments[2]),
+                query,
+                output,
+            )
+        }
+        Action::Syntax => exec_sshd_syntax_image_fixture(
             Path::new(&arguments[1]),
             parent,
             Path::new(&arguments[2]),
-            query,
-            output,
-        )
-    } else {
-        exec_sshd_syntax_image_fixture(Path::new(&arguments[1]), parent, Path::new(&arguments[2]))
+        ),
     };
     match result {
         Ok(never) => match never {},

@@ -737,8 +737,9 @@ they do not substitute for signed-image/loop/target acceptance.
 readonly image descriptors, public transfer context and fixed syntax/effective
 helper mode. It consumes its inputs and keeps the identity guard until the
 direct child has exited and been reaped. One fixed small SCM_RIGHTS packet is
-queued before spawn, then the sender and local image owners close; a failed
-spawn drops the receiver/queued descriptors. The configured Command is dropped
+queued before spawn, then the sender and transfer aliases close; original
+readonly image descriptors remain owned for sequential key-proof children.
+A failed spawn drops the receiver/queued descriptors. The configured Command is dropped
 immediately after spawn so it cannot retain stdin/stdio aliases. A successful
 send remains only a queued transport record, not native acceptance or authority.
 
@@ -786,9 +787,74 @@ host-ELF bypasses, not production provenance. They cover size/hash/ELF rejection
 source mutation/proc-fd exec, exact output bounds, cancellation, timeout, reaping,
 zero exit without EOF, and real typed-root cleanup including unknown-file
 preservation. Capturing the retained static RV64 helper does not execute it on
-the host. Target loop/exec/kernel cleanup, runtime trust binding, isolated native
-key possession, full Match matrix and actual SSH login remain open. The legacy
+the host. Target loop/exec/kernel cleanup, runtime trust binding, full Match
+matrix and actual SSH login remain open. The legacy
 raw writer/early apply are unchanged: **C1 remains OPEN**.
+
+### Isolated native host-key possession (component; target acceptance open)
+
+`Check::HostKeys` runs the fixed `--host-key-proof STAGE:ALGORITHM` image-only
+helper mode for every staged RSA/ECDSA/Ed25519 private host key. Only the nine
+public/sign/verify selectors are accepted; no custom key path, command, FD or
+challenge/key bytes can be supplied through CLI. The original immutable images
+stay owned for all children, and every child uses the same exact-image import,
+private root pivot, zero capabilities, no-new-privileges, limits and seccomp.
+No syscall/network/fork allowance was added for key operations.
+
+The parent generates one fresh 32-byte OS-random challenge and creates a fixed
+root-owned0600 file under the private root's `/run`. For each present key:
+
+1. Native `ssh-keygen -y -P '' -f FIXED_PRIVATE_PATH` yields a bounded public
+   identity; an existing public companion must match its decoded key/type.
+2. Native `ssh-keygen -Y sign -q -n hardened-nanokvm-restore-key-proof-v1 -P ''
+   -f FIXED_PRIVATE_PATH` signs stdin and emits its signature only on stdout.
+3. The parent materializes that bounded signature and a generated single exact
+   `restore-probe KEY_TYPE BASE64_KEY` allowed-signers entry at fixed per-key
+   paths. Native `ssh-keygen -Y verify -q` checks the same challenge, namespace,
+   principal, signature and exact allowed public key.
+
+Sign/verify stdin is opened **after pivot** from the fixed challenge path inside
+the readonly root. Its owner/type/single-link/mode/32-byte shape is checked. No
+parent procfs, writable file, outside-root FD or live input writer is exposed.
+Public extraction receives `/dev/null`. All native stderr stays null; public/
+signature stdout is private, zeroizing and capped at16KiB, with native-zero/EOF
+and the existing15s per-child deadline/kill/reap. Verify requires empty stdout.
+The full proof is at most nine native children, not one15s whole-transaction
+deadline; target storage/loop latency and peak space remain acceptance gates.
+Environment is scrubbed, without SSH_AUTH_SOCK or provider/askpass options.
+Encrypted/unusable keys fail explicitly; no password prompt, agent or factory
+key-generation fallback is introduced.
+
+The shared parser preserves native comments and public-companion compatibility:
+it compares the first non-comment key identity, never copies comment strings
+into allowed-signers. Pinned OpenSSH10.5p1 `do_print_public` prints arbitrary
+stored comments, so enforcing exactly one output line would reject usable keys.
+Cryptographic verify is bound to the exact reconstructed public key, not to
+ignored trailing comment bytes. `-y` alone is NOT possession evidence. No-key
+disabled SSH returns an explicit count0, not a login/enablement proof; enabled
+SSH without a host-key candidate is rejected earlier by capture. Missing
+optional `.pub` stays supported; no key/enablement is synthesized.
+
+Namespace teardown removes bind mounts but not their underlying placeholder
+inodes. The parent rejects every unowned runtime slot before spawn and, after
+reap, records only the closed fixed set of newly created empty root-owned
+directories/loader files. Existing receipts are rechecked for exact inode/device/
+type/mode/emptiness before and after each child. These slots join the same
+exact-inventory cleanup as identity/challenge/signature files. Replaced, nonempty
+or unknown entries fail closed and are preserved, never recursively removed or
+adopted as runtime/restore authority.
+
+Host tests run the complete authenticated synthetic capsule -> typed builder ->
+owned supervisor -> actual isolated host ssh-keygen public/sign/verify sequence
+for all three algorithms, then verify that the root is empty. Missing/wrong
+companions, an altered Ed25519 seed that still passes native `-y`, disabled
+zero-key state, and unowned/replaced/nonempty/loader override cleanup are covered.
+The host fixture explicitly bypasses signed target-image/helper provenance and
+loop mounting; it is excluded from release builds. The older standalone
+parent-proc-fd probe remains host diagnostics only, not target acceptance.
+Production system-API/helper packaging/authority integration, actual RV64 native
+execution, loop/clone/AUTOCLEAR/kill behavior, certificate/full Match/login gates,
+writer/early apply/crash recovery and full release acceptance remain required.
 
 ### Fresh-process SSH syntax sandbox (component only)
 
@@ -867,9 +933,9 @@ unsafe layouts, real host sshd valid/invalid config and invalid synthetic key.
 Host userns only grants disposable fixture privilege and is not target evidence.
 The fake native executable is excluded without the opt-in feature. Target
 kernel execution, signed-runtime provenance and actual SSH login remain gates.
-The previous possession-probe API uses a parent proc-fd view; it cannot be run
-unchanged in this no-proc sandbox. Its required isolated input transport/native
-command mode must be integrated without reintroducing host proc or outside fds.
+The previous possession-probe API uses a parent proc-fd view and remains host
+diagnostics only. The isolated fixed key mode above does not reintroduce host
+proc or outside input descriptors; target/system-API integration remains open.
 
 ## Protected boot ticket v1 (implemented, not wired into boot/writer)
 

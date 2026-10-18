@@ -241,6 +241,7 @@ fn authenticated_identity_builder_feeds_real_sshd_through_the_image_sandbox() {
     use nanokvm_rust_server::{auth::password::Account, config::Config};
     let mut prepared = PreparedRoot::new(Path::new("/usr/sbin/sshd"));
     let source = prepared.split_image_runtime();
+    fs::copy("/usr/bin/ssh-keygen", source.join("usr/bin/ssh-keygen")).unwrap();
     let identity = prepared.root.clone();
     for (path, bytes) in [
         (
@@ -281,6 +282,17 @@ fn authenticated_identity_builder_feeds_real_sshd_through_the_image_sandbox() {
             .status
             .success()
     );
+    for (kind, bits) in [("rsa", "2048"), ("ecdsa", "256")] {
+        assert!(
+            Command::new("/usr/bin/ssh-keygen")
+                .args(["-q", "-t", kind, "-b", bits, "-N", "", "-f"])
+                .arg(identity.join(format!("etc/ssh/ssh_host_{kind}_key")))
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
     fs::create_dir_all(identity.join("etc/ssh/sshd_config.d")).unwrap();
     fs::write(
         identity.join("etc/ssh/sshd_config.d/root.conf"),
@@ -424,6 +436,124 @@ fn authenticated_identity_builder_feeds_real_sshd_through_the_image_sandbox() {
         );
         drop(retained);
     }
+    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
+    // REAL parent ownership spans sequential native image-bind children, then
+    // cleanup checks both identity/proof files and child-created mount slots.
+    let owned = |name: &str, mode: &str| {
+        let root = prepared._temporary.path().join(name);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user"])
+            .arg(env!("CARGO_BIN_EXE_nanokvm-image-runtime-fixture"))
+            .arg(&root)
+            .arg(&source)
+            .arg(std::process::id().to_string())
+            .arg("--prepare-identity")
+            .arg(&identity)
+            .arg(mode)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            0,
+            "owned root was not cleaned after reaped native child"
+        );
+        output
+    };
+    let output = owned("owned-syntax", "--owned-syntax");
+    assert!(output.status.success(), "owned syntax: {output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    let output = owned("owned-keys", "--owned-keys");
+    assert!(output.status.success(), "isolated sign/verify: {output:?}");
+    assert_eq!(output.stdout, b"keys=3\n");
+    assert!(output.stderr.is_empty());
+    // Missing optional public companion remains supported, not factory-filled.
+    let companion_path = identity.join("etc/ssh/ssh_host_ed25519_key.pub");
+    let companion = fs::read(&companion_path).unwrap();
+    fs::remove_file(&companion_path).unwrap();
+    let output = owned("owned-no-companion", "--owned-keys");
+    assert!(
+        output.status.success(),
+        "missing public companion: {output:?}"
+    );
+    fs::write(&companion_path, &companion).unwrap();
+    fs::write(
+        &companion_path,
+        fs::read(identity.join("etc/ssh/ssh_host_rsa_key.pub")).unwrap(),
+    )
+    .unwrap();
+    let output = owned("owned-wrong-companion", "--owned-keys");
+    assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
+    fs::write(&companion_path, companion).unwrap();
+    // A changed Ed25519 seed with both stored public fields intact can pass
+    // native -y. It MUST fail the isolated sign/verify proof and still clean up.
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use zeroize::Zeroizing;
+    let original = Zeroizing::new(fs::read(&key).unwrap());
+    let mut encoded = Zeroizing::new(Vec::with_capacity(original.len()));
+    for line in original.split(|b| *b == b'\n') {
+        if !line.starts_with(b"-----") {
+            encoded.extend_from_slice(line);
+        }
+    }
+    let mut blob = Zeroizing::new(STANDARD.decode(&*encoded).unwrap());
+    fn skip_string(bytes: &[u8], at: &mut usize) -> std::ops::Range<usize> {
+        let length = u32::from_be_bytes(bytes[*at..*at + 4].try_into().unwrap()) as usize;
+        *at += 4;
+        let range = *at..*at + length;
+        *at += length;
+        range
+    }
+    let mut at = b"openssh-key-v1\0".len();
+    for _ in 0..3 {
+        skip_string(&blob, &mut at);
+    }
+    assert_eq!(&blob[at..at + 4], &1_u32.to_be_bytes());
+    at += 4;
+    skip_string(&blob, &mut at);
+    let block = skip_string(&blob, &mut at);
+    at = block.start + 8;
+    skip_string(&blob, &mut at);
+    skip_string(&blob, &mut at);
+    let secret = skip_string(&blob, &mut at);
+    assert_eq!(secret.len(), 64);
+    blob[secret.start] ^= 1;
+    let encoded = Zeroizing::new(STANDARD.encode(&*blob));
+    let changed = Zeroizing::new(format!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+        *encoded
+    ));
+    fs::write(&key, changed.as_bytes()).unwrap();
+    assert!(
+        Command::new("/usr/bin/ssh-keygen")
+            .args(["-y", "-P", "", "-f"])
+            .arg(&key)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = owned("owned-altered-seed", "--owned-keys");
+    assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
+    fs::write(&key, &*original).unwrap();
+    // Disabled SSH with no keys is preserved as an explicit count=0 result,
+    // never force-enabled or silently supplied with factory identity.
+    for kind in ["rsa", "ecdsa", "ed25519"] {
+        fs::remove_file(identity.join(format!("etc/ssh/ssh_host_{kind}_key"))).unwrap();
+        fs::remove_file(identity.join(format!("etc/ssh/ssh_host_{kind}_key.pub"))).unwrap();
+    }
+    fs::write(identity.join("etc/kvm/ssh_stop"), []).unwrap();
+    let output = owned("owned-disabled-no-keys", "--owned-keys");
+    assert!(
+        output.status.success(),
+        "disabled zero-key state: {output:?}"
+    );
+    assert_eq!(output.stdout, b"keys=0\n");
     assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
 }
 

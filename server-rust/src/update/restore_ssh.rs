@@ -194,7 +194,7 @@ pub(super) async fn check_host_keys(
     archive: &mut ValidatedRestore,
     private_staging: &Path,
 ) -> Result<()> {
-    use key_probe::Algorithm;
+    use super::restore_key::HostKey as Algorithm;
     for (index, path) in HOST_KEYS.iter().enumerate() {
         let private_index = archive.members().iter().position(|m| m.path == *path);
         let public_path = format!("{path}.pub");

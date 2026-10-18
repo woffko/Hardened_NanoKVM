@@ -3,7 +3,10 @@
 //! hold the common lock and quiesce writers until the native child is reaped.
 
 use super::{
-    restore_archive::RestoreAction, restore_fs, restore_identity::IdentityCheckedRestore,
+    restore_archive::RestoreAction,
+    restore_fs,
+    restore_identity::IdentityCheckedRestore,
+    restore_key::{CHALLENGE, HostKey, MAX_PUBLIC},
     restore_ssh,
 };
 use rustix::fs::{
@@ -11,10 +14,11 @@ use rustix::fs::{
 };
 use std::{
     fs::File,
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
+use zeroize::Zeroizing;
 
 const DIRECTORIES: [&str; 14] = [
     ".oldroot",
@@ -37,6 +41,16 @@ const MAX_FILES: usize = 140;
 const MAX_BYTES: u64 = 9 * 1024 * 1024;
 const MAX_HOST_FILE: u64 = 64 * 1024;
 const NSS: &[u8] = b"passwd: files\ngroup: files\nshadow: files\nhosts: files\n";
+const RUNTIME_SLOTS: [(&str, bool); 8] = [
+    ("usr", true),
+    ("lib", true),
+    ("bin", true),
+    ("sbin", true),
+    ("lib64", true),
+    ("etc/ssl", true),
+    ("etc/ld-musl-riscv64.path", false),
+    ("etc/ld-musl-riscv64xthead.path", false),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareRootError {
@@ -65,6 +79,151 @@ pub struct PreparedSshRoot {
 }
 
 impl PreparedSshRoot {
+    pub(super) fn host_keys(&self) -> Vec<HostKey> {
+        let mut keys = Vec::with_capacity(3);
+        for key in HostKey::ALL {
+            if self
+                .created
+                .iter()
+                .any(|entry| entry.path == key.private_path()[1..])
+            {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    pub(super) fn public_companion(&self, key: HostKey) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let path = format!("{}.pub", &key.private_path()[1..]);
+        let Some(entry) = self.created.iter().find(|entry| entry.path == path) else {
+            return Ok(None);
+        };
+        let mut file = restore_fs::open_beneath(&self.root, &path, OFlags::RDONLY)
+            .map_err(|_| PrepareRootError::Io)?;
+        let metadata = file.metadata().map_err(|_| PrepareRootError::Io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != 0
+            || [metadata.dev(), metadata.ino()] != entry.identity
+            || metadata.len() > MAX_PUBLIC as u64
+        {
+            return Err(PrepareRootError::Input);
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_PUBLIC + 1));
+        Read::by_ref(&mut file)
+            .take((MAX_PUBLIC + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| PrepareRootError::Io)?;
+        if bytes.len() > MAX_PUBLIC {
+            return Err(PrepareRootError::Input);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(super) fn stage_challenge(&mut self, challenge: &[u8; 32]) -> Result<()> {
+        self.create_file(&CHALLENGE[1..], 0o600)?
+            .write_all(challenge)
+            .map_err(|_| PrepareRootError::Io)
+    }
+    pub(super) fn stage_key_proof(
+        &mut self,
+        key: HostKey,
+        signature: &[u8],
+        allowed: &[u8],
+    ) -> Result<()> {
+        if signature.is_empty()
+            || signature.len() > MAX_PUBLIC
+            || allowed.is_empty()
+            || allowed.len() > MAX_PUBLIC + 128
+        {
+            return Err(PrepareRootError::Input);
+        }
+        self.create_file(&key.signature_path()[1..], 0o600)?
+            .write_all(signature)
+            .map_err(|_| PrepareRootError::Io)?;
+        self.create_file(&key.allowed_path()[1..], 0o600)?
+            .write_all(allowed)
+            .map_err(|_| PrepareRootError::Io)
+    }
+
+    /// The trusted child creates only these absent mount placeholders before
+    /// pivot. Namespace teardown removes mounts, NOT their underlying inodes.
+    /// After reap, adopt only exact empty fixed slots into transaction cleanup;
+    /// never adopt/delete a nonempty, replaced or arbitrary recovery tree.
+    pub(super) fn record_runtime_slots(&mut self) -> Result<()> {
+        self.checked_path()?;
+        for (path, directory) in RUNTIME_SLOTS {
+            let Some(file) = self.runtime_slot(path, directory)? else {
+                continue;
+            };
+            let metadata = file.metadata().map_err(|_| PrepareRootError::Io)?;
+            if let Some(entry) = self.created.iter().find(|entry| entry.path == path) {
+                if [metadata.dev(), metadata.ino()] != entry.identity {
+                    return Err(PrepareRootError::Root);
+                }
+                continue;
+            }
+            self.created.push(Created {
+                path: path.to_owned(),
+                directory,
+                identity: [metadata.dev(), metadata.ino()],
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_runtime_slots_before_child(&self) -> Result<()> {
+        for (path, directory) in RUNTIME_SLOTS {
+            match (
+                self.created.iter().find(|entry| entry.path == path),
+                self.runtime_slot(path, directory)?,
+            ) {
+                (Some(entry), Some(file)) => {
+                    let metadata = file.metadata().map_err(|_| PrepareRootError::Io)?;
+                    if [metadata.dev(), metadata.ino()] != entry.identity {
+                        return Err(PrepareRootError::Root);
+                    }
+                }
+                (None, None) => {}
+                _ => return Err(PrepareRootError::Root),
+            }
+        }
+        Ok(())
+    }
+
+    fn runtime_slot(&self, path: &str, directory: bool) -> Result<Option<File>> {
+        let file =
+            match restore_fs::open_beneath(&self.root, path, OFlags::RDONLY | OFlags::NONBLOCK) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(_) => return Err(PrepareRootError::Io),
+            };
+        let metadata = file.metadata().map_err(|_| PrepareRootError::Io)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o7777 != if directory { 0o700 } else { 0o600 }
+        {
+            return Err(PrepareRootError::Root);
+        }
+        if directory {
+            if !metadata.is_dir() {
+                return Err(PrepareRootError::Root);
+            }
+            for entry in Dir::read_from(&file).map_err(|_| PrepareRootError::Io)? {
+                if !matches!(
+                    entry
+                        .map_err(|_| PrepareRootError::Io)?
+                        .file_name()
+                        .to_bytes(),
+                    b"." | b".."
+                ) {
+                    return Err(PrepareRootError::Root);
+                }
+            }
+        } else if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() != 0 {
+            return Err(PrepareRootError::Root);
+        }
+        Ok(Some(file))
+    }
+
     /// Recheck the root pathname immediately before passing it to the helper.
     /// Caller-protected ancestors and no concurrent local root remain required.
     pub fn checked_path(&self) -> Result<&Path> {
@@ -202,7 +361,7 @@ pub fn prepare_sshd_root(
     let mut prepared = PreparedSshRoot {
         root,
         path: path.to_path_buf(),
-        created: Vec::with_capacity(MAX_FILES + DIRECTORIES.len() + 2),
+        created: Vec::with_capacity(MAX_FILES + DIRECTORIES.len() + 17),
     };
     for directory in DIRECTORIES {
         let (parent, name) = checked_parent(&prepared.root, directory)?;

@@ -66,10 +66,10 @@ pub struct IdentityCheckedRestore {
     archive: ValidatedRestore,
 }
 impl IdentityCheckedRestore {
-    /// Probe every preserved private host key using native ssh-keygen and a
-    /// sign/verify challenge, without modifying the archive or source identity.
-    /// Target compatibility requires execution within the exact verified target
-    /// runtime. This is not full sshd config/certificate/policy acceptance.
+    /// Host diagnostic only: probes native ssh-keygen through parent proc-fds.
+    /// This is not the closed signed-image sandbox and must not authorize a
+    /// target restore. Production preflight must use SshPreflightJob HostKeys.
+    /// It does not modify source identity or prove config/certificate/login.
     pub async fn check_native_host_keys(&mut self, private_staging: &Path) -> Result<()> {
         restore_ssh::check_host_keys(&mut self.archive, private_staging).await?;
         Ok(())

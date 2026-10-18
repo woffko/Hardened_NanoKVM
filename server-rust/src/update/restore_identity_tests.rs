@@ -219,6 +219,84 @@ fn owned_ssh_job_cleans_typed_identity_on_success_cancel_transfer_and_native_fai
 }
 
 #[test]
+fn runtime_mount_slot_receipts_reject_unowned_replaced_or_nonempty_entries() {
+    if !preflight_namespace(concat!(
+        module_path!(),
+        "::runtime_mount_slot_receipts_reject_unowned_replaced_or_nonempty_entries"
+    )) {
+        return;
+    }
+    use crate::update::restore_preflight::prepare_sshd_root;
+    let (source, config) = fixture();
+    let mut identity = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    for case in 0..4 {
+        let target = tempdir().unwrap();
+        let mut root = prepare_sshd_root(&mut identity, target.path()).unwrap();
+        assert!(root.check_runtime_slots_before_child().is_ok());
+        fs::create_dir(target.path().join("usr")).unwrap();
+        fs::set_permissions(
+            target.path().join("usr"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(
+            root.check_runtime_slots_before_child().is_err(),
+            "unowned slot cannot be adopted before spawn"
+        );
+        // Simulate exactly the trusted child's empty inode after precheck/reap.
+        root.record_runtime_slots().unwrap();
+        assert!(root.check_runtime_slots_before_child().is_ok());
+        if case == 0 {
+            root.cleanup().unwrap();
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+            continue;
+        }
+        if case == 1 {
+            fs::rename(target.path().join("usr"), target.path().join("old-usr")).unwrap();
+            fs::create_dir(target.path().join("usr")).unwrap();
+            fs::set_permissions(
+                target.path().join("usr"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )
+            .unwrap();
+        } else if case == 2 {
+            fs::write(
+                target.path().join("usr/recovery"),
+                b"preserve unknown recovery bytes",
+            )
+            .unwrap();
+        } else {
+            fs::write(
+                target.path().join("etc/ld-musl-riscv64.path"),
+                b"untrusted loader override",
+            )
+            .unwrap();
+            fs::set_permissions(
+                target.path().join("etc/ld-musl-riscv64.path"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        assert!(root.check_runtime_slots_before_child().is_err());
+        assert!(root.record_runtime_slots().is_err());
+        assert!(root.cleanup().is_err());
+        if case == 1 {
+            assert!(target.path().join("usr").is_dir() && target.path().join("old-usr").is_dir());
+        } else if case == 2 {
+            assert_eq!(
+                fs::read(target.path().join("usr/recovery")).unwrap(),
+                b"preserve unknown recovery bytes"
+            );
+        } else {
+            assert_eq!(
+                fs::read(target.path().join("etc/ld-musl-riscv64.path")).unwrap(),
+                b"untrusted loader override"
+            );
+        }
+    }
+}
+
+#[test]
 fn private_ssh_root_rejects_existing_unsafe_redirected_or_nested_mount_roots() {
     if !preflight_namespace(concat!(
         module_path!(),
