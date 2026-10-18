@@ -215,8 +215,13 @@ helper-before-gate publication by the new backend. They are snapshot checks, not
 native launch ownership. App archives now use a pinned legacy-S95 delivery view
 without premature ancillary gates; full-image staging remains canonical. This
 addresses the exact RC12 copier ordering at host scope, not device acceptance.
-The trusted producer, helper migration and first-restart acceptance remain open. Independent
-installation has no full target acceptance. The app API still uses its
+Pinned v1 predecessors now have a directed forward-publication path under one
+live update-admission owner, with atomic exchange and retained old evidence.
+Unknown/unsafe support and nonterminal journals refuse migration; missing support
+still requires no transaction. This is not automatic old-backend rollback or
+protocol-upgrade acceptance. The trusted producer and first-restart/rollback
+acceptance remain open. Independent installation has no full target acceptance.
+The app API still uses its
 legacy swap; no interrupted-install acceptance is claimed from this component.
 
 ## Command lifetime within the update worker

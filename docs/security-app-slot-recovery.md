@@ -240,15 +240,18 @@ rejected. A missing `libexec` directory may be created under the protected `/usr
 no existing directory or helper is chmod-repaired. Publication uses only the
 compile-bound bytes, not the bundled helper as a runtime fallback.
 
-An existing helper must be a single-link regular root-owned file of mode 0755,
-exact size and exact bytes. It is opened for inspection without data access,
-then reopened read-only/nonblocking, with inode/layout checks before/after the
-read. A different or unsafe helper is retained and refused, not overwritten.
+An existing helper must be a single-link regular root-owned file of mode 0755.
+Current-helper verification requires exact size and exact bytes. It is opened
+for inspection without data access, then reopened read-only/nonblocking, with
+inode/layout checks before/after the read. An unknown or unsafe helper is
+retained and refused, not overwritten. No installed helper is executed to
+identify or authorize itself.
 First helper publication supports the historical absence case; this does not
 prove the complete old-installer/first-restart bridge described above.
-Replacement of a different independently installed helper needs a separately
-reviewed protocol migration. Do not delete journals or replace files manually
-to turn a mismatch into a successful check.
+The directed v1 predecessor migration below covers only explicitly pinned
+previous bytes. Old-backend rollback and transitions to a different journal
+protocol still need separate lifecycle acceptance. Do not delete journals or
+replace files manually to turn a mismatch into a successful check.
 
 A missing helper is written to a fresh exclusive random sibling, chmodded only
 through that new FD, file-synced, renamed with NOREPLACE and directory-synced.
@@ -256,6 +259,57 @@ The result is rechecked. A competing canonical winner must be exact; an unknown
 winner and all torn temporaries are preserved. Temporary names are never read
 as fallback or selected as authority. A pending, terminal or corrupt app-slot
 journal never permits a new helper to be installed over missing support.
+
+### Directed v1 helper migration
+
+Startup holds the same update admission from fixed-root journal inspection
+through helper publication. The internal publication primitive requires a
+borrow of that live admission owner. It does not call recovery while holding
+the lock, avoiding nested admission. Corrupt/foreign journal or layout fails
+before publication; no journal is retired or rewritten by bootstrap.
+
+| Validated app-slot state | Exact current helper | Missing helper | Pinned v1 predecessor |
+| --- | --- | --- | --- |
+| No transaction | Verify only | Install exact embedded helper | Forward migration |
+| Committed / rolled-back v1 | Verify only | Refuse | Forward migration |
+| Nonterminal v1 | Verify only | Refuse | Refuse |
+
+Unknown/unsafe helpers are refused in every state. The build-owned predecessor
+registry binds both size and SHA-256, not an executable's version output or a
+runtime manifest. The initial entry is the retained development helper from
+`89aa736`, 373,048 bytes, SHA-256
+`9095522caf08d9f0a0bf2f70917b9ce733930d9cedb85f50249b745cc2b535e8`.
+Historical RC12 has no independent helper. Adding a predecessor requires exact
+byte and journal compatibility review; a matching hash is not a new release
+signature or authorization from an untrusted app directory.
+
+Migration verifies the predecessor before staging, writes only the compile-bound
+new image to a fresh exclusive sibling, establishes mode 0755 on that new FD and
+syncs it. It rechecks the prior digest and canonical inode, then uses atomic
+`RENAME_EXCHANGE`: the canonical name is never intentionally absent or updated
+in place. After directory sync it verifies the exact new canonical image and
+retained old inode. The old file stays under the random sibling name as evidence;
+it is never selected as an executable fallback or transaction authority.
+
+An error after exchange does not mean nothing changed and does not assert
+rollback. Startup keeps authenticated management for diagnosis and skips new
+critical-script publication on that failure. A fresh invocation must inspect
+canonical state: if the new helper is already exact, it completes file/directory
+durability without exchanging again. Torn/retained sibling files are not scanned
+or selected. Cooperating privileged writers must honor update admission; this
+does not sandbox hostile root or promise protection against an unrelated
+privileged writer racing after the final check.
+
+Host tests cover the state decision, pinned actual old RV64 bytes (never executed),
+unknown/unsafe refusal, competing admission, SIGKILL at staging/exchange boundaries,
+pre-exchange canonical replacement and a post-exchange sync-error path. Journal
+states in migration unit tests are supplied enums; actual fixed-root decoded
+terminal-journal/startup composition and physical power-cut acceptance remain
+open. The retained-input test is explicitly ignored by default and was run in
+the full `--include-ignored` gate; ordinary default tests do not cover that input.
+The new test image is synthetic, not a deployable successor helper. This
+is forward publication, not automatic executable rollback, the trusted app-slot
+producer, retained native ownership or full C1 closure.
 
 If the backend has already launched, a helper-bootstrap failure alone is logged
 without terminating it, preserving authenticated management for diagnosis.
@@ -304,10 +358,11 @@ not physical power-loss, ext4 write-cache or target acceptance.
   exact signed/manual authority and retained metadata/key/policy context.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
-- Reviewed helper-version migration across subsequent app updates; the current
-  exact-existing/no-replacement rule is a fail-closed prerequisite, not a final
-  upgrade lifecycle. This remains required for WP-04 acceptance, not an implicit
-  waiver of app-only updates.
+- Complete helper-version lifecycle across subsequent app updates. The pinned
+  v1 forward-publication path is host-tested, but actual decoded-terminal-journal
+  startup, released successor/predecessor pairs and old-backend rollback still
+  need acceptance. This remains required for WP-04, not an implicit waiver of
+  app-only updates or permission to replace unknown support.
 - Full target/first-bridge acceptance of the archive-delivery profile and the
   early/individual consumer gates; verify exact old S95 identity, establish
   independent support before publishing gates, and preserve legacy rollback.

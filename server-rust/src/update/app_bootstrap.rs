@@ -4,6 +4,7 @@
 use super::{app_slot, operation_lock::ProcessLock, restore_binding, restore_fs};
 use rand_core::{OsRng, RngCore};
 use rustix::fs::{Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat_with};
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{self, Read, Write},
@@ -12,6 +13,25 @@ use std::{
 };
 
 const EXECUTABLE: &str = "nanokvm-app-recovery";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HelperVersion {
+    size: usize,
+    sha256: [u8; 32],
+}
+
+// Directed, compile-bound compatibility, not a runtime manifest or a version
+// string supplied by the installed executable. This exact v1 development helper
+// is retained in the 89aa736 evidence. RC12 itself has no independent helper.
+// New entries require exact-byte review and journal/rollback compatibility review.
+const V1_PREDECESSORS: &[HelperVersion] = &[HelperVersion {
+    size: 373_048,
+    sha256: [
+        0x90, 0x95, 0x52, 0x2c, 0xaf, 0x08, 0xd9, 0xf0, 0xa0, 0xbf, 0x2f, 0x70, 0x91, 0x7b, 0x9c,
+        0xe7, 0x33, 0x93, 0x0d, 0x9c, 0xed, 0xb8, 0x5f, 0x50, 0x24, 0x9b, 0x74, 0x5c, 0xc2, 0xb5,
+        0x35, 0xe8,
+    ],
+}];
 
 // Trusted backend source bytes, never a runtime /kvmapp or manifest fallback.
 // S95 must not overwrite these independent gates from a rolled-back bundle.
@@ -46,15 +66,16 @@ pub fn embedded_recovery() -> io::Result<&'static [u8]> {
 
 /// Establish independent support for a historical app-only bridge. This is not
 /// itself an early boot invocation, slot authorization, health acknowledgement or permission
-/// to perform the legacy two-rename swap. Never replace a different helper.
+/// to perform the legacy two-rename swap. Only explicitly pinned v1 predecessors
+/// may be replaced; unknown helpers and nonterminal journals refuse migration.
 pub fn ensure_installed() -> io::Result<()> {
     let image = embedded_recovery()?;
-    let _admission = ProcessLock::acquire().map_err(io::Error::other)?;
-    let absent_transaction = no_transaction()?;
+    let admission = ProcessLock::acquire().map_err(io::Error::other)?;
+    let status = app_slot::status().map_err(io::Error::other)?;
     let root = restore_fs::open_root(Path::new("/"), true)?;
     let _boot_parent = boot_parent_at(&root, 0)?;
-    let parent = fixed_parent(absent_transaction)?;
-    ensure_at(&parent, image, 0, absent_transaction)
+    let parent = fixed_parent(status == app_slot::Status::NoTransaction)?;
+    ensure_at(&parent, image, 0, status, V1_PREDECESSORS, &admission)
 }
 
 /// The caller already owns app/system update admission. Read-only prerequisite
@@ -167,7 +188,12 @@ fn checked_file(file: &File, uid: u32, device: u64, size: usize) -> io::Result<s
     Ok(metadata)
 }
 
-fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Option<File>> {
+fn open_existing(
+    parent: &File,
+    name: &str,
+    size: usize,
+    uid: u32,
+) -> io::Result<Option<(File, u64)>> {
     let device = parent.metadata()?.dev();
     protected_directory(parent, uid, device)?;
     // Inspect the object before any data open. O_PATH cannot block on a FIFO
@@ -177,12 +203,38 @@ fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Opt
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let identity = checked_file(&identity, uid, device, image.len())?;
-    let mut file = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
-    let before = checked_file(&file, uid, device, image.len())?;
+    let identity = checked_file(&identity, uid, device, size)?;
+    let file = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    let before = checked_file(&file, uid, device, size)?;
     if before.ino() != identity.ino() {
         return Err(invalid());
     }
+    Ok(Some((file, identity.ino())))
+}
+
+fn finish_existing(
+    parent: &File,
+    name: &str,
+    file: &File,
+    size: usize,
+    uid: u32,
+    inode: u64,
+) -> io::Result<()> {
+    let device = parent.metadata()?.dev();
+    protected_directory(parent, uid, device)?;
+    let after = checked_file(file, uid, device, size)?;
+    let named = restore_fs::open_beneath(parent, name, OFlags::PATH)?;
+    let named = checked_file(&named, uid, device, size)?;
+    if after.ino() != inode || named.ino() != inode {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Option<File>> {
+    let Some((mut file, inode)) = open_existing(parent, name, image.len(), uid)? else {
+        return Ok(None);
+    };
     let mut buffer = [0; 16 * 1024];
     for expected in image.chunks(buffer.len()) {
         file.read_exact(&mut buffer[..expected.len()])?;
@@ -193,27 +245,92 @@ fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Opt
     if file.read(&mut buffer[..1])? != 0 {
         return Err(invalid());
     }
-    let after = checked_file(&file, uid, device, image.len())?;
-    let named = restore_fs::open_beneath(parent, name, OFlags::PATH)?;
-    let named = checked_file(&named, uid, device, image.len())?;
-    if after.ino() != identity.ino() || named.ino() != identity.ino() {
-        return Err(invalid());
-    }
+    finish_existing(parent, name, &file, image.len(), uid, inode)?;
     Ok(Some(file))
 }
 
-fn ensure_at(parent: &File, image: &[u8], uid: u32, install: bool) -> io::Result<()> {
+fn predecessor(
+    parent: &File,
+    name: &str,
+    uid: u32,
+    versions: &[HelperVersion],
+) -> io::Result<File> {
+    // Unknown sizes are refused before opening for data. The O_PATH inspection
+    // cannot block on a FIFO or read a device, and aliases are rejected.
+    let identity = restore_fs::open_beneath(parent, name, OFlags::PATH)?;
+    let size = identity.metadata()?.len();
+    let version = versions
+        .iter()
+        .find(|version| {
+            version.size != 0
+                && version.size as u64 <= restore_binding::MAX_HELPER
+                && version.size as u64 == size
+        })
+        .ok_or_else(invalid)?;
+    let Some((mut file, inode)) = open_existing(parent, name, version.size, uid)? else {
+        return Err(invalid());
+    };
+    let mut hash = Sha256::new();
+    let mut remaining = version.size;
+    let mut buffer = [0; 16 * 1024];
+    while remaining != 0 {
+        let length = remaining.min(buffer.len());
+        file.read_exact(&mut buffer[..length])?;
+        hash.update(&buffer[..length]);
+        remaining -= length;
+    }
+    if file.read(&mut buffer[..1])? != 0 {
+        return Err(invalid());
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    if !versions
+        .iter()
+        .any(|version| version.size as u64 == size && version.sha256 == digest)
+    {
+        return Err(invalid());
+    }
+    finish_existing(parent, name, &file, version.size, uid, inode)?;
+    Ok(file)
+}
+
+fn ensure_at(
+    parent: &File,
+    image: &[u8],
+    uid: u32,
+    status: app_slot::Status,
+    predecessors: &[HelperVersion],
+    _admission: &ProcessLock,
+) -> io::Result<()> {
     if image.is_empty() || image.len() as u64 > restore_binding::MAX_HELPER {
         return Err(invalid());
     }
-    if let Some(file) = existing(parent, EXECUTABLE, image, uid)? {
-        file.sync_all()?;
-        parent.sync_all()?;
-        return Ok(());
+    match existing(parent, EXECUTABLE, image, uid) {
+        Ok(Some(file)) => {
+            file.sync_all()?;
+            parent.sync_all()?;
+            return Ok(());
+        }
+        Ok(None) if status == app_slot::Status::NoTransaction => {}
+        Ok(None) => return Err(invalid()),
+        Err(error)
+            if error.kind() == io::ErrorKind::InvalidData
+                && matches!(
+                    status,
+                    app_slot::Status::NoTransaction
+                        | app_slot::Status::Transaction(
+                            app_slot::Phase::Committed | app_slot::Phase::RolledBack
+                        )
+                ) =>
+        {
+            return migrate_at(parent, image, uid, predecessors);
+        }
+        Err(error) => return Err(error),
     }
-    if !install {
-        return Err(invalid());
-    }
+    let name = stage_helper(parent, image)?;
+    publish(parent, &name, image, uid)
+}
+
+fn stage_helper(parent: &File, image: &[u8]) -> io::Result<String> {
     let mut nonce = [0; 16];
     OsRng
         .try_fill_bytes(&mut nonce)
@@ -238,7 +355,51 @@ fn ensure_at(parent: &File, image: &[u8], uid: u32, install: bool) -> io::Result
     file.sync_all()?;
     #[cfg(test)]
     checkpoint("synced");
-    publish(parent, &name, image, uid)
+    Ok(name)
+}
+
+fn migrate_at(
+    parent: &File,
+    image: &[u8],
+    uid: u32,
+    predecessors: &[HelperVersion],
+) -> io::Result<()> {
+    let previous = predecessor(parent, EXECUTABLE, uid, predecessors)?;
+    previous.sync_all()?;
+    let inode = previous.metadata()?.ino();
+    let name = stage_helper(parent, image)?;
+    // The caller holds update admission throughout status inspection, staging
+    // and publication. Recheck the protected canonical name before exchange;
+    // unrelated privileged writers must use the same admission protocol.
+    let named = predecessor(parent, EXECUTABLE, uid, predecessors)?;
+    if named.metadata()?.ino() != inode {
+        return Err(invalid());
+    }
+    renameat_with(
+        parent,
+        name.as_str(),
+        parent,
+        EXECUTABLE,
+        RenameFlags::EXCHANGE,
+    )?;
+    #[cfg(test)]
+    checkpoint("exchanged");
+    #[cfg(test)]
+    if std::env::var("NANOKVM_APP_BOOTSTRAP_TEST_ERROR").as_deref() == Ok("exchange-sync") {
+        return Err(io::Error::other("injected exchange directory sync error"));
+    }
+    parent.sync_all()?;
+    #[cfg(test)]
+    checkpoint("exchange-published");
+    // Exchange retains the exact previous inode at the exclusive random name.
+    // It is evidence only, never a fallback executable or a journal authority.
+    let retained = predecessor(parent, &name, uid, predecessors)?;
+    if retained.metadata()?.ino() != inode {
+        return Err(invalid());
+    }
+    let current = existing(parent, EXECUTABLE, image, uid)?.ok_or_else(invalid)?;
+    current.sync_all()?;
+    Ok(())
 }
 
 fn publish(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<()> {
@@ -270,6 +431,12 @@ fn checkpoint(position: &str) {
     if std::env::var("NANOKVM_APP_BOOTSTRAP_TEST_STOP").as_deref() == Ok(position) {
         println!("app-bootstrap-checkpoint-ready");
         io::stdout().flush().unwrap();
+        if std::env::var_os("NANOKVM_APP_BOOTSTRAP_TEST_RESUME").is_some() {
+            let mut byte = [0];
+            io::stdin().read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [1]);
+            return;
+        }
         loop {
             std::thread::park();
         }
