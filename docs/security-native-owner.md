@@ -94,14 +94,66 @@ That forced-death fixture tests detection/admission, **not recovery of an orphan
 native tree after killing a real subreaper**. Process-tree size/high-churn limits,
 unusual clone exit signals, durable crash recovery and vendor runtime remain open.
 
+## Durable native broker admission component
+
+`native_owner::broker::Broker` now combines the sibling group with a protected
+singleton journal. It is a library component with **no production caller or
+S95/watchdog daemon yet**, not a replacement for the separate raw restore ticket.
+
+The fixed store is `/etc/kvm/native-runtime-owner`: root-owned mode 0700 on the
+same rootfs, opened descriptor-relatively with no symlinks, magic links or mount
+crossing. A nonblocking exclusive flock uses the stable directory inode, which
+is never unlinked. State is one single-link, root-owned mode-0600, fixed 80-byte
+record. Its SHA-256 detects corruption, not authenticity; protected location is
+the trust boundary. It contains only format, boot epoch and Active/Closed phase,
+not credentials, process-number authority or raw-update authorization.
+The closed restore allowlist does not preserve/import/delete these runtime
+authority members; capture and forged write/absent-archive tests cover both names.
+
+Before the first possible native launch, Active is written to an exclusive
+temporary member, file-synced, renamed, and directory-synced. The journal lease
+stays owned while native work and the retained drain exist. Closed is published
+only after every controller scope proves complete closure. `Resume::Retained`
+keeps ownership when closure/publication is incomplete or uncertain; it never
+implicitly resumes. Drop merely releases the kernel lease, preserving Active.
+
+| Acquired store observation | Native admission |
+| --- | --- |
+| No record, or valid Closed | Publish current-boot Active before launch |
+| Current-boot Active | Refuse: previous ownership is unresolved |
+| Valid record from another boot | Old process lifetime ended; expose prior-boot observation |
+| Corrupt/unsafe state or leftover temporary member | Refuse; preserve evidence |
+
+The live epoch comes only from bounded kernel `/proc/sys/kernel/random/boot_id`
+reading with procfs checks, using the existing nonzero restore-ticket UUID
+parser. There is no production path/boot-ID/environment override. A different
+boot ID proves only that old native processes cannot still be alive. **It does
+not authorize startup before early restore, mark boot-good, validate images,
+resolve raw journal state, or allow partition writes.** Those integration gates
+remain mandatory. Rootfs replacement can destroy this journal/lease; this code
+does not solve the retained immutable runtime and raw handoff requirements.
+
+Publication errors poison the live store. A leftover temporary member is not
+removed automatically, and missing PID/socket/name is never used to clear Active.
+Reopening may accept a complete Closed record after an ambiguous final fsync,
+but only the controller's proven drain can attempt that Closed publication.
+Recovery from an incomplete record and supported operator recovery remain open;
+this fail-closed prototype must not be enabled in S95 without that lifecycle.
+
+Host verification injects I/O failures and kills real journal-owner subprocesses
+at six publication boundaries. Broker tests check pre-launch intent, retained
+drain, missing receipts and cleanup-publication failure, plus a real dedicated
+subreaper with a daemonized native fixture while the journal descriptor is held.
+These are not power-cut tests, vendor runtime evidence or device acceptance.
+
 Build the static RV64 component with
 `server-rust/scripts/build-native-owner.sh`. The script rejects dynamic loaders,
 shared-library dependencies and wrong ELF architecture. This is not app/full
 pipeline reproducibility or target execution evidence. The ordinary package
 builder intentionally does not include this unused component yet.
 
-Remaining work is a production lifecycle broker/retained owner: integrate this
-in-process admission owner with durable intent and authenticated IPC; close
+Remaining work is a production lifecycle broker/retained daemon: integrate the
+durable component with authenticated IPC and supported recovery; close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle
 pending AP attempts. Do not naively nest an independent service owner below a
 watchdog subreaper: that creates ownership/teardown coupling, not independent

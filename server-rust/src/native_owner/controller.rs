@@ -22,7 +22,7 @@ impl Role {
         }
     }
 
-    fn command(self) -> Command {
+    pub(super) fn command(self) -> Command {
         let role = match self {
             Self::KvmSystem => "kvm-system",
             Self::Hwmon => "hwmon",

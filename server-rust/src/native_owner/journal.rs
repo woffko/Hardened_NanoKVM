@@ -1,0 +1,356 @@
+//! Native process ownership only, never raw-update/restore authorization.
+
+use crate::update::restore_capsule::ticket::BootId;
+use rustix::fs::{
+    FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags, flock, fstatfs, mkdirat, openat2,
+    renameat,
+};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
+};
+
+const DIRECTORY: &str = "native-runtime-owner";
+const STATE: &str = "state";
+const NEXT: &str = ".state.next";
+const MAGIC: &[u8; 8] = b"NKBROK01";
+const BYTES: usize = 80;
+const HASH: usize = 48;
+const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS);
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("another native runtime owner holds the singleton lease")]
+    Busy,
+    #[error("native runtime journal storage is not protected rootfs")]
+    Unsafe,
+    #[error("native runtime journal or kernel boot identity is invalid")]
+    Invalid,
+    #[error("native runtime ownership from this boot is unresolved")]
+    Unresolved,
+    #[error("native runtime journal publication is ambiguous")]
+    Ambiguous,
+    #[error("native runtime journal I/O failed")]
+    Io,
+}
+impl From<io::Error> for Error {
+    fn from(_: io::Error) -> Self {
+        Self::Io
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Epoch([u8; 36]);
+impl Epoch {
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let text = std::str::from_utf8(bytes).map_err(|_| Error::Invalid)?;
+        // Reuse the restore-ticket parser, including non-zero UUID validation.
+        BootId::parse(text).map_err(|_| Error::Invalid)?;
+        let mut value = [0; 36];
+        value.copy_from_slice(bytes);
+        value.make_ascii_lowercase();
+        Ok(Self(value))
+    }
+
+    fn current() -> Result<Self, Error> {
+        let root = File::open("/")?;
+        let proc = open(&root, "proc", OFlags::RDONLY | OFlags::DIRECTORY, false)?;
+        let mut file = open(
+            &proc,
+            "sys/kernel/random/boot_id",
+            OFlags::RDONLY | OFlags::NONBLOCK,
+            false,
+        )?;
+        if fstatfs(&proc).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC
+            || fstatfs(&file).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC
+        {
+            return Err(Error::Unsafe);
+        }
+        let mut bytes = [0; 37];
+        file.read_exact(&mut bytes)?;
+        if bytes[36] != b'\n' || file.read(&mut [0])? != 0 {
+            return Err(Error::Invalid);
+        }
+        Self::parse(&bytes[..36])
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Active = 1,
+    Closed = 2,
+}
+
+pub(super) struct Store {
+    directory: File,
+    uid: u32,
+    device: u64,
+    epoch: Epoch,
+    active: bool,
+    poisoned: bool,
+    previous_boot: bool,
+    #[cfg(test)]
+    fail_at: Option<Step>,
+    #[cfg(test)]
+    pause_at: Option<(Step, std::path::PathBuf)>,
+}
+
+impl Store {
+    pub(super) fn open() -> Result<Self, Error> {
+        if !nix::unistd::geteuid().is_root() {
+            return Err(Error::Unsafe);
+        }
+        let root = File::open("/")?;
+        protected(&root, 0, false)?;
+        let etc = open(&root, "etc", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        protected(&etc, 0, false)?;
+        let parent = open(&etc, "kvm", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        Self::at_parent(&parent, 0, Epoch::current()?)
+    }
+
+    fn at_parent(parent: &File, uid: u32, epoch: Epoch) -> Result<Self, Error> {
+        protected(parent, uid, false)?;
+        match mkdirat(parent, DIRECTORY, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+            Ok(()) => parent.sync_all()?,
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(Error::Io),
+        }
+        let directory = open(parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        protected(&directory, uid, true)?;
+        let device = directory.metadata()?.dev();
+        if device != parent.metadata()?.dev() {
+            return Err(Error::Unsafe);
+        }
+        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
+            if e == rustix::io::Errno::WOULDBLOCK {
+                Error::Busy
+            } else {
+                Error::Io
+            }
+        })?;
+        // Construct the owner immediately: even a failed load must explicitly
+        // unlock, not leave a transient pre-exec alias extending this lease.
+        let mut store = Self {
+            directory,
+            uid,
+            device,
+            epoch,
+            active: false,
+            poisoned: false,
+            previous_boot: false,
+            #[cfg(test)]
+            fail_at: None,
+            #[cfg(test)]
+            pause_at: None,
+        };
+        if store.member(NEXT)?.is_some() {
+            return Err(Error::Ambiguous);
+        }
+        if let Some((prior, phase)) = store.read()? {
+            if prior == epoch && phase == Phase::Active {
+                return Err(Error::Unresolved);
+            }
+            store.previous_boot = prior != epoch;
+        }
+        Ok(store)
+    }
+
+    pub(super) fn previous_boot(&self) -> bool {
+        self.previous_boot
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(parent: &File, uid: u32, boot: &str) -> Result<Self, Error> {
+        Self::at_parent(parent, uid, Epoch::parse(boot.as_bytes())?)
+    }
+
+    pub(super) fn begin(&mut self) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Ambiguous);
+        }
+        if !self.active {
+            self.publish(Phase::Active)?;
+            self.active = true;
+        }
+        Ok(())
+    }
+
+    pub(super) fn close(&mut self) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Ambiguous);
+        }
+        if self.active {
+            self.publish(Phase::Closed)?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    fn member(&self, name: &str) -> Result<Option<File>, Error> {
+        let file = match open(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK,
+            true,
+        ) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Error::Io),
+        };
+        let m = file.metadata()?;
+        if !m.is_file()
+            || m.uid() != self.uid
+            || m.dev() != self.device
+            || m.nlink() != 1
+            || m.mode() & 0o7777 != 0o600
+        {
+            return Err(Error::Unsafe);
+        }
+        Ok(Some(file))
+    }
+
+    fn read(&self) -> Result<Option<(Epoch, Phase)>, Error> {
+        let Some(mut file) = self.member(STATE)? else {
+            return Ok(None);
+        };
+        if file.metadata()?.len() != BYTES as u64 {
+            return Err(Error::Invalid);
+        }
+        let mut bytes = [0; BYTES];
+        file.read_exact(&mut bytes)?;
+        if file.read(&mut [0])? != 0
+            || &bytes[..8] != MAGIC
+            || bytes[45..HASH] != [0; 3]
+            || bytes[HASH..] != Sha256::digest(&bytes[..HASH])[..]
+        {
+            return Err(Error::Invalid);
+        }
+        let phase = match bytes[44] {
+            1 => Phase::Active,
+            2 => Phase::Closed,
+            _ => return Err(Error::Invalid),
+        };
+        Ok(Some((Epoch::parse(&bytes[8..44])?, phase)))
+    }
+
+    fn publish(&mut self, phase: Phase) -> Result<(), Error> {
+        let mut bytes = [0; BYTES];
+        bytes[..8].copy_from_slice(MAGIC);
+        bytes[8..44].copy_from_slice(&self.epoch.0);
+        bytes[44] = phase as u8;
+        let hash = Sha256::digest(&bytes[..HASH]);
+        bytes[HASH..].copy_from_slice(&hash);
+        let result = (|| -> Result<(), Error> {
+            #[cfg(test)]
+            self.inject(Step::BeforeCreate)?;
+            let mut file: File = openat2(
+                &self.directory,
+                NEXT,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+                RESOLVE | ResolveFlags::NO_XDEV,
+            )
+            .map_err(|_| Error::Io)?
+            .into();
+            #[cfg(test)]
+            self.inject(Step::Created)?;
+            let m = file.metadata()?;
+            if !m.is_file()
+                || m.uid() != self.uid
+                || m.dev() != self.device
+                || m.nlink() != 1
+                || m.mode() & 0o7777 != 0o600
+            {
+                return Err(Error::Unsafe);
+            }
+            file.write_all(&bytes)?;
+            #[cfg(test)]
+            self.inject(Step::Written)?;
+            file.sync_all()?;
+            #[cfg(test)]
+            self.inject(Step::FileSynced)?;
+            renameat(&self.directory, NEXT, &self.directory, STATE).map_err(|_| Error::Io)?;
+            #[cfg(test)]
+            self.inject(Step::Renamed)?;
+            self.directory.sync_all()?;
+            #[cfg(test)]
+            self.inject(Step::DirectorySynced)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // Preserve canonical and temporary evidence; never retry blindly or
+            // erase an unresolved launch intent on Drop/error.
+            self.poisoned = true;
+            return Err(Error::Ambiguous);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn inject(&self, step: Step) -> Result<(), Error> {
+        if let Some((pause, ready)) = &self.pause_at
+            && *pause == step
+        {
+            std::fs::write(ready, b"fixture")?;
+            std::thread::sleep(std::time::Duration::from_secs(20));
+        }
+        if self.fail_at == Some(step) {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = flock(&self.directory, FlockOperation::Unlock);
+        // Never unlink state/temporary or the singleton directory.
+    }
+}
+
+fn protected(file: &File, uid: u32, exact: bool) -> Result<(), Error> {
+    let m = file.metadata()?;
+    if !m.is_dir()
+        || m.uid() != uid
+        || m.mode() & 0o7022 != 0
+        || (exact && m.mode() & 0o7777 != 0o700)
+    {
+        return Err(Error::Unsafe);
+    }
+    Ok(())
+}
+
+fn open(parent: &File, name: &str, flags: OFlags, same_mount: bool) -> io::Result<File> {
+    Ok(openat2(
+        parent,
+        name,
+        flags | OFlags::CLOEXEC,
+        Mode::empty(),
+        if same_mount {
+            RESOLVE | ResolveFlags::NO_XDEV
+        } else {
+            RESOLVE
+        },
+    )?
+    .into())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    BeforeCreate,
+    Created,
+    Written,
+    FileSynced,
+    Renamed,
+    DirectorySynced,
+}
+
+#[cfg(test)]
+#[path = "journal_tests.rs"]
+mod tests;

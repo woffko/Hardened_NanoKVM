@@ -151,6 +151,16 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         "etc/kvm/update-keys/untrusted.pub.pem",
         b"do not preserve trust material",
     );
+    for path in [
+        "etc/kvm/native-runtime-owner/state",
+        "etc/kvm/native-runtime-owner/.state.next",
+    ] {
+        put(
+            source.path(),
+            path,
+            b"do not preserve native process ownership authority",
+        );
+    }
     let mut snapshot = capture(source.path(), staging.path()).unwrap();
     let mut bytes = Vec::new();
     snapshot.read_to_end(&mut bytes).unwrap();
@@ -179,6 +189,8 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         "etc/init.d/S96picoclaw",
         "etc/default/syslogd",
         "etc/kvm/update-keys/untrusted.pub.pem",
+        "etc/kvm/native-runtime-owner/state",
+        "etc/kvm/native-runtime-owner/.state.next",
         "root/.picoclaw/workspace/AGENT.md",
         "root/.picoclaw/workspace/skills/kvm-control/tool.sh",
     ] {
@@ -441,6 +453,8 @@ fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
         "etc/kvm/update-nanokvm.py",
         "etc/kvm/system-version.json",
         "etc/kvm/system-update-pending.json",
+        "etc/kvm/native-runtime-owner/state",
+        "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/update-key-policy",
         "etc/kvm/update-keys/key.pub.pem",
         "etc/kvm/.picoclaw_internal_token",
@@ -464,6 +478,8 @@ fn absent_records_cannot_delete_identity_or_authorize_unknown_paths() {
         "etc/kvm/server.yaml",
         "etc/kvm/update-key-policy",
         "usr/bin/picoclaw",
+        "etc/kvm/native-runtime-owner/state",
+        "etc/kvm/native-runtime-owner/.state.next",
     ] {
         let mut items = records();
         items.push((format!("absent/{path}"), vec![], 0o600, EntryType::Regular));

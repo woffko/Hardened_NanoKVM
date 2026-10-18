@@ -359,9 +359,13 @@ The [native owner component](security-native-owner.md) supplies separate-process
 child-tree Stop/reap and sibling-controller drain machinery. Moving its launch
 capability into a retained drain closes in-process starts; receipts, owner exits
 and EOF are checked independently, and uncertainty cannot resume. This is not
-durable/interprocess respawner admission. It is not yet the service broker,
-retained raw writer or a caller of the composed writer drain. Its presence does not close the
-following production boundaries.
+production respawner admission. The additional broker library component holds a
+protected singleton/Active journal across native work and drain, refuses
+unresolved same-boot ownership, and publishes Closed only after proven closure.
+It has no production caller or S95/watchdog daemon, supported journal recovery,
+retained raw handoff or caller of the composed writer drain yet. A changed boot
+epoch resolves only old process lifetime, never raw restore or boot-good. Its
+presence does not close the following production boundaries.
 
 - The front-end kernel lease is cooperative cross-process admission, not a
   durable install journal, idempotency receipt or power-loss recovery protocol.
