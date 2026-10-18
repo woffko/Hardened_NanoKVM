@@ -222,12 +222,68 @@ serial conflict/retry without lost fields, session retiming, startup secret reus
 publication errors and retained command/follow-up lifetime. They do not execute
 native firewall, TLS generation at device paths or reboot.
 
-Network, standalone firewall/rollback, time/syslog, active terminal sessions,
+Network, time/syslog, active terminal sessions,
 scripts, optional apps and other service/background writers are not quiesced.
 No coherent preservation snapshot, all-writer freeze, phase-aware Stop/join,
 service stop, raw-writer ticket
 or retained transaction is accepted from this component. The host fixtures do
 not change a live root password or device configuration.
+
+### Owned firewall transition
+
+Standalone firewall set/confirm now enter through the Config serial domain and
+runtime-owned work, also serializing against TLS changes. A distinct typed
+Firewall permit owns the protected `firewall-operation` kernel lock and common
+writer activity. Only an already enrolled Config operation may create this
+follow-up, even after new admission closes. There is no gap in activity ownership.
+
+The pending timer keeps the Firewall permit, not the Config serial lock, so
+ordinary Config changes and confirmation remain possible during the 60-second
+confirmation window. Its controller retains the join handle until completion.
+Confirm joins with an explicit confirmation; a replacement first rolls back and
+joins the old transition, then publishes a new random transaction ID. The old
+timer cannot act on the new marker. Marker identity and all recorded fields must
+match the task's original record; their contents do not supply new rollback
+authority. Marker reads are capped at1024 bytes, use nonblocking/no-follow open
+and require a single-link regular file owned by the backend UID with mode0600;
+special files, aliases and broad permissions fail closed. Native commands and
+blocking callbacks keep their own permit shares.
+
+`AppState::drain_writers` first closes writer admission, asks the pending firewall
+owner to roll back and joins it, then drains the common activity shares under one
+deadline. Cancellation/timeout returns no drained guard and does not discard the
+pending join handle or command owner. Retry resumes the same cleanup. The
+low-level `StateWriters::drain` only waits for activity: it does not settle a
+pending firewall transition or diagnose orphan markers. A future capture caller
+must use the composed boundary and still close all other source writers.
+
+Unknown/orphan pending markers, marker mismatch, task panic or failed rollback
+abort this composed boundary. An observed owner/publication failure is sticky in
+the running controller. Explicit Moderate/Baseline selection or the TLS-disable
+Moderate operation is a recovery action and can clear it only after successful
+publication/application. This is not automatic fallback or confirmation. A second
+backend cannot replace a live owner's marker: the kernel Firewall lock survives
+the first handler's reply. Confirming a foreign owner is rejected, not forwarded.
+
+Here successful application means the command completed with status0, not that
+effective rules were read back and proved correct. The current S40firewall script
+can return0/print OK after individual iptables failures; this component does not
+fix that service error-propagation/readback gap. It remains a required WP-11
+gate, not evidence of effective firewall enforcement or remote reachability.
+
+These are one-process-lifetime guarantees, not durable firewall recovery. The
+legacy `/tmp` marker and file rename helper still lack protected durable journal,
+crash recovery, complete pathname hardening and directory-sync guarantees. A
+backend restart/power loss is not proved safe by this timer protocol. Actual
+iptables/interface/TLS/remote reachability and service process-tree completion
+remain target gates. No production raw capture consumes the composed boundary
+yet. Other producers, especially network/init/local privileged code, remain open.
+
+Synthetic tests exercise real set/confirm handlers, timer expiry, replacement,
+lost replies, cancellation/deadline while a fixture command runs, sticky errors,
+foreign/orphan marker rejection, already-admitted TLS follow-up and independent
+exec ownership. Fixture paths/commands exist only under cfg(test); they do not
+alter firewall rules or invoke device services on the host.
 
 ## Explicit remaining boundaries
 
@@ -251,9 +307,9 @@ not change a live root password or device configuration.
   transaction authority. A callback lease alone is still not proof that every
   process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
-- Other startup writes, network, firewall rollback, time/syslog, active terminal,
+- Other startup writes, network, time/syslog, active terminal,
   scripts, optional-app workers and other configuration writers do not yet
-  acquire the shared quiescence permit. Account/Config enrollment is partial
+  acquire the shared quiescence permit. Account/Config/firewall enrollment is partial
   coverage, not a credential/TLS/config rollback protocol. No snapshot may claim
   all writers are stopped merely because update admission or this drain is held.
 - No generic abort handle is exposed. Explicit Stop must use phase-aware

@@ -6,12 +6,13 @@ use std::sync::{
 use tokio::sync::RwLock;
 
 use crate::{
-    Result,
+    AppError, Result,
+    api::system_firewall::FirewallController,
     auth::{password::AccountStore, session::SessionStore, terminal_ticket::TerminalTicketStore},
     config::Config,
     security::rate_limit::LoginRateLimiter,
     update::operation::UpdateCoordinator,
-    update::state_writers::StateWriters,
+    update::state_writers::{StateWriters, WriterDrain},
 };
 
 pub const DEFAULT_SESSION_LOCK_DURATION_SECS: u64 = 900;
@@ -33,6 +34,7 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
     pub writers: Arc<StateWriters>,
+    pub firewall: Arc<FirewallController>,
     pub config: Arc<Config>,
     pub accounts: Arc<AccountStore>,
     pub sessions: Arc<SessionStore>,
@@ -69,6 +71,7 @@ impl AppState {
         Ok(Self {
             updates: Arc::new(UpdateCoordinator::default()),
             writers,
+            firewall: Arc::new(FirewallController::default()),
             config: Arc::new(config),
             accounts: Arc::new(accounts),
             sessions: Arc::new(sessions),
@@ -78,6 +81,19 @@ impl AppState {
             remote_image_download_enabled: Arc::new(AtomicBool::new(remote_image_download_enabled)),
             session_lock_duration: Arc::new(AtomicU64::new(session_lock_duration)),
         })
+    }
+
+    /// A cooperative boundary for the enrolled APIs/timer only. External
+    /// services, privileged sessions and other settings are still NOT covered.
+    pub async fn drain_writers(&self, timeout: std::time::Duration) -> Result<WriterDrain> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let pause = self.writers.pause()?;
+        tokio::time::timeout_at(deadline, self.firewall.stop_and_join())
+            .await
+            .map_err(|_| AppError::Conflict("firewall writer did not stop".into()))??;
+        pause
+            .drain(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            .await
     }
 
     pub fn set_terminal_enabled(&self, enabled: bool) {

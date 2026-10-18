@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
-    api::{stream, system_firewall},
+    api::stream,
     auth::compat_crypto::decode_frontend_password,
     config::Config,
     error::ApiResponse,
@@ -1036,7 +1036,10 @@ pub async fn set_tls(
                 })
                 .await?;
             if !req.enabled {
-                system_firewall::force_moderate_mode(&writer).await?;
+                state
+                    .firewall
+                    .force_moderate_mode(&state.writers, &writer)
+                    .await?;
                 config.proto = "http".to_string();
             }
             writer.blocking(move |permit| config.write(permit)).await?;

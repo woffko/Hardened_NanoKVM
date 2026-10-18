@@ -9,8 +9,9 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Producer boundary | Implemented state | Still required before capture |
 | --- | --- | --- |
 | Account and Config APIs | Typed owned permits and common activity drain | Integrate capture; retain native/web/config crash-recovery work separately |
+| Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
-| Backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
+| Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
 | DHCP/Wi-Fi, SSH, optional gateways/daemons | Conditional service owners identified | Verify exact deployed ownership and completion; kill/pidfile deletion is not join |
 | Local NanoKVM privileged sessions/scripts | Can affect all sources | Supported maintenance boundary or abort; never assume they only write listed paths |
@@ -43,6 +44,13 @@ are rejected. This deliberately restricted Rust-constant parser is a source
 coverage lint, not semantic call-graph analysis. A PASS explicitly reports that
 runtime quiescence is **not established**. Runtime stop/join, production capture,
 retained raw writer/ticket/early boot restore and target/release gates remain open.
+
+The implemented firewall boundary is detailed in
+[security-update-ownership.md](security-update-ownership.md#owned-firewall-transition).
+Its stop means roll back and join, never implicitly confirm. Orphan pending state
+or an observed failure aborts capture; explicit operator recovery is separate.
+`AppState::drain_writers` composes this with admission and activity drain, not
+external service closure. No production capture calls it yet.
 
 `source_basis` records the reviewed source revision; the checker does not bind it
 to the current Git revision or source contents. Evidence references are checked

@@ -1038,8 +1038,9 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative
-cross-process admission lease. Account/Config writers also have partial
-admission/drain enrollment; no production capture consumes that drain yet.
+cross-process admission lease. Account/Config/firewall writers also have partial
+admission/drain enrollment; the composed firewall rollback stop/join boundary is
+host-tested, but no production capture consumes it yet.
 Exact lifetime guarantees and remaining raw-child/quiescence/durable-transaction
 gaps are documented in [security-update-ownership.md](security-update-ownership.md).
 This does not satisfy the complete protected writer requirements below.
