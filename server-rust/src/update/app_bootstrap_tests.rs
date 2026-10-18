@@ -11,6 +11,37 @@ use tempfile::{TempDir, tempdir};
 
 const IMAGE: &[u8] = b"synthetic compile-bound helper bytes, never executed";
 
+#[test]
+fn consumer_gate_scripts_must_be_exact_protected_independent_files() {
+    for fault in 0..6 {
+        let root = tempdir().unwrap();
+        let parent = root.path().join("etc/init.d");
+        fs::create_dir_all(&parent).unwrap();
+        for (name, bytes) in BOOT_SCRIPTS {
+            fs::write(parent.join(name), bytes).unwrap();
+            fs::set_permissions(parent.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(check_boot_scripts_at(&File::open(root.path()).unwrap(), uid).is_ok());
+        let victim = parent.join("S02apprecover");
+        match fault {
+            0 => fs::remove_file(&victim).unwrap(),
+            1 => fs::write(&victim, b"foreign gate bytes").unwrap(),
+            2 => fs::set_permissions(&victim, fs::Permissions::from_mode(0o777)).unwrap(),
+            3 => {
+                fs::rename(&victim, parent.join("other")).unwrap();
+                std::os::unix::fs::symlink("other", &victim).unwrap();
+            }
+            4 => fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap(),
+            _ => fs::hard_link(&victim, parent.join("alias")).unwrap(),
+        }
+        assert!(
+            check_boot_scripts_at(&File::open(root.path()).unwrap(), uid).is_err(),
+            "fault {fault}"
+        );
+    }
+}
+
 struct Fixture(TempDir);
 impl Fixture {
     fn new() -> Self {
@@ -198,7 +229,7 @@ fn unsafe_parent_and_foreign_identity_are_rejected_without_repairs() {
     fixture.install(true).unwrap();
     let parent = fixture.parent(false).unwrap();
     let uid = nix::unistd::geteuid().as_raw();
-    assert!(existing(&parent, IMAGE, uid.wrapping_add(1)).is_err());
+    assert!(existing(&parent, EXECUTABLE, IMAGE, uid.wrapping_add(1)).is_err());
     assert!(
         checked_file(
             &File::open(fixture.canonical()).unwrap(),

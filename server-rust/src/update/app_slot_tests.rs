@@ -149,6 +149,95 @@ fn checksum_cannot_make_invalid_context_or_reserved_fields_valid() {
     assert!(record.encode().is_err());
 }
 
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn boot_gate_child_fixture() {
+    let Ok(root) = std::env::var("NANOKVM_APP_GATE_FIXTURE_ROOT") else {
+        return;
+    };
+    let case = std::env::var("NANOKVM_APP_GATE_FIXTURE_CASE").unwrap();
+    assert!(nix::unistd::geteuid().is_root());
+    // Only a fresh disposable root from this test's user-namespace parent.
+    // No mount, host rootfs, target hardware or production override is used.
+    nix::unistd::chroot(Path::new(&root)).unwrap();
+    std::env::set_current_dir("/").unwrap();
+    let admission = ProcessLock::acquire().unwrap();
+    if case == "corrupt" {
+        assert!(boot_gate().is_err());
+        assert_eq!(
+            fs::read("/etc/kvm/application-slot/current/state").unwrap(),
+            b"corrupt fixture"
+        );
+    } else if case == "none" {
+        assert_eq!(boot_gate().unwrap(), Status::NoTransaction);
+    } else if case == "committed" {
+        assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::Committed));
+    } else if case == "rolled-back" {
+        assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+    } else {
+        // A still-owning installer cannot be rolled back by a boot consumer.
+        let before = status().unwrap();
+        assert!(matches!(boot_gate(), Err(SlotError::Busy)));
+        assert_eq!(status().unwrap(), before);
+        drop(admission);
+        assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+        let _admission = ProcessLock::acquire().unwrap();
+        assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+    }
+    println!("app-boot-gate-fixture-ran");
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupted_slots() {
+    for (case, phase, position) in [
+        ("none", Phase::Prepared, Position::Prepared),
+        ("committed", Phase::Committed, Position::Published),
+        ("rolled-back", Phase::RolledBack, Position::Prepared),
+        ("prepared", Phase::Prepared, Position::Prepared),
+        ("parked", Phase::Publishing, Position::Parked),
+        ("published", Phase::Published, Position::Published),
+        ("corrupt", Phase::Prepared, Position::Prepared),
+    ] {
+        let fixture = Fixture::new(phase, position);
+        fs::create_dir_all(fixture.root.path().join("etc/kvm")).unwrap();
+        let directory = fixture.root.path().join("etc/kvm/application-slot");
+        fs::rename(fixture.root.path().join(DIRECTORY), &directory).unwrap();
+        if case == "none" {
+            fs::remove_dir_all(&directory).unwrap();
+        }
+        if case == "corrupt" {
+            fs::write(directory.join("current/state"), b"corrupt fixture").unwrap();
+        }
+        let output = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::app_slot::tests::boot_gate_child_fixture",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("NANOKVM_APP_GATE_FIXTURE_ROOT", fixture.root.path())
+            .env("NANOKVM_APP_GATE_FIXTURE_CASE", case)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{case}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            text.contains("running 1 test")
+                && text.contains("1 passed; 0 failed")
+                && text.contains("app-boot-gate-fixture-ran"),
+            "{case}: {text}"
+        );
+        assert_eq!(
+            fs::read(fixture.root.path().join("kvmapp/identity")).unwrap(),
+            if case == "committed" { b"new" } else { b"old" }
+        );
+    }
+}
+
 #[test]
 fn manual_and_explicit_lab_receipts_remain_distinct_from_signed_context() {
     let fixture = Fixture::new(Phase::Prepared, Position::Prepared);

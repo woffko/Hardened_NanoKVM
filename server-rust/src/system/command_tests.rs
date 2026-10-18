@@ -6,6 +6,18 @@ const LIMIT: Duration = Duration::from_secs(5);
 const SHORT: Duration = Duration::from_millis(300);
 const SLEEP: &str = "echo $$ > \"$1\"; exec sleep 30";
 
+#[test]
+fn app_slot_gate_uses_only_the_fixed_independent_executable() {
+    assert_eq!(
+        AllowedCommand::AppSlotGate.program(),
+        OsStr::new("/usr/libexec/nanokvm-app-recovery")
+    );
+    assert_eq!(
+        AllowedCommand::PicoclawStop.program(),
+        OsStr::new("/bin/busybox")
+    );
+}
+
 fn shell() -> AllowedCommand {
     AllowedCommand::CustomForTest(PathBuf::from("/bin/sh"))
 }

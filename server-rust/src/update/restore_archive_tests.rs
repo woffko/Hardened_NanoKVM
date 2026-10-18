@@ -152,6 +152,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         b"do not preserve trust material",
     );
     for path in [
+        "etc/init.d/S02apprecover",
         "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/libexec/nanokvm-app-recovery",
         "usr/libexec/.nanokvm-app-recovery-next-forged",
@@ -197,6 +198,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         assert_eq!(validated.members()[index].mode, 0o600);
     }
     for forbidden in [
+        "etc/init.d/S02apprecover",
         "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/libexec/nanokvm-app-recovery",
         "usr/libexec/.nanokvm-app-recovery-next-forged",
@@ -471,6 +473,7 @@ fn append_never_consumes_more_than_the_declared_size() {
 #[test]
 fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
     for path in [
+        "etc/init.d/S02apprecover",
         "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/libexec/nanokvm-app-recovery",
         "usr/libexec/.nanokvm-app-recovery-next-forged",
@@ -509,6 +512,7 @@ fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
 #[test]
 fn absent_records_cannot_delete_identity_or_authorize_unknown_paths() {
     for path in [
+        "etc/init.d/S02apprecover",
         "etc/kvm/application-update/stage-forged/extract/kvmapp/server/NanoKVM-Server",
         "usr/libexec/nanokvm-app-recovery",
         "usr/libexec/.nanokvm-app-recovery-next-forged",

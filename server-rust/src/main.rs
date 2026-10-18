@@ -33,6 +33,7 @@ const BOOT_INIT_SCRIPTS: &[&str] = &[
     "S00kmod",
     "S01fs",
     "S01syslogd",
+    "S02apprecover",
     "S02klogd",
     "S03usbdev",
     "S15kvmhwd",
@@ -60,16 +61,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     nanokvm_rust_server::api::storage::secure_existing_storage()?;
-    install_runtime_boot_scripts()?;
     media::secure_device_mounts().await?;
     let config = Config::load()?;
     config.log_runtime_warnings();
     #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
-    if let Err(error) = nanokvm_rust_server::update::app_bootstrap::ensure_installed() {
-        // Keep authenticated management available for diagnosis. App installs
-        // independently recheck this prerequisite under their existing lease.
-        warn!(%error, "independent app recovery unavailable; app installs will refuse");
-    }
+    let independent_ready = match nanokvm_rust_server::update::app_bootstrap::ensure_installed() {
+        Ok(()) => true,
+        Err(error) => {
+            // Do not install new fail-closed gates before their static helper
+            // exists. Preserve management for diagnosis; app install rechecks.
+            warn!(%error, "independent app recovery unavailable; app installs will refuse");
+            false
+        }
+    };
+    #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
+    let independent_ready = false;
+    install_runtime_boot_scripts(independent_ready)?;
     let migration = media::prepare_and_migrate(Path::new("/data"), Path::new(media::MEDIA_ROOT))?;
     if migration.moved > 0 || migration.collisions > 0 {
         info!(
@@ -153,11 +160,19 @@ async fn shutdown_signal() {
     }
 }
 
-fn install_runtime_boot_scripts() -> io::Result<()> {
+fn install_runtime_boot_scripts(independent_ready: bool) -> io::Result<()> {
     for script in BOOT_INIT_SCRIPTS {
         let src = Path::new("/kvmapp/system/init.d").join(script);
         let dst = Path::new("/etc/init.d").join(script);
-        match install_runtime_boot_script(&src, &dst) {
+        let result = match nanokvm_rust_server::update::app_bootstrap::BOOT_SCRIPTS
+            .iter()
+            .find(|(name, _)| name == script)
+        {
+            Some((_, bytes)) if independent_ready => install_runtime_boot_script_bytes(bytes, &dst),
+            Some(_) => continue,
+            None => install_runtime_boot_script(&src, &dst),
+        };
+        match result {
             Ok(true) => info!(
                 source = %src.display(),
                 target = %dst.display(),
@@ -183,7 +198,10 @@ fn install_runtime_boot_script(src: &Path, dst: &Path) -> io::Result<bool> {
     }
 
     let bytes = fs::read(src)?;
+    install_runtime_boot_script_bytes(&bytes, dst)
+}
 
+fn install_runtime_boot_script_bytes(bytes: &[u8], dst: &Path) -> io::Result<bool> {
     if let Ok(meta) = fs::symlink_metadata(dst) {
         if !meta.file_type().is_file() {
             return Err(io::Error::other("target exists but is not a regular file"));
@@ -201,7 +219,9 @@ fn install_runtime_boot_script(src: &Path, dst: &Path) -> io::Result<bool> {
         .mode(0o755)
         .open(&temp)?;
     let result = (|| {
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
+        // This FD is a fresh exclusive inode, never an existing script repair.
+        file.set_permissions(fs::Permissions::from_mode(0o755))?;
         file.sync_all()?;
         fs::rename(&temp, dst)?;
         fs::File::open(
@@ -366,6 +386,47 @@ fn init_tracing() {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn compiled_boot_script_mode_child_fixture() {
+        let Ok(root) = std::env::var("NANOKVM_BOOT_SCRIPT_MODE_FIXTURE") else {
+            return;
+        };
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o777));
+        let path = Path::new(&root).join("S02apprecover");
+        let bytes = nanokvm_rust_server::update::app_bootstrap::BOOT_SCRIPTS[0].1;
+        assert!(install_runtime_boot_script_bytes(bytes, &path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        println!("compiled-boot-mode-fixture-ran");
+    }
+
+    #[test]
+    fn compiled_boot_script_publication_ignores_parent_umask() {
+        let root = tempfile::tempdir().unwrap();
+        let output = process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::compiled_boot_script_mode_child_fixture",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("NANOKVM_BOOT_SCRIPT_MODE_FIXTURE", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            text.contains("running 1 test")
+                && text.contains("1 passed; 0 failed")
+                && text.contains("compiled-boot-mode-fixture-ran"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn boot_script_install_is_idempotent_and_preserves_old_temp_files() {

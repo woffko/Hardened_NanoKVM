@@ -1,16 +1,17 @@
 # Independent app-slot recovery component
 
-This describes a source/host-tested rollback component, not an activated
-installer or a completed WP-04/C1 fix. The actual app API still uses its legacy
-slot swap. The new helper is compile-bound into the linked RV64 backend and
+This describes a source/host-tested rollback engine and early consumer gates,
+not an activated journaled installer or a completed WP-04/C1 fix. The actual app
+API still uses its legacy slot swap. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
-installation for an app-only bridge. Early boot invocation and device acceptance
-are still absent. The full remediation scope is unchanged.
+installation for an app-only bridge. S02 and individual consumer gates now invoke
+it, but the trusted producer, legacy first-bridge ordering, helper migration and
+device acceptance remain open. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
 
-The standalone `nanokvm-app-recovery` accepts only `status` and `recover`.
+The standalone `nanokvm-app-recovery` accepts only `status`, `recover` and `gate`.
 There are no root, journal, stage, phase, force, prepare or commit arguments.
 Recovery cannot publish a new app or issue a trusted installation receipt.
 
@@ -85,6 +86,80 @@ acceptance are still to be designed/wired and tested before the new installer
 can be considered complete. `no-transaction` is diagnostics, not boot-good or
 permission to execute an arbitrary app directory.
 
+## Early consumer integration (development branch)
+
+`/etc/init.d/S02apprecover` invokes the independent helper after S01 mounts and
+before app consumers. A failed init script does not necessarily stop rcS, so
+the DHCPv6 client/hook path in S30eth, Wi-Fi AP credentials in S30wifi, S95 start/
+restart and native/backend/watchdog/delayed-hwmon launch paths also call the fixed
+helper. Ordinary Ethernet IPv4/SLAAC and STA startup do not read `/kvmapp` and
+are not gated by this app-slot protocol. This is NOT the future global raw
+identity/restore boot gate; raw installation remains temporarily refused.
+
+`gate` first reads/validates the protected journal and exact slot layout. A
+terminal committed/rolled-back state or absence returns without acquiring common
+update admission: the restart requester may still hold that admission. An
+uncommitted state enters the existing recovery path, which must acquire it.
+A concurrent consumer therefore receives Busy while an installer owns admission,
+rather than rolling that installer back. Corrupt/foreign layouts fail closed. NoTransaction preserves
+the pre-existing trusted legacy/factory path; it is not a new authorization,
+candidate signature, bootstrap ticket or runtime-health receipt.
+
+The backend embeds exact S02/S30eth/S30wifi/S95 source bytes. Its startup first
+establishes/verifies the static helper and protected init directory, then
+atomically publishes these compile-bound scripts. If support establishment fails,
+it skips new critical gate publication and keeps management for diagnosis.
+Ordinary script-copy failures still fail startup. The publisher establishes mode
+0755 on its fresh FD independently of umask. S95 no longer recopies these four
+scripts (including itself) from a possibly rolled-back bundle. The app install
+prerequisite verifies their exact bytes, owner/mode/link count and protected
+parents, not just presence of a helper. An absent optional hwmon remains a normal
+startup condition; a denied recovery gate does not.
+
+Optional S96 onboarding/skill/profile consumers are gated. The picoclaw API also
+runs the fixed helper before selecting either an already installed S96 or the
+bundled fallback for start/onboard, so an older installed script cannot bypass
+that API gate. Stop does not depend on recovery or execute either script: it
+uses fixed `/bin/busybox killall picoclaw`, preserving S96's existing best-effort
+stop semantics even when the app slot is unresolved. This is not process-tree
+quiescence or the remaining MCP worker cancellation/revocation acceptance.
+No optional service is installed/enabled merely to update its guards. The API
+command has a 20-second deadline and owned direct-child cleanup; a killed recovery
+must be resumed from durable journal state, not assumed complete. This does not
+implement the separate unprivileged picoclaw/capability work or alter autonomous
+target-computer HID operations. Manual root execution is not sandboxed.
+
+These are startup snapshot checks, NOT a retained native launch capability or
+process-tree quiescence proof. State can change after a gate returns. Existing
+system boot-health monitoring and other native/configuration producers still
+need the composed native-owner lifecycle; passive app-file health probes are
+not individually fenced by this protocol. Do not claim that all concurrent
+runtime reads/writes are excluded or that an app install is now crash-safe.
+
+**Legacy first-bridge ordering is still a release blocker.** An old S95 can copy
+new bundled gated scripts before the new backend has established the helper.
+In RC12 source `387793ab944437bbedc534d2ba231dd88d1fd2ca`, the old app API first
+swaps `/kvmapp`, then invokes S95 `restart`. S95's `start_runtime` calls
+`install_boot_scripts` before starting either native runtime or backend; its
+copier also overwrites S95 itself in place. Safe continuation of that already
+running shell must not be assumed. The old backend's own script synchronization
+occurs only after it has been launched and cannot close this earlier window.
+Power loss in that window is not covered by the new backend's safer publication
+order. A new bridge must establish independent support before that old installer
+can publish gates, or use a reviewed distinct transition flow. No `/kvmapp`
+execution fallback, journal deletion or policy relaxation is added here to mask
+this gap. Old backends may also overwrite rootfs gates after rollback; legacy
+rollback/migration must account for this before acceptance.
+
+Host user-namespace/chroot fixtures exercise the actual fixed-root gate with
+held admission in no-transaction/terminal states, Busy for active nonterminal
+states, and recovery of all three supported interrupted layouts. Shell fixtures
+check refusal before side effects, repeated launch guards, S02 exit propagation,
+protected-script non-copying and rootfs validator errors. Historical ungated
+bodies are rejected structurally, never executed on the host. Source guards for
+the picoclaw API (including independent Stop selection) are not HTTP/device
+acceptance; no live processes are signalled by those tests.
+
 ## Build and verification boundaries
 
 `server-rust/scripts/build-app-recovery.sh --locked --offline` builds this helper
@@ -126,8 +201,9 @@ An existing helper must be a single-link regular root-owned file of mode 0755,
 exact size and exact bytes. It is opened for inspection without data access,
 then reopened read-only/nonblocking, with inode/layout checks before/after the
 read. A different or unsafe helper is retained and refused, not overwritten.
-The first fixing app supports the historical states where this path is absent;
-replacement of a different independently installed helper needs a separately
+First helper publication supports the historical absence case; this does not
+prove the complete old-installer/first-restart bridge described above.
+Replacement of a different independently installed helper needs a separately
 reviewed protocol migration. Do not delete journals or replace files manually
 to turn a mismatch into a successful check.
 
@@ -138,9 +214,11 @@ winner and all torn temporaries are preserved. Temporary names are never read
 as fallback or selected as authority. A pending, terminal or corrupt app-slot
 journal never permits a new helper to be installed over missing support.
 
-Bootstrap failure leaves authenticated management available for diagnosis.
-The target app install API independently rechecks the exact helper and requires
-no app-slot transaction before its first legacy slot/backup mutation, while
+If the backend has already launched, a helper-bootstrap failure alone is logged
+without terminating it, preserving authenticated management for diagnosis.
+The target app install API independently rechecks the exact helper and critical
+consumer scripts, and requires no app-slot transaction before its first legacy
+slot/backup mutation, while
 already owning shared update admission. This is an installation prerequisite,
 not a durable receipt or a claim that the remaining legacy swap is crash-safe.
 
@@ -187,14 +265,16 @@ not physical power-loss, ext4 write-cache or target acceptance.
   exact-existing/no-replacement rule is a fail-closed prerequisite, not a final
   upgrade lifecycle. This remains required for WP-04 acceptance, not an implicit
   waiver of app-only updates.
-- Recovery before the first boot app consumer, with fail-closed consumer gates;
-  a failed init-script exit alone must not be assumed to stop rcS.
+- Full target/first-bridge acceptance of the new early/individual consumer gates;
+  establish independent support before old S95 can publish gated scripts and
+  preserve recovery across legacy rollback. Nonzero rcS exits alone are not gates.
 - Native/S95/watchdog/raw lifecycle coordination, first restart and runtime
   acceptance; do not replace code used by a running shell/executable in place.
 - Actual installation crash tests, ENOSPC/I/O failure, target mount negatives,
   legacy migration and complete device/release acceptance.
 
-The app API now refuses a missing/mismatched independent helper or any app-slot
-journal before legacy slot mutation. It still does not publish a journal or
-invoke recovery at boot. No account, SSH setting, signature algorithm/key ID,
+The app API now refuses missing/mismatched independent support/scripts or any
+app-slot journal before legacy slot mutation. Early gates invoke recovery, but
+the app API still does not publish a journal. No account, SSH setting, signature
+algorithm/key ID,
 version, release channel or accepted image is changed by this component.

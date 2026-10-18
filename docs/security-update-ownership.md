@@ -209,9 +209,12 @@ now install an independent rootfs copy; target startup attempts atomic app-only
 bootstrap without replacing unknown support. Failure keeps management available,
 and the target app API rechecks exact independent support/no journal under its
 existing admission before legacy mutation; see
-[app-slot recovery](security-app-slot-recovery.md). The trusted producer,
-boot/consumer gates and first restart are not yet wired; independent installation
-has host tests but no full target acceptance. The app API still uses its
+[app-slot recovery](security-app-slot-recovery.md). S02/individual app-consumer
+gates are now wired and host-tested, with compile-bound critical init scripts and
+helper-before-gate publication by the new backend. They are snapshot checks, not
+native launch ownership. The trusted producer, old-installer bridge ordering,
+helper migration and first-restart acceptance remain open. Independent
+installation has no full target acceptance. The app API still uses its
 legacy swap; no interrupted-install acceptance is claimed from this component.
 
 ## Command lifetime within the update worker

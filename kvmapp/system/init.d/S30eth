@@ -160,6 +160,7 @@ apply_ipv6_slaac() {
 }
 
 apply_ipv6_dhcpv6() {
+    /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
     stop_dhcpv6
     enable_ipv6_base || return 0
     write_ipv6_conf accept_ra 2

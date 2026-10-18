@@ -1,5 +1,5 @@
 //! Compile-bound app recovery and fixed-rootfs bootstrap publication. Early
-//! consumer gates and the slot producer remain separate activation work.
+//! consumer gate scripts are compile-bound below; the slot producer remains open.
 
 use super::{app_slot, operation_lock::ProcessLock, restore_binding, restore_fs};
 use rand_core::{OsRng, RngCore};
@@ -13,6 +13,27 @@ use std::{
 
 const EXECUTABLE: &str = "nanokvm-app-recovery";
 
+// Trusted backend source bytes, never a runtime /kvmapp or manifest fallback.
+// S95 must not overwrite these independent gates from a rolled-back bundle.
+pub const BOOT_SCRIPTS: &[(&str, &[u8])] = &[
+    (
+        "S02apprecover",
+        include_bytes!("../../../kvmapp/system/init.d/S02apprecover"),
+    ),
+    (
+        "S30eth",
+        include_bytes!("../../../kvmapp/system/init.d/S30eth"),
+    ),
+    (
+        "S30wifi",
+        include_bytes!("../../../kvmapp/system/init.d/S30wifi"),
+    ),
+    (
+        "S95nanokvm",
+        include_bytes!("../../../kvmapp/system/init.d/S95nanokvm"),
+    ),
+];
+
 /// Only a trusted backend build supplies these immutable bytes. No runtime
 /// pathname, manifest, environment variable or bundled helper is a fallback.
 /// This checks framing/ELF/build consistency, not a release RSA signature.
@@ -24,12 +45,14 @@ pub fn embedded_recovery() -> io::Result<&'static [u8]> {
 }
 
 /// Establish independent support for a historical app-only bridge. This is not
-/// an early boot hook, slot authorization, health acknowledgement or permission
+/// itself an early boot invocation, slot authorization, health acknowledgement or permission
 /// to perform the legacy two-rename swap. Never replace a different helper.
 pub fn ensure_installed() -> io::Result<()> {
     let image = embedded_recovery()?;
     let _admission = ProcessLock::acquire().map_err(io::Error::other)?;
     let absent_transaction = no_transaction()?;
+    let root = restore_fs::open_root(Path::new("/"), true)?;
+    let _boot_parent = boot_parent_at(&root, 0)?;
     let parent = fixed_parent(absent_transaction)?;
     ensure_at(&parent, image, 0, absent_transaction)
 }
@@ -44,9 +67,30 @@ pub fn check_before_legacy_install() -> io::Result<()> {
         return Err(invalid());
     }
     let parent = fixed_parent(false)?;
-    let _file = existing(&parent, image, 0)?.ok_or_else(invalid)?;
+    let _file = existing(&parent, EXECUTABLE, image, 0)?.ok_or_else(invalid)?;
     parent.sync_all()?;
+    let root = restore_fs::open_root(Path::new("/"), true)?;
+    check_boot_scripts_at(&root, 0)?;
     Ok(())
+}
+
+fn check_boot_scripts_at(root: &File, uid: u32) -> io::Result<()> {
+    let parent = boot_parent_at(root, uid)?;
+    for (name, bytes) in BOOT_SCRIPTS {
+        let file = existing(&parent, name, bytes, uid)?.ok_or_else(invalid)?;
+        file.sync_all()?;
+    }
+    parent.sync_all()
+}
+
+fn boot_parent_at(root: &File, uid: u32) -> io::Result<File> {
+    let device = root.metadata()?.dev();
+    protected_directory(root, uid, device)?;
+    let etc = restore_fs::open_beneath(root, "etc", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    protected_directory(&etc, uid, device)?;
+    let parent = restore_fs::open_beneath(&etc, "init.d", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    protected_directory(&parent, uid, device)?;
+    Ok(parent)
 }
 
 fn no_transaction() -> io::Result<bool> {
@@ -123,18 +167,18 @@ fn checked_file(file: &File, uid: u32, device: u64, size: usize) -> io::Result<s
     Ok(metadata)
 }
 
-fn existing(parent: &File, image: &[u8], uid: u32) -> io::Result<Option<File>> {
+fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Option<File>> {
     let device = parent.metadata()?.dev();
     protected_directory(parent, uid, device)?;
     // Inspect the object before any data open. O_PATH cannot block on a FIFO
     // or trigger a device read; openat2 still rejects all aliases/mounts.
-    let identity = match restore_fs::open_beneath(parent, EXECUTABLE, OFlags::PATH) {
+    let identity = match restore_fs::open_beneath(parent, name, OFlags::PATH) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     let identity = checked_file(&identity, uid, device, image.len())?;
-    let mut file = restore_fs::open_beneath(parent, EXECUTABLE, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    let mut file = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
     let before = checked_file(&file, uid, device, image.len())?;
     if before.ino() != identity.ino() {
         return Err(invalid());
@@ -150,7 +194,7 @@ fn existing(parent: &File, image: &[u8], uid: u32) -> io::Result<Option<File>> {
         return Err(invalid());
     }
     let after = checked_file(&file, uid, device, image.len())?;
-    let named = restore_fs::open_beneath(parent, EXECUTABLE, OFlags::PATH)?;
+    let named = restore_fs::open_beneath(parent, name, OFlags::PATH)?;
     let named = checked_file(&named, uid, device, image.len())?;
     if after.ino() != identity.ino() || named.ino() != identity.ino() {
         return Err(invalid());
@@ -162,7 +206,7 @@ fn ensure_at(parent: &File, image: &[u8], uid: u32, install: bool) -> io::Result
     if image.is_empty() || image.len() as u64 > restore_binding::MAX_HELPER {
         return Err(invalid());
     }
-    if let Some(file) = existing(parent, image, uid)? {
+    if let Some(file) = existing(parent, EXECUTABLE, image, uid)? {
         file.sync_all()?;
         parent.sync_all()?;
         return Ok(());
@@ -210,7 +254,7 @@ fn publish(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<()> 
     parent.sync_all()?;
     #[cfg(test)]
     checkpoint("published");
-    let _file = existing(parent, image, uid)?.ok_or_else(invalid)?;
+    let _file = existing(parent, EXECUTABLE, image, uid)?.ok_or_else(invalid)?;
     Ok(())
 }
 

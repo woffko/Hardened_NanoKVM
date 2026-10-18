@@ -2555,6 +2555,34 @@ fn install_binary(src: &Path, target: &Path) -> Result<()> {
 }
 
 async fn run_script(action: &'static str, timeout: Duration) -> Result<(String, String)> {
+    if action == "stop" {
+        // Stop remains available with an unresolved/missing app slot. Match
+        // S96's best-effort killall semantics without executing app code.
+        let output = command::run_allowed(
+            AllowedCommand::PicoclawStop,
+            ["killall", "picoclaw"],
+            timeout,
+        )
+        .await?;
+        return Ok((
+            "/bin/busybox killall picoclaw".into(),
+            command_output_text(&output),
+        ));
+    }
+    // Gate before selecting either the installed or bundled script: an older
+    // installed S96 may not contain the new shell guard. Do not auto-install or
+    // enable this optional service just to refresh its script.
+    let gate = command::run_allowed(
+        AllowedCommand::AppSlotGate,
+        ["gate"],
+        Duration::from_secs(20),
+    )
+    .await?;
+    if gate.status != 0 {
+        return Err(AppError::Conflict(
+            "picoclaw script is blocked by unresolved app recovery; no script started".into(),
+        ));
+    }
     let (command, display) = if Path::new(ETC_INIT_PICOCLAW_SCRIPT).exists() {
         (
             AllowedCommand::ServicePicoclawEtc,

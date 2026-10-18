@@ -62,7 +62,8 @@ cmp "$TARGET_DIR/kvmapp/server/NanoKVM-Server" "$TARGET_DIR/kvmapp/backends/Nano
 
 # Restore the bundled static recovery after generic ELF fixups, then bind its
 # final bytes to the final backend. Install the independent rootfs copy too;
-# early boot activation remains separate from installation/provenance.
+# package-installed S02/consumer gates use this copy; target acceptance and
+# trusted transaction production remain separate from installation/provenance.
 "${HOST_DIR:-}/bin/python3" "$ROOT/scripts/app-recovery-binding.py" verify \
 	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
 	--helper "$KVMAPP_SOURCE/system/bin/nanokvm-app-recovery"

@@ -15,6 +15,7 @@ SYSTEM_KERNEL_VERSION="${HARDENED_SYSTEM_KERNEL_VERSION:-}"
 SYSTEM_SECURITY_PATCH_LEVEL="${HARDENED_SYSTEM_SECURITY_PATCH_LEVEL:-}"
 OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_Rev1_4_2_rust}"
 BOOT_INIT_SCRIPTS=(
+  S02apprecover
   S00kmod
   S01fs
   S03usbdev
@@ -178,7 +179,7 @@ fi
   fi
 
   # Recovery bytes must survive an absent /kvmapp; this installs support only,
-  # not an early-boot hook or authorization to use a legacy p3 restore journal.
+  # before the installed S02/consumer gates; it never authorizes legacy p3 state.
   printf 'mkdir /usr/libexec\n'
   printf 'sif /usr/libexec mode 040755\n'
   printf 'sif /usr/libexec uid 0\n'

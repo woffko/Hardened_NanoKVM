@@ -45,6 +45,7 @@ setup_runtime_env() {
 }
 
 resolve_kvm_control_source() {
+  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
   for candidate in \
     "/kvmapp/picoclaw/skills/kvm-control" \
     "/kvmapp/skills/kvm-control" \
@@ -84,6 +85,7 @@ sync_kvm_control_skill() {
 }
 
 sync_agent_profile() {
+  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
   source_file="/kvmapp/picoclaw/AGENT_KVM.md"
   target_file="$PICOCLAW_HOME/workspace/AGENT.md"
   workspace_dir="$PICOCLAW_HOME/workspace"
@@ -121,6 +123,7 @@ start_service() {
 }
 
 onboard_service() {
+  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
   setup_runtime_env || return 1
   "$BIN_PATH" onboard >>"$LOG_FILE" 2>&1 || return 1
   sync_kvm_control_skill || return 1

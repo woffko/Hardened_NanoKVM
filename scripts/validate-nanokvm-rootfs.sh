@@ -26,7 +26,7 @@ EXPECTED_BACKEND="${EXPECTED_BACKEND:-rust}"
 EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-}"
 EXPECTED_UPDATE_KEY_ID="${EXPECTED_UPDATE_KEY_ID:-}"
 EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256="${EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256:-}"
-BOOT_INIT_SCRIPTS="S00kmod S01fs S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S95nanokvm"
+BOOT_INIT_SCRIPTS="S00kmod S01fs S02apprecover S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S95nanokvm"
 
 [ -f "$IMAGE" ] || die "rootfs image does not exist: $IMAGE"
 command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
@@ -114,6 +114,19 @@ require_boot_state_boundary() {
   fi
 }
 
+require_app_consumer_gates() {
+  for name in S02apprecover S30eth S30wifi S95nanokvm; do
+    bundled=$(dump_file "/kvmapp/system/init.d/$name" "app-gate-$name") || return 1
+    installed=$(dump_file "/etc/init.d/$name" "installed-app-gate-$name") || return 1
+    cmp -s "$bundled" "$installed" || die "independent app consumer gate differs: $name"
+    if grep -Fq '/usr/libexec/nanokvm-app-recovery gate' "$installed"; then
+      :
+    else
+      die "missing or unreadable independent app consumer gate: $name"
+    fi
+  done
+}
+
 debugfs_output "stats" >/dev/null || die "not a readable ext rootfs image: $IMAGE"
 
 require_dir /kvmapp
@@ -154,6 +167,7 @@ for script in $BOOT_INIT_SCRIPTS; do
 done
 
 require_boot_state_boundary || die "unsafe boot restore/rollback boundary"
+require_app_consumer_gates || die "unsafe independent app consumer boundary"
 
 reject_path /kvmapp/backends/NanoKVM-Server.go
 reject_path /kvmapp/server/NanoKVM-Server.go

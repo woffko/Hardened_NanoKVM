@@ -5,6 +5,7 @@ use std::{ffi::OsString, process::ExitCode};
 enum Mode {
     Status,
     Recover,
+    Gate,
 }
 
 fn parse(args: &[OsString]) -> Option<Mode> {
@@ -14,6 +15,7 @@ fn parse(args: &[OsString]) -> Option<Mode> {
     match args[1].to_str()? {
         "status" => Some(Mode::Status),
         "recover" => Some(Mode::Recover),
+        "gate" => Some(Mode::Gate),
         _ => None,
     }
 }
@@ -21,12 +23,13 @@ fn parse(args: &[OsString]) -> Option<Mode> {
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().take(3).collect();
     let Some(mode) = parse(&args) else {
-        eprintln!("usage: nanokvm-app-recovery status|recover");
+        eprintln!("usage: nanokvm-app-recovery status|recover|gate");
         return ExitCode::from(64);
     };
     let result = match mode {
         Mode::Status => app_slot::status(),
         Mode::Recover => app_slot::recover(),
+        Mode::Gate => app_slot::boot_gate(),
     };
     match result {
         Ok(status) => {
@@ -49,10 +52,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_fixed_status_and_recover_modes_are_accepted() {
+    fn only_fixed_status_recover_and_gate_modes_are_accepted() {
         let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
         assert_eq!(parse(&args(&["helper", "status"])), Some(Mode::Status));
         assert_eq!(parse(&args(&["helper", "recover"])), Some(Mode::Recover));
+        assert_eq!(parse(&args(&["helper", "gate"])), Some(Mode::Gate));
         for values in [
             vec!["helper"],
             vec!["helper", "commit"],

@@ -32,6 +32,8 @@ pub enum AllowedCommand {
     ServiceTailscaled,
     ServicePicoclawEtc,
     ServicePicoclawKvmapp,
+    AppSlotGate,
+    PicoclawStop,
     EtherWake,
     Fallocate,
     Mkswap,
@@ -84,6 +86,8 @@ impl AllowedCommand {
             AllowedCommand::ServicePicoclawKvmapp => {
                 OsStr::new("/kvmapp/system/init.d/S96picoclaw")
             }
+            AllowedCommand::AppSlotGate => OsStr::new("/usr/libexec/nanokvm-app-recovery"),
+            AllowedCommand::PicoclawStop => OsStr::new("/bin/busybox"),
             AllowedCommand::EtherWake => OsStr::new("ether-wake"),
             AllowedCommand::Fallocate => OsStr::new("fallocate"),
             AllowedCommand::Mkswap => OsStr::new("mkswap"),

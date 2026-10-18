@@ -515,6 +515,19 @@ pub fn recover() -> Result<Status> {
     store.recover()
 }
 
+/// Gate an app consumer before it opens or executes /kvmapp. A terminal layout
+/// is read-only: a restart may still own update admission. Only an interrupted
+/// nonterminal transaction enters recovery, which must acquire that admission.
+/// NoTransaction retains the trusted legacy/factory boot path; it is not a new
+/// candidate receipt, runtime health acknowledgement or authorization from p3.
+pub fn boot_gate() -> Result<Status> {
+    match status()? {
+        ready @ (Status::NoTransaction
+        | Status::Transaction(Phase::Committed | Phase::RolledBack)) => Ok(ready),
+        Status::Transaction(_) => recover(),
+    }
+}
+
 #[cfg(test)]
 #[path = "app_slot_tests.rs"]
 mod tests;
