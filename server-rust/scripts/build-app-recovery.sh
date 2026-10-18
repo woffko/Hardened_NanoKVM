@@ -12,7 +12,7 @@ done
 
 # Independent recovery must never require a library or interpreter in /kvmapp.
 # This script only builds/checks the helper; it does not install or activate it.
-unset NANOKVM_SSH_RUNTIME_BINDING
+unset NANOKVM_SSH_RUNTIME_BINDING NANOKVM_APP_RECOVERY_BINDING
 export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/restore-runtime}"
 export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang}"

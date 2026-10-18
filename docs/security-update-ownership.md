@@ -203,8 +203,11 @@ or mismatched recovery support must refuse the mutation, not claim that two
 renames are recoverable. Unknown/torn journal state must preserve evidence and
 must never synthesize authorization from a legacy p3 marker or plain inventory.
 The standalone rollback component and static helper build are now implemented
-and host-tested; see [app-slot recovery](security-app-slot-recovery.md). The
-trusted producer, independent bootstrap installation, boot/consumer gates and
+and host-tested. The linked backend compile-binds a distinct app-recovery image,
+and packaging/Buildroot preserve and check its exact bundled bytes; see
+[app-slot recovery](security-app-slot-recovery.md). That bundled copy is not an
+independent rootfs bootstrap. The trusted producer, independent bootstrap
+installation, boot/consumer gates and
 first restart are not yet wired or target-tested. The app API still uses its
 legacy swap; no interrupted-install acceptance is claimed from this component.
 

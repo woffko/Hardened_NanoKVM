@@ -21,6 +21,9 @@ test "$(cat "$STAGE_DIR/kvmapp/version")" = "$APP_VERSION"
 test -x "$STAGE_DIR/kvmapp/server/NanoKVM-Server"
 python3 "$ROOT/scripts/ssh-runtime-binding.py" inspect \
   --backend "$STAGE_DIR/kvmapp/server/NanoKVM-Server" --quiet
+python3 "$ROOT/scripts/app-recovery-binding.py" verify \
+  --backend "$STAGE_DIR/kvmapp/server/NanoKVM-Server" \
+  --helper "$STAGE_DIR/kvmapp/system/bin/nanokvm-app-recovery"
 test -x "$STAGE_DIR/kvmapp/hwmon/nanokvm-hwmon"
 test -x "$STAGE_DIR/kvmapp/kvm_system/kvm_system"
 if readelf -d "$STAGE_DIR/kvmapp/kvm_system/kvm_system" 2>/dev/null | grep -Eq '\((RPATH|RUNPATH)\)'; then

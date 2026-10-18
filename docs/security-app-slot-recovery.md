@@ -2,8 +2,10 @@
 
 This describes a source/host-tested rollback component, not an activated
 installer or a completed WP-04/C1 fix. The actual app API still uses its legacy
-slot swap. The new helper is not yet embedded, installed in rootfs, invoked by
-boot scripts, or accepted on a device. The full remediation scope is unchanged.
+slot swap. The new helper is compile-bound into the linked RV64 backend and
+packaged under `/kvmapp/system/bin`, but is not yet installed independently in
+rootfs, invoked by boot scripts, or accepted on a device. The full remediation
+scope is unchanged.
 
 ## Authority and fixed storage
 
@@ -89,6 +91,31 @@ component must not load `/kvmapp` libraries before establishing its boundary.
 This command builds/checks only; no installation, boot-hook activation, signing
 provenance or independent A/B reproducibility is implied.
 
+The linked backend build first builds both static helpers in the separate
+restore-runtime target directory. It requires a distinct `NKAPPBT1` app-recovery
+envelope as well as the existing `NKSSHRT1` SSH envelope. Both inputs are
+validated before either Cargo output is written. Host/unbound helper builds
+contain no usable binding; neither envelope domain can substitute for the other.
+The backend validates and retains the embedded app-recovery image. There is no
+runtime path, environment, bundled-file or manifest fallback.
+
+The app packager extracts the exact embedded image exclusively into
+`kvmapp/system/bin/nanokvm-app-recovery` and records its SHA-256 and size in the
+package inventory. An unrelated bundled helper cannot replace a missing or bad
+binding. Buildroot checks source helper/backend equality, restores the bundled
+helper after generic ELF fixups and checks the final pair again. These are
+build/package consistency checks, not RSA release authentication or permission
+to execute code supplied by an attacker. A helper living only inside `/kvmapp`
+still cannot recover a missing app slot.
+
+`server-rust/scripts/test-embedded-app-recovery.sh` checks host capture of the
+actual static RV64 input, without executing that foreign-architecture image.
+The binding CLI tests cover distinct domains, corruption, ambiguity, ELF
+constraints, exact extraction/verification, cache conflicts and unsafe input
+types. Package and post-build fixtures additionally reject missing, corrupt,
+duplicate or wrong-domain bindings and helper mismatch. These synthetic fixtures
+do not replace a real target package, full rootfs build or device gate.
+
 Host tests cover strict framing/context, each supported uncommitted phase/layout,
 idempotence, terminal layout mismatches, foreign/missing/symlink objects, FIFO/
 hard-link/permissions/device checks, a subprocess with restrictive umask,
@@ -102,8 +129,9 @@ not physical power-loss, ext4 write-cache or target acceptance.
 
 - Trusted journal producer with same-filesystem durable preparation/publication,
   exact signed/manual authority and retained metadata/key/policy context.
-- Immutable helper binding and atomic bootstrap installation outside `/kvmapp`,
-  both for rootfs builds and the historical app-only bridge.
+- Atomic bootstrap installation of the compile-bound helper outside `/kvmapp`,
+  both for rootfs builds and the historical app-only bridge; the current bundled
+  copy is not independent recovery support.
 - Recovery before the first boot app consumer, with fail-closed consumer gates;
   a failed init-script exit alone must not be assumed to stop rcS.
 - Native/S95/watchdog/raw lifecycle coordination, first restart and runtime

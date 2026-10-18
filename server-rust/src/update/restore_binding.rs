@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::io;
 
 pub const MAGIC: &[u8; 8] = b"NKSSHRT1";
+pub const APP_RECOVERY_MAGIC: &[u8; 8] = b"NKAPPBT1";
 pub const HEADER: usize = 48;
 pub const MAX_HELPER: u64 = 32 * 1024 * 1024;
 
@@ -17,7 +18,15 @@ pub struct Binding<'a> {
 }
 
 pub fn validate(bytes: &[u8]) -> Result<Binding<'_>, InvalidBinding> {
-    if bytes.len() < HEADER || &bytes[..8] != MAGIC {
+    validate_domain(bytes, MAGIC)
+}
+
+pub fn validate_app_recovery(bytes: &[u8]) -> Result<Binding<'_>, InvalidBinding> {
+    validate_domain(bytes, APP_RECOVERY_MAGIC)
+}
+
+fn validate_domain<'a>(bytes: &'a [u8], magic: &[u8; 8]) -> Result<Binding<'a>, InvalidBinding> {
+    if bytes.len() < HEADER || &bytes[..8] != magic {
         return Err(InvalidBinding);
     }
     let size = u64::from_le_bytes(bytes[8..16].try_into().map_err(|_| InvalidBinding)?);
@@ -140,6 +149,22 @@ mod tests {
         bytes.pop();
         bytes[HEADER] ^= 1;
         assert!(validate(&bytes).is_err());
+    }
+
+    #[test]
+    fn app_and_ssh_domains_cannot_substitute_for_each_other() {
+        let image = image();
+        let ssh = envelope(&image);
+        let mut app = ssh.clone();
+        app[..8].copy_from_slice(APP_RECOVERY_MAGIC);
+        assert!(validate_app_recovery(&ssh).is_err());
+        assert!(validate(&app).is_err());
+        assert_eq!(validate_app_recovery(&app).unwrap().image, image);
+        app.push(0);
+        assert!(validate_app_recovery(&app).is_err());
+        app.pop();
+        app[HEADER] ^= 1;
+        assert!(validate_app_recovery(&app).is_err());
     }
 
     #[test]

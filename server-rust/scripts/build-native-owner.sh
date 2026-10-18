@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="riscv64gc-unknown-linux-musl"
 [[ $# == 0 ]] || { echo "usage: $0" >&2; exit 2; }
-unset NANOKVM_SSH_RUNTIME_BINDING
+unset NANOKVM_SSH_RUNTIME_BINDING NANOKVM_APP_RECOVERY_BINDING
 export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/restore-runtime}"
 export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang}"

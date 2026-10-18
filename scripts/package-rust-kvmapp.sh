@@ -142,6 +142,15 @@ ssh_runtime=$(python3 "$ROOT_DIR/scripts/ssh-runtime-binding.py" inspect \
   --backend "$KVMAPP_STAGE/server/NanoKVM-Server")
 ssh_runtime_sha256=${ssh_runtime% *}
 ssh_runtime_size=${ssh_runtime#* }
+app_recovery=$(python3 "$ROOT_DIR/scripts/app-recovery-binding.py" inspect \
+  --backend "$KVMAPP_STAGE/server/NanoKVM-Server")
+app_recovery_sha256=${app_recovery% *}
+app_recovery_size=${app_recovery#* }
+mkdir -p "$KVMAPP_STAGE/system/bin"
+python3 "$ROOT_DIR/scripts/app-recovery-binding.py" extract \
+  --backend "$KVMAPP_STAGE/server/NanoKVM-Server" \
+  --destination "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
+chmod 0755 "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
 cp "$HWMON_BINARY" "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 chmod 0755 "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 
@@ -199,6 +208,9 @@ kvm_system_sha256=$(build_file_sha256 "$KVMAPP_STAGE/kvm_system/kvm_system")
   printf 'ssh_runtime: embedded-static-rv64-v1\n'
   printf 'ssh_runtime_sha256: %s\n' "$ssh_runtime_sha256"
   printf 'ssh_runtime_size: %s\n' "$ssh_runtime_size"
+  printf 'app_recovery: embedded-static-rv64-v1\n'
+  printf 'app_recovery_sha256: %s\n' "$app_recovery_sha256"
+  printf 'app_recovery_size: %s\n' "$app_recovery_size"
   printf 'hwmon_binary: kvmapp/hwmon/nanokvm-hwmon\n'
   printf 'hwmon_binary_sha256: %s\n' "$hwmon_binary_sha256"
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"

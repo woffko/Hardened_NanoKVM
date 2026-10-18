@@ -16,6 +16,7 @@ import struct
 import sys
 
 MAGIC = b"NKSSHRT1"
+APP_RECOVERY_MAGIC = b"NKAPPBT1"
 HEADER = 48
 MAX_HELPER = 32 * 1024 * 1024
 MAX_BACKEND = 128 * 1024 * 1024
@@ -59,24 +60,28 @@ def check_elf(image):
         raise ValueError("helper ELF has no LOAD")
 
 
-def envelope(image):
+def envelope(image, magic=MAGIC):
+    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+        raise ValueError("unsupported runtime binding domain")
     check_elf(image)
-    return MAGIC + struct.pack("<Q", len(image)) + hashlib.sha256(image).digest() + image
+    return magic + struct.pack("<Q", len(image)) + hashlib.sha256(image).digest() + image
 
 
-def locate(backend):
+def locate(backend, magic=MAGIC):
+    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+        raise ValueError("unsupported runtime binding domain")
     found = None
     offset = 0
     candidates = 0
     while True:
-        offset = backend.find(MAGIC, offset)
+        offset = backend.find(magic, offset)
         if offset < 0:
             break
         candidates += 1
         if candidates > 64:
             raise ValueError("backend has too many helper binding markers")
         start = offset
-        offset += len(MAGIC)
+        offset += len(magic)
         if start + HEADER > len(backend):
             continue
         size = struct.unpack_from("<Q", backend, start + 8)[0]
@@ -107,26 +112,31 @@ def create_exclusive(path, data, mode):
         os.fsync(output.fileno())
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(magic=MAGIC, description=__doc__):
+    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+        raise ValueError("unsupported runtime binding domain")
+    parser = argparse.ArgumentParser(description=description)
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--helper", required=True, type=Path)
     prepare.add_argument("--directory", required=True, type=Path)
-    for name in ("inspect", "extract"):
+    for name in ("inspect", "extract", "verify"):
         command = sub.add_parser(name)
         command.add_argument("--backend", required=True, type=Path)
         if name == "extract":
             command.add_argument("--destination", required=True, type=Path)
+        elif name == "verify":
+            command.add_argument("--helper", required=True, type=Path)
         else:
             command.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         with regular(args.helper, MAX_HELPER) as source:
             image = source.read(MAX_HELPER + 1)
-        data = envelope(image)
+        data = envelope(image, magic)
         args.directory.mkdir(parents=True, exist_ok=True)
-        destination = args.directory.resolve() / (hashlib.sha256(image).hexdigest() + ".binding")
+        prefix = "" if magic == MAGIC else "app-"
+        destination = args.directory.resolve() / (prefix + hashlib.sha256(image).hexdigest() + ".binding")
         try:
             create_exclusive(destination, data, 0o444)
         except FileExistsError:
@@ -137,9 +147,13 @@ def main():
         return
     with regular(args.backend, MAX_BACKEND) as source:
         with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as backend:
-            image, digest = locate(backend)
+            image, digest = locate(backend, magic)
     if args.command == "extract":
         create_exclusive(args.destination, image, 0o500)
+    elif args.command == "verify":
+        with regular(args.helper, MAX_HELPER) as source:
+            if source.read(MAX_HELPER + 1) != image:
+                raise ValueError("helper differs from exact embedded runtime")
     elif not args.quiet:
         print(digest.hex(), len(image))
 

@@ -132,12 +132,13 @@ class BindingTests(unittest.TestCase):
 
     def test_post_build_gate_checks_final_copied_backend(self):
         script = TOOL.parent.parent / "buildroot-external/hardened-sg2002/board/sg2002/post-build.sh"
-        for fault in [None, "missing-binding", "backup-differs", "unsafe-runpath"]:
+        for fault in [None, "missing-binding", "backup-differs", "unsafe-runpath",
+                      "missing-app-binding", "app-helper-mismatch", "app-helper-missing"]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="nanokvm-post-build-") as directory:
                 work = Path(directory)
                 source, target, host = work / "source", work / "target", work / "host"
                 for base in [source, target / "kvmapp"]:
-                    for child in ["server", "backends", "hwmon"]:
+                    for child in ["server", "backends", "hwmon", "system/bin"]:
                         (base / child).mkdir(parents=True)
                 (host / "bin").mkdir(parents=True)
                 (host / "bin/python3").symlink_to(sys.executable)
@@ -148,10 +149,15 @@ class BindingTests(unittest.TestCase):
                 # Stub patchelf controls only this shell-gate fixture; no ABI,
                 # provenance, Buildroot pipeline or target execution claim.
                 backend = b"synthetic backend" + (b"" if fault == "missing-binding" else binding.envelope(image()))
+                if fault != "missing-app-binding":
+                    backend += binding.envelope(image(), binding.APP_RECOVERY_MAGIC)
                 (source / "server/NanoKVM-Server").write_bytes(backend)
                 (source / "backends/NanoKVM-Server.rust").write_bytes(
                     backend + (b"differs" if fault == "backup-differs" else b""))
                 (source / "hwmon/nanokvm-hwmon").write_bytes(b"synthetic hwmon")
+                if fault != "app-helper-missing":
+                    (source / "system/bin/nanokvm-app-recovery").write_bytes(
+                        image() + (b"differs" if fault == "app-helper-mismatch" else b""))
                 env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOST_DIR": str(host),
                        "NANOKVM_KVMAPP_SOURCE_DIR": str(source)}
                 result = subprocess.run([str(script), str(target)], env=env, capture_output=True,
@@ -160,6 +166,7 @@ class BindingTests(unittest.TestCase):
                 if fault is None:
                     self.assertEqual((target / "kvmapp/server/NanoKVM-Server").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/backends/NanoKVM-Server.rust").read_bytes(), backend)
+                    self.assertEqual((target / "kvmapp/system/bin/nanokvm-app-recovery").read_bytes(), image())
 
 
 if __name__ == "__main__":

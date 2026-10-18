@@ -21,6 +21,8 @@ try {
   fs.symlinkSync(path.join(root, 'scripts/lib'), path.join(project, 'scripts/lib'));
   fs.symlinkSync(path.join(root, 'scripts/ssh-runtime-binding.py'),
     path.join(project, 'scripts/ssh-runtime-binding.py'));
+  fs.symlinkSync(path.join(root, 'scripts/app-recovery-binding.py'),
+    path.join(project, 'scripts/app-recovery-binding.py'));
   const script = path.join(project, 'scripts/package-rust-kvmapp.sh');
   if (args[1]) {
     const source = spawnSync('git', ['show', `${args[1]}:scripts/package-rust-kvmapp.sh`],
@@ -52,6 +54,9 @@ try {
   header.writeBigUInt64LE(BigInt(helper.length), 8);
   crypto.createHash('sha256').update(helper).digest().copy(header, 16);
   const envelope = Buffer.concat([header, helper]);
+  const appHeader = Buffer.from(header);
+  appHeader.write('NKAPPBT1');
+  const appEnvelope = Buffer.concat([appHeader, helper]);
   const host = fs.readFileSync('/bin/true');
   const cases = [
     ['valid package matches its checksum', null],
@@ -69,6 +74,11 @@ try {
       ['missing embedded helper rejects', 'binding-missing'],
       ['corrupt embedded helper rejects', 'binding-corrupt'],
       ['duplicate embedded helper rejects', 'binding-duplicate'],
+      ['missing app recovery rejects', 'app-binding-missing'],
+      ['corrupt app recovery rejects', 'app-binding-corrupt'],
+      ['duplicate app recovery rejects', 'app-binding-duplicate'],
+      ['SSH domain cannot replace app recovery', 'app-binding-wrong-domain'],
+      ['bundled app recovery cannot replace embedded bytes', 'app-binding-bundled'],
       ['absolute CARGO_TARGET_DIR is honored', 'target-absolute'],
       ['relative CARGO_TARGET_DIR is honored', 'target-relative'],
     ] : []),
@@ -83,7 +93,15 @@ try {
     if (fault === 'binding-missing') binding = Buffer.alloc(0);
     if (fault === 'binding-corrupt') binding[binding.length - 1] ^= 1;
     if (fault === 'binding-duplicate') binding = Buffer.concat([binding, binding]);
-    fs.writeFileSync(backend, Buffer.concat([host, binding]), { mode: 0o755 });
+    let appBinding = Buffer.from(appEnvelope);
+    if (fault === 'app-binding-missing' || fault === 'app-binding-bundled') appBinding = Buffer.alloc(0);
+    if (fault === 'app-binding-corrupt') appBinding[appBinding.length - 1] ^= 1;
+    if (fault === 'app-binding-duplicate') appBinding = Buffer.concat([appBinding, appBinding]);
+    if (fault === 'app-binding-wrong-domain') {
+      binding = Buffer.alloc(0);
+      appBinding = Buffer.from(envelope);
+    }
+    fs.writeFileSync(backend, Buffer.concat([host, binding, appBinding]), { mode: 0o755 });
     const env = { ...process.env, BUILD_DIR: build, STAGE_DIR: path.join(build, 'stage'),
       OUT_DIR: out, ARTIFACT_NAME: 'fixture.tar.gz', RUST_BINARY: backend,
       HWMON_BINARY: '/bin/true', KVM_SYSTEM_SOURCE: '/bin/true', NATIVE_LIB_DIR: native,
@@ -124,6 +142,11 @@ try {
     if (fault === 'existing') fs.writeFileSync(archive, 'previous archive\n');
     if (fault === 'stage-lock') fs.mkdirSync(env.STAGE_DIR + '.lock');
     if (fault === 'output-lock') fs.mkdirSync(archive + '.lock');
+    const bundledRecovery = path.join(project, 'kvmapp/system/bin/nanokvm-app-recovery');
+    if (fault === 'app-binding-bundled') {
+      fs.mkdirSync(path.dirname(bundledRecovery), { recursive: true });
+      fs.writeFileSync(bundledRecovery, helper);
+    }
     try {
       const result = spawnSync('sh', [script], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
       if (result.error) throw result.error;
@@ -136,6 +159,10 @@ try {
           assert(manifest.includes('ssh_runtime: embedded-static-rv64-v1\n'));
           assert(manifest.includes(`ssh_runtime_sha256: ${crypto.createHash('sha256').update(helper).digest('hex')}\n`));
           assert(manifest.includes('ssh_runtime_size: 120\n'));
+          assert(manifest.includes('app_recovery: embedded-static-rv64-v1\n'));
+          assert(manifest.includes(`app_recovery_sha256: ${crypto.createHash('sha256').update(helper).digest('hex')}\n`));
+          assert(manifest.includes('app_recovery_size: 120\n'));
+          assert.deepEqual(fs.readFileSync(path.join(env.STAGE_DIR, 'kvmapp/system/bin/nanokvm-app-recovery')), helper);
         }
       } else {
         assert.notEqual(result.status, 0, 'faulty package reported success');
@@ -148,6 +175,7 @@ try {
       console.error(`FAIL ${label}: ${error.message}`);
     } finally {
       fs.rmSync(sentinel, { force: true });
+      if (fault === 'app-binding-bundled') fs.rmSync(bundledRecovery);
     }
   }
 } finally {

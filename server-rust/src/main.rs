@@ -54,7 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tls::install_crypto_provider();
 
     #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
-    nanokvm_rust_server::update::restore_job::PinnedSshHelper::check_embedded()?;
+    {
+        nanokvm_rust_server::update::restore_job::PinnedSshHelper::check_embedded()?;
+        let _ = nanokvm_rust_server::update::app_bootstrap::embedded_recovery()?;
+    }
 
     nanokvm_rust_server::api::storage::secure_existing_storage()?;
     install_runtime_boot_scripts()?;

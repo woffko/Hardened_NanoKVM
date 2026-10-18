@@ -23,6 +23,9 @@ define HARDENED_NANOKVM_KVMAPP_INSTALL_TARGET_CMDS
 	cmp $(@D)/server/NanoKVM-Server $(@D)/backends/NanoKVM-Server.rust
 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_HARDENED_SG2002_PATH)/../../scripts/ssh-runtime-binding.py \
 		inspect --backend $(@D)/server/NanoKVM-Server --quiet
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_HARDENED_SG2002_PATH)/../../scripts/app-recovery-binding.py \
+		verify --backend $(@D)/server/NanoKVM-Server \
+		--helper $(@D)/system/bin/nanokvm-app-recovery
 	$(INSTALL) -d $(TARGET_DIR)/kvmapp $(TARGET_DIR)/etc/kvm \
 		$(TARGET_DIR)/etc/init.d $(TARGET_DIR)/mnt/data
 	cp -a $(@D)/. $(TARGET_DIR)/kvmapp/

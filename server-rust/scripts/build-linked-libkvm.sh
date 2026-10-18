@@ -30,8 +30,8 @@ for obj in crt1.o crti.o crtbegin.o crtend.o crtn.o; do
   fi
 done
 
-# Build the static helper separately before the dynamic backend. It deliberately
-# has no binding of its own, so this cannot recursively embed previous builds.
+# Build both static helpers before the dynamic backend. Neither has embedded
+# bindings of its own, so this cannot recursively embed previous builds.
 METADATA="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 --locked --offline)"
 TARGET_DIR="$(printf '%s' "$METADATA" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 RESTORE_TARGET_DIR="${NANOKVM_RESTORE_TARGET_DIR:-$TARGET_DIR/restore-runtime}"
@@ -42,10 +42,15 @@ if [[ "$RESTORE_TARGET_DIR" == "$TARGET_DIR" ]]; then
   exit 1
 fi
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-restore-runtime.sh" --locked --offline
+CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-app-recovery.sh" --locked --offline
 NANOKVM_SSH_RUNTIME_BINDING="$(python3 "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-ssh-sandbox" \
   --directory "$TARGET_DIR/ssh-runtime-bindings")"
 export NANOKVM_SSH_RUNTIME_BINDING
+NANOKVM_APP_RECOVERY_BINDING="$(python3 "$ROOT/../scripts/app-recovery-binding.py" prepare \
+  --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-app-recovery" \
+  --directory "$TARGET_DIR/app-recovery-bindings")"
+export NANOKVM_APP_RECOVERY_BINDING
 
 export NANOKVM_SYSROOT_LIB="$SYSROOT_LIB"
 export RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}"
