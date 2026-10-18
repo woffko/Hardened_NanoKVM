@@ -1,6 +1,7 @@
 //! Cooperative writer admission/drain. Only enrolled writers are covered;
 //! currently account mutation/legacy seed, Config YAML/startup secret, firewall,
-//! time settings/sync and syslog settings. Native services remain separate owners.
+//! time settings/sync, syslog settings and network settings/cache APIs.
+//! Native services remain separate owners.
 //! NOT a coherent device snapshot, service stop, raw-writer ticket or durable crash protocol.
 
 use super::operation_lock::{Domain, LockError, ProcessLock};

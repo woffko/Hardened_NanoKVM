@@ -222,8 +222,8 @@ serial conflict/retry without lost fields, session retiming, startup secret reus
 publication errors and retained command/follow-up lifetime. They do not execute
 native firewall, TLS generation at device paths or reboot.
 
-Network, active terminal sessions, scripts, optional apps and independent native
-service/background writers are not quiesced.
+Network API enrollment is described below. Active terminal sessions, scripts,
+optional apps and independent native service/background writers are not quiesced.
 No coherent preservation snapshot, all-writer freeze, phase-aware Stop/join,
 service stop, raw-writer ticket
 or retained transaction is accepted from this component. The host fixtures do
@@ -277,7 +277,8 @@ crash recovery, complete pathname hardening and directory-sync guarantees. A
 backend restart/power loss is not proved safe by this timer protocol. Actual
 iptables/interface/TLS/remote reachability and service process-tree completion
 remain target gates. No production raw capture consumes the composed boundary
-yet. Other producers, especially network/init/local privileged code, remain open.
+yet. Other producers, especially independent network/init/local privileged code,
+remain open.
 
 Synthetic tests exercise real set/confirm handlers, timer expiry, replacement,
 lost replies, cancellation/deadline while a fixture command runs, sticky errors,
@@ -318,6 +319,40 @@ admission. No service script changes or target clock/logging operations are
 included here. Fixtures use explicit cfg(test)-only rooted files and commands,
 never process-global environment changes or production-command fallback.
 
+### Owned network settings and optional WOL history
+
+DNS/IPv6 changes, authenticated Wi-Fi connect/disconnect, AP credential/request
+publication, WOL rename/delete and optional history writes use the Config serial
+domain. Runtime work retains admission through the complete file/service chain,
+including manual DNS resolver repair and DHCP resolver publication after the
+Ethernet restart, and credential removal after Wi-Fi stop. Losing the HTTP reply
+does not abandon an enrolled operation or its direct-child cleanup. Other Config
+mutations fail busy; no per-file lock gap is introduced.
+
+WOL packet dispatch stays outside local configuration admission. Only after a
+successful target action does the API try to save history. Busy/paused or failed
+cache mutation is best-effort and cannot turn that successful action into failure.
+Cache edits and history insertion share one serialized read/modify/write boundary;
+read errors no longer become an empty history that overwrites existing data.
+Wi-Fi SSID publication now uses mode 0600 as already used for its password. Route URLs,
+DTOs, service arguments and deadlines are unchanged.
+
+AP success still means credentials plus `wifi_try_connect` publication, not
+association/IP completion. The native `kvm_system` consumer removes that marker,
+calls S30wifi and independently writes connection state; it has no Rust permit.
+Ordinary disconnect likewise is not a settlement/join of that native attempt.
+S30eth/S30wifi spawn independent DHCP/WPA/AP clients and hooks. Service command
+completion is not daemon/descendant closure, effective network readback or proof
+that a pending marker was consumed. Before capture, stop/join the respawners and
+native consumers and explicitly complete or abort pending attempts.
+
+Multi-file publication still can leave earlier writes after a later failure;
+negative fixtures demonstrate this rather than claiming rollback. File/path
+durability, canonical legacy network capture and signed-image regeneration remain
+open. Synthetic fixtures root fixed paths and commands using a cfg(test)-only
+permit, with no environment selector or real-command fallback. They do not change
+host/device networking, transmit real WOL packets or test physical connectivity.
+
 ## Explicit remaining boundaries
 
 - The front-end kernel lease is cooperative cross-process admission, not a
@@ -340,11 +375,11 @@ never process-global environment changes or production-command fallback.
   transaction authority. A callback lease alone is still not proof that every
   process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
-- Other startup writes, network, active terminal,
+- Other startup writes, independent native network producers, active terminal,
   scripts, optional-app workers and other configuration writers do not yet
-  acquire the shared quiescence permit. Account/Config/firewall/time/syslog API
-  enrollment is partial
-  coverage, not a credential/TLS/config rollback protocol. No snapshot may claim
+  acquire the shared quiescence permit. Account/Config/firewall/time/syslog/network
+  API enrollment is partial coverage, not a credential/TLS/config rollback
+  protocol. No snapshot may claim
   all writers are stopped merely because update admission or this drain is held.
 - No generic abort handle is exposed. Explicit Stop must use phase-aware
   cancellation plus child/work-owner join, not HTTP disconnect, dropped

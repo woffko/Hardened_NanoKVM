@@ -11,6 +11,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Account and Config APIs | Typed owned permits and common activity drain | Integrate capture; retain native/web/config crash-recovery work separately |
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
+| DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -23,12 +24,24 @@ app transitions need an explicit completion/abort decision. Preserve authoritati
 settings and regenerate derived runtime files from signed code; do not copy
 arbitrary symlinks, shell defaults, executables or caches as trusted state.
 
+WOL target dispatch remains independent of local cache admission. If that
+optional history is busy/paused or cannot be read, dispatch can succeed without
+changing it. Rename/delete are normal Config mutations and fail on busy/error.
+Wi-Fi SSID and password publication now both use mode 0600.
+
 Native `kvm_system` is a writer too: its AP state machine writes AP credentials
 and invokes Wi-Fi init independently of HTTP. Rust hwmon, in contrast, writes
 temporary telemetry rather than the preserved schema. Optional S96/S98 scripts
 are not default-installed Buildroot init entries; source presence does not prove
 an installed/running device service. Native library side effects need their own
 evidence, not a conclusion from a path-name search.
+
+An AP API success publishes credentials and a request marker; it is not a
+connection receipt. Draining API activity does not settle that native request.
+The marker consumer and any in-flight init work must be stopped/joined and the
+pending attempt explicitly completed or aborted before capture. Ordinary Wi-Fi
+disconnect retains the legacy service/file behavior; it is not that maintenance
+settlement protocol.
 
 Do not assume cgroup freezer or PID namespaces from a kernel version number.
 Check the exact deployed capabilities before selecting a maintenance mechanism;
