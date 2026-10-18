@@ -1037,6 +1037,11 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 
 ## Required writer/boot integration (not implemented yet)
 
+App/system request work now shares an in-process job owner; its exact lifetime
+guarantees and remaining raw-child/quiescence/durable-lock gaps are documented
+in [security-update-ownership.md](security-update-ownership.md). This does not
+satisfy the protected transaction/writer requirements below by itself.
+
 1. Hold the common update transaction lock. Retain exact metadata/signature;
    reverify current trust policy and archive identity. Do not authorize from
    `staged.json`, old raw markers or copied preservation trees.

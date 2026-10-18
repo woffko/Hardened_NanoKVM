@@ -10,6 +10,7 @@ use crate::{
     auth::{password::AccountStore, session::SessionStore, terminal_ticket::TerminalTicketStore},
     config::Config,
     security::rate_limit::LoginRateLimiter,
+    update::operation::UpdateCoordinator,
 };
 
 pub const DEFAULT_SESSION_LOCK_DURATION_SECS: u64 = 900;
@@ -29,6 +30,7 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub updates: Arc<UpdateCoordinator>,
     pub config: Arc<Config>,
     pub accounts: Arc<AccountStore>,
     pub sessions: Arc<SessionStore>,
@@ -59,6 +61,7 @@ impl AppState {
             normalize_session_lock_duration(config.security.access_token_duration);
 
         Ok(Self {
+            updates: Arc::new(UpdateCoordinator::default()),
             config: Arc::new(config),
             accounts: Arc::new(accounts),
             sessions: Arc::new(sessions),

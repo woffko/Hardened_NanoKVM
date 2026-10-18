@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod keys;
+pub mod operation;
 pub mod raw_transport;
 pub mod restore_archive;
 mod restore_binding;

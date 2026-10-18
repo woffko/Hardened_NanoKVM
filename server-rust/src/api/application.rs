@@ -12,10 +12,9 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{fs as tokio_fs, io::AsyncWriteExt, time};
+use tokio::time;
 
 use crate::{
     AppError, Result,
@@ -23,7 +22,11 @@ use crate::{
     error::ApiResponse,
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
-    update::{archive::extract_tar_gz_safe, keys::resolve_update_public_key},
+    update::{
+        archive::extract_tar_gz_safe,
+        keys::resolve_update_public_key,
+        operation::{Kind, Snapshot, UpdateOwner},
+    },
 };
 
 const APP_DIR: &str = "/kvmapp";
@@ -42,8 +45,6 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
 const APPLICATION_UPDATE_CACHE_DIR_NAME: &str = "application-update";
 const APP_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const APP_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
-
-static UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
 #[derive(Debug, Serialize)]
 pub struct VersionRsp {
@@ -83,14 +84,8 @@ struct LatestRelease {
     signature_key_id: String,
 }
 
-struct UpdateGuard;
-
-impl Drop for UpdateGuard {
-    fn drop(&mut self) {
-        if let Ok(mut is_updating) = UPDATE_LOCK.lock() {
-            *is_updating = false;
-        }
-    }
+pub async fn update_status(State(state): State<AppState>) -> Result<Json<ApiResponse<Snapshot>>> {
+    Ok(Json(ApiResponse::ok(state.updates.snapshot()?)))
 }
 
 pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoResponse> {
@@ -157,18 +152,27 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
         ));
     }
 
-    let _guard = acquire_update_lock()?;
-    let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
-
-    prepare_cache_dir(&cache_dir)?;
-    let latest = get_latest(is_preview_enabled(), &state.config).await?;
-    let archive = cache_dir.join(&latest.name);
-    download_release_asset(&latest, &archive).await?;
-    verify_sha512(&archive, &latest.sha512)?;
-
-    install_package_blocking(archive, cache_dir.clone()).await?;
-    let _ = remove_dir_if_exists(&cache_dir);
-    restart_nanokvm_after_response();
+    let owner = state.updates.acquire(Kind::ApplicationOnline)?;
+    owner
+        .run(move |job| async move {
+            let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
+            let prepare_dir = cache_dir.clone();
+            job.blocking("prepare app cache", move || prepare_cache_dir(&prepare_dir))
+                .await?;
+            let latest = get_latest(is_preview_enabled(), &state.config).await?;
+            let archive = cache_dir.join(&latest.name);
+            download_release_asset(&latest, &archive).await?;
+            job.blocking("verify and install app", move || {
+                verify_sha512(&archive, &latest.sha512)?;
+                install_package(&archive, &cache_dir)?;
+                let _ = remove_dir_if_exists(&cache_dir);
+                Ok(())
+            })
+            .await?;
+            restart_nanokvm_after_response(job);
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -177,15 +181,31 @@ pub async fn offline_update(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<ApiResponse<()>>> {
-    let _guard = acquire_update_lock()?;
-    let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
-
-    prepare_cache_dir(&cache_dir)?;
-    let archive = save_uploaded_update(&cache_dir, &mut multipart).await?;
-
-    install_package_blocking(archive, cache_dir.clone()).await?;
-    let _ = remove_dir_if_exists(&cache_dir);
-    restart_nanokvm_after_response();
+    let owner = state.updates.acquire(Kind::ApplicationOffline)?;
+    owner
+        .run(move |job| async move {
+            let cache_dir = application_update_cache_dir(&state.config.paths.update_cache_dir);
+            let prepare_dir = cache_dir.clone();
+            job.blocking("prepare offline app cache", move || {
+                prepare_cache_dir(&prepare_dir)
+            })
+            .await?;
+            let archive = time::timeout(
+                DOWNLOAD_TIMEOUT,
+                save_uploaded_update(&cache_dir, &mut multipart, &job),
+            )
+            .await
+            .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
+            job.blocking("install offline app", move || {
+                install_package(&archive, &cache_dir)?;
+                let _ = remove_dir_if_exists(&cache_dir);
+                Ok(())
+            })
+            .await?;
+            restart_nanokvm_after_response(job);
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -311,7 +331,11 @@ async fn download_release_asset(latest: &LatestRelease, target: &Path) -> Result
     Ok(())
 }
 
-async fn save_uploaded_update(cache_dir: &Path, multipart: &mut Multipart) -> Result<PathBuf> {
+async fn save_uploaded_update(
+    cache_dir: &Path,
+    multipart: &mut Multipart,
+    owner: &UpdateOwner,
+) -> Result<PathBuf> {
     let mut archive = None;
 
     while let Some(mut field) = multipart
@@ -330,7 +354,12 @@ async fn save_uploaded_update(cache_dir: &Path, multipart: &mut Multipart) -> Re
         validate_update_filename(&filename)?;
 
         let target = cache_dir.join(&filename);
-        let mut file = tokio_fs::File::create(&target).await?;
+        let create_target = target.clone();
+        let mut file = owner
+            .blocking("create offline app archive", move || {
+                Ok(fs::File::create(create_target)?)
+            })
+            .await?;
         let mut written = 0_u64;
 
         while let Some(chunk) = field
@@ -344,9 +373,19 @@ async fn save_uploaded_update(cache_dir: &Path, multipart: &mut Multipart) -> Re
                     "update archive is too large".to_string(),
                 ));
             }
-            file.write_all(&chunk).await?;
+            file = owner
+                .blocking("write offline app archive", move || {
+                    file.write_all(&chunk)?;
+                    Ok(file)
+                })
+                .await?;
         }
-        file.sync_all().await?;
+        owner
+            .blocking("sync offline app archive", move || {
+                file.sync_all()?;
+                Ok(())
+            })
+            .await?;
 
         if written == 0 {
             return Err(AppError::BadRequest("empty update archive".to_string()));
@@ -355,12 +394,6 @@ async fn save_uploaded_update(cache_dir: &Path, multipart: &mut Multipart) -> Re
     }
 
     archive.ok_or_else(|| AppError::BadRequest("no update file uploaded".to_string()))
-}
-
-async fn install_package_blocking(archive: PathBuf, cache_dir: PathBuf) -> Result<()> {
-    tokio::task::spawn_blocking(move || install_package(&archive, &cache_dir))
-        .await
-        .map_err(|err| AppError::Internal(format!("update task failed: {err}")))?
 }
 
 fn install_package(source: &Path, cache_dir: &Path) -> Result<()> {
@@ -731,17 +764,6 @@ fn application_update_cache_dir(cache_root: &Path) -> PathBuf {
     cache_root.join(APPLICATION_UPDATE_CACHE_DIR_NAME)
 }
 
-fn acquire_update_lock() -> Result<UpdateGuard> {
-    let mut is_updating = UPDATE_LOCK
-        .lock()
-        .map_err(|_| AppError::Internal("update lock poisoned".to_string()))?;
-    if *is_updating {
-        return Err(AppError::Conflict("update already in progress".to_string()));
-    }
-    *is_updating = true;
-    Ok(UpdateGuard)
-}
-
 fn ensure_success(output: &CommandOutput, action: &str) -> Result<()> {
     if output.status == 0 {
         return Ok(());
@@ -867,17 +889,18 @@ fn chmod_recursively(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn restart_nanokvm_after_response() {
-    tokio::spawn(async {
+fn restart_nanokvm_after_response(owner: UpdateOwner) {
+    tokio::spawn(async move {
         time::sleep(Duration::from_secs(1)).await;
-        if let Err(err) = run_allowed(
+        let result = run_allowed(
             AllowedCommand::ServiceNanokvmRestart,
             ["restart"],
             Duration::from_secs(20),
         )
-        .await
-        {
-            tracing::error!(error = %err, "failed to restart NanoKVM after update");
+        .await;
+        if !matches!(result, Ok(ref output) if output.status == 0) {
+            owner.record_outcome(false);
+            tracing::error!("failed to restart NanoKVM after update");
         }
     });
 }
@@ -907,6 +930,55 @@ fn now_unix_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
+        use axum::{body::Body, extract::FromRequest, http::Request};
+        let mut body = b"--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hardened-nanokvm-kvmapp-fixture.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n".to_vec();
+        body.extend_from_slice(payload);
+        if complete {
+            body.extend_from_slice(b"\r\n--fixture--\r\n");
+        }
+        let request = Request::builder()
+            .header("content-type", "multipart/form-data; boundary=fixture")
+            .body(Body::from(body))
+            .unwrap();
+        Multipart::from_request(request, &()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn offline_upload_file_work_is_owned_and_exact() {
+        use crate::update::operation::{Phase, UpdateCoordinator};
+        use std::sync::Arc;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().to_path_buf();
+        let coordinator = Arc::new(UpdateCoordinator::default());
+        let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
+        let payload = b"synthetic archive bytes, not an installable archive";
+        let mut multipart = upload_fixture(payload, true).await;
+        let archive = owner
+            .run(move |job| async move { save_uploaded_update(&path, &mut multipart, &job).await })
+            .await
+            .unwrap();
+        assert_eq!(fs::read(archive).unwrap(), payload);
+        let snapshot = coordinator.snapshot().unwrap();
+        assert!(snapshot.active.is_none() && snapshot.last.unwrap().phase == Phase::Finished);
+    }
+
+    #[tokio::test]
+    async fn interrupted_offline_body_never_returns_an_installable_upload() {
+        use crate::update::operation::{Phase, UpdateCoordinator};
+        use std::sync::Arc;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().to_path_buf();
+        let coordinator = Arc::new(UpdateCoordinator::default());
+        let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
+        let mut multipart = upload_fixture(b"synthetic truncated body", false).await;
+        assert!(owner.run(move |job| async move {
+            save_uploaded_update(&path, &mut multipart, &job).await
+        }).await.is_err());
+        let snapshot = coordinator.snapshot().unwrap();
+        assert!(snapshot.active.is_none() && snapshot.last.unwrap().phase == Phase::Failed);
+    }
     use std::os::unix::fs::symlink;
 
     #[test]

@@ -1,3 +1,20 @@
+use crate::{
+    AppError, Result,
+    api::application::{compare_application_versions, current_app_version, is_preview_enabled},
+    api::system_firewall,
+    config::Config,
+    error::ApiResponse,
+    state::AppState,
+    system::command::{AllowedCommand, CommandOutput, run_allowed},
+    update::{
+        archive::extract_tar_gz_reader,
+        keys::resolve_update_public_key,
+        operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
+        staged_archive::{StageDirectory, StagedDownload},
+        staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
+        staged_snapshot::PublicSnapshot,
+    },
+};
 use axum::{Json, extract::State, response::IntoResponse};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -13,26 +30,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
-};
-use tokio::task;
-
-use crate::{
-    AppError, Result,
-    api::application::{compare_application_versions, current_app_version, is_preview_enabled},
-    api::system_firewall,
-    config::Config,
-    error::ApiResponse,
-    state::AppState,
-    system::command::{AllowedCommand, CommandOutput, run_allowed},
-    update::{
-        archive::extract_tar_gz_reader,
-        keys::resolve_update_public_key,
-        staged_archive::{StageDirectory, StagedDownload},
-        staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
-        staged_snapshot::PublicSnapshot,
-    },
 };
 
 #[path = "system_update_bundle.rs"]
@@ -80,8 +78,6 @@ const SYSTEM_RAW_RUNTIME_LOADER: &str = "ld-musl-system-update.so.1";
 const SYSTEM_RAW_RUNTIME_LIBC: &str = "libc.so";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
-
-static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +161,7 @@ pub struct SystemStagedUpdate {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatusRsp {
+    pub update_operation: OperationSnapshot,
     pub current: SystemVersion,
     pub staged: Option<SystemStagedUpdate>,
     pub pending: Option<SystemPendingUpdate>,
@@ -359,20 +356,9 @@ struct InstalledSystemVersion {
 }
 
 #[derive(Debug)]
-struct UpdateGuard;
-
-#[derive(Debug)]
 struct FileHashes {
     sha256: String,
     sha512: String,
-}
-
-impl Drop for UpdateGuard {
-    fn drop(&mut self) {
-        if let Ok(mut is_updating) = SYSTEM_UPDATE_LOCK.lock() {
-            *is_updating = false;
-        }
-    }
 }
 
 impl SystemUpdateProgress {
@@ -457,10 +443,15 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
 }
 
 pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let update_operation = state.updates.snapshot()?;
+    let operation_active = update_operation
+        .active
+        .is_some_and(|active| active.kind.is_system());
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let mut pending = read_pending_update().ok().flatten();
-    let progress = read_normalized_update_progress(&stage_dir, &current, pending.as_ref());
+    let progress =
+        read_normalized_update_progress(&stage_dir, &current, pending.as_ref(), operation_active);
     if raw_pending_marker_is_stale(&current, pending.as_ref(), progress.as_ref()) {
         pending = None;
     }
@@ -485,6 +476,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
             }
 
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
+                update_operation,
                 current,
                 staged,
                 pending,
@@ -497,6 +489,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
         Err(err) => {
             tracing::warn!(error = %err, "failed to read staged system update");
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
+                update_operation,
                 current,
                 staged: None,
                 pending,
@@ -509,14 +502,23 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
     }
 }
 
-pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
+pub async fn download(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SystemDownloadRsp>>> {
     if system_firewall::paranoid_mode_enabled() {
         return Err(AppError::BadRequest(
             system_firewall::paranoid_blocked_message().to_string(),
         ));
     }
 
-    let guard = acquire_update_lock()?;
+    let owner = state.updates.acquire(Kind::SystemDownload)?;
+    owner.run(move |job| download_owned(state, job)).await
+}
+
+async fn download_owned(
+    state: AppState,
+    owner: UpdateOwner,
+) -> Result<Json<ApiResponse<SystemDownloadRsp>>> {
     ensure_no_pending_system_update()?;
     let current = read_current_system_version();
     let verified = get_verified_latest_system(is_preview_enabled(), &state.config).await?;
@@ -539,27 +541,28 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let cache_stage_dir = stage_dir.clone();
     let cache_latest = latest.clone();
-    if let Some(staged) =
-        run_blocking_system_update("check cached system update staging", move || {
+    if let Some(staged) = owner
+        .blocking("check cached system update staging", move || {
             read_cached_staged_update(&cache_stage_dir, &cache_latest)
         })
         .await?
     {
         let receipt_stage_dir = stage_dir.clone();
-        run_blocking_system_update_with_guard("commit cached system metadata", guard, move || {
-            ensure_no_pending_system_update()?;
-            let mut archive =
-                StageDirectory::open(&receipt_stage_dir)?.open_archive(&verified.latest.name)?;
-            let mut snapshot =
-                freeze_system_archive(&mut archive, &receipt_stage_dir, &verified.latest)?;
-            let _checked = bundle::capture(
-                &mut snapshot,
-                &StageDirectory::open(&receipt_stage_dir)?,
-                &verified.latest,
-            )?;
-            persist_verified_system_metadata(&verified)
-        })
-        .await?;
+        owner
+            .blocking("commit cached system metadata", move || {
+                ensure_no_pending_system_update()?;
+                let mut archive = StageDirectory::open(&receipt_stage_dir)?
+                    .open_archive(&verified.latest.name)?;
+                let mut snapshot =
+                    freeze_system_archive(&mut archive, &receipt_stage_dir, &verified.latest)?;
+                let _checked = bundle::capture(
+                    &mut snapshot,
+                    &StageDirectory::open(&receipt_stage_dir)?,
+                    &verified.latest,
+                )?;
+                persist_verified_system_metadata(&verified)
+            })
+            .await?;
         remove_update_progress(&stage_dir)?;
         return Ok(Json(ApiResponse::ok(SystemDownloadRsp {
             current,
@@ -569,10 +572,11 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     }
 
     let prepare_dir = stage_dir.clone();
-    run_blocking_system_update("prepare system update staging", move || {
-        prepare_stage_dir(&prepare_dir)
-    })
-    .await?;
+    owner
+        .blocking("prepare system update staging", move || {
+            prepare_stage_dir(&prepare_dir)
+        })
+        .await?;
 
     write_update_progress(
         &stage_dir,
@@ -606,10 +610,8 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     )?;
 
     let stage_dir_for_verify = stage_dir.clone();
-    let staged = match run_blocking_system_update_with_guard(
-        "verify and stage system update",
-        guard,
-        move || {
+    let staged = match owner
+        .blocking("verify and stage system update", move || {
             ensure_no_pending_system_update()?;
             let mut snapshot = freeze_system_archive(
                 downloaded.file_mut(),
@@ -633,9 +635,8 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
             // with mismatched generations fails closed and requires re-download.
             persist_verified_system_metadata(&verified)?;
             Ok(staged_summary(&record))
-        },
-    )
-    .await
+        })
+        .await
     {
         Ok(staged) => staged,
         Err(err) => {
@@ -661,8 +662,15 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     })))
 }
 
-pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let guard = acquire_update_lock()?;
+pub async fn install(State(state): State<AppState>) -> Result<Json<ApiResponse<SystemInstallRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemInstall)?;
+    owner.run(move |job| install_owned(state, job)).await
+}
+
+async fn install_owned(
+    state: AppState,
+    owner: UpdateOwner,
+) -> Result<Json<ApiResponse<SystemInstallRsp>>> {
     ensure_no_pending_system_update()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
@@ -692,26 +700,26 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
         ),
     )?;
     let install_error_version = staged_version.clone();
-    let installed = match run_blocking_system_update_with_guard(
-        "install staged system update",
-        guard,
-        move || match install_staged_update(&stage_dir, &config, verified) {
-            Ok(installed) => Ok(installed),
-            Err(err) => {
-                let _ = write_update_progress(
-                    &stage_dir,
-                    SystemUpdateProgress::new(
-                        "install",
-                        "failed",
-                        install_error_version,
-                        Some(err.to_string()),
-                    ),
-                );
-                Err(err)
-            }
-        },
-    )
-    .await
+    let installed = match owner
+        .blocking(
+            "install staged system update",
+            move || match install_staged_update(&stage_dir, &config, verified) {
+                Ok(installed) => Ok(installed),
+                Err(err) => {
+                    let _ = write_update_progress(
+                        &stage_dir,
+                        SystemUpdateProgress::new(
+                            "install",
+                            "failed",
+                            install_error_version,
+                            Some(err.to_string()),
+                        ),
+                    );
+                    Err(err)
+                }
+            },
+        )
+        .await
     {
         Ok(installed) => installed,
         Err(err) => {
@@ -735,43 +743,56 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
     })))
 }
 
-pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let guard = acquire_update_lock()?;
+pub async fn rollback(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SystemRollbackRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemRollback)?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let restored =
-        run_blocking_system_update_with_guard("rollback system update", guard, move || {
-            rollback_last_system_update(&stage_dir)
+    owner
+        .run(move |job| async move {
+            let restored = job
+                .blocking("rollback system update", move || {
+                    rollback_last_system_update(&stage_dir)
+                })
+                .await?;
+            Ok(Json(ApiResponse::ok(SystemRollbackRsp {
+                reboot_required: restored.requires_reboot,
+                restored,
+            })))
         })
-        .await?;
-
-    Ok(Json(ApiResponse::ok(SystemRollbackRsp {
-        reboot_required: restored.requires_reboot,
-        restored,
-    })))
+        .await
 }
 
-pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let _guard = acquire_update_lock()?;
-    let current = read_current_system_version();
-    let pending = read_pending_update()?
-        .ok_or_else(|| AppError::NotFound("no pending system update found".to_string()))?;
-    let health = evaluate_boot_health(&current, &pending, &state);
+pub async fn confirm(State(state): State<AppState>) -> Result<Json<ApiResponse<SystemConfirmRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemConfirm)?;
+    owner
+        .run(move |job| async move {
+            job.blocking("confirm system update", move || {
+                let current = read_current_system_version();
+                let pending = read_pending_update()?.ok_or_else(|| {
+                    AppError::NotFound("no pending system update found".to_string())
+                })?;
+                let health = evaluate_boot_health(&current, &pending, &state);
 
-    if !health.healthy {
-        return Err(AppError::BadRequest(
-            "system update boot health check failed".to_string(),
-        ));
-    }
+                if !health.healthy {
+                    return Err(AppError::BadRequest(
+                        "system update boot health check failed".to_string(),
+                    ));
+                }
 
-    write_boot_good(&pending, &health)?;
-    remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
-    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
-    remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
+                write_boot_good(&pending, &health)?;
+                remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+                remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
+                remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
 
-    Ok(Json(ApiResponse::ok(SystemConfirmRsp {
-        confirmed: pending,
-        health,
-    })))
+                Ok(Json(ApiResponse::ok(SystemConfirmRsp {
+                    confirmed: pending,
+                    health,
+                })))
+            })
+            .await
+        })
+        .await
 }
 
 async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLatest> {
@@ -2772,45 +2793,6 @@ fn reject_pending_system_paths(paths: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn acquire_update_lock() -> Result<UpdateGuard> {
-    let mut is_updating = SYSTEM_UPDATE_LOCK
-        .lock()
-        .map_err(|_| AppError::Internal("system update lock poisoned".to_string()))?;
-    if *is_updating {
-        return Err(AppError::Conflict(
-            "system update already in progress".to_string(),
-        ));
-    }
-    *is_updating = true;
-    Ok(UpdateGuard)
-}
-
-async fn run_blocking_system_update<T, F>(operation: &'static str, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    task::spawn_blocking(f)
-        .await
-        .map_err(|err| AppError::Internal(format!("{operation} task failed: {err}")))?
-}
-
-async fn run_blocking_system_update_with_guard<T, F>(
-    operation: &'static str,
-    guard: UpdateGuard,
-    f: F,
-) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    run_blocking_system_update(operation, move || {
-        let _guard = guard;
-        f()
-    })
-    .await
-}
-
 fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
     let data = serde_json::to_vec_pretty(record)
         .map_err(|err| AppError::Internal(format!("encode staged system update: {err}")))?;
@@ -3134,6 +3116,7 @@ fn read_normalized_update_progress(
     stage_dir: &Path,
     current: &SystemVersion,
     pending: Option<&SystemPendingUpdate>,
+    operation_active: bool,
 ) -> Option<SystemUpdateProgress> {
     let mut progress = match read_update_progress(stage_dir) {
         Ok(progress) => progress?,
@@ -3152,16 +3135,13 @@ fn read_normalized_update_progress(
             .map(|pending| current.version == pending.version && current.target == pending.target)
             .unwrap_or(false)
     {
-        let _ = remove_update_progress(stage_dir);
         return None;
     }
 
     if progress.operation == "install" && progress.phase == "failed" && progress.version.is_none() {
-        let _ = remove_update_progress(stage_dir);
         return None;
     }
 
-    let lock_active = update_lock_active();
     let now = now_unix_seconds();
     let raw_install_stopped = progress.operation == "install"
         && progress.is_active()
@@ -3172,11 +3152,10 @@ fn read_normalized_update_progress(
             })
             .unwrap_or(false)
         && !raw_writer_active();
-    if raw_install_stopped {
+    if raw_install_stopped && !operation_active {
         progress.phase = "failed".to_string();
         progress.updated_at = now;
         progress.message = Some("raw system update writer stopped before reboot".to_string());
-        let _ = write_update_progress(stage_dir, progress.clone());
         return Some(progress);
     }
 
@@ -3185,11 +3164,10 @@ fn read_normalized_update_progress(
         .checked_add(60 * 60)
         .map(|expires| expires < now)
         .unwrap_or(false);
-    if progress.is_active() && (stale || (progress.operation != "install" && !lock_active)) {
+    if progress.is_active() && !operation_active && (stale || progress.operation != "install") {
         progress.phase = "failed".to_string();
         progress.updated_at = now;
         progress.message = Some("system update operation did not complete".to_string());
-        let _ = write_update_progress(stage_dir, progress.clone());
     }
 
     Some(progress)
@@ -3233,13 +3211,6 @@ fn validate_update_progress(progress: &SystemUpdateProgress) -> Result<()> {
         validate_text_field("system update progress message", message, 256)?;
     }
     Ok(())
-}
-
-fn update_lock_active() -> bool {
-    SYSTEM_UPDATE_LOCK
-        .lock()
-        .map(|is_updating| *is_updating)
-        .unwrap_or(false)
 }
 
 fn raw_writer_active() -> bool {
@@ -3745,6 +3716,40 @@ mod trust_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_normalization_never_mutates_live_or_stale_progress() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let mut progress =
+            SystemUpdateProgress::new("download", "verifying", Some("0.1.0".into()), None);
+        progress.updated_at = 0; // a clock jump never fails registered live work
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+        let current = read_current_system_version();
+        let active = read_normalized_update_progress(&stage, &current, None, true).unwrap();
+        assert_eq!(active.phase, "verifying");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let stale = read_normalized_update_progress(&stage, &current, None, false).unwrap();
+        assert_eq!(stale.phase, "failed");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn status_normalization_does_not_delete_completed_progress() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let progress = SystemUpdateProgress::new("install", "failed", None, None);
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+        assert!(
+            read_normalized_update_progress(&stage, &read_current_system_version(), None, false)
+                .is_none()
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
 
     pub(super) fn valid_latest() -> SystemLatest {
         SystemLatest {
