@@ -498,13 +498,17 @@ presence does not close the following production boundaries.
   replacing lock paths/mounts is outside this lease's protection boundary. The
   legacy self-restart can terminate the backend before its init-script child
   finishes; no lock inheritance/handoff to that child is claimed here.
-- Existing app staging/extraction/swap is still the legacy path, including its
-  writable-p3 cache/provenance and rename/recovery limitations. Work ownership
-  alone does not authenticate that filesystem or close the USB trust boundary.
-- The legacy raw shell writer is still launched separately. Its handoff/reap,
-  immutable image descriptors, protected ticket, retained runtime and early
-  fail-closed restore are not implemented by this coordinator. A system request
-  finishing after launch is not the raw transaction finishing.
+- App staging/extraction now uses protected rootfs and readonly authorized
+  archive bytes as described above, but the swap still has legacy rename/
+  recovery limitations. Work ownership alone is not a durable slot journal,
+  trusted producer, first-restart acceptance or complete USB trust boundary.
+- The legacy raw shell launcher and plaintext p3 boot restore are removed.
+  Production raw installation returns an explicit development barrier before
+  launching a writer or publishing a raw marker. Its required replacement still
+  needs immutable image descriptors, protected ticket, retained runtime and
+  early fail-closed restore. This temporary unavailability is not acceptance or
+  permission to drop raw functionality from the final result. A future request
+  finishing after launch must not be mistaken for the raw transaction finishing.
 - The command helper now owns normal direct-child timeout/pipe/reap cleanup,
   but is not a process-tree manager, a synchronous Drop join or a protected
   transaction authority. A callback lease alone is still not proof that every

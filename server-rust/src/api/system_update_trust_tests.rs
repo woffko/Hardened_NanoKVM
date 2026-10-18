@@ -1,4 +1,5 @@
 use super::*;
+use std::process::Command;
 use tempfile::{TempDir, tempdir};
 
 struct SigningFixture {
@@ -690,4 +691,89 @@ fn any_pending_object_blocks_relaunch_without_deleting_evidence() {
             .file_type()
             .is_symlink()
     );
+}
+
+#[test]
+fn legacy_raw_marker_is_diagnostic_only_and_never_a_pending_fallback() {
+    let parent = tempdir().unwrap();
+    let pending = parent.path().join("root-pending");
+    let legacy = parent.path().join("legacy-p3-marker");
+    let (record, error) = read_pending_status(&pending, &legacy);
+    assert!(record.is_none() && error.is_none());
+    let forged = br#"{"pending":{"version":"0.3.0-raw.12","target":"sg2002-licheervnano-sd","backupId":"raw-forged","installedAt":1,"requiresReboot":true,"fileCount":2}}"#;
+    for bytes in [forged.as_slice(), b"invalid json", b""] {
+        fs::write(&legacy, bytes).unwrap();
+        let (record, error) = read_pending_status(&pending, &legacy);
+        assert!(record.is_none(), "p3 marker became pending authority");
+        assert!(error.is_some(), "legacy evidence was silently hidden");
+        assert!(read_pending_update(&pending).unwrap().is_none());
+        assert_eq!(fs::read(&legacy).unwrap(), bytes);
+    }
+    fs::remove_file(&legacy).unwrap();
+    fs::create_dir(&legacy).unwrap();
+    assert!(read_pending_status(&pending, &legacy).1.is_some());
+    fs::remove_dir(&legacy).unwrap();
+    std::os::unix::fs::symlink(parent.path().join("absent"), &legacy).unwrap();
+    assert!(read_pending_status(&pending, &legacy).1.is_some());
+    assert!(fs::symlink_metadata(&legacy).unwrap().is_symlink());
+    fs::remove_file(&legacy).unwrap();
+    nix::unistd::mkfifo(&legacy, nix::sys::stat::Mode::S_IRUSR).unwrap();
+    assert!(read_pending_status(&pending, &legacy).1.is_some());
+    assert!(fs::symlink_metadata(&legacy).is_ok());
+}
+
+#[test]
+fn root_pending_status_keeps_root_record_and_exposes_read_errors() {
+    let parent = tempdir().unwrap();
+    let pending = parent.path().join("root-pending");
+    let legacy = parent.path().join("legacy-p3-marker");
+    let expected = SystemPendingUpdate {
+        version: "0.3.0-file.1".into(),
+        target: "sg2002-licheervnano-sd".into(),
+        backup_id: "trusted-file-backup".into(),
+        installed_at: 42,
+        requires_reboot: true,
+        file_count: 1,
+    };
+    let bytes = serde_json::to_vec(&expected).unwrap();
+    fs::write(&pending, &bytes).unwrap();
+    let (record, error) = read_pending_status(&pending, &legacy);
+    assert!(error.is_none());
+    assert_eq!(record.unwrap().backup_id, expected.backup_id);
+    fs::write(&legacy, b"legacy evidence, never parsed").unwrap();
+    let (record, error) = read_pending_status(&pending, &legacy);
+    assert_eq!(record.unwrap().backup_id, expected.backup_id);
+    assert!(error.is_some());
+    assert_eq!(fs::read(&pending).unwrap(), bytes);
+    fs::write(&pending, b"corrupt root pending").unwrap();
+    let (record, error) = read_pending_status(&pending, &legacy);
+    assert!(record.is_none());
+    assert!(error.unwrap().contains("invalid pending system update"));
+    assert_eq!(fs::read(&pending).unwrap(), b"corrupt root pending");
+    assert_eq!(fs::read(&legacy).unwrap(), b"legacy evidence, never parsed");
+}
+
+#[test]
+fn pending_reader_refuses_symlinks_special_files_and_oversized_records() {
+    let parent = tempdir().unwrap();
+    let pending = parent.path().join("root-pending");
+    let victim = parent.path().join("unchanged-target");
+    fs::write(&victim, b"unrelated bytes").unwrap();
+    std::os::unix::fs::symlink(&victim, &pending).unwrap();
+    assert!(read_pending_update(&pending).is_err());
+    assert_eq!(fs::read(&victim).unwrap(), b"unrelated bytes");
+    fs::remove_file(&pending).unwrap();
+    std::os::unix::fs::symlink(parent.path().join("absent"), &pending).unwrap();
+    assert!(read_pending_update(&pending).is_err());
+    fs::remove_file(&pending).unwrap();
+    fs::create_dir(&pending).unwrap();
+    assert!(read_pending_update(&pending).is_err());
+    fs::remove_dir(&pending).unwrap();
+    nix::unistd::mkfifo(&pending, nix::sys::stat::Mode::S_IRUSR).unwrap();
+    assert!(read_pending_update(&pending).is_err());
+    fs::remove_file(&pending).unwrap();
+    let oversized = vec![b' '; MAX_PENDING_UPDATE_BYTES as usize + 1];
+    fs::write(&pending, &oversized).unwrap();
+    assert!(read_pending_update(&pending).is_err());
+    assert_eq!(fs::read(&pending).unwrap(), oversized);
 }

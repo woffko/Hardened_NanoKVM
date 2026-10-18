@@ -95,6 +95,25 @@ trim_file() {
   tr -d '\r' < "$1" | awk 'NF { value=$0 } END { print value }'
 }
 
+require_boot_state_boundary() {
+  s01=$(dump_file /kvmapp/system/init.d/S01fs no-legacy-S01fs) || return 1
+  s95=$(dump_file /kvmapp/system/init.d/S95nanokvm no-legacy-S95nanokvm) || return 1
+  installed_s01=$(dump_file /etc/init.d/S01fs installed-no-legacy-S01fs) || return 1
+  installed_s95=$(dump_file /etc/init.d/S95nanokvm installed-no-legacy-S95nanokvm) || return 1
+  cmp -s "$s01" "$installed_s01" || die "packaged and installed S01fs differ"
+  cmp -s "$s95" "$installed_s95" || die "packaged and installed S95nanokvm differ"
+  if grep -Eq 'RAW_RESTORE_|restore_raw_root_config|restore_preserved_path|fix_restored_permissions' "$s01"; then
+    die "S01fs contains legacy p3 restore authority"
+  else
+    [ "$?" -eq 1 ] || die "could not inspect S01fs boot authority"
+  fi
+  if grep -Fq 'SYSTEM_RAW_INSTALL_MARKER' "$s95"; then
+    die "S95nanokvm imports legacy p3 boot/rollback authority"
+  else
+    [ "$?" -eq 1 ] || die "could not inspect S95nanokvm boot authority"
+  fi
+}
+
 debugfs_output "stats" >/dev/null || die "not a readable ext rootfs image: $IMAGE"
 
 require_dir /kvmapp
@@ -133,6 +152,8 @@ for script in $BOOT_INIT_SCRIPTS; do
   require_regular "/kvmapp/system/init.d/$script"
   require_regular "/etc/init.d/$script"
 done
+
+require_boot_state_boundary || die "unsafe boot restore/rollback boundary"
 
 reject_path /kvmapp/backends/NanoKVM-Server.go
 reject_path /kvmapp/server/NanoKVM-Server.go

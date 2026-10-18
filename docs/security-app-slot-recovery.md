@@ -43,8 +43,11 @@ protection, issuer provenance and the closed restore policy are mandatory.
 Neither a copied p3 record nor a valid checksum creates installation authority.
 Host tests require the new journal, temporary records and old/new code slots to
 be absent from restore capture, rejected on restore import, and undeletable by
-restore absence records. The currently unintegrated legacy raw path is still
-an open C1 blocker; it must not be allowed to overwrite this future authority.
+restore absence records. Legacy S01 p3 import and API p3 pending authority are
+now retired; raw installation is temporarily refused in the development branch.
+The authenticated raw/early-restore replacement is still an open C1 blocker and
+must preserve these exclusions. Removal of the old path does not itself activate
+early app recovery or authenticate old rootfs state from a compromised boot.
 
 ## Supported rollback layouts
 

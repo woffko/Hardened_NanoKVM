@@ -3,9 +3,12 @@
 Status: implementation in progress on the security remediation branch. Capsule
 crypto, closed-schema archive capture/validation, canonical app/native-identity
 checks, SSH configuration-path guards/snapshots, protected ticket persistence and
-descriptor-relative source I/O are implemented and host-tested. Existing raw
-writer and early boot still use legacy preservation and must not be released as
-fixed C1.
+descriptor-relative source I/O are implemented and host-tested. The development
+branch has retired the legacy raw launcher and plaintext p3 boot restore. Raw
+installation now fails explicitly before the old launcher/marker/partition-write
+steps until the authenticated replacement is integrated. This temporary barrier
+is not a releasable replacement or fixed C1; raw functionality must return before
+candidate acceptance. Previously released RC12 artifacts are unchanged.
 
 ## Trust boundaries
 
@@ -54,6 +57,50 @@ preserve state, old archives and unknown recovery files remain. Any existing
 root pending record or legacy raw marker, including malformed data or dangling
 links, conservatively blocks a new download/install until recovery is inspected.
 This is denial/retry protection, not authorization from a legacy marker.
+
+### Retired legacy authority (development-only transition)
+
+`S01fs` no longer imports the p3 plaintext preserve tree, privileged configuration,
+accounts, optional executables/init scripts or update trust. Its old permission
+fixups, including weakening `server.yaml` to mode `0644`, are removed. Existing media
+mount/partition-growth logic is unchanged, not accepted as idempotent by this fix.
+`S95nanokvm` selects only the rootfs file-update pending record, never the p3 raw
+marker, and does not delete that marker during auto-confirm.
+
+The Rust API likewise has no p3-to-pending fallback or marker-staleness heuristic.
+Status reports legacy object presence/inspection errors without opening its
+contents. Confirm reads only the fixed rootfs pending path; confirm and rollback
+leave legacy p3 evidence untouched. Rootfs pending parse errors are reported,
+not silently converted to absence. That legacy rootfs reader rejects final
+symlinks/special files and reads at most 4097 bytes for a 4096-byte limit; it is
+NOT the new authenticated ticket protocol, a pinned-ancestor implementation or
+proof of provenance after an already compromised historical boot. No cleanup
+or automatic trust import of such a boot is implied.
+
+The detached shell launcher, its runtime copying and raw marker publisher are
+removed from production. Its historical generator remains `cfg(test)` only, with
+explicit historical-only test names; those tests do not prove preservation by
+the current build. Old `/proc` writer detection remains diagnostic, not a launch
+or completion receipt. The administrative runtime-repair script also no longer
+copies TLS identity from the plaintext p3 preserve tree; separate reviewed TLS
+recovery is required if identity is missing.
+
+The current raw install API retains the existing configuration permission gate,
+then returns a development Conflict explaining that authenticated writer/restore
+integration is incomplete and no partition write started. Normal file-update
+installation remains separate. Existing archive preflight/extraction still runs
+before raw dispatch; the barrier is not a claim that the whole API performs no
+staging I/O. The new raw writer, restore-required signed-image
+discriminator, protected early applier and complete settings/identity preservation
+are mandatory next integration, not deferred optional features. No candidate may
+be accepted or deployed as the finished security migration with this barrier.
+
+Disposable host fixtures execute S01 and the S95 selector with inert commands,
+show forged p3 state cannot change fixture account/config/code bytes or modes,
+and retain all legacy evidence. Rootfs gates compare installed and bundled init
+scripts and reject the known legacy selectors/inspection failures. These are
+source/fixture regressions, not a full Buildroot pipeline, physical boot, raw
+preservation or protection against arbitrary equivalent malicious source code.
 
 Archive downloads use a pinned stage directory and a random exclusive `0600`
 file. Curl receives no output pathname, user curlrc or stdin; only HTTPS and
@@ -138,17 +185,17 @@ The historical manifest's 640-MiB `required_free_bytes` is not an adequate budge
 for this new path. Compute/check the transaction's actual peak requirements
 before release; do not silently treat that old hint as a storage reservation.
 
-**The legacy raw writer does not yet consume these descriptors.** It still
-reopens extracted payload paths; verification here cannot authorize later reads
-from that mutable tree. An isolated descriptor-bound writer and signed runtime
-binding remain required before C1 closure. File-update bundles use the direct
+**No production raw writer consumes these descriptors yet.** The old mutable-path
+launcher is removed and raw installation is explicitly blocked. An isolated
+descriptor-bound writer and signed runtime binding remain required before C1
+closure. File-update bundles use the direct
 bounded manifest but retain their legacy remaining payload/framing validator;
 the closed raw framing claims above do not apply to the non-raw early return.
 
 **C1 remains open.** The snapshot closes later source-inode mutation but is not
 protection from malicious local root or raw writes to its backing filesystem.
-Extraction destinations, some legacy record reads, extracted raw payloads and
-the raw/early writer are not yet an immutable descriptor-owned transaction.
+Extraction destinations, some legacy record reads and the remaining future
+raw/early integration are not yet an immutable descriptor-owned transaction.
 USB p3 exclusion, isolated writer,
 signed-target runtime/rootfs binding, protected tickets, early fail-closed apply,
 private app staging and device/crash/release gates remain mandatory. Do not ship
@@ -593,8 +640,8 @@ children. The helper asserts that exactly one requested nested test executed,
 preventing a zero-test filter false pass. No real host account files are copied.
 Exact raw.12 target mount, vendor/exFAT behavior, target sshd/key-possession/
 effective-policy checks and production writer/early-restore use remain open.
-The existing system API still uses the transitional legacy writer; this
-component does NOT close C1 or make a releasable raw update.
+The existing system API now refuses raw installation until the replacement
+writer is composed; this component does NOT close C1 or make a releasable raw update.
 
 ### Exact-image SSH runtime binding (component; caller integration open)
 
@@ -789,8 +836,9 @@ source mutation/proc-fd exec, exact output bounds, cancellation, timeout, reapin
 zero exit without EOF, and real typed-root cleanup including unknown-file
 preservation. Capturing the retained static RV64 helper does not execute it on
 the host. Target loop/exec/kernel cleanup, protected backend authority, full Match
-matrix and actual SSH login remain open. The legacy
-raw writer/early apply are unchanged: **C1 remains OPEN**.
+matrix and actual SSH login remain open. Production raw writing/early apply are
+not integrated; the legacy path is retired with a temporary install barrier:
+**C1 remains OPEN**.
 
 ### Static helper build/package binding (component; app-slot authority open)
 
@@ -1097,9 +1145,10 @@ This does not satisfy the complete protected writer requirements below.
    private staging area. Preflight free space and required identity files.
    Failure must stop the whole management/provisioning boot path: merely returning
    nonzero from S01fs is not sufficient if rcS continues to later init scripts.
-   Disable the complete legacy preserve/marker restore path, including its
-   permission fixups: old S01fs can chmod server.yaml 0644. No later boot script
-   may overwrite authenticated state or weaken its required 0600 permissions.
+   Keep the retired legacy preserve/marker restore path disabled, including its
+   permission fixups. The old S01fs `server.yaml` mode `0644` behavior is removed, not a
+   substitute for implementing this helper. No later boot script may overwrite
+   authenticated state or weaken its required mode `0600` permissions.
 7. Apply only from the already-verified open descriptor/private snapshot. Durable
    state is `prepared -> applying -> restored -> committed`. Restarts continue
    the same authorized transaction idempotently. Pending/invalid restore cannot

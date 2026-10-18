@@ -33,7 +33,6 @@ SYSTEM_PENDING_FILE=/etc/kvm/system-update-pending.json
 SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
 SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
 SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
-SYSTEM_RAW_INSTALL_MARKER=/data/hardened-system-raw-update-pending.json
 SYSTEM_UPDATE_STAGE_DIR=/data/.hardened-kvmcache/system-update
 SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
 SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
@@ -541,10 +540,7 @@ pending_update_file() {
         printf '%s\n' "$SYSTEM_PENDING_FILE"
         return 0
     fi
-    if [ -f "$SYSTEM_RAW_INSTALL_MARKER" ]; then
-        printf '%s\n' "$SYSTEM_RAW_INSTALL_MARKER"
-        return 0
-    fi
+    # Legacy p3 markers are diagnostics, never boot health/rollback authority.
     return 1
 }
 
@@ -597,7 +593,7 @@ confirm_system_update_boot() {
 }
 EOF
     chmod 0644 "$SYSTEM_BOOT_GOOD_FILE"
-    rm -f "$SYSTEM_PENDING_FILE" "$SYSTEM_RAW_INSTALL_MARKER" "$SYSTEM_UPDATE_STAGE_DIR/progress.json" 2>/dev/null || true
+    rm -f "$SYSTEM_PENDING_FILE" "$SYSTEM_UPDATE_STAGE_DIR/progress.json" 2>/dev/null || true
     echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update auto-confirmed" >> "$SYSTEM_UPDATE_LOG"
 }
 

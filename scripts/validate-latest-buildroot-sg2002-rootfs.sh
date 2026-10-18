@@ -318,10 +318,8 @@ debugfs -R "dump /etc/init.d/S01fs $ETC_S01" "$IMAGE" >/dev/null 2>&1 || \
 	die "could not extract installed S01fs"
 cmp -s "$KVMAPP_S01" "$ETC_S01" || \
 	die "packaged and installed S01fs differ"
-grep -Fq 'etc/default/syslogd' "$KVMAPP_S01" || \
-	die "S01fs does not restore preserved syslogd defaults"
-grep -Fq 'etc/default/klogd' "$KVMAPP_S01" || \
-	die "S01fs does not restore preserved klogd defaults"
+# The generic rootfs gate above already checks both installed/packaged copies,
+# rejects legacy p3 restore/rollback selectors and fails on inspection errors.
 
 OS_RELEASE="$TMP_DIR/os-release"
 debugfs -R "dump /usr/lib/os-release $OS_RELEASE" "$IMAGE" >/dev/null 2>&1 || \

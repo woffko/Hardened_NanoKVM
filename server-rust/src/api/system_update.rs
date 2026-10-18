@@ -24,12 +24,9 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Read, Seek, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::CommandExt,
-    },
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -67,15 +64,17 @@ const SYSTEM_PROGRESS_RECORD: &str = "progress.json";
 const SYSTEM_BACKUPS_DIR_NAME: &str = "backups";
 const SYSTEM_BACKUP_RECORD: &str = "backup.json";
 const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
+const MAX_PENDING_UPDATE_BYTES: u64 = 4096;
 const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
 const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
 const SYSTEM_ROLLBACK_SCRIPT_FILE: &str = "/etc/kvm/system-update-rollback.sh";
 const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-attempted";
 const SYSTEM_RAW_INSTALL_MARKER: &str = "/data/hardened-system-raw-update-pending.json";
 const SYSTEM_RAW_INSTALL_RUN_DIR: &str = "/tmp/hardened-system-raw-update";
+#[cfg(test)]
 const SYSTEM_RAW_INSTALL_LOG: &str = "/data/hardened-system-raw-update.log";
+#[cfg(test)]
 const SYSTEM_RAW_RUNTIME_LOADER: &str = "ld-musl-system-update.so.1";
-const SYSTEM_RAW_RUNTIME_LIBC: &str = "libc.so";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
 
@@ -461,12 +460,12 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
         .is_some_and(|active| active.kind.is_system());
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let mut pending = read_pending_update().ok().flatten();
+    let (pending, pending_error) = read_pending_status(
+        Path::new(SYSTEM_PENDING_FILE),
+        Path::new(SYSTEM_RAW_INSTALL_MARKER),
+    );
     let progress =
         read_normalized_update_progress(&stage_dir, &current, pending.as_ref(), operation_active);
-    if raw_pending_marker_is_stale(&current, pending.as_ref(), progress.as_ref()) {
-        pending = None;
-    }
     let boot_health = pending
         .as_ref()
         .map(|pending| evaluate_boot_health(&current, pending, &state));
@@ -495,7 +494,7 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
                 boot_health,
                 rollback,
                 progress,
-                error: None,
+                error: pending_error,
             })))
         }
         Err(err) => {
@@ -508,7 +507,10 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
                 boot_health,
                 rollback,
                 progress,
-                error: Some(err.to_string()),
+                error: Some(match pending_error {
+                    Some(pending_error) => format!("{pending_error}; {err}"),
+                    None => err.to_string(),
+                }),
             })))
         }
     }
@@ -781,9 +783,10 @@ pub async fn confirm(State(state): State<AppState>) -> Result<Json<ApiResponse<S
         .run(move |job| async move {
             job.blocking("confirm system update", move || {
                 let current = read_current_system_version();
-                let pending = read_pending_update()?.ok_or_else(|| {
-                    AppError::NotFound("no pending system update found".to_string())
-                })?;
+                let pending =
+                    read_pending_update(Path::new(SYSTEM_PENDING_FILE))?.ok_or_else(|| {
+                        AppError::NotFound("no pending system update found".to_string())
+                    })?;
                 let health = evaluate_boot_health(&current, &pending, &state);
 
                 if !health.healthy {
@@ -794,7 +797,6 @@ pub async fn confirm(State(state): State<AppState>) -> Result<Json<ApiResponse<S
 
                 write_boot_good(&pending, &health)?;
                 remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
-                remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
                 remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
 
                 Ok(Json(ApiResponse::ok(SystemConfirmRsp {
@@ -1511,9 +1513,9 @@ fn extract_and_verify_system_bundle(
         raw_images,
     } = bundle::capture(archive, &StageDirectory::open(stage_dir)?, latest)?;
     // Transitional preflight only: these checked image FDs are not yet passed
-    // to the legacy detached shell writer. Keep C1 open until that path and
-    // early restoration are replaced; a checked p3 pathname is not authority.
-    // Avoid retaining two expanded image snapshots alongside legacy extraction.
+    // to the future isolated writer. Raw install is explicitly blocked until
+    // descriptor/ticket/early-restore integration; C1 remains open. Avoid
+    // retaining expanded image snapshots alongside transitional extraction.
     drop(raw_images);
     archive.rewind()?;
     let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
@@ -1647,9 +1649,9 @@ fn install_staged_update(
 }
 
 fn install_raw_image_update(
-    stage_dir: &Path,
+    _stage_dir: &Path,
     manifest: &SystemManifest,
-    payload_dir: &Path,
+    _payload_dir: &Path,
     config: &Config,
 ) -> Result<SystemPendingUpdate> {
     if !config.security.allow_raw_system_updates {
@@ -1663,51 +1665,17 @@ fn install_raw_image_update(
         ));
     }
 
-    let installed_at = now_unix_seconds();
-    let pending = SystemPendingUpdate {
-        version: manifest.version.clone(),
-        target: manifest.target.clone(),
-        backup_id: format!("raw-{}", installed_at),
-        installed_at,
-        requires_reboot: true,
-        file_count: manifest.raw_images.len(),
-    };
-
-    for image in &manifest.raw_images {
-        validate_raw_image_payload(payload_dir, image)?;
-    }
-    ensure_raw_payloads_are_not_on_rootfs(payload_dir)?;
-    write_raw_install_marker(manifest, &pending)?;
-    write_update_progress(
-        stage_dir,
-        SystemUpdateProgress::new(
-            "install",
-            "launching",
-            Some(manifest.version.clone()),
-            Some("raw image writer is starting".to_string()),
-        ),
-    )?;
-    launch_raw_image_updater(stage_dir, manifest, payload_dir, &pending)?;
-    sync_filesystems();
-
-    Ok(pending)
+    // Temporary development barrier, NOT the final raw-update implementation.
+    // S01 no longer imports plaintext p3 preserve state. The old detached shell
+    // writer cannot retain authenticated descriptors/ticket/restore authority,
+    // so never publish its marker or start partition writes. Re-enable raw only
+    // through the composed authenticated writer/early-restore lifecycle.
+    Err(AppError::Conflict(
+        "raw installation is unavailable in this development build: authenticated writer/restore integration is incomplete; no partition write started".into(),
+    ))
 }
 
-fn ensure_raw_payloads_are_not_on_rootfs(payload_dir: &Path) -> Result<()> {
-    let root_dev = fs::metadata("/")
-        .map_err(|err| AppError::Internal(format!("stat root filesystem: {err}")))?
-        .dev();
-    let payload_dev = fs::metadata(payload_dir)
-        .map_err(|err| AppError::Internal(format!("stat system update payload directory: {err}")))?
-        .dev();
-    if root_dev == payload_dev {
-        return Err(AppError::BadRequest(
-            "raw system update staging is on rootfs; mount the /data partition first".to_string(),
-        ));
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemManifestRawImage> {
     let mut ordered: Vec<_> = images.iter().collect();
     ordered.sort_by_key(|image| match image.device.as_str() {
@@ -1718,128 +1686,9 @@ fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemMan
     ordered
 }
 
-fn launch_raw_image_updater(
-    stage_dir: &Path,
-    manifest: &SystemManifest,
-    payload_dir: &Path,
-    pending: &SystemPendingUpdate,
-) -> Result<()> {
-    let run_dir = Path::new(SYSTEM_RAW_INSTALL_RUN_DIR);
-    remove_dir_if_exists(run_dir)?;
-    fs::create_dir_all(run_dir)?;
-    fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700))?;
-
-    let busybox_src = find_busybox_binary()?;
-    let busybox_dst = run_dir.join("busybox");
-    fs::copy(&busybox_src, &busybox_dst)?;
-    fs::set_permissions(&busybox_dst, fs::Permissions::from_mode(0o755))?;
-
-    let loader_src = find_musl_loader()?;
-    let loader_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LOADER);
-    fs::copy(&loader_src, &loader_dst)?;
-    fs::set_permissions(&loader_dst, fs::Permissions::from_mode(0o755))?;
-
-    let libc_src = Path::new("/lib/libc.so");
-    if libc_src.is_file() {
-        let libc_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LIBC);
-        fs::copy(libc_src, &libc_dst)?;
-        fs::set_permissions(&libc_dst, fs::Permissions::from_mode(0o755))?;
-    }
-
-    let script_path = run_dir.join("run.sh");
-    let script = raw_image_updater_script(stage_dir, manifest, payload_dir, pending)?;
-    fs::write(&script_path, script)?;
-    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700))?;
-
-    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_LOG).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(SYSTEM_RAW_INSTALL_LOG)?;
-    let stderr = stdout.try_clone()?;
-
-    let mut command = Command::new(&loader_dst);
-    command
-        .arg("--library-path")
-        .arg(run_dir)
-        .arg(&busybox_dst)
-        .arg("sh")
-        .arg(&script_path)
-        .current_dir(run_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-
-    // libkvm/CVI file descriptors are not guaranteed to be CLOEXEC. If the
-    // raw updater inherits them, it can keep device files and sockets open
-    // after NanoKVM is stopped and make the read-only remount unreliable.
-    unsafe {
-        command.pre_exec(|| {
-            for fd in 3..1024 {
-                nix::libc::close(fd);
-            }
-            Ok(())
-        });
-    }
-
-    command
-        .spawn()
-        .map_err(|err| AppError::Internal(format!("failed to launch raw image updater: {err}")))?;
-
-    tracing::warn!(
-        version = %manifest.version,
-        images = manifest.raw_images.len(),
-        log = SYSTEM_RAW_INSTALL_LOG,
-        "launched raw system image updater"
-    );
-    Ok(())
-}
-
-fn find_busybox_binary() -> Result<PathBuf> {
-    for candidate in ["/bin/busybox", "/usr/bin/busybox", "/sbin/busybox"] {
-        let path = Path::new(candidate);
-        if path.is_file() {
-            return Ok(path.to_path_buf());
-        }
-    }
-
-    Err(AppError::Internal(
-        "busybox binary is required for raw system updates".to_string(),
-    ))
-}
-
-fn find_musl_loader() -> Result<PathBuf> {
-    for candidate in [
-        "/lib/ld-musl-riscv64v0p7_xthead.so.1",
-        "/lib/ld-musl-riscv64xthead.so.1",
-        "/lib/ld-musl-riscv64.so.1",
-    ] {
-        let path = Path::new(candidate);
-        if path.is_file() {
-            return Ok(path.to_path_buf());
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir("/lib") {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with("ld-musl-riscv64") && name.ends_with(".so.1") && path.is_file() {
-                return Ok(path);
-            }
-        }
-    }
-
-    Err(AppError::Internal(
-        "musl loader is required for raw system updates".to_string(),
-    ))
-}
-
+// Historical generator retained only to document/test the removed unsafe
+// engine. No launcher exists and this code is absent from production builds.
+#[cfg(test)]
 fn raw_image_updater_script(
     stage_dir: &Path,
     manifest: &SystemManifest,
@@ -2241,78 +2090,6 @@ force_reboot_now\n",
     Ok(script)
 }
 
-fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
-    validate_raw_image_manifest(image)?;
-    let payload = safe_payload_join(payload_dir, &image.payload)?;
-    let metadata = fs::metadata(&payload)?;
-    let expected_size = raw_image_payload_stored_size(image)?;
-    if metadata.len() != expected_size {
-        return Err(AppError::BadRequest(format!(
-            "system update raw image size mismatch: {}",
-            image.payload
-        )));
-    }
-
-    let device = Path::new(&image.device);
-    let device_metadata = fs::metadata(device)?;
-    if !device_metadata.file_type().is_block_device() {
-        return Err(AppError::BadRequest(format!(
-            "raw system update target is not a block device: {}",
-            image.device
-        )));
-    }
-    if let Some(device_size) = block_device_size(device) {
-        if image.size > device_size {
-            return Err(AppError::BadRequest(format!(
-                "raw system update image {} is larger than {}",
-                image.payload, image.device
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn block_device_size(device: &Path) -> Option<u64> {
-    let name = device.file_name()?.to_str()?;
-    let sectors = read_trimmed(&format!("/sys/class/block/{name}/size"))?;
-    sectors.parse::<u64>().ok()?.checked_mul(512)
-}
-
-fn write_raw_install_marker(
-    manifest: &SystemManifest,
-    pending: &SystemPendingUpdate,
-) -> Result<()> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RawInstallMarker<'a> {
-        pending: &'a SystemPendingUpdate,
-        source_commit: &'a str,
-        raw_images: &'a [SystemManifestRawImage],
-        warning: &'a str,
-    }
-
-    let marker = RawInstallMarker {
-        pending,
-        source_commit: &manifest.source_commit,
-        raw_images: &manifest.raw_images,
-        warning: "raw partition update has no automatic rollback",
-    };
-    let data = serde_json::to_vec_pretty(&marker)
-        .map_err(|err| AppError::Internal(format!("encode raw system update marker: {err}")))?;
-    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_MARKER).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(SYSTEM_RAW_INSTALL_MARKER, data)?;
-    Ok(())
-}
-
-fn sync_filesystems() {
-    unsafe {
-        nix::libc::sync();
-    }
-}
-
 fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
     write_update_progress(
         stage_dir,
@@ -2333,7 +2110,6 @@ fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
         return Err(err);
     }
     remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
-    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
     remove_file_if_exists(Path::new(SYSTEM_BOOT_GOOD_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_ATTEMPT_FILE))?;
@@ -2943,6 +2719,7 @@ fn raw_image_payload_stored_size(image: &SystemManifestRawImage) -> Result<u64> 
     }
 }
 
+#[cfg(test)]
 fn raw_image_is_gzip(image: &SystemManifestRawImage) -> bool {
     image.compression.as_deref() == Some("gzip")
 }
@@ -3254,55 +3031,53 @@ fn raw_writer_active() -> bool {
     false
 }
 
-fn raw_pending_marker_is_stale(
-    current: &SystemVersion,
-    pending: Option<&SystemPendingUpdate>,
-    progress: Option<&SystemUpdateProgress>,
-) -> bool {
-    let Some(pending) = pending else {
-        return false;
+fn read_pending_status(
+    pending_path: &Path,
+    legacy_marker: &Path,
+) -> (Option<SystemPendingUpdate>, Option<String>) {
+    let (pending, pending_error) = match read_pending_update(pending_path) {
+        Ok(pending) => (pending, None),
+        Err(error) => (None, Some(error.to_string())),
     };
-    if Path::new(SYSTEM_PENDING_FILE).exists() || !pending.backup_id.starts_with("raw-") {
-        return false;
-    }
-    if current.version == pending.version && current.target == pending.target {
-        return false;
-    }
-    matches!(
-        progress.map(|progress| (progress.operation.as_str(), progress.phase.as_str())),
-        None | Some(("install", "failed")) | Some(("install", "done"))
-    )
+    // Any legacy p3 object is evidence to inspect, never pending/boot-good
+    // authority. Do not open its contents, follow its target, or remove it.
+    let legacy_error = reject_pending_system_paths(&[legacy_marker])
+        .err()
+        .map(|error| error.to_string());
+    (pending, pending_error.or(legacy_error))
 }
 
-fn read_pending_update() -> Result<Option<SystemPendingUpdate>> {
-    let path = Path::new(SYSTEM_PENDING_FILE);
-    if path.exists() {
-        let raw = fs::read(path)?;
-        let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
-            .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
-        validate_pending_update(&pending)?;
-        return Ok(Some(pending));
+fn read_pending_update(path: &Path) -> Result<Option<SystemPendingUpdate>> {
+    // Production callers pass only SYSTEM_PENDING_FILE on rootfs. There is no
+    // p3 fallback. This bounded legacy file reader is NOT the future raw ticket
+    // or app journal protocol, nor proof of provenance after a compromised boot.
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_PENDING_UPDATE_BYTES {
+        return Err(AppError::BadRequest(
+            "pending system update is not a bounded regular record".into(),
+        ));
     }
-
-    read_raw_pending_update()
-}
-
-fn read_raw_pending_update() -> Result<Option<SystemPendingUpdate>> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RawInstallMarker {
-        pending: SystemPendingUpdate,
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PENDING_UPDATE_BYTES + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > MAX_PENDING_UPDATE_BYTES {
+        return Err(AppError::BadRequest(
+            "pending system update exceeds its size limit".into(),
+        ));
     }
-
-    let path = Path::new(SYSTEM_RAW_INSTALL_MARKER);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read(path)?;
-    let marker: RawInstallMarker = serde_json::from_slice(&raw)
-        .map_err(|err| AppError::Internal(format!("invalid raw pending system update: {err}")))?;
-    validate_pending_update(&marker.pending)?;
-    Ok(Some(marker.pending))
+    let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
+    validate_pending_update(&pending)?;
+    Ok(Some(pending))
 }
 
 fn validate_pending_update(pending: &SystemPendingUpdate) -> Result<()> {
@@ -4114,7 +3889,66 @@ mod tests {
     }
 
     #[test]
-    fn raw_image_updater_preserves_user_configuration() {
+    fn incomplete_authenticated_raw_install_refuses_before_any_path_access_or_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join("staging-must-not-be-created");
+        let payload = temp.path().join("payload-must-not-be-read");
+        let retained = temp.path().join("old-recovery");
+        fs::write(&retained, b"retain existing recovery evidence").unwrap();
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = true;
+        let result = install_raw_image_update(&stage, &valid_raw_manifest(), &payload, &config);
+        assert!(matches!(result, Err(AppError::Conflict(message))
+            if message.contains("authenticated writer/restore integration is incomplete")
+                && message.contains("no partition write started")));
+        assert!(!stage.exists());
+        assert!(!payload.exists());
+        assert_eq!(
+            fs::read(retained).unwrap(),
+            b"retain existing recovery evidence"
+        );
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn raw_install_barrier_keeps_existing_configuration_permission_gate() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = false;
+        assert!(matches!(
+            install_raw_image_update(
+                Path::new("/not-opened"),
+                &valid_raw_manifest(),
+                Path::new("/not-opened"),
+                &config
+            ),
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn raw_install_barrier_still_rejects_mixed_file_and_raw_operations() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = true;
+        let mut manifest = valid_raw_manifest();
+        manifest.files.push(SystemManifestFile {
+            payload: "images/file".into(),
+            install: "/etc/hostname".into(),
+            size: 1,
+            sha256: "a".repeat(64),
+        });
+        assert!(matches!(
+            install_raw_image_update(
+                Path::new("/not-opened"),
+                &manifest,
+                Path::new("/not-opened"),
+                &config
+            ),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn historical_only_raw_generator_documents_removed_unsafe_preserve() {
         let temp = tempfile::tempdir().unwrap();
         let stage_dir = temp.path().join("system-update");
         let payload_dir = temp.path().join("payload");
@@ -4194,7 +4028,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_image_updater_streams_compressed_images() {
+    fn historical_only_raw_generator_documents_removed_mutable_gzip_inputs() {
         let temp = tempfile::tempdir().unwrap();
         let stage_dir = temp.path().join("system-update");
         let payload_dir = temp.path().join("payload");

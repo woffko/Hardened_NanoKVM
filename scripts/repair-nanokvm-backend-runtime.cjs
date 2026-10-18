@@ -83,12 +83,8 @@ test "$(sha256sum '${remoteArchive}' | awk '{print $1}')" = '${ARCHIVE_SHA256}'
 mkdir -p /kvmapp/server/dl_lib
 gzip -dc '${remoteArchive}' | tar -C /kvmapp/server/dl_lib -xf -
 rm -f '${remoteArchive}'
-PRESERVE=/data/.hardened-kvmcache/system-update/preserve/root/etc/kvm
-for NAME in server.crt server.key; do
-  if [ -s "$PRESERVE/$NAME" ]; then cp -p "$PRESERVE/$NAME" "/etc/kvm/$NAME"; fi
-done
-chmod 0644 /etc/kvm/server.crt 2>/dev/null || true
-chmod 0600 /etc/kvm/server.key 2>/dev/null || true
+# Runtime repair must not import TLS identity from untrusted legacy p3 state.
+# Missing/invalid TLS identity needs a separate reviewed recovery operation.
 test "$(sha256sum /kvmapp/server/NanoKVM-Server | awk '{print $1}')" = '${EXPECTED_BACKEND}'
 test -e /kvmapp/server/dl_lib/libopencv_video.so.409
 test -e /kvmapp/server/dl_lib/libprotobuf.so.32
