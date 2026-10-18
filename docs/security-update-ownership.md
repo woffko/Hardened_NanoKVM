@@ -1,7 +1,8 @@
 # App/system update work ownership
 
-This documents the implemented in-process coordinator, not a claim that C1,
-durable installation, raw restore or configuration quiescence is complete.
+This documents the implemented work coordinator and cooperative cross-process
+front-end lease, not a claim that C1, durable installation, raw restore or
+configuration quiescence is complete.
 
 ## Shared admission and observability
 
@@ -20,6 +21,46 @@ phase. No payload/path/private error/configuration data is stored in this view.
 not that a raw writer, reboot, native services or restoration were accepted.
 `failed` includes abandonment before work starts, panic and callback/restart
 errors. Receipts are in-memory and disappear on process restart.
+
+## Protected cross-process front-end lease
+
+Every production acquisition also takes a nonblocking exclusive `flock` on the
+directory `/etc/kvm/update-operation`. The last work owner holds its descriptor,
+including across queued/running blocking work and app restart scheduling. An
+independent backend cannot enter another app/system front-end operation while
+that kernel lease remains held. Local conflict replies keep the active operation
+ID. Cross-process conflict reports another owner but does not invent an ID from
+an untrusted/stale file; the bounded status view remains process-local.
+
+The fixed build-owned path is not configurable and is never selected from p3,
+cache metadata or a PID marker. Acquisition requires root and opens `/`, `/etc`
+and `/etc/kvm` without symlinks, magic links or mount crossings. Parents must be
+root-owned directories without group/other write or special mode bits. The lock
+directory must be root-owned mode0700 on the same device. Missing lock directory
+is created under the pinned protected parent; unsafe existing objects are not
+repaired, followed or deleted. Storage/permission errors fail closed; there is
+no path-based or in-process-only production fallback.
+
+The lock inode is deliberately never unlinked/rmdir'd on release. All cooperative
+contenders reopen that same inode; replacing a live lock name would split the
+admission domain. Its descriptor is CLOEXEC; last-owner teardown explicitly
+unlocks to avoid a temporary pre-exec inherited alias prolonging the lease.
+The kernel releases the lease when the last open-description owner disappears
+or on reboot, even though the empty directory persists. After abrupt parent
+death a pre-exec fork alias can conservatively prolong busy until it closes or
+execs; it is not proof that a child transaction completed. Neither directory
+existence nor an inactive local status
+authorizes restore, proves success, recovers a transaction or quiesces writers.
+The local final receipt can briefly become visible before field Drop releases
+the kernel lease; competitors still fail busy during that interval.
+
+Host fixtures use explicit cfg(test)-only constructors and synthetic private
+parents owned by the test UID. These constructors and environment-controlled
+subprocess probes are absent from shipped code. Handler fixtures live inside
+the unit-test module so no fixture bypass enters the public production API.
+Independent exec, SIGKILL release, same-inode reuse, unsafe objects and canceled
+blocking ownership are host evidence. Target filesystem/kernel admission and
+same-device bind-mount negative testing remain separate gates.
 
 ## Ownership lifecycle
 
@@ -98,9 +139,14 @@ visible in `/proc`.
 
 ## Explicit remaining boundaries
 
-- This is one-process coordination, not a protected cross-process lock, durable
-  install journal, idempotency receipt or power-loss recovery protocol. A new
-  backend process cannot infer old job success from these in-memory statuses.
+- The front-end kernel lease is cooperative cross-process admission, not a
+  durable install journal, idempotency receipt or power-loss recovery protocol.
+  It does not survive destruction/replacement of rootfs and has not been handed
+  off to the retained raw writer. A new backend cannot infer old job success
+  from directory existence or these in-memory statuses. Hostile local root
+  replacing lock paths/mounts is outside this lease's protection boundary. The
+  legacy self-restart can terminate the backend before its init-script child
+  finishes; no lock inheritance/handoff to that child is claimed here.
 - Existing app staging/extraction/swap is still the legacy path, including its
   writable-p3 cache/provenance and rename/recovery limitations. Work ownership
   alone does not authenticate that filesystem or close the USB trust boundary.

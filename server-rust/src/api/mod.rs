@@ -16,3 +16,6 @@ pub mod system_update;
 pub mod tailscale;
 pub mod vm;
 pub mod webrtc_stream;
+
+#[cfg(test)]
+mod update_admission_tests;

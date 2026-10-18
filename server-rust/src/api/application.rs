@@ -951,7 +951,7 @@ mod tests {
         use std::sync::Arc;
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().to_path_buf();
-        let coordinator = Arc::new(UpdateCoordinator::default());
+        let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let payload = b"synthetic archive bytes, not an installable archive";
         let mut multipart = upload_fixture(payload, true).await;
@@ -970,7 +970,7 @@ mod tests {
         use std::sync::Arc;
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().to_path_buf();
-        let coordinator = Arc::new(UpdateCoordinator::default());
+        let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let mut multipart = upload_fixture(b"synthetic truncated body", false).await;
         assert!(owner.run(move |job| async move {

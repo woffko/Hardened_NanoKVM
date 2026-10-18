@@ -1,8 +1,10 @@
-//! In-process app/system work ownership, not durable update/restore authority.
+//! App/system work ownership and cooperative cross-process front-end admission,
+//! not durable update/restore authority.
 //! HTTP cancellation drops only a reply receiver. The runtime task and blocking
 //! callbacks retain admission through their own completion. Legacy process
 //! handoffs still need separate child supervision and durable authority.
 
+use super::operation_lock::{LockError, ProcessLock};
 use crate::{AppError, Result};
 use rand_core::{OsRng, RngCore};
 use serde::{Serialize, Serializer};
@@ -84,6 +86,13 @@ struct Slot {
 #[derive(Default)]
 pub struct UpdateCoordinator {
     slot: Mutex<Slot>,
+    #[cfg(test)]
+    fixture: Option<TestAdmission>,
+}
+#[cfg(test)]
+enum TestAdmission {
+    InProcess,
+    Parent(std::fs::File),
 }
 
 impl UpdateCoordinator {
@@ -95,6 +104,7 @@ impl UpdateCoordinator {
                 active.status.id
             )));
         }
+        let process_lock = self.acquire_process_lock()?;
         let mut id = [0; 16];
         for _ in 0..2 {
             OsRng
@@ -121,7 +131,39 @@ impl UpdateCoordinator {
         Ok(UpdateOwner(Arc::new(Ownership {
             coordinator: Arc::clone(self),
             id,
+            _process_lock: process_lock,
         })))
+    }
+
+    fn acquire_process_lock(&self) -> Result<Option<ProcessLock>> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.fixture {
+            return match fixture {
+                TestAdmission::InProcess => Ok(None),
+                TestAdmission::Parent(parent) => {
+                    ProcessLock::from_parent(parent, nix::unistd::geteuid().as_raw())
+                        .map(Some)
+                        .map_err(lock_error)
+                }
+            };
+        }
+        ProcessLock::acquire().map(Some).map_err(lock_error)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_process_fixture() -> Self {
+        Self {
+            slot: Mutex::default(),
+            fixture: Some(TestAdmission::InProcess),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_parent(parent: std::fs::File) -> Self {
+        Self {
+            slot: Mutex::default(),
+            fixture: Some(TestAdmission::Parent(parent)),
+        }
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
@@ -136,6 +178,8 @@ impl UpdateCoordinator {
 struct Ownership {
     coordinator: Arc<UpdateCoordinator>,
     id: OperationId,
+    // Dropped only with the LAST owner, after the local completion receipt.
+    _process_lock: Option<ProcessLock>,
 }
 impl Drop for Ownership {
     fn drop(&mut self) {
@@ -241,6 +285,13 @@ impl UpdateOwner {
 
 fn poisoned() -> AppError {
     AppError::Internal("update coordinator poisoned".into())
+}
+
+fn lock_error(error: LockError) -> AppError {
+    match error {
+        LockError::Busy => AppError::Conflict(error.to_string()),
+        LockError::Unsafe | LockError::Io => AppError::Internal(error.to_string()),
+    }
 }
 
 #[cfg(test)]

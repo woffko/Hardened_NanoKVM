@@ -1,5 +1,6 @@
 use super::*;
 use std::{collections::BTreeSet, sync::mpsc, time::Duration};
+use tokio::time;
 
 const KINDS: [Kind; 6] = [
     Kind::ApplicationOnline,
@@ -43,7 +44,7 @@ async fn idle(coordinator: &UpdateCoordinator) -> Snapshot {
 
 #[test]
 fn one_common_admission_and_bounded_public_receipt() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let mut ids = BTreeSet::new();
     for kind in KINDS {
         let owner = coordinator.acquire(kind).unwrap();
@@ -70,7 +71,7 @@ fn one_common_admission_and_bounded_public_receipt() {
 
 #[tokio::test]
 async fn detached_http_receiver_does_not_cancel_async_job() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::SystemDownload).unwrap();
     let id = coordinator.snapshot().unwrap().active.unwrap().id;
     let (started, start) = oneshot::channel();
@@ -95,7 +96,7 @@ async fn detached_http_receiver_does_not_cancel_async_job() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_disconnect_keeps_blocking_work_and_cleanup_exclusive() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
     let (started, start) = oneshot::channel();
     let (finish, wait) = mpsc::channel();
@@ -123,7 +124,7 @@ async fn http_disconnect_keeps_blocking_work_and_cleanup_exclusive() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_blocking_waiter_retains_admission_and_late_error() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::SystemInstall).unwrap();
     let (started, start) = oneshot::channel();
     let (finish, wait) = mpsc::channel();
@@ -161,7 +162,7 @@ async fn dropped_blocking_waiter_retains_admission_and_late_error() {
 
 #[tokio::test]
 async fn callback_error_and_panic_release_only_after_unwind() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::SystemRollback).unwrap();
     let result: Result<()> = owner
         .run(|job| async move {
@@ -181,7 +182,7 @@ async fn callback_error_and_panic_release_only_after_unwind() {
 
 #[tokio::test]
 async fn retained_restart_owner_blocks_until_finished_and_failure_is_sticky() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
     let restart = owner.run(|job| async { Ok(job) }).await.unwrap();
     assert!(coordinator.snapshot().unwrap().active.is_some());
@@ -193,7 +194,7 @@ async fn retained_restart_owner_blocks_until_finished_and_failure_is_sticky() {
 
 #[test]
 fn poisoned_coordinator_fails_closed() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::SystemDownload).unwrap();
     let poison = Arc::clone(&coordinator);
     assert!(
@@ -214,7 +215,7 @@ fn poisoned_coordinator_fails_closed() {
 
 #[tokio::test]
 async fn restart_scheduled_inside_worker_survives_lost_reply() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
     let (scheduled, schedule) = oneshot::channel();
     let (reply_finish, reply_wait) = oneshot::channel();
@@ -242,7 +243,7 @@ async fn restart_scheduled_inside_worker_survives_lost_reply() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_blocking_result_cleanup_still_owns_admission() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::SystemInstall).unwrap();
     let (started, start) = oneshot::channel();
     let (finish_work, wait_work) = mpsc::channel();
@@ -278,7 +279,7 @@ async fn discarded_blocking_result_cleanup_still_owns_admission() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_http_result_cleanup_still_owns_admission() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
     let (started, start) = oneshot::channel();
     let (finish_work, wait_work) = oneshot::channel();
@@ -307,7 +308,7 @@ async fn discarded_http_result_cleanup_still_owns_admission() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discarded_result_cleanup_panic_cannot_report_success() {
-    let coordinator = Arc::new(UpdateCoordinator::default());
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
     let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
     let (started, start) = oneshot::channel();
     let (finish, wait) = oneshot::channel();
@@ -342,4 +343,72 @@ async fn discarded_result_cleanup_panic_cannot_report_success() {
         .unwrap();
     finish.send(()).unwrap();
     assert!(idle(&coordinator).await.last.unwrap().phase == Phase::Failed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_coordinators_hold_process_lock_through_cancelled_blocking_work() {
+    let temporary = tempfile::tempdir().unwrap();
+    let first = Arc::new(UpdateCoordinator::with_test_parent(
+        std::fs::File::open(temporary.path()).unwrap(),
+    ));
+    let second = Arc::new(UpdateCoordinator::with_test_parent(
+        std::fs::File::open(temporary.path()).unwrap(),
+    ));
+    let owner = first.acquire(Kind::ApplicationOffline).unwrap();
+    assert!(matches!(
+        second.acquire(Kind::SystemDownload),
+        Err(AppError::Conflict(_))
+    ));
+    let (started, start) = oneshot::channel();
+    let (finish, wait) = mpsc::channel();
+    let request = task::spawn(owner.run(move |job| async move {
+        job.blocking("synthetic locked install", move || {
+            started.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(())
+        })
+        .await
+    }));
+    start.await.unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        second.acquire(Kind::SystemInstall),
+        Err(AppError::Conflict(_))
+    ));
+    finish.send(()).unwrap();
+    idle(&first).await;
+    // The local completion receipt can precede final field Drop by a few
+    // instructions. Cross-process admission, not status, is authoritative.
+    time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(next) = second.acquire(Kind::SystemInstall) {
+                drop(next);
+                break;
+            }
+            time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn failed_protected_admission_never_registers_work_or_selects_a_fixture() {
+    let production = Arc::new(UpdateCoordinator::default());
+    assert!(production.fixture.is_none());
+    if !nix::unistd::geteuid().is_root() {
+        assert!(matches!(
+            production.acquire(Kind::ApplicationOnline),
+            Err(AppError::Internal(_))
+        ));
+        assert!(production.snapshot().unwrap().active.is_none());
+    }
+    let temporary = tempfile::tempfile().unwrap();
+    let invalid = Arc::new(UpdateCoordinator::with_test_parent(temporary));
+    assert!(matches!(
+        invalid.acquire(Kind::SystemInstall),
+        Err(AppError::Internal(_))
+    ));
+    assert!(invalid.snapshot().unwrap().active.is_none());
 }

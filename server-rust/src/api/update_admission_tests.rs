@@ -1,16 +1,16 @@
 //! Real handler admission only: no install, service, network or device writes.
 
-use axum::{
-    body::Body,
-    extract::{FromRequest, Multipart, State},
-    http::Request,
-};
-use nanokvm_rust_server::{
+use crate::{
     AppError,
     api::{application, system_update},
     config::Config,
     state::AppState,
     update::operation::{Kind, Phase},
+};
+use axum::{
+    body::Body,
+    extract::{FromRequest, Multipart, State},
+    http::Request,
 };
 
 async fn state(path: &std::path::Path) -> AppState {
@@ -18,7 +18,12 @@ async fn state(path: &std::path::Path) -> AppState {
     config.security.allow_default_admin = false;
     config.paths.account_file = path.join("account");
     config.paths.update_cache_dir = path.join("cache");
-    AppState::new(config).await.unwrap()
+    let mut state = AppState::new(config).await.unwrap();
+    // Explicit unit-only admission fixture; shipped code always uses the fixed
+    // protected rootfs lock. These cases test handlers, not production storage.
+    state.updates =
+        std::sync::Arc::new(crate::update::operation::UpdateCoordinator::in_process_fixture());
+    state
 }
 
 fn conflict(error: AppError, id: &str) {
@@ -125,7 +130,7 @@ async fn cloned_app_state_exposes_one_readonly_bounded_operation_status() {
 
 #[tokio::test]
 async fn lost_update_reply_keeps_admission_until_command_timeout_and_reap() {
-    use nanokvm_rust_server::system::command::{AllowedCommand, run_allowed};
+    use crate::system::command::{AllowedCommand, run_allowed};
     use nix::{errno::Errno, sys::wait::waitpid, unistd::Pid};
     use std::time::Duration;
 
