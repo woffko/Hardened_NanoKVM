@@ -48,6 +48,7 @@ use crate::{
         command::{AllowedCommand, run_allowed},
         usb,
     },
+    update::state_writers::ConfigPermit,
     ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
@@ -823,10 +824,20 @@ pub async fn set_terminal_enabled(
     State(state): State<AppState>,
     Json(req): Json<SetTerminalReq>,
 ) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_terminal = req.enabled;
-    config.write()?;
-    state.set_terminal_enabled(req.enabled);
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_terminal = req.enabled;
+                    config.write(permit)?;
+                    state.set_terminal_enabled(req.enabled);
+                    Ok(())
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -848,30 +859,40 @@ pub async fn set_session_lock(
         ));
     }
 
-    let mut config = Config::read()?;
-    config.security.access_token_duration = req.duration;
-    config.write()?;
-    state.set_session_lock_duration(req.duration);
-    let session = state.sessions.retime(&session.token, req.duration).await;
-    let mut headers = HeaderMap::new();
-    if let Some(session) = &session {
-        headers.insert(
-            axum::http::header::SET_COOKIE,
-            session_cookie(
-                &session.token,
-                req.duration,
-                session_cookie_secure(&state.config.proto),
-            )?,
-        );
-    }
-
-    Ok((
-        headers,
-        Json(ApiResponse::ok(SessionLockRsp {
-            duration: req.duration,
-            expires_at: session.map(|session| session.expires_at_unix),
-        })),
-    ))
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            let runtime = state.clone();
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.access_token_duration = req.duration;
+                    config.write(permit)?;
+                    runtime.set_session_lock_duration(req.duration);
+                    Ok(())
+                })
+                .await?;
+            let session = state.sessions.retime(&session.token, req.duration).await;
+            let mut headers = HeaderMap::new();
+            if let Some(session) = &session {
+                headers.insert(
+                    axum::http::header::SET_COOKIE,
+                    session_cookie(
+                        &session.token,
+                        req.duration,
+                        session_cookie_secure(&state.config.proto),
+                    )?,
+                );
+            }
+            Ok((
+                headers,
+                Json(ApiResponse::ok(SessionLockRsp {
+                    duration: req.duration,
+                    expires_at: session.map(|session| session.expires_at_unix),
+                })),
+            ))
+        })
+        .await
 }
 
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
@@ -995,33 +1016,48 @@ pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<im
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>> {
-    let mut config = Config::read()?;
-    if req.enabled {
-        tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
-        config.proto = "https".to_string();
-        config.cert.crt = TLS_CERT_FILE.to_string();
-        config.cert.key = TLS_KEY_FILE.to_string();
-    } else {
-        system_firewall::force_moderate_mode().await?;
-        config.proto = "http".to_string();
-    }
-    config.write()?;
-
-    schedule_device_reboot("TLS protocol update");
+pub async fn set_tls(
+    State(state): State<AppState>,
+    Json(req): Json<SetTlsReq>,
+) -> Result<Json<ApiResponse<()>>> {
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            let mut config = writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    if req.enabled {
+                        tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
+                        config.proto = "https".to_string();
+                        config.cert.crt = TLS_CERT_FILE.to_string();
+                        config.cert.key = TLS_KEY_FILE.to_string();
+                    }
+                    Ok(config)
+                })
+                .await?;
+            if !req.enabled {
+                system_firewall::force_moderate_mode(&writer).await?;
+                config.proto = "http".to_string();
+            }
+            writer.blocking(move |permit| config.write(permit)).await?;
+            schedule_device_reboot(writer, "TLS protocol update");
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-fn schedule_device_reboot(reason: &'static str) {
+fn schedule_device_reboot(writer: ConfigPermit, reason: &'static str) {
     tokio::spawn(async move {
         time::sleep(Duration::from_millis(1000)).await;
-        match run_allowed(
-            AllowedCommand::Reboot,
-            std::iter::empty::<&str>(),
-            Duration::from_secs(2),
-        )
-        .await
+        match writer
+            .command(
+                AllowedCommand::Reboot,
+                std::iter::empty::<&str>(),
+                Duration::from_secs(2),
+            )
+            .await
         {
             Ok(output) if output.status == 0 => {
                 tracing::info!(reason, "scheduled device reboot completed")
@@ -1036,6 +1072,7 @@ fn schedule_device_reboot(reason: &'static str) {
                 tracing::warn!(reason, error = ?err, "failed to reboot device")
             }
         }
+        drop(writer);
     });
 }
 

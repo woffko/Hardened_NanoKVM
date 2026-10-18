@@ -19,7 +19,7 @@ use crate::{
     },
     state::AppState,
     system::{audit, command::AllowedCommand},
-    update::state_writers::WriterPermit,
+    update::state_writers::AccountPermit,
 };
 
 const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -240,7 +240,7 @@ pub async fn change_password(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-async fn change_root_password(password: &str, writer: &WriterPermit) -> Result<()> {
+async fn change_root_password(password: &str, writer: &AccountPermit) -> Result<()> {
     let input = Zeroizing::new(format!("{password}\n{password}\n"));
     let output = writer
         .command_with_stdin(

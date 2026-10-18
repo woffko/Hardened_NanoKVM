@@ -11,7 +11,11 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{AppError, Result, system::media::MEDIA_ROOT};
+use crate::{
+    AppError, Result,
+    system::media::MEDIA_ROOT,
+    update::state_writers::{ConfigPermit, StateWriters},
+};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/kvm/server.yaml";
 const DEFAULT_SECRET_PATH: &str = "/etc/kvm/session_secret";
@@ -212,17 +216,30 @@ impl Default for Paths {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let mut config = Self::read()?;
-        config.ensure_session_secret()?;
+        let writers = StateWriters::default();
+        let permit = writers.configuration()?;
+        Self::load_for(&permit)
+    }
+
+    pub(crate) fn load_for(permit: &ConfigPermit) -> Result<Self> {
+        // Startup may generate persistent identity; use the same serialized
+        // domain as runtime YAML changes, including across backend processes.
+        let mut config = Self::read_for(permit)?;
+        config.ensure_session_secret(permit)?;
         Ok(config)
     }
 
     pub fn read() -> Result<Self> {
-        let path = std::env::var("NANOKVM_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
+        Self::read_path(&config_path())
+    }
+
+    pub(crate) fn read_for(permit: &ConfigPermit) -> Result<Self> {
+        Self::read_path(&writer_config_path(permit))
+    }
+
+    fn read_path(path: &Path) -> Result<Self> {
         let mut config = if path.exists() {
-            let data = fs::read_to_string(&path)?;
+            let data = fs::read_to_string(path)?;
             serde_yaml::from_str::<Config>(&data).map_err(|err| {
                 AppError::Config(format!("failed to parse {}: {err}", path.display()))
             })?
@@ -234,10 +251,8 @@ impl Config {
         Ok(config)
     }
 
-    pub fn write(&self) -> Result<()> {
-        let path = std::env::var("NANOKVM_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
+    pub(crate) fn write(&self, permit: &ConfigPermit) -> Result<()> {
+        let path = writer_config_path(permit);
         let data = serde_yaml::to_string(self)
             .map_err(|err| AppError::Config(format!("failed to serialize config: {err}")))?;
         write_yaml_0600_atomic(&path, data.as_bytes())?;
@@ -331,7 +346,7 @@ impl Config {
         Ok(())
     }
 
-    fn ensure_session_secret(&mut self) -> Result<()> {
+    fn ensure_session_secret(&mut self, permit: &ConfigPermit) -> Result<()> {
         if !self.jwt.secret_key.is_empty() {
             return Ok(());
         }
@@ -345,10 +360,24 @@ impl Config {
         }
 
         let secret = generate_secret();
-        write_secret_0600(&self.paths.session_secret_file, &secret)?;
+        write_secret_0600(permit, &self.paths.session_secret_file, &secret)?;
         self.jwt.secret_key = secret;
         Ok(())
     }
+}
+
+fn config_path() -> PathBuf {
+    std::env::var("NANOKVM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH))
+}
+
+fn writer_config_path(_permit: &ConfigPermit) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = _permit.fixture_config_path() {
+        return path.to_owned();
+    }
+    config_path()
 }
 
 fn generate_secret() -> String {
@@ -357,7 +386,7 @@ fn generate_secret() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn write_secret_0600(path: &Path, secret: &str) -> Result<()> {
+fn write_secret_0600(_permit: &ConfigPermit, path: &Path, secret: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

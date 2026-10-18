@@ -90,10 +90,20 @@ pub async fn set_remote_image_download_enabled(
     State(state): State<AppState>,
     Json(req): Json<SetRemoteImageDownloadReq>,
 ) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_remote_image_download = req.enabled;
-    config.write()?;
-    state.set_remote_image_download_enabled(req.enabled);
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_remote_image_download = req.enabled;
+                    config.write(permit)?;
+                    state.set_remote_image_download_enabled(req.enabled);
+                    Ok(())
+                })
+                .await
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }

@@ -1037,16 +1037,21 @@ prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 
 ## Required writer/boot integration (not implemented yet)
 
-App/system request work now shares an in-process job owner; its exact lifetime
-guarantees and remaining raw-child/quiescence/durable-lock gaps are documented
-in [security-update-ownership.md](security-update-ownership.md). This does not
-satisfy the protected transaction/writer requirements below by itself.
+App/system front-end work now shares a runtime job owner and cooperative
+cross-process admission lease. Account/Config writers also have partial
+admission/drain enrollment; no production capture consumes that drain yet.
+Exact lifetime guarantees and remaining raw-child/quiescence/durable-transaction
+gaps are documented in [security-update-ownership.md](security-update-ownership.md).
+This does not satisfy the complete protected writer requirements below.
 
 1. Hold the common update transaction lock. Retain exact metadata/signature;
    reverify current trust policy and archive identity. Do not authorize from
    `staged.json`, old raw markers or copied preservation trees.
-2. Stop configuration writers. Capture the current allowlisted account, SSH,
-   network and application state from live trusted rootfs/bootfs. Any critical
+2. Stop configuration writers. Before enabling capture, maintain a finite
+   producer inventory with each persistent source's owner, enrollment or explicit
+   stop+join, and completion/abort boundary. Backend exit alone is not proof that
+   helper/daemon/background writers stopped. Capture the current allowlisted
+   account, SSH, network and application state from live trusted rootfs/bootfs. Any critical
    read/copy/space error aborts before partition writes. Preserve optional app
    configuration/state, never downloaded binaries, caches or init scripts.
    Use the implemented canonical app-state capture/checks with the exact active

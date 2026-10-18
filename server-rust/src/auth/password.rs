@@ -11,7 +11,7 @@ use argon2::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, Result, update::state_writers::WriterPermit};
+use crate::{AppError, Result, update::state_writers::AccountPermit};
 
 pub const LEGACY_DEFAULT_USERNAME: &str = "admin";
 pub const LEGACY_DEFAULT_PASSWORD: &str = "admin";
@@ -48,7 +48,7 @@ impl AccountStore {
 
     pub(crate) fn set_account(
         &self,
-        _permit: &WriterPermit,
+        _permit: &AccountPermit,
         username: &str,
         password: &str,
     ) -> Result<()> {
@@ -58,7 +58,7 @@ impl AccountStore {
         self.write_account(username, &hash)
     }
 
-    pub(crate) fn seed_legacy_default_account(&self, _permit: &WriterPermit) -> Result<bool> {
+    pub(crate) fn seed_legacy_default_account(&self, _permit: &AccountPermit) -> Result<bool> {
         if self.exists() {
             return Ok(false);
         }

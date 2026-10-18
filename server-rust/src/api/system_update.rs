@@ -397,10 +397,22 @@ pub async fn get_raw_enabled() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_raw_enabled(Json(req): Json<SetRawUpdateEnabledReq>) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_raw_system_updates = req.enabled;
-    config.write()?;
+pub async fn set_raw_enabled(
+    State(state): State<AppState>,
+    Json(req): Json<SetRawUpdateEnabledReq>,
+) -> Result<impl IntoResponse> {
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_raw_system_updates = req.enabled;
+                    config.write(permit)
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 

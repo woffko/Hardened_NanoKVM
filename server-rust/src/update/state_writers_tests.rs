@@ -199,6 +199,7 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
 fn normal_constructor_never_chooses_a_test_parent() {
     let gate = StateWriters::default();
     assert!(gate.parent.is_none());
+    assert!(gate.config_path.is_none());
     if !nix::unistd::geteuid().is_root() {
         assert!(matches!(gate.account(), Err(AppError::Internal(_))));
     }

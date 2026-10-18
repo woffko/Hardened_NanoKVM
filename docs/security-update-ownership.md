@@ -121,7 +121,7 @@ Loss of a command's caller signals the runtime owner to cancel and reap; droppin
 the waiting future is **not** a synchronous cleanup join. The registered update
 worker is not canceled by HTTP reply loss, so its command timeout/error result
 and update admission release occur after explicit direct-child cleanup. Enrolled
-account commands additionally retain their writer permit in the command owner;
+account/Config commands additionally retain their permit in the command owner;
 other configuration callers still need permit/Stop integration that retains
 quiescence ownership until such cleanup is joined.
 
@@ -138,15 +138,20 @@ updated progress file. A currently registered system operation is not declared
 stale solely because the wall clock changed or a legacy raw process was not yet
 visible in `/proc`.
 
-## Separate configuration-writer admission and account enrollment
+## Separate configuration-writer admission and account/Config enrollment
 
 `AppState.writers` is separate from update admission. Its fixed protected-rootfs
 directories use the same root/owner/mode/device/open checks and persistent-inode
 rules as the front-end lease: `/etc/kvm/state-writer-admission`,
-`/etc/kvm/state-writer-activity` and `/etc/kvm/account-operation`. An account
-writer acquires admission shared, activity shared, then account exclusive;
-after enrollment it releases the short admission share. Concurrent account
-mutations fail busy rather than interleaving native and web identity writes.
+`/etc/kvm/state-writer-activity`, `/etc/kvm/account-operation` and
+`/etc/kvm/configuration-operation`. A writer acquires admission shared, activity
+shared, then its serial domain exclusive; after enrollment it releases the
+short admission share. Account and Config mutations have independent serial
+domains, but both count toward the same activity drain. Concurrent mutations
+in one domain fail busy rather than interleaving their read/modify/write work.
+Zero-sized role tags keep `AccountPermit` and `ConfigPermit` distinct: Config
+enrollment cannot authorize an AccountStore mutation, or vice versa. The
+constructor and ownership-sharing machinery remain internal.
 
 `StateWriters::drain` takes admission exclusive before waiting for activity
 exclusive. It rejects new enrollment while existing work drains, and returns a
@@ -180,12 +185,49 @@ Web account publication still uses its existing truncate-in-place path, and
 rollback/journaling, protected file publication and power-loss recovery remain
 required. Enrollment closes lifetime/interleaving gaps, not these failures.
 
-Only those account writers currently enroll. YAML configuration/startup secret,
-network, firewall rollback, time/syslog, terminal, scripts, optional apps and
-other service/background writers are not quiesced. No coherent preservation
-snapshot, all-writer freeze, phase-aware Stop/join, service stop, raw-writer ticket
-or retained transaction is accepted from this component. Its cancellation and
-synthetic account-file tests are host-only; no live root password was changed.
+Config enrollment covers all five YAML setters: remote-image download, local
+terminal enablement, session duration, raw-update enablement and TLS protocol.
+The permit is acquired before reading YAML or doing related side effects and
+retained through publication/runtime updates. Blocking read/modify/write work
+does not run on the HTTP task. Session duration also retains ownership through
+live-session retiming and cookie construction. Lost replies cannot leave that
+sequence halfway merely by canceling the handler. Other settings in the
+immutable startup Config snapshot are not silently refreshed by this change.
+
+`Config::load` also acquires the Config domain before reading YAML and checking
+or generating the persisted session secret. It uses the same kernel locks as
+runtime setters across independent backends; busy/unsafe storage fails closed,
+not through a rootless startup fallback. This does not enroll the backend's
+other startup migration/trust/script writers. Ordinary Config getters remain
+read-only and do not acquire writer admission.
+
+TLS holds its Config permit across certificate generation or the forced
+moderate-firewall operation, YAML publication and scheduling reboot. The delayed
+reboot task receives the permit before the root worker replies; it retains it
+through the delay and the command's direct-child cleanup. Normal capture and
+stdin commands both support this retained ownership. No shutdown/process-tree
+completion or durable reboot journal is implied.
+
+Config/TLS publication is still **not** a multi-file crash transaction. The
+existing YAML rename helper has pathname races and ignores parent-directory
+sync errors; session-secret writing remains truncate-in-place. Certificate/key
+publication and firewall changes can occur before a later failure or YAML
+write error, with no compensating rollback. The existing session-secret read/
+regeneration policy is unchanged. Protected atomic publication, error recovery
+and target TLS/firewall/reboot acceptance remain required.
+
+Synthetic host fixtures use explicit cfg(test)-only private config paths, not
+process-global environment mutation. They check real safe setters, lost replies,
+serial conflict/retry without lost fields, session retiming, startup secret reuse,
+publication errors and retained command/follow-up lifetime. They do not execute
+native firewall, TLS generation at device paths or reboot.
+
+Network, standalone firewall/rollback, time/syslog, active terminal sessions,
+scripts, optional apps and other service/background writers are not quiesced.
+No coherent preservation snapshot, all-writer freeze, phase-aware Stop/join,
+service stop, raw-writer ticket
+or retained transaction is accepted from this component. The host fixtures do
+not change a live root password or device configuration.
 
 ## Explicit remaining boundaries
 
@@ -209,11 +251,11 @@ synthetic account-file tests are host-only; no live root password was changed.
   transaction authority. A callback lease alone is still not proof that every
   process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
-- YAML/startup-secret, network, firewall rollback, time/syslog, local terminal,
+- Other startup writes, network, firewall rollback, time/syslog, active terminal,
   scripts, optional-app workers and other configuration writers do not yet
-  acquire the shared quiescence permit. Account enrollment is partial coverage,
-  not a native/web rollback protocol. No preservation snapshot may claim all
-  writers are stopped merely because update admission or this drain is held.
+  acquire the shared quiescence permit. Account/Config enrollment is partial
+  coverage, not a credential/TLS/config rollback protocol. No snapshot may claim
+  all writers are stopped merely because update admission or this drain is held.
 - No generic abort handle is exposed. Explicit Stop must use phase-aware
   cancellation plus child/work-owner join, not HTTP disconnect, dropped
   `spawn_blocking` handles or killing an irreversible raw write midway.

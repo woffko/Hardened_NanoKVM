@@ -14,6 +14,7 @@ use crate::{
     config::Config,
     error::ApiResponse,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
+    update::state_writers::ConfigPermit,
 };
 
 const CONFIG_FILE: &str = "/etc/kvm/firewall.json";
@@ -116,13 +117,24 @@ pub fn webrtc_blocked_message() -> &'static str {
     WEBRTC_BLOCKED_MESSAGE
 }
 
-pub async fn force_moderate_mode() -> Result<()> {
-    let moderate = FirewallConfig {
-        mode: MODE_MODERATE.to_string(),
-    };
-    write_config(&moderate)?;
-    remove_file_if_exists(PENDING_FILE)?;
-    apply_firewall().await
+pub(crate) async fn force_moderate_mode(writer: &ConfigPermit) -> Result<()> {
+    writer
+        .blocking(|_| {
+            let moderate = FirewallConfig {
+                mode: MODE_MODERATE.to_string(),
+            };
+            write_config(&moderate)?;
+            remove_file_if_exists(PENDING_FILE)
+        })
+        .await?;
+    let output = writer
+        .command(
+            AllowedCommand::ServiceFirewall,
+            ["restart"],
+            Duration::from_secs(10),
+        )
+        .await?;
+    check_firewall_output(output)
 }
 
 pub async fn get_status() -> Result<impl IntoResponse> {
@@ -312,6 +324,10 @@ async fn apply_firewall() -> Result<()> {
         Duration::from_secs(10),
     )
     .await?;
+    check_firewall_output(output)
+}
+
+fn check_firewall_output(output: CommandOutput) -> Result<()> {
     if output.status != 0 {
         return Err(AppError::Internal(command_error(
             "failed to apply firewall settings",

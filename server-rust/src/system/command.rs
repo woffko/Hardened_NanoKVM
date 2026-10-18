@@ -160,6 +160,21 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_allowed_owned(command, args, timeout, ()).await
+}
+
+/// Owns caller-issued work through capture, cancellation and direct-child reap.
+pub(crate) async fn run_allowed_owned<I, S, G>(
+    command: AllowedCommand,
+    args: I,
+    timeout: Duration,
+    ownership: G,
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    G: Send + 'static,
+{
     let mut process = Command::new(command.program());
     process
         .args(args)
@@ -167,7 +182,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    run_captured(process, None, timeout, ()).await
+    run_captured(process, None, timeout, ownership).await
 }
 
 /// A runtime task owns the direct child through cancellation/timeout cleanup.

@@ -14,6 +14,7 @@ pub(super) enum Domain {
     WriterAdmission,
     WriterActivity,
     Account,
+    Configuration,
 }
 impl Domain {
     fn directory(self) -> &'static str {
@@ -22,6 +23,7 @@ impl Domain {
             Self::WriterAdmission => "state-writer-admission",
             Self::WriterActivity => "state-writer-activity",
             Self::Account => "account-operation",
+            Self::Configuration => "configuration-operation",
         }
     }
 }
