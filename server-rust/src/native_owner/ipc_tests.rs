@@ -198,6 +198,32 @@ fn fragmented_request_has_no_effect_until_complete_and_lost_pause_reply_abandons
 }
 
 #[test]
+fn pending_reply_idle_budget_starts_after_request_work_not_before_it() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path());
+    let (server, mut peer) = UnixStream::pair().unwrap();
+    let mut client = Client::new(server, 12, nix::unistd::geteuid().as_raw()).unwrap();
+    peer.write_all(&request(Operation::EnsureKvm, 1)).unwrap();
+    assert!(!client.tick(&mut engine).unwrap());
+    assert!(client.writing);
+    assert_eq!(client.sent, 0);
+    assert!(
+        client.last_activity >= engine.fixture_request_completed.unwrap(),
+        "request work consumed the pending reply's transport idle budget"
+    );
+    assert!(!client.tick(&mut engine).unwrap());
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut reply = [0; FRAME];
+    peer.read_exact(&mut reply).unwrap();
+    assert_eq!(&reply[..4], b"NKR1");
+    engine.request(12, Operation::Shutdown);
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Stopped
+    });
+}
+
+#[test]
 fn duplicate_unsolicited_reply_cannot_satisfy_the_next_operation() {
     let (a, mut b) = UnixStream::pair().unwrap();
     let mut channel = Channel::verified(a, nix::unistd::geteuid().as_raw()).unwrap();

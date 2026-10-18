@@ -246,6 +246,8 @@ struct Engine {
     stopped_at: Option<Instant>,
     #[cfg(test)]
     fixture: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    fixture_request_completed: Option<Instant>,
 }
 impl Engine {
     fn new(broker: Broker) -> Self {
@@ -260,6 +262,8 @@ impl Engine {
             stopped_at: None,
             #[cfg(test)]
             fixture: None,
+            #[cfg(test)]
+            fixture_request_completed: None,
         }
     }
     fn command(&self, role: Role) -> std::process::Command {
@@ -438,6 +442,10 @@ impl Engine {
         if self.mode == Mode::Uncertain {
             code = Code::Uncertain;
         }
+        #[cfg(test)]
+        {
+            self.fixture_request_completed = Some(Instant::now());
+        }
         self.reply(code)
     }
     fn disconnected(&mut self, key: u64) {
@@ -530,6 +538,9 @@ impl Client {
         self.sent = 0;
         self.writing = true;
         self.read = 0;
+        // Spawn/journal work is not a stalled receiver. Start the pending
+        // reply's transport budget only after that work has produced a reply.
+        self.last_activity = Instant::now();
         Ok(false)
     }
 }

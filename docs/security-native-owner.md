@@ -180,6 +180,12 @@ same live connection may explicitly resume after proven closure. Caller EOF,
 protocol failure or disconnect leaves maintenance abandoned, disables respawn
 and denies takeover by another client. A maintenance owner is not evicted by the
 ordinary five-second idle budget; abandoned state has no implicit expiry.
+For a pending response, that transport budget starts after synchronous request
+work has produced the reply. Spawn/journal latency must not expire a newly
+prepared response before its first write. Partial I/O still updates activity;
+a stalled non-owner receiver remains bounded by the same idle limit. This does
+not make synchronous filesystem/spawn work nonblocking or give the entire
+daemon a hard scheduling deadline.
 This is a trusted-root management endpoint: a root peer can keep one of the
 bounded slots occupied with partial-frame progress. There is no absolute frame
 deadline or availability guarantee against hostile root. Do not expose this
