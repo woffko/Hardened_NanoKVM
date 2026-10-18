@@ -53,6 +53,13 @@ restore_rust_elf server/NanoKVM-Server kvmapp/server/NanoKVM-Server
 restore_rust_elf backends/NanoKVM-Server.rust kvmapp/backends/NanoKVM-Server.rust
 restore_rust_elf hwmon/nanokvm-hwmon kvmapp/hwmon/nanokvm-hwmon
 
+# Recheck the final restored bytes, not just the package's earlier source tree.
+# This is consistency only; signed release provenance is a separate gate.
+cmp "$KVMAPP_SOURCE/server/NanoKVM-Server" "$TARGET_DIR/kvmapp/server/NanoKVM-Server"
+cmp "$TARGET_DIR/kvmapp/server/NanoKVM-Server" "$TARGET_DIR/kvmapp/backends/NanoKVM-Server.rust"
+"${HOST_DIR:-}/bin/python3" "$ROOT/scripts/ssh-runtime-binding.py" inspect \
+	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" --quiet
+
 if [ -n "$RUNTIME_SYSTEM_VERSION" ] || [ -n "$RUNTIME_KERNEL_VERSION" ] || [ -n "$RUNTIME_SECURITY_PATCH_LEVEL" ]; then
 	case "$RUNTIME_SYSTEM_VERSION$RUNTIME_KERNEL_VERSION$RUNTIME_SECURITY_PATCH_LEVEL" in
 		*['&|\\']*)

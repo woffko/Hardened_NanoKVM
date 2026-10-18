@@ -112,7 +112,11 @@ shell: check-root builder-image
 # Build Rust application locally
 rust-app:
 	@echo "Building Rust app..."
+ifeq ($(strip $(RUST_TARGET)),riscv64gc-unknown-linux-musl)
+	@server-rust/scripts/build-linked-libkvm.sh --locked --offline
+else
 	@cargo build $(RUST_BUILD_ARGS)
+endif
 
 # Build frontend assets
 web-app:

@@ -2,7 +2,7 @@
 //! NEVER a hash supplied by p3/the helper itself. This is not a signature API.
 
 use super::{JobError, Result};
-use crate::update::{restore_capsule::create_private_spool, restore_fs};
+use crate::update::{restore_binding, restore_capsule::create_private_spool, restore_fs};
 use rustix::fs::{Mode, OFlags, PROC_SUPER_MAGIC, fchmod, fcntl_getfl, fstatfs, openat};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,7 +19,15 @@ use std::{
     process::Command,
 };
 
-const MAX_HELPER: u64 = 32 * 1024 * 1024;
+// Keep the exact envelope contiguous in the backend for host-side packaging
+// verification. The optimizer barrier is safe; a missing/ambiguous envelope
+// fails the packaging gate rather than selecting a mutable runtime fallback.
+#[inline(never)]
+fn embedded_binding() -> &'static [u8] {
+    std::hint::black_box(
+        include_bytes!(concat!(env!("OUT_DIR"), "/ssh-runtime.binding")).as_slice(),
+    )
+}
 
 // No Clone, writable FD/path accessor or arbitrary command constructor.
 pub struct PinnedSshHelper {
@@ -27,16 +35,38 @@ pub struct PinnedSshHelper {
 }
 
 impl PinnedSshHelper {
+    /// Linked device startup and packaging both require this exact envelope.
+    /// Checking it does not grant an update/restore authorization.
+    pub fn check_embedded() -> Result<()> {
+        restore_binding::validate(embedded_binding()).map_err(|_| JobError::Helper)?;
+        Ok(())
+    }
+
+    /// Build-bound bytes only. No p3 file, runtime environment variable or
+    /// unsigned manifest can supply/replace this authority. The backend itself
+    /// still requires the protected app-slot/signed-build trust boundary.
+    pub fn embedded(private_root: &Path) -> Result<Self> {
+        let binding =
+            restore_binding::validate(embedded_binding()).map_err(|_| JobError::Helper)?;
+        let mut image = binding.image;
+        Self::capture(
+            &mut image,
+            binding.image.len() as u64,
+            &binding.digest,
+            private_root,
+        )
+    }
+
     /// Exact size/hash MUST originate from the authenticated release/build
     /// authority. rootfs O_TMPFILE only; no named/exFAT/p3 code staging fallback.
     /// Snapshot closes source mutation TOCTOU, not malicious local root.
-    pub fn capture(
+    pub(crate) fn capture(
         source: &mut impl Read,
         size: u64,
         expected: &[u8; 32],
         private_root: &Path,
     ) -> Result<Self> {
-        if !(64..=MAX_HELPER).contains(&size) {
+        if !(64..=restore_binding::MAX_HELPER).contains(&size) {
             return Err(JobError::Helper);
         }
         let mut writable = create_private_spool(private_root).map_err(|_| JobError::Helper)?;
@@ -69,7 +99,10 @@ impl PinnedSshHelper {
         if !eof || actual != *expected {
             return Err(JobError::Helper);
         }
-        check_static_rv64(&writable, size)?;
+        restore_binding::check_static_rv64(size, |buffer, offset| {
+            writable.read_exact_at(buffer, offset)
+        })
+        .map_err(|_| JobError::Helper)?;
         fchmod(&writable, Mode::RUSR | Mode::XUSR).map_err(|_| JobError::Helper)?;
         writable.sync_all().map_err(|_| JobError::Helper)?;
         let file = readonly(&writable, size)?;
@@ -134,41 +167,6 @@ fn readonly(source: &File, size: u64) -> Result<File> {
     Ok(rustix::io::fcntl_dupfd_cloexec(&file, 3)
         .map_err(|_| JobError::Helper)?
         .into())
-}
-
-fn check_static_rv64(file: &File, size: u64) -> Result<()> {
-    let mut header = [0; 64];
-    file.read_exact_at(&mut header, 0)
-        .map_err(|_| JobError::Helper)?;
-    let u16_at = |n| u16::from_le_bytes([header[n], header[n + 1]]);
-    let phoff = u64::from_le_bytes(header[32..40].try_into().map_err(|_| JobError::Helper)?);
-    let count = u16_at(56);
-    if &header[..7] != b"\x7fELF\x02\x01\x01"
-        || u16_at(16) != 2
-        || u16_at(18) != 243
-        || header[20..24] != 1_u32.to_le_bytes()
-        || u16_at(52) != 64
-        || u16_at(54) != 56
-        || !(1..=128).contains(&count)
-        || phoff < 64
-        || phoff
-            .checked_add(u64::from(count) * 56)
-            .is_none_or(|end| end > size)
-    {
-        return Err(JobError::Helper);
-    }
-    let mut load = false;
-    let mut program = [0; 56];
-    for n in 0..count {
-        file.read_exact_at(&mut program, phoff + u64::from(n) * 56)
-            .map_err(|_| JobError::Helper)?;
-        match u32::from_le_bytes(program[..4].try_into().map_err(|_| JobError::Helper)?) {
-            1 => load = true,
-            2 | 3 => return Err(JobError::Helper), // no dynamic table/interpreter
-            _ => {}
-        }
-    }
-    if load { Ok(()) } else { Err(JobError::Helper) }
 }
 
 #[cfg(test)]

@@ -746,11 +746,12 @@ send remains only a queued transport record, not native acceptance or authority.
 `PinnedSshHelper::capture` copies at most 32 MiB through a 64-KiB buffer into
 rootfs-only anonymous O_TMPFILE storage, checking exact size/EOF and SHA-256.
 **The expected size/hash must come from trusted build/release authority, not p3
-or the helper's own manifest.** This constructor is not signature verification;
-the protected packaging/authority caller is still missing. It requires ELF64,
-little-endian RV64 ET_EXEC, a bounded program-header table and a LOAD, with no
-PT_INTERP/PT_DYNAMIC. This intentionally admits the current static build, not
-an unreviewed future static-PIE layout. No ambient loader/vendor library is used.
+or the helper's own manifest.** This crate-private constructor is not signature
+verification; the public build-bound constructor is described below. It requires
+ELF64, little-endian RV64 ET_EXEC, a bounded program-header table and a LOAD,
+with no PT_INTERP/PT_DYNAMIC, and bounded/congruent LOAD ranges. This admits the
+current static build, not an unreviewed future static-PIE layout. No ambient
+loader/vendor library is used.
 After fsync/chmod0500 it independently reopens the exact anonymous inode as
 O_RDONLY/CLOEXEC, closes the only writable owner, and pins the descriptor above
 stdio. Exec uses actual procfs `/proc/self/fd/N`, never the mutable source path.
@@ -787,9 +788,45 @@ host-ELF bypasses, not production provenance. They cover size/hash/ELF rejection
 source mutation/proc-fd exec, exact output bounds, cancellation, timeout, reaping,
 zero exit without EOF, and real typed-root cleanup including unknown-file
 preservation. Capturing the retained static RV64 helper does not execute it on
-the host. Target loop/exec/kernel cleanup, runtime trust binding, full Match
+the host. Target loop/exec/kernel cleanup, protected backend authority, full Match
 matrix and actual SSH login remain open. The legacy
 raw writer/early apply are unchanged: **C1 remains OPEN**.
+
+### Static helper build/package binding (component; app-slot authority open)
+
+The linked build wrapper builds the helper first, without `linked-libkvm` and
+with `NANOKVM_SSH_RUNTIME_BINDING` unset, in a separate Cargo target directory.
+The build tool prepares a content-addressed envelope with eight-byte `NKSSHRT1`,
+little-endian u64 image size, 32-byte SHA-256, then exact static-helper bytes.
+The helper is bounded to 32 MiB; malformed/truncated/trailing framing and wrong
+hash/ELF fail closed. No new signature format, key or trust-policy ID is added.
+
+The backend build script requires and validates that complete envelope for a
+linked RV64 build, then embeds a build-owned copy, not a runtime source path.
+The linked device backend checks it at startup, retaining the exact bytes even
+with LTO/strip. `PinnedSshHelper::embedded` validates its own build bytes and
+passes them to the existing exact anonymous-file capture. It accepts only the
+private rootfs spool directory, never a caller-selected helper/hash/path.
+Generic host/helper builds have an empty envelope unless explicitly bound at
+build time; the build-bound constructor fails closed when absent.
+
+Host packaging inspects the copied backend without executing RV64 code. It
+requires exactly one valid envelope, bounds the backend to 128 MiB and marker
+candidates to 64, and records embedded helper hash/size in the app manifest.
+Buildroot repeats inspection before installation and after the post-build Rust
+ELF restore, with byte comparisons of source/active/backup backend copies.
+The Python gate and shared Rust build/runtime parser reject foreign/dynamic
+ELF, invalid program tables and out-of-image/overflowing/misaligned LOAD ranges.
+These are consistency checks: an arbitrary hostile backend can append a valid
+envelope, so packaging alone does **not** authenticate backend provenance.
+
+The build input and backend must remain inside the trusted build/release and
+protected app-slot boundary. A root-owned directory on writable/exported p3 is
+not sufficient authority. Signed app provenance, protected app slots, production
+transaction lock/quiescence/cancellation owner, retained writer/ticket and early
+restore integration remain required. No system API has been switched to this
+constructor yet; no raw partition write, loop/target/native-login or release
+acceptance is implied. Synthetic host envelopes test framing/packaging only.
 
 ### Isolated native host-key possession (component; target acceptance open)
 

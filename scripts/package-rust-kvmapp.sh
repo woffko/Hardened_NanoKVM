@@ -8,6 +8,8 @@ STAGE_DIR="${STAGE_DIR:-$BUILD_DIR/kvmapp-rust}"
 KVMAPP_STAGE="$STAGE_DIR/kvmapp"
 OUT_DIR="${OUT_DIR:-$BUILD_DIR/artifacts}"
 RUST_TARGET="${RUST_TARGET:-}"
+RUST_BUILD_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/server-rust/target}"
+case "$RUST_BUILD_DIR" in /*) ;; *) RUST_BUILD_DIR="$PWD/$RUST_BUILD_DIR" ;; esac
 RUST_BINARY="${RUST_BINARY:-}"
 HWMON_BINARY="${HWMON_BINARY:-}"
 WEB_DIST="${WEB_DIST:-$ROOT_DIR/web/dist}"
@@ -73,17 +75,17 @@ restore_kvm_system_helper() {
 
 if [ -z "$RUST_BINARY" ]; then
   if [ -n "$RUST_TARGET" ]; then
-    RUST_BINARY="$ROOT_DIR/server-rust/target/$RUST_TARGET/release/nanokvm-rust-server"
+    RUST_BINARY="$RUST_BUILD_DIR/$RUST_TARGET/release/nanokvm-rust-server"
   else
-    RUST_BINARY="$ROOT_DIR/server-rust/target/release/nanokvm-rust-server"
+    RUST_BINARY="$RUST_BUILD_DIR/release/nanokvm-rust-server"
   fi
 fi
 
 if [ -z "$HWMON_BINARY" ]; then
   if [ -n "$RUST_TARGET" ]; then
-    HWMON_BINARY="$ROOT_DIR/server-rust/target/$RUST_TARGET/release/nanokvm-hwmon"
+    HWMON_BINARY="$RUST_BUILD_DIR/$RUST_TARGET/release/nanokvm-hwmon"
   else
-    HWMON_BINARY="$ROOT_DIR/server-rust/target/release/nanokvm-hwmon"
+    HWMON_BINARY="$RUST_BUILD_DIR/release/nanokvm-hwmon"
   fi
 fi
 
@@ -136,6 +138,10 @@ cp "$RUST_BINARY" "$KVMAPP_STAGE/server/NanoKVM-Server"
 chmod 0755 "$KVMAPP_STAGE/server/NanoKVM-Server"
 cp "$RUST_BINARY" "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
 chmod 0755 "$KVMAPP_STAGE/backends/NanoKVM-Server.rust"
+ssh_runtime=$(python3 "$ROOT_DIR/scripts/ssh-runtime-binding.py" inspect \
+  --backend "$KVMAPP_STAGE/server/NanoKVM-Server")
+ssh_runtime_sha256=${ssh_runtime% *}
+ssh_runtime_size=${ssh_runtime#* }
 cp "$HWMON_BINARY" "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 chmod 0755 "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 
@@ -190,6 +196,9 @@ kvm_system_sha256=$(build_file_sha256 "$KVMAPP_STAGE/kvm_system/kvm_system")
   printf 'source: %s\n' "$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf unknown)"
   printf 'rust_binary: kvmapp/server/NanoKVM-Server\n'
   printf 'rust_binary_sha256: %s\n' "$rust_binary_sha256"
+  printf 'ssh_runtime: embedded-static-rv64-v1\n'
+  printf 'ssh_runtime_sha256: %s\n' "$ssh_runtime_sha256"
+  printf 'ssh_runtime_size: %s\n' "$ssh_runtime_size"
   printf 'hwmon_binary: kvmapp/hwmon/nanokvm-hwmon\n'
   printf 'hwmon_binary_sha256: %s\n' "$hwmon_binary_sha256"
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"

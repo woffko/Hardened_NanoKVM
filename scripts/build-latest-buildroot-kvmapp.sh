@@ -19,6 +19,8 @@ EXTRA_NATIVE_LIB_DIR="$EXTRA_NATIVE_LIB_DIR" \
 
 test "$(cat "$STAGE_DIR/kvmapp/version")" = "$APP_VERSION"
 test -x "$STAGE_DIR/kvmapp/server/NanoKVM-Server"
+python3 "$ROOT/scripts/ssh-runtime-binding.py" inspect \
+  --backend "$STAGE_DIR/kvmapp/server/NanoKVM-Server" --quiet
 test -x "$STAGE_DIR/kvmapp/hwmon/nanokvm-hwmon"
 test -x "$STAGE_DIR/kvmapp/kvm_system/kvm_system"
 if readelf -d "$STAGE_DIR/kvmapp/kvm_system/kvm_system" 2>/dev/null | grep -Eq '\((RPATH|RUNPATH)\)'; then

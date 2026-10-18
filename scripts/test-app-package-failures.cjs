@@ -19,6 +19,8 @@ try {
   fs.mkdirSync(path.join(project, 'scripts'), { recursive: true });
   fs.cpSync(path.join(root, 'kvmapp'), path.join(project, 'kvmapp'), { recursive: true });
   fs.symlinkSync(path.join(root, 'scripts/lib'), path.join(project, 'scripts/lib'));
+  fs.symlinkSync(path.join(root, 'scripts/ssh-runtime-binding.py'),
+    path.join(project, 'scripts/ssh-runtime-binding.py'));
   const script = path.join(project, 'scripts/package-rust-kvmapp.sh');
   if (args[1]) {
     const source = spawnSync('git', ['show', `${args[1]}:scripts/package-rust-kvmapp.sh`],
@@ -35,6 +37,22 @@ try {
   fs.mkdirSync(web);
   fs.writeFileSync(path.join(web, 'index.html'), 'synthetic frontend\n');
   const sentinel = path.join(project, 'kvmapp', '.synthetic-private-marker');
+  // Synthetic RV64 header/envelope appended to a host ELF: tests only the
+  // packaging consistency gate, not compilation, provenance or execution.
+  const helper = Buffer.alloc(120);
+  Buffer.from([0x7f, 69, 76, 70, 2, 1, 1]).copy(helper);
+  for (const [offset, value] of [[16, 2], [18, 243], [52, 64], [54, 56], [56, 1]]) {
+    helper.writeUInt16LE(value, offset);
+  }
+  helper.writeUInt32LE(1, 20);
+  helper.writeBigUInt64LE(64n, 32);
+  helper.writeUInt32LE(1, 64);
+  const header = Buffer.alloc(48);
+  header.write('NKSSHRT1');
+  header.writeBigUInt64LE(BigInt(helper.length), 8);
+  crypto.createHash('sha256').update(helper).digest().copy(header, 16);
+  const envelope = Buffer.concat([header, helper]);
+  const host = fs.readFileSync('/bin/true');
   const cases = [
     ['valid package matches its checksum', null],
     ['tar creation failure does not publish', 'tar-create'],
@@ -47,16 +65,41 @@ try {
     ['existing archive is preserved', 'existing'],
     ['concurrent stage lock rejects', 'stage-lock'],
     ['concurrent output lock rejects', 'output-lock'],
+    ...(!args[1] ? [
+      ['missing embedded helper rejects', 'binding-missing'],
+      ['corrupt embedded helper rejects', 'binding-corrupt'],
+      ['duplicate embedded helper rejects', 'binding-duplicate'],
+      ['absolute CARGO_TARGET_DIR is honored', 'target-absolute'],
+      ['relative CARGO_TARGET_DIR is honored', 'target-relative'],
+    ] : []),
   ];
   for (const [index, [label, fault]] of cases.entries()) {
     const build = path.join(work, `case${index}`);
     const out = path.join(build, 'out');
     fs.mkdirSync(out, { recursive: true });
     const archive = path.join(out, 'fixture.tar.gz');
+    const backend = path.join(build, 'backend');
+    let binding = Buffer.from(envelope);
+    if (fault === 'binding-missing') binding = Buffer.alloc(0);
+    if (fault === 'binding-corrupt') binding[binding.length - 1] ^= 1;
+    if (fault === 'binding-duplicate') binding = Buffer.concat([binding, binding]);
+    fs.writeFileSync(backend, Buffer.concat([host, binding]), { mode: 0o755 });
     const env = { ...process.env, BUILD_DIR: build, STAGE_DIR: path.join(build, 'stage'),
-      OUT_DIR: out, ARTIFACT_NAME: 'fixture.tar.gz', RUST_BINARY: '/bin/true',
+      OUT_DIR: out, ARTIFACT_NAME: 'fixture.tar.gz', RUST_BINARY: backend,
       HWMON_BINARY: '/bin/true', KVM_SYSTEM_SOURCE: '/bin/true', NATIVE_LIB_DIR: native,
       EXTRA_NATIVE_LIB_DIR: '', WEB_DIST: web, APP_VERSION: '2.0.43' };
+    const succeeds = !fault || fault === 'target-absolute' || fault === 'target-relative';
+    if (fault === 'target-absolute' || fault === 'target-relative') {
+      const target = path.join(build, 'custom-target');
+      const release = path.join(target, 'riscv64gc-unknown-linux-musl', 'release');
+      fs.mkdirSync(release, { recursive: true });
+      fs.copyFileSync(backend, path.join(release, 'nanokvm-rust-server'));
+      fs.copyFileSync('/bin/true', path.join(release, 'nanokvm-hwmon'));
+      delete env.RUST_BINARY;
+      delete env.HWMON_BINARY;
+      env.RUST_TARGET = 'riscv64gc-unknown-linux-musl';
+      env.CARGO_TARGET_DIR = fault === 'target-absolute' ? target : path.relative(project, target);
+    }
     if (['tar-create', 'tar-list', 'tar-empty-list', 'entry-check', 'gzip'].includes(fault)) {
       const bin = path.join(build, 'bin');
       fs.mkdirSync(bin);
@@ -84,10 +127,16 @@ try {
     try {
       const result = spawnSync('sh', [script], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
       if (result.error) throw result.error;
-      if (!fault) {
+      if (succeeds) {
         assert.equal(result.status, 0, result.stderr);
         assert(fs.readFileSync(archive + '.sha256', 'utf8').startsWith(
           crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex')));
+        if (!args[1]) {
+          const manifest = fs.readFileSync(path.join(env.STAGE_DIR, 'MANIFEST.txt'), 'utf8');
+          assert(manifest.includes('ssh_runtime: embedded-static-rv64-v1\n'));
+          assert(manifest.includes(`ssh_runtime_sha256: ${crypto.createHash('sha256').update(helper).digest('hex')}\n`));
+          assert(manifest.includes('ssh_runtime_size: 120\n'));
+        }
       } else {
         assert.notEqual(result.status, 0, 'faulty package reported success');
         if (fault === 'existing') assert.equal(fs.readFileSync(archive, 'utf8'), 'previous archive\n');

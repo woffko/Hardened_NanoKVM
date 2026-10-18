@@ -30,6 +30,23 @@ for obj in crt1.o crti.o crtbegin.o crtend.o crtn.o; do
   fi
 done
 
+# Build the static helper separately before the dynamic backend. It deliberately
+# has no binding of its own, so this cannot recursively embed previous builds.
+METADATA="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 --locked --offline)"
+TARGET_DIR="$(printf '%s' "$METADATA" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+RESTORE_TARGET_DIR="${NANOKVM_RESTORE_TARGET_DIR:-$TARGET_DIR/restore-runtime}"
+mkdir -p "$RESTORE_TARGET_DIR"
+RESTORE_TARGET_DIR="$(cd "$RESTORE_TARGET_DIR" && pwd)"
+if [[ "$RESTORE_TARGET_DIR" == "$TARGET_DIR" ]]; then
+  echo "static helper must use a separate Cargo target directory" >&2
+  exit 1
+fi
+CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-restore-runtime.sh" --locked --offline
+NANOKVM_SSH_RUNTIME_BINDING="$(python3 "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
+  --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-ssh-sandbox" \
+  --directory "$TARGET_DIR/ssh-runtime-bindings")"
+export NANOKVM_SSH_RUNTIME_BINDING
+
 export NANOKVM_SYSROOT_LIB="$SYSROOT_LIB"
 export RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}"
 export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang}"

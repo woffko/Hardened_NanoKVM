@@ -47,11 +47,43 @@ That script builds with feature `linked-libkvm`, uses the NanoKVM dynamic loader
 `/kvmapp/server/dl_lib`. S95 may stage the executable itself in a root-created
 `/tmp/server`, but never copies or loads shared libraries from `/tmp`.
 
+The linked build first builds `nanokvm-ssh-sandbox` separately, with static
+musl and no `linked-libkvm`, then embeds its exact bytes, size and SHA-256 in
+the backend. `NANOKVM_RESTORE_TARGET_DIR` may select that separate build tree;
+it defaults to `restore-runtime` inside Cargo's effective target directory.
+The helper never embeds itself. Direct linked RV64 builds without a validated
+`NANOKVM_SSH_RUNTIME_BINDING` fail closed; use the wrapper above.
+
+The linked device backend checks this envelope at startup. The build-bound
+preflight constructor captures those embedded bytes into a private rootfs
+anonymous inode for execution through its independently reopened read-only
+descriptor, not an executable or hash manifest from p3. Packaging and Buildroot
+staging reject missing, corrupt or ambiguous bindings, and `MANIFEST.txt` records the helper
+hash and size. This is build consistency, **not** a replacement for signed app
+metadata or protected app-slot authority. Raw transaction integration and the
+protected app-slot boundary are still separate, unfinished remediation gates.
+
 Package a deployable `kvmapp` layout with:
 
 ```sh
 RUST_TARGET=riscv64gc-unknown-linux-musl scripts/package-rust-kvmapp.sh
 ```
+
+Packaging honors `CARGO_TARGET_DIR`, or explicit `RUST_BINARY` and
+`HWMON_BINARY` paths. Generic host/development backends without an embedded
+helper are intentionally not deployable app packages.
+
+Focused host checks (the last command requires the separately built helper):
+
+```sh
+python3 -B scripts/test-ssh-runtime-binding.py
+node scripts/test-app-package-failures.cjs
+server-rust/scripts/test-embedded-restore-runtime.sh
+```
+
+The embedded-runtime test captures and compares the actual RV64 helper bytes
+in a host anonymous file; it does not execute that helper or validate device
+boot/loop/SSH behavior.
 
 The package is written to:
 

@@ -13,12 +13,16 @@ HARDENED_NANOKVM_KVMAPP_LICENSE = GPL-3.0-only, PROPRIETARY
 HARDENED_NANOKVM_KVMAPP_REDISTRIBUTE = NO
 HARDENED_NANOKVM_KVMAPP_DEPENDENCIES = \
 	avahi \
+	host-python3 \
 	hostapd \
 	openssh \
 	wpa_supplicant
 
 define HARDENED_NANOKVM_KVMAPP_INSTALL_TARGET_CMDS
 	test "$$(cat $(@D)/version)" = "$(HARDENED_NANOKVM_KVMAPP_VERSION)"
+	cmp $(@D)/server/NanoKVM-Server $(@D)/backends/NanoKVM-Server.rust
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_HARDENED_SG2002_PATH)/../../scripts/ssh-runtime-binding.py \
+		inspect --backend $(@D)/server/NanoKVM-Server --quiet
 	$(INSTALL) -d $(TARGET_DIR)/kvmapp $(TARGET_DIR)/etc/kvm \
 		$(TARGET_DIR)/etc/init.d $(TARGET_DIR)/mnt/data
 	cp -a $(@D)/. $(TARGET_DIR)/kvmapp/

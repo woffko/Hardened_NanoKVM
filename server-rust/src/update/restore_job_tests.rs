@@ -186,6 +186,31 @@ fn elf() -> Vec<u8> {
 }
 
 #[test]
+fn embedded_runtime_has_no_mutable_path_fallback() {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/ssh-runtime.binding"));
+    let temporary = tempfile::tempdir().unwrap();
+    if bytes.is_empty() {
+        assert!(matches!(
+            PinnedSshHelper::check_embedded(),
+            Err(JobError::Helper)
+        ));
+        assert!(matches!(
+            PinnedSshHelper::embedded(temporary.path()),
+            Err(JobError::Helper)
+        ));
+    } else {
+        let binding = crate::update::restore_binding::validate(bytes).unwrap();
+        PinnedSshHelper::check_embedded().unwrap();
+        let mut pinned = PinnedSshHelper::embedded(temporary.path()).unwrap();
+        let mut copied = Vec::new();
+        pinned.file.read_to_end(&mut copied).unwrap();
+        assert_eq!(copied, binding.image);
+        assert_eq!(pinned.file.metadata().unwrap().nlink(), 0);
+    }
+    assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn helper_capture_enforces_exact_trusted_digest_size_static_rv64_and_readonly() {
     let temporary = tempfile::tempdir().unwrap();
     let valid = elf();
