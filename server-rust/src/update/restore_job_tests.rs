@@ -150,6 +150,37 @@ fn timeout_cancellation_and_overflow_kill_and_reap_without_private_error_bytes()
 
 #[test]
 fn pinned_proc_fd_exec_survives_source_replacement_and_parent_close() {
+    // CLOEXEC does not prevent a concurrent fork from briefly inheriting the
+    // O_RDWR spool before exec. Run this positive exec assertion in its own
+    // single-test process, not alongside unrelated fork-heavy fixtures. This
+    // is isolation, not an ETXTBSY retry or a named-executable fallback.
+    const CHILD: &str = "NANOKVM_PINNED_EXEC_FIXTURE";
+    if std::env::var_os(CHILD).is_none() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "update::restore_job::tests::pinned_proc_fd_exec_survives_source_replacement_and_parent_close",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .stdin(Stdio::null());
+        let output = check_reaped(
+            command,
+            &AtomicBool::new(false),
+            Duration::from_secs(5),
+            true,
+        )
+        .unwrap();
+        assert!(
+            std::str::from_utf8(&output)
+                .unwrap()
+                .contains("1 passed; 0 failed")
+        );
+        return;
+    }
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::copy("/usr/bin/true", &source).unwrap();

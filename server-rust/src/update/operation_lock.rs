@@ -8,6 +8,24 @@ use std::{fs::File, io, os::unix::fs::MetadataExt, path::Path};
 
 const DIRECTORY: &str = "update-operation";
 
+#[derive(Clone, Copy)]
+pub(super) enum Domain {
+    Update,
+    WriterAdmission,
+    WriterActivity,
+    Account,
+}
+impl Domain {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Update => DIRECTORY,
+            Self::WriterAdmission => "state-writer-admission",
+            Self::WriterActivity => "state-writer-activity",
+            Self::Account => "account-operation",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum LockError {
     #[error("update admission is owned by another process")]
@@ -28,6 +46,10 @@ pub(super) struct ProcessLock {
 }
 impl ProcessLock {
     pub fn acquire() -> Result<Self, LockError> {
+        Self::for_domain(Domain::Update, false)
+    }
+
+    pub(super) fn for_domain(domain: Domain, shared: bool) -> Result<Self, LockError> {
         if !nix::unistd::geteuid().is_root() {
             return Err(LockError::Unsafe);
         }
@@ -38,19 +60,29 @@ impl ProcessLock {
             check_parent(&parent, 0)?;
         }
         let parent = restore_fs::open_root(Path::new("/etc/kvm"), true)?;
-        Self::from_parent(&parent, 0)
+        Self::at_parent(&parent, 0, domain, shared)
     }
 
+    #[cfg(test)]
     pub(super) fn from_parent(parent: &File, uid: u32) -> Result<Self, LockError> {
+        Self::at_parent(parent, uid, Domain::Update, false)
+    }
+
+    pub(super) fn at_parent(
+        parent: &File,
+        uid: u32,
+        domain: Domain,
+        shared: bool,
+    ) -> Result<Self, LockError> {
         check_parent(parent, uid)?;
         let device = parent.metadata()?.dev();
-        match mkdirat(parent, DIRECTORY, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+        let name = domain.directory();
+        match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
             Ok(()) => parent.sync_all()?,
             Err(rustix::io::Errno::EXIST) => {}
             Err(_) => return Err(LockError::Io),
         }
-        let directory =
-            restore_fs::open_beneath(parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        let directory = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
         let metadata = directory.metadata()?;
         if !metadata.is_dir()
             || metadata.uid() != uid
@@ -59,7 +91,12 @@ impl ProcessLock {
         {
             return Err(LockError::Unsafe);
         }
-        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        let operation = if shared {
+            FlockOperation::NonBlockingLockShared
+        } else {
+            FlockOperation::NonBlockingLockExclusive
+        };
+        flock(&directory, operation).map_err(|error| {
             if error == rustix::io::Errno::WOULDBLOCK {
                 LockError::Busy
             } else {

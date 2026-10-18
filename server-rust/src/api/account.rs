@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use crate::{
     AppError, Result,
@@ -17,10 +18,8 @@ use crate::{
         tls::ClientAddr,
     },
     state::AppState,
-    system::{
-        audit,
-        command::{AllowedCommand, CommandOutput, run_allowed_with_stdin},
-    },
+    system::{audit, command::AllowedCommand},
+    update::state_writers::WriterPermit,
 };
 
 const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,10 +136,29 @@ pub async fn setup_first_account(
             "account already initialized".to_string(),
         ));
     }
-    let password = decode_frontend_password(&req.password)?;
-    validate_account_credentials(&req.username, &password)?;
-    change_root_password(&password).await?;
-    state.accounts.set_account(&req.username, &password)?;
+    let permit = state.writers.account()?;
+    let ChangePasswordReq {
+        username,
+        password: encoded,
+    } = req;
+    let encoded = Zeroizing::new(encoded);
+    let password = Zeroizing::new(decode_frontend_password(&encoded)?);
+    validate_account_credentials(&username, &password)?;
+    permit
+        .run(move |writer| async move {
+            // Recheck under the serialized permit; two first-setup requests must
+            // not each change native identity and then overwrite the web account.
+            if state.accounts.exists() {
+                return Err(AppError::Conflict("account already initialized".into()));
+            }
+            change_root_password(&password, &writer).await?;
+            let accounts = state.accounts;
+            writer
+                .blocking(move |permit| accounts.set_account(permit, &username, &password))
+                .await?;
+            Ok(())
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -197,47 +215,44 @@ pub async fn change_password(
             "cannot change another account password".to_string(),
         ));
     }
-    let password = decode_frontend_password(&req.password)?;
-    validate_account_credentials(&req.username, &password)?;
-    change_root_password(&password).await?;
-    state.accounts.set_account(&req.username, &password)?;
-    if state.config.security.revoke_tokens_on_password_change {
-        state.sessions.revoke_user(&req.username).await;
-    }
+    let permit = state.writers.account()?;
+    let ChangePasswordReq {
+        username,
+        password: encoded,
+    } = req;
+    let encoded = Zeroizing::new(encoded);
+    let password = Zeroizing::new(decode_frontend_password(&encoded)?);
+    validate_account_credentials(&username, &password)?;
+    permit
+        .run(move |writer| async move {
+            change_root_password(&password, &writer).await?;
+            let revoke_user = username.clone();
+            let accounts = state.accounts;
+            writer
+                .blocking(move |permit| accounts.set_account(permit, &username, &password))
+                .await?;
+            if state.config.security.revoke_tokens_on_password_change {
+                state.sessions.revoke_user(&revoke_user).await;
+            }
+            Ok(())
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-async fn change_root_password(password: &str) -> Result<()> {
-    let input = format!("{password}\n{password}\n");
-    let output = run_allowed_with_stdin(
-        AllowedCommand::Passwd,
-        ["root"],
-        input.as_bytes(),
-        ROOT_PASSWORD_TIMEOUT,
-    )
-    .await?;
+async fn change_root_password(password: &str, writer: &WriterPermit) -> Result<()> {
+    let input = Zeroizing::new(format!("{password}\n{password}\n"));
+    let output = writer
+        .command_with_stdin(
+            AllowedCommand::Passwd,
+            ["root"],
+            input.as_bytes(),
+            ROOT_PASSWORD_TIMEOUT,
+        )
+        .await?;
     if output.status == 0 {
         Ok(())
     } else {
-        Err(AppError::Internal(command_error(
-            "failed to change root password",
-            output,
-        )))
-    }
-}
-
-fn command_error(message: &str, output: CommandOutput) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = stderr.trim();
-    if !detail.is_empty() {
-        format!("{message}: {detail}")
-    } else {
-        let detail = stdout.trim();
-        if detail.is_empty() {
-            message.to_string()
-        } else {
-            format!("{message}: {detail}")
-        }
+        Err(AppError::Internal("failed to change root password".into()))
     }
 }

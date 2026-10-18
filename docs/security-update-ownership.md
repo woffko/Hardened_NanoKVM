@@ -120,8 +120,9 @@ exit still requires successful input delivery.
 Loss of a command's caller signals the runtime owner to cancel and reap; dropping
 the waiting future is **not** a synchronous cleanup join. The registered update
 worker is not canceled by HTTP reply loss, so its command timeout/error result
-and update admission release occur after explicit direct-child cleanup. Generic
-configuration callers still need future permit/Stop integration that retains
+and update admission release occur after explicit direct-child cleanup. Enrolled
+account commands additionally retain their writer permit in the command owner;
+other configuration callers still need permit/Stop integration that retains
 quiescence ownership until such cleanup is joined.
 
 Init scripts deliberately daemonize services. No process-group kill or claim of
@@ -136,6 +137,55 @@ failure for stale interrupted work but does not overwrite/delete a concurrently
 updated progress file. A currently registered system operation is not declared
 stale solely because the wall clock changed or a legacy raw process was not yet
 visible in `/proc`.
+
+## Separate configuration-writer admission and account enrollment
+
+`AppState.writers` is separate from update admission. Its fixed protected-rootfs
+directories use the same root/owner/mode/device/open checks and persistent-inode
+rules as the front-end lease: `/etc/kvm/state-writer-admission`,
+`/etc/kvm/state-writer-activity` and `/etc/kvm/account-operation`. An account
+writer acquires admission shared, activity shared, then account exclusive;
+after enrollment it releases the short admission share. Concurrent account
+mutations fail busy rather than interleaving native and web identity writes.
+
+`StateWriters::drain` takes admission exclusive before waiting for activity
+exclusive. It rejects new enrollment while existing work drains, and returns a
+guard that must remain owned through the protected read/capture phase. Timeout,
+error or cancellation releases admission without claiming a drained state.
+This API is not yet called by a production update/capture path. Do not hold a
+future capture barrier across a network download or infer quiescence merely
+because an app/system update owns its independent admission lease.
+
+First-account setup, password change and explicitly enabled legacy account seed
+are enrolled. AccountStore mutation requires an internal permit; ordinary login
+verification remains read-only. First setup rechecks absence under account
+serialization before changing native root identity. Existing authorization,
+password rules, API success shapes and default-disabled legacy seed remain.
+Unsafe/busy writer storage fails closed; no default-account recovery is added.
+
+After validation, a runtime-owned task retains the account permit through native
+`passwd`, blocking web-account hashing/publication and configured token revocation.
+Lost HTTP replies do not abandon the middle of this sequence. Blocking callbacks
+and command owners retain their own shares; dropping their waiters cannot release
+writer activity before callback/discarded-result cleanup or direct-child reap.
+A delivered callback result does not retain ownership; cleanup-sensitive returned
+guards must own a share or be consumed inside the callback. Encoded/decoded
+passwords and the duplicated command input are zeroizing; native command output
+is not reproduced in account error replies. This is not a general guarantee that
+password data has no other copies or that arbitrary command output is safe.
+
+Native and web password publication are **not** an atomic transaction: native
+success followed by web-file failure can still leave different credentials.
+Web account publication still uses its existing truncate-in-place path, and
+rollback/journaling, protected file publication and power-loss recovery remain
+required. Enrollment closes lifetime/interleaving gaps, not these failures.
+
+Only those account writers currently enroll. YAML configuration/startup secret,
+network, firewall rollback, time/syslog, terminal, scripts, optional apps and
+other service/background writers are not quiesced. No coherent preservation
+snapshot, all-writer freeze, phase-aware Stop/join, service stop, raw-writer ticket
+or retained transaction is accepted from this component. Its cancellation and
+synthetic account-file tests are host-only; no live root password was changed.
 
 ## Explicit remaining boundaries
 
@@ -157,12 +207,13 @@ visible in `/proc`.
 - The command helper now owns normal direct-child timeout/pipe/reap cleanup,
   but is not a process-tree manager, a synchronous Drop join or a protected
   transaction authority. A callback lease alone is still not proof that every
-  process it started has been reaped. Raw writer handoff, generic configuration
+  process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
-- Account/password, network, firewall rollback, time/syslog, local terminal,
+- YAML/startup-secret, network, firewall rollback, time/syslog, local terminal,
   scripts, optional-app workers and other configuration writers do not yet
-  acquire a shared quiescence permit. No preservation snapshot may claim those
-  writers are stopped merely because update admission is held.
+  acquire the shared quiescence permit. Account enrollment is partial coverage,
+  not a native/web rollback protocol. No preservation snapshot may claim all
+  writers are stopped merely because update admission or this drain is held.
 - No generic abort handle is exposed. Explicit Stop must use phase-aware
   cancellation plus child/work-owner join, not HTTP disconnect, dropped
   `spawn_blocking` handles or killing an irreversible raw write midway.

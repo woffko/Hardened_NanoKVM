@@ -11,7 +11,7 @@ use argon2::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, Result};
+use crate::{AppError, Result, update::state_writers::WriterPermit};
 
 pub const LEGACY_DEFAULT_USERNAME: &str = "admin";
 pub const LEGACY_DEFAULT_PASSWORD: &str = "admin";
@@ -46,14 +46,19 @@ impl AccountStore {
         Ok(Some(account))
     }
 
-    pub fn set_account(&self, username: &str, password: &str) -> Result<()> {
+    pub(crate) fn set_account(
+        &self,
+        _permit: &WriterPermit,
+        username: &str,
+        password: &str,
+    ) -> Result<()> {
         validate_username(username)?;
         validate_password(password)?;
         let hash = hash_password(password)?;
         self.write_account(username, &hash)
     }
 
-    pub fn seed_legacy_default_account(&self) -> Result<bool> {
+    pub(crate) fn seed_legacy_default_account(&self, _permit: &WriterPermit) -> Result<bool> {
         if self.exists() {
             return Ok(false);
         }
@@ -182,8 +187,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path().join("pwd"));
 
-        assert!(store.seed_legacy_default_account().unwrap());
-        assert!(!store.seed_legacy_default_account().unwrap());
+        let writers = crate::update::state_writers::StateWriters::for_test_parent(
+            std::fs::File::open(dir.path()).unwrap(),
+        );
+        let permit = writers.account().unwrap();
+        assert!(store.seed_legacy_default_account(&permit).unwrap());
+        assert!(!store.seed_legacy_default_account(&permit).unwrap());
         assert!(store.verify("admin", "admin").unwrap());
         assert!(!store.verify("admin", "wrong").unwrap());
     }

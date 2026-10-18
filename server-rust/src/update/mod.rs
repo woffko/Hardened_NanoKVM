@@ -20,3 +20,4 @@ pub mod restore_ssh;
 pub(crate) mod staged_archive;
 pub(crate) mod staged_metadata;
 pub(crate) mod staged_snapshot;
+pub mod state_writers;

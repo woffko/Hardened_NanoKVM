@@ -118,6 +118,23 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_allowed_with_stdin_owned(command, args, stdin, timeout, ()).await
+}
+
+/// Retains caller-issued work ownership through pipe cleanup and child reap.
+/// This is lifetime ownership, not authorization for an arbitrary command.
+pub(crate) async fn run_allowed_with_stdin_owned<I, S, G>(
+    command: AllowedCommand,
+    args: I,
+    stdin: &[u8],
+    timeout: Duration,
+    ownership: G,
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    G: Send + 'static,
+{
     let mut process = Command::new(command.program());
     process
         .args(args)
@@ -125,7 +142,13 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    run_captured(process, Some(Zeroizing::new(stdin.to_vec())), timeout).await
+    run_captured(
+        process,
+        Some(Zeroizing::new(stdin.to_vec())),
+        timeout,
+        ownership,
+    )
+    .await
 }
 
 pub async fn run_allowed<I, S>(
@@ -144,16 +167,17 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    run_captured(process, None, timeout).await
+    run_captured(process, None, timeout, ()).await
 }
 
 /// A runtime task owns the direct child through cancellation/timeout cleanup.
 /// No separate pipe tasks outlive it. A lost receiver signals cancellation; it
 /// is not a synchronous join API or a process-tree/quiescence guarantee.
-async fn run_captured(
+async fn run_captured<G: Send + 'static>(
     mut command: Command,
     input: Option<Zeroizing<Vec<u8>>>,
     timeout: Duration,
+    ownership: G,
 ) -> Result<CommandOutput> {
     let (mut reply, receive) = oneshot::channel();
     tokio::spawn(async move {
@@ -168,6 +192,7 @@ async fn run_captured(
             Err(error) => Err(error.into()),
         };
         drop(reply.send(result));
+        drop(ownership);
     });
     receive
         .await

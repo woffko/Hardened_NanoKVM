@@ -11,6 +11,7 @@ use crate::{
     config::Config,
     security::rate_limit::LoginRateLimiter,
     update::operation::UpdateCoordinator,
+    update::state_writers::StateWriters,
 };
 
 pub const DEFAULT_SESSION_LOCK_DURATION_SECS: u64 = 900;
@@ -31,6 +32,7 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 #[derive(Clone)]
 pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
+    pub writers: Arc<StateWriters>,
     pub config: Arc<Config>,
     pub accounts: Arc<AccountStore>,
     pub sessions: Arc<SessionStore>,
@@ -43,9 +45,13 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
+        let writers = Arc::new(StateWriters::default());
         let accounts = AccountStore::new(config.paths.account_file.clone());
-        if config.security.allow_default_admin && accounts.seed_legacy_default_account()? {
-            tracing::warn!("seeded legacy default web account admin/admin");
+        if config.security.allow_default_admin {
+            let permit = writers.account()?;
+            if accounts.seed_legacy_default_account(&permit)? {
+                tracing::warn!("seeded legacy default web account admin/admin");
+            }
         }
 
         let sessions = SessionStore::new();
@@ -62,6 +68,7 @@ impl AppState {
 
         Ok(Self {
             updates: Arc::new(UpdateCoordinator::default()),
+            writers,
             config: Arc::new(config),
             accounts: Arc::new(accounts),
             sessions: Arc::new(sessions),
