@@ -94,33 +94,41 @@ That forced-death fixture tests detection/admission, **not recovery of an orphan
 native tree after killing a real subreaper**. Process-tree size/high-churn limits,
 unusual clone exit signals, durable crash recovery and vendor runtime remain open.
 
-## Durable native broker admission component
+## Durable native broker admission
 
-`native_owner::broker::Broker` now combines the sibling group with a protected
-singleton journal. It is a library component with **no production caller or
-S95/watchdog daemon yet**, not a replacement for the separate raw restore ticket.
+`native_owner::broker::Broker` combines the sibling group with a protected
+singleton journal. The standalone `nanokvm-native-broker --serve` now owns this
+component through a fixed local protocol. Neither executable is packaged or
+connected to S95/watchdogs yet; this is not a replacement for the separate raw
+restore ticket or proof that existing production services are quiescent.
 
 The fixed store is `/etc/kvm/native-runtime-owner`: root-owned mode 0700 on the
 same rootfs, opened descriptor-relatively with no symlinks, magic links or mount
 crossing. A nonblocking exclusive flock uses the stable directory inode, which
 is never unlinked. State is one single-link, root-owned mode-0600, fixed 80-byte
 record. Its SHA-256 detects corruption, not authenticity; protected location is
-the trust boundary. It contains only format, boot epoch and Active/Closed phase,
-not credentials, process-number authority or raw-update authorization.
+the trust boundary. It contains only format, boot epoch and Active/Closed/
+Maintenance phase, not credentials, process-number authority or raw-update
+authorization.
 The closed restore allowlist does not preserve/import/delete these runtime
-authority members; capture and forged write/absent-archive tests cover both names.
+authority members; capture and forged write/absent-archive tests cover state,
+temporary state and the control socket member name.
 
 Before the first possible native launch, Active is written to an exclusive
 temporary member, file-synced, renamed, and directory-synced. The journal lease
 stays owned while native work and the retained drain exist. Closed is published
-only after every controller scope proves complete closure. `Resume::Retained`
-keeps ownership when closure/publication is incomplete or uncertain; it never
-implicitly resumes. Drop merely releases the kernel lease, preserving Active.
+only after every controller scope proves complete closure. Maintenance instead
+persists across that closure: stopping native work does not authorize new work
+while a caller may still be preparing a raw handoff. Only explicit resume from
+the retained owner can publish Closed and reopen native admission.
+`Resume::Retained` keeps ownership when closure/publication is incomplete or
+uncertain; it never implicitly resumes. Drop merely releases the kernel lease,
+preserving Active or Maintenance.
 
 | Acquired store observation | Native admission |
 | --- | --- |
 | No record, or valid Closed | Publish current-boot Active before launch |
-| Current-boot Active | Refuse: previous ownership is unresolved |
+| Current-boot Active or Maintenance | Refuse: previous ownership is unresolved |
 | Valid record from another boot | Old process lifetime ended; expose prior-boot observation |
 | Corrupt/unsafe state or leftover temporary member | Refuse; preserve evidence |
 
@@ -146,14 +154,63 @@ drain, missing receipts and cleanup-publication failure, plus a real dedicated
 subreaper with a daemonized native fixture while the journal descriptor is held.
 These are not power-cut tests, vendor runtime evidence or device acceptance.
 
-Build the static RV64 component with
+## Local lifecycle protocol, not raw-write authority
+
+The daemon listens only at the protected journal directory's `control.sock`.
+The journal flock remains the singleton authority. A stale socket is removed
+only after journal acquisition has accepted the state, never to clear unresolved
+ownership. The endpoint is mode 0600, opened through the pinned parent directory;
+cleanup checks its exact device/inode and preserves a replacement member.
+Listener and accepted/client descriptors are CLOEXEC.
+
+Both ends verify kernel `SO_PEERCRED` root UID. Requests have fixed 16-byte frames
+with a closed operation set, reserved-byte validation and connection-local serials.
+At most 16 clients are retained; I/O is nonblocking with bounded work per loop.
+An exact duplicate of the last request returns its cached response without
+executing again; conflicting replay, gaps and invalid frames close the connection.
+There is no generic shell, path, environment, raw writer or settings import opcode.
+Root peer identity is **not** executable attestation or a hostile-root sandbox.
+The later unprivileged picoclaw/admin capability split remains separate work.
+
+The daemon owns both sibling native roles and desired-role retries. `EnsureKvm`
+and `EnsureHwmon` request admission, not health acceptance. Pause consumes all
+launch capability before draining and durably records Maintenance. Only that
+same live connection may explicitly resume after proven closure. Caller EOF,
+protocol failure or disconnect leaves maintenance abandoned, disables respawn
+and denies takeover by another client. A maintenance owner is not evicted by the
+ordinary five-second idle budget; abandoned state has no implicit expiry.
+This is a trusted-root management endpoint: a root peer can keep one of the
+bounded slots occupied with partial-frame progress. There is no absolute frame
+deadline or availability guarantee against hostile root. Do not expose this
+transport directly as the later unprivileged picoclaw interface.
+
+`Channel` retains partial sends/reads and the outstanding serial across caller
+deadlines. It refuses replacement of an unresolved operation and poisons itself
+on invalid/lost replies. Reconnecting is not permission to replay an operation
+whose outcome is unknown. A future maintenance transaction must retain this
+channel and the independent raw transaction authority throughout its lifetime.
+
+`nanokvm-native-ctl` accepts only `status`, `ensure-kvm`, `ensure-hwmon` and
+`shutdown`. There is deliberately no short-lived pause/resume command: exiting
+would lose the retained maintenance connection. Shutdown reports completion only
+after the proven drain/Closed state; the daemon may exit after flushing Stopped.
+A CLI deadline or lost reply reports unknown completion without killing the
+daemon. No valid production daemon invocation is used in host CLI tests.
+
+Host private-directory fixtures cover real Unix socket exchange, fragmented I/O,
+serial/replay rejection, actual peer UID mismatch, foreign-client denial,
+maintenance EOF and durable reopening refusal, and safe endpoint cleanup.
+A separate real subreaper fixture holds journal/listener/client descriptors while
+launching and draining a daemonized tree to check descriptor isolation. These
+tests do not execute production native roles or establish target runtime health.
+
+Build all three static RV64 executables with
 `server-rust/scripts/build-native-owner.sh`. The script rejects dynamic loaders,
 shared-library dependencies and wrong ELF architecture. This is not app/full
 pipeline reproducibility or target execution evidence. The ordinary package
-builder intentionally does not include this unused component yet.
+builder intentionally does not include these unused components yet.
 
-Remaining work is a production lifecycle broker/retained daemon: integrate the
-durable component with authenticated IPC and supported recovery; close
+Remaining work is production lifecycle integration and supported recovery: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle
 pending AP attempts. Do not naively nest an independent service owner below a
 watchdog subreaper: that creates ownership/teardown coupling, not independent

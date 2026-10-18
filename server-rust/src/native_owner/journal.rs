@@ -22,6 +22,9 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
+#[path = "broker_socket.rs"]
+pub(super) mod socket;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("another native runtime owner holds the singleton lease")]
@@ -83,6 +86,7 @@ impl Epoch {
 enum Phase {
     Active = 1,
     Closed = 2,
+    Maintenance = 3,
 }
 
 pub(super) struct Store {
@@ -100,6 +104,25 @@ pub(super) struct Store {
 }
 
 impl Store {
+    pub(super) fn endpoint(&self) -> io::Result<socket::Endpoint> {
+        socket::Endpoint::bind(&self.directory, self.uid, self.device)
+    }
+
+    pub(super) fn connect_control() -> io::Result<std::os::unix::net::UnixStream> {
+        if !nix::unistd::geteuid().is_root() {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let root = File::open("/")?;
+        let etc = open(&root, "etc", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        let parent = open(&etc, "kvm", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        let directory = open(&parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        for file in [&root, &etc, &parent] {
+            protected(file, 0, false).map_err(|_| io::ErrorKind::PermissionDenied)?;
+        }
+        protected(&directory, 0, true).map_err(|_| io::ErrorKind::PermissionDenied)?;
+        socket::connect(&directory, 0)
+    }
+
     pub(super) fn open() -> Result<Self, Error> {
         if !nix::unistd::geteuid().is_root() {
             return Err(Error::Unsafe);
@@ -151,7 +174,7 @@ impl Store {
             return Err(Error::Ambiguous);
         }
         if let Some((prior, phase)) = store.read()? {
-            if prior == epoch && phase == Phase::Active {
+            if prior == epoch && phase != Phase::Closed {
                 return Err(Error::Unresolved);
             }
             store.previous_boot = prior != epoch;
@@ -188,6 +211,21 @@ impl Store {
             self.active = false;
         }
         Ok(())
+    }
+
+    pub(super) fn maintenance(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        self.publish(Phase::Maintenance)?;
+        self.active = true;
+        Ok(())
+    }
+
+    pub(super) fn ready(&self) -> Result<(), Error> {
+        if self.poisoned {
+            Err(Error::Ambiguous)
+        } else {
+            Ok(())
+        }
     }
 
     fn member(&self, name: &str) -> Result<Option<File>, Error> {
@@ -232,6 +270,7 @@ impl Store {
         let phase = match bytes[44] {
             1 => Phase::Active,
             2 => Phase::Closed,
+            3 => Phase::Maintenance,
             _ => return Err(Error::Invalid),
         };
         Ok(Some((Epoch::parse(&bytes[8..44])?, phase)))

@@ -39,7 +39,13 @@ fn preflight_namespace(name: &str) -> bool {
         stdout.contains("running 1 test\n") && stdout.contains("1 passed; 0 failed;"),
         "exact preflight fixture did not run: {output:?}"
     );
-    assert_eq!(fs::read("/proc/self/mountinfo").unwrap(), before);
+    let after = fs::read("/proc/self/mountinfo").unwrap();
+    assert!(
+        after == before,
+        "parent mount table changed during {name}; before={}B after={}B (snapshot alone cannot attribute the change)",
+        before.len(),
+        after.len()
+    );
     false
 }
 
@@ -198,22 +204,31 @@ fn owned_ssh_job_cleans_typed_identity_on_success_cancel_transfer_and_native_fai
         }
         .run(&AtomicBool::new(cancelled));
         if unexpected {
-            assert!(matches!(result, Err(JobError::Cleanup)));
+            assert!(
+                matches!(result, Err(JobError::Cleanup)),
+                "program={program} cancelled={cancelled} bad_images={bad_images} unexpected={unexpected}: error={:?}",
+                result.as_ref().err()
+            );
             assert_eq!(
                 fs::read(target.path().join("etc/ssh/unexpected.conf")).unwrap(),
                 b"do not remove unknown recovery state"
             );
         } else {
             assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
-            if cancelled {
-                assert!(matches!(result, Err(JobError::Cancelled)));
+            let expected = if cancelled {
+                matches!(result, Err(JobError::Cancelled))
             } else if bad_images {
-                assert!(matches!(result, Err(JobError::Process)));
+                matches!(result, Err(JobError::Process))
             } else if program.ends_with("false") {
-                assert!(matches!(result, Err(JobError::Native)));
+                matches!(result, Err(JobError::Native))
             } else {
-                assert!(matches!(result, Ok(Outcome::Syntax)));
-            }
+                matches!(result, Ok(Outcome::Syntax))
+            };
+            assert!(
+                expected,
+                "program={program} cancelled={cancelled} bad_images={bad_images} unexpected={unexpected}: error={:?}",
+                result.as_ref().err()
+            );
         }
     }
 }

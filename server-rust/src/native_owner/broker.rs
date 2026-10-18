@@ -1,10 +1,12 @@
 //! Retained native-service admission plus durable same-boot crash detection.
-//! Not yet the S95/watchdog daemon or a raw-update/early-restore coordinator.
+//! Local lifecycle transport exists; S95/raw-update/early-restore integration does not.
 
 use super::controller::{self, DrainStatus, Group, Role, StartError, Status};
 #[path = "journal.rs"]
 mod journal;
 pub use journal::Error as JournalError;
+#[path = "ipc.rs"]
+pub mod ipc;
 
 #[derive(Debug)]
 pub enum StartFailure {
@@ -13,7 +15,7 @@ pub enum StartFailure {
 }
 
 /// The singleton lease stays alive through all child scopes and maintenance.
-/// Only a future trusted lifecycle daemon may own this production object.
+/// The trusted lifecycle daemon retains this object; integration is still gated.
 pub struct Broker {
     group: Group,
     journal: journal::Store,
@@ -58,13 +60,25 @@ impl Broker {
         RetainedDrain {
             group: self.group.begin_drain(),
             journal: self.journal,
+            maintenance: false,
         }
+    }
+
+    /// Close starts immediately; retain durable maintenance even after native
+    /// closure. Only the same retained owner can explicitly resume/abort it.
+    pub fn begin_maintenance(self) -> RetainedDrain {
+        let mut drain = self.begin_drain();
+        drain.maintenance = true;
+        // Failure poisons the retained journal; poll cannot grant readiness.
+        let _ = drain.journal.maintenance();
+        drain
     }
 }
 
 pub struct RetainedDrain {
     group: controller::Drain,
     journal: journal::Store,
+    maintenance: bool,
 }
 
 /// Ownership transition, not an error carrying a discarded cleanup handle.
@@ -77,7 +91,9 @@ pub enum Resume {
 impl RetainedDrain {
     pub fn poll(&mut self) -> Result<DrainStatus, JournalError> {
         let status = self.group.poll();
-        if status == DrainStatus::Drained {
+        if self.maintenance {
+            self.journal.ready()?;
+        } else if status == DrainStatus::Drained {
             // Never publish Closed merely because the owner PID disappeared,
             // the caller disconnected, or its cleanup deadline elapsed.
             self.journal.close()?;
@@ -89,6 +105,9 @@ impl RetainedDrain {
         if !matches!(self.poll(), Ok(DrainStatus::Drained)) {
             return Resume::Retained(self);
         }
+        if self.journal.close().is_err() {
+            return Resume::Retained(self);
+        }
         match self.group.try_resume() {
             Ok(group) => Resume::Running(Broker {
                 group,
@@ -97,6 +116,7 @@ impl RetainedDrain {
             Err(group) => Resume::Retained(Self {
                 group,
                 journal: self.journal,
+                maintenance: self.maintenance,
             }),
         }
     }

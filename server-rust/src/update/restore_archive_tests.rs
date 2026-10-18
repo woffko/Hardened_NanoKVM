@@ -154,6 +154,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
     for path in [
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
+        "etc/kvm/native-runtime-owner/control.sock",
     ] {
         put(
             source.path(),
@@ -191,6 +192,7 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         "etc/kvm/update-keys/untrusted.pub.pem",
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
+        "etc/kvm/native-runtime-owner/control.sock",
         "root/.picoclaw/workspace/AGENT.md",
         "root/.picoclaw/workspace/skills/kvm-control/tool.sh",
     ] {
@@ -455,6 +457,7 @@ fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
         "etc/kvm/system-update-pending.json",
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
+        "etc/kvm/native-runtime-owner/control.sock",
         "etc/kvm/update-key-policy",
         "etc/kvm/update-keys/key.pub.pem",
         "etc/kvm/.picoclaw_internal_token",
@@ -480,6 +483,7 @@ fn absent_records_cannot_delete_identity_or_authorize_unknown_paths() {
         "usr/bin/picoclaw",
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
+        "etc/kvm/native-runtime-owner/control.sock",
     ] {
         let mut items = records();
         items.push((format!("absent/{path}"), vec![], 0o600, EntryType::Regular));
