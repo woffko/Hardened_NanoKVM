@@ -115,14 +115,35 @@ nonzero exit and deadline errors refuse installation and reap the fixed direct
 child. No stdout retry can append a second response. This is direct-child
 supervision, not a claim of generic descendant quiescence.
 
-Online metadata still passes the existing RSA/policy gate; its exact size and
-decoded SHA-512 are checked against the retained anonymous inode. After sync,
+Online metadata and its detached signature now travel together as their exact
+original bytes, including through stable/preview version selection. The install
+job reads persisted Config before fetching and again after the archive download;
+it reparses and reauthenticates those same bytes against the current key policy
+and key file before handing the candidate to the blocking install phase. It
+does not fall back to the server's startup Config or reserialize a cached parsed
+view as signature input. Metadata is bounded to 64 KiB and signatures to 16 KiB;
+metadata/signature curl requests also disable curlrc and restrict redirects to
+HTTPS. An unsigned online lab receipt requires the current explicit setting and
+an empty signature; it is not administrative offline import.
+
+The authenticated exact size and decoded SHA-512 are checked against the retained
+anonymous inode. After sync,
 verified procfs is used to reopen that same inode with an independent O_RDONLY
 description; the sole writable owner closes before the opaque archive can be
-extracted. Extraction never reopens an archive pathname after hashing. Current
-policy reauthorization and a durable signed app-slot receipt are separate,
-still-open work; private staging is not that receipt. The explicit lab-only
-unsigned-update setting and production key IDs/algorithms are unchanged.
+extracted. Extraction never reopens an archive pathname after hashing. The
+candidate's bounded regular UTF-8 `version` must be semver; online it must equal
+that exact metadata version before any live slot/backup mutation. Version reads
+use NOFOLLOW/NONBLOCK and at most 129 bytes, rejecting directories, FIFOs, symlinks
+and an oversized file without blocking or loading an arbitrary large value.
+
+This is an installation-initialization authorization point, not a lock that
+freezes all local policy/config writers throughout extraction and swap. The
+existing key resolver and OpenSSL path-based verifier are retained; protected
+key/input snapshots and independent recovery provenance remain separate work.
+There is still no durable signed app-slot receipt. The explicit lab-only
+unsigned setting, production key IDs/algorithms and manual bridge path are unchanged.
+The version-only query still uses its startup Config snapshot; it is status,
+not permission to install or proof that policy is still current.
 
 Offline upload deliberately remains an authenticated administrator's manual
 import, with external checksum verification as documented for the bridge. It
@@ -164,6 +185,24 @@ The subsequent `/kvmapp`/`/root/old` swap is still the legacy path: it has no
 durable journal/early recovery and is not an atomic or accepted crash-safe
 transaction. Slot provenance, independent startup recovery and first restart
 acceptance must be implemented before claiming WP-04 or C1 complete.
+
+### Independent recovery prerequisite
+
+Buildroot and the SD assembler install a separate `/etc/init.d/S95nanokvm`, but
+that script still loads backend/native work from `/kvmapp`; it cannot recover a
+missing app directory. Rust recopies bundled init scripts only after it has
+already been launched, and exits on required-copy failure. Consequently a
+recovery executable bundled only under the new `/kvmapp` cannot close the gap.
+
+Before activating a journaled slot swap, a fixed rootfs recovery/bootstrap
+executable and startup gate must be available independently of the candidate.
+They must run before the first boot consumer of `/kvmapp`, not merely rely on
+late backend startup. Rootfs builds must install this path up front; an installed
+bridge must establish/check it before exposing the new swap operation. Missing
+or mismatched recovery support must refuse the mutation, not claim that two
+renames are recoverable. Unknown/torn journal state must preserve evidence and
+must never synthesize authorization from a legacy p3 marker or plain inventory.
+This prerequisite is documented, not yet implemented or target-tested.
 
 ## Command lifetime within the update worker
 

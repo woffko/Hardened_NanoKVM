@@ -19,6 +19,7 @@ use tokio::time;
 use crate::{
     AppError, Result,
     api::system_firewall,
+    config::Config,
     error::ApiResponse,
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
@@ -27,6 +28,7 @@ use crate::{
         archive::extract_app_tar_gz,
         keys::resolve_update_public_key,
         operation::{Kind, Snapshot, UpdateOwner},
+        staged_metadata::{MAX_METADATA, MAX_SIGNATURE},
     },
 };
 
@@ -44,6 +46,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
 const APP_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const APP_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
+const MAX_APP_VERSION_BYTES: u64 = 128;
 
 #[derive(Debug, Serialize)]
 pub struct VersionRsp {
@@ -83,6 +86,19 @@ struct LatestRelease {
     signature_key_id: String,
 }
 
+// Exact signed bytes travel with the parsed view. Never reconstruct a receipt
+// by serializing LatestRelease, or let version selection mix two receipts.
+struct VerifiedAppMetadata {
+    latest: LatestRelease,
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+enum InstallAuthority {
+    OnlineMetadata(VerifiedAppMetadata),
+    ManualImport,
+}
+
 pub async fn update_status(State(state): State<AppState>) -> Result<Json<ApiResponse<Snapshot>>> {
     Ok(Json(ApiResponse::ok(state.updates.snapshot()?)))
 }
@@ -98,7 +114,7 @@ pub async fn get_version(State(state): State<AppState>) -> Result<impl IntoRespo
     }
 
     let latest = match get_latest(is_preview_enabled(), &state.config).await {
-        Ok(latest) => latest.version,
+        Ok(verified) => verified.latest.version,
         Err(err) => {
             tracing::warn!(error = %err, "failed to query latest application release");
             String::new()
@@ -154,7 +170,8 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
     let owner = state.updates.acquire(Kind::ApplicationOnline)?;
     owner
         .run(move |job| async move {
-            let latest = get_latest(is_preview_enabled(), &state.config).await?;
+            let config = job.blocking("read app update policy", Config::read).await?;
+            let verified = get_latest(is_preview_enabled(), &config).await?;
             let (stage, archive) = job
                 .blocking("prepare private app staging", || {
                     let stage = AppStage::prepare()?;
@@ -162,10 +179,18 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                     Ok((stage, archive))
                 })
                 .await?;
-            let archive = download_release_asset(&latest, archive, &job).await?;
+            let archive = download_release_asset(&verified.latest, archive, &job).await?;
+            let config = job
+                .blocking("reread app install policy", Config::read)
+                .await?;
+            let verified =
+                authenticate_app_metadata(verified.metadata, verified.signature, &config).await?;
             job.blocking("verify and install app", move || {
                 let archive = archive
-                    .finish_online(latest.size, &decode_sha512(&latest.sha512)?)
+                    .finish_online(
+                        verified.latest.size,
+                        &decode_sha512(&verified.latest.sha512)?,
+                    )
                     .map_err(|error| {
                         if error.kind() == io::ErrorKind::InvalidData {
                             AppError::BadRequest("update archive size or checksum mismatch".into())
@@ -173,7 +198,7 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                             error.into()
                         }
                     })?;
-                install_package(archive, stage)
+                install_package(archive, stage, InstallAuthority::OnlineMetadata(verified))
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -205,7 +230,7 @@ pub async fn offline_update(
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
             job.blocking("install offline app", move || {
-                install_package(archive, stage)
+                install_package(archive, stage, InstallAuthority::ManualImport)
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -216,7 +241,7 @@ pub async fn offline_update(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-async fn get_latest(preview: bool, config: &crate::config::Config) -> Result<LatestRelease> {
+async fn get_latest(preview: bool, config: &Config) -> Result<VerifiedAppMetadata> {
     if preview {
         match fetch_latest(GITHUB_PREVIEW_LATEST_JSON, config).await {
             Ok(preview_latest) => match fetch_latest(GITHUB_RELEASE_LATEST_JSON, config).await {
@@ -241,8 +266,8 @@ async fn get_latest(preview: bool, config: &crate::config::Config) -> Result<Lat
     fetch_latest(GITHUB_RELEASE_LATEST_JSON, config).await
 }
 
-fn newer_release(left: LatestRelease, right: LatestRelease) -> LatestRelease {
-    match compare_application_versions(&left.version, &right.version) {
+fn newer_release(left: VerifiedAppMetadata, right: VerifiedAppMetadata) -> VerifiedAppMetadata {
+    match compare_application_versions(&left.latest.version, &right.latest.version) {
         Some(std::cmp::Ordering::Less) => right,
         _ => left,
     }
@@ -267,20 +292,49 @@ fn parse_application_version(version: &str) -> Option<[u64; 3]> {
     Some(parsed)
 }
 
-async fn fetch_latest(url: &str, config: &crate::config::Config) -> Result<LatestRelease> {
+async fn fetch_latest(url: &str, config: &Config) -> Result<VerifiedAppMetadata> {
     validate_metadata_url(url)?;
     let metadata = fetch_latest_metadata(url).await?;
-    let latest: LatestRelease = serde_json::from_slice(&metadata)
-        .map_err(|err| AppError::Internal(format!("invalid latest.json: {err}")))?;
+    let latest = parse_exact_app_metadata(&metadata)?;
+    let signature = enforce_app_metadata_signature(url, &metadata, &latest, config).await?;
+    Ok(VerifiedAppMetadata {
+        latest,
+        metadata,
+        signature,
+    })
+}
+
+fn parse_exact_app_metadata(metadata: &[u8]) -> Result<LatestRelease> {
+    if metadata.is_empty() || metadata.len() > MAX_METADATA {
+        return Err(AppError::BadRequest(
+            "invalid application update metadata size".into(),
+        ));
+    }
+    let latest = serde_json::from_slice(metadata)
+        .map_err(|_| AppError::BadRequest("invalid application update metadata".into()))?;
     validate_latest_release(&latest)?;
-    enforce_app_metadata_signature(url, &metadata, &latest, config).await?;
     Ok(latest)
+}
+
+async fn authenticate_app_metadata(
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+    config: &Config,
+) -> Result<VerifiedAppMetadata> {
+    let latest = parse_exact_app_metadata(&metadata)?;
+    verify_app_metadata_with_policy(&metadata, &signature, &latest, config).await?;
+    Ok(VerifiedAppMetadata {
+        latest,
+        metadata,
+        signature,
+    })
 }
 
 async fn fetch_latest_metadata(url: &str) -> Result<Vec<u8>> {
     let output = run_allowed(
         AllowedCommand::Curl,
         [
+            "--disable",
             "-fsSL",
             "--connect-timeout",
             "10",
@@ -288,6 +342,11 @@ async fn fetch_latest_metadata(url: &str) -> Result<Vec<u8>> {
             "30",
             "-H",
             "Accept: application/json",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--",
             url,
         ],
         METADATA_TIMEOUT,
@@ -450,11 +509,31 @@ async fn save_uploaded_update(
         .await
 }
 
-fn install_package(source: AppArchive, mut stage: AppStage) -> Result<()> {
+fn prepare_app_candidate(
+    source: AppArchive,
+    stage: &AppStage,
+    authority: &InstallAuthority,
+) -> Result<PathBuf> {
     let extract_dir = stage.extraction_path()?;
     let extracted = extract_app_tar_gz(source, &extract_dir)?;
     let update_root = resolve_update_root(&extracted)?;
-    validate_update_root(&update_root)?;
+    let version = validate_update_root(&update_root)?;
+    if let InstallAuthority::OnlineMetadata(verified) = authority
+        && version != verified.latest.version
+    {
+        return Err(AppError::BadRequest(
+            "app candidate version differs from authenticated metadata".into(),
+        ));
+    }
+    Ok(update_root)
+}
+
+fn install_package(
+    source: AppArchive,
+    mut stage: AppStage,
+    authority: InstallAuthority,
+) -> Result<()> {
+    let update_root = prepare_app_candidate(source, &stage, &authority)?;
 
     // From the first live-slot/backup mutation onward, retain the candidate on
     // every error (including failed backup restore). No cleanup is recovery.
@@ -494,7 +573,7 @@ fn resolve_update_root(extracted: &Path) -> Result<PathBuf> {
     ))
 }
 
-fn validate_update_root(root: &Path) -> Result<()> {
+fn validate_update_root(root: &Path) -> Result<String> {
     for relative in [
         "server/NanoKVM-Server",
         "system/init.d/S95nanokvm",
@@ -531,7 +610,40 @@ fn validate_update_root(root: &Path) -> Result<()> {
         }
     }
     validate_update_tree_has_no_symlinks(root)?;
-    Ok(())
+    read_candidate_version(root)
+}
+
+fn read_candidate_version(root: &Path) -> Result<String> {
+    use std::io::Read;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(root.join("version"))
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                AppError::BadRequest("app candidate version is missing".into())
+            } else {
+                error.into()
+            }
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(AppError::BadRequest(
+            "app candidate version is not a regular file".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(MAX_APP_VERSION_BYTES as usize + 1);
+    file.take(MAX_APP_VERSION_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_APP_VERSION_BYTES {
+        return Err(AppError::BadRequest(
+            "invalid app candidate version size".into(),
+        ));
+    }
+    let version = std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::BadRequest("invalid app candidate version encoding".into()))?
+        .trim();
+    validate_version(version)?;
+    Ok(version.to_string())
 }
 
 fn validate_latest_release(latest: &LatestRelease) -> Result<()> {
@@ -563,9 +675,30 @@ async fn enforce_app_metadata_signature(
     metadata_url: &str,
     metadata: &[u8],
     latest: &LatestRelease,
-    config: &crate::config::Config,
+    config: &Config,
+) -> Result<Vec<u8>> {
+    let signature = if app_metadata_is_unsigned(latest) {
+        Vec::new()
+    } else {
+        let signature_url = metadata_signature_url(metadata_url)?;
+        fetch_app_metadata_signature(&signature_url).await?
+    };
+    verify_app_metadata_with_policy(metadata, &signature, latest, config).await?;
+    Ok(signature)
+}
+
+async fn verify_app_metadata_with_policy(
+    metadata: &[u8],
+    signature: &[u8],
+    latest: &LatestRelease,
+    config: &Config,
 ) -> Result<()> {
     if app_metadata_is_unsigned(latest) {
+        if !signature.is_empty() {
+            return Err(AppError::BadRequest(
+                "unsigned application metadata cannot carry a signature receipt".into(),
+            ));
+        }
         if config.security.allow_unsigned_updates {
             tracing::warn!(
                 version = %latest.version,
@@ -583,14 +716,17 @@ async fn enforce_app_metadata_signature(
             "unsupported application update metadata signature algorithm".to_string(),
         ));
     }
+    if signature.is_empty() || signature.len() > MAX_SIGNATURE {
+        return Err(AppError::BadRequest(
+            "invalid application update metadata signature size".into(),
+        ));
+    }
     let public_key = resolve_update_public_key(
         &config.paths.system_update_public_key,
         &latest.signature_key_id,
     )?;
 
-    let signature_url = metadata_signature_url(metadata_url)?;
-    let signature = fetch_app_metadata_signature(&signature_url).await?;
-    verify_app_metadata_signature(metadata, &signature, &public_key).await
+    verify_app_metadata_signature(metadata, signature, &public_key).await
 }
 
 fn app_metadata_is_unsigned(latest: &LatestRelease) -> bool {
@@ -644,12 +780,25 @@ fn metadata_signature_url(metadata_url: &str) -> Result<String> {
 async fn fetch_app_metadata_signature(url: &str) -> Result<Vec<u8>> {
     let output = run_allowed(
         AllowedCommand::Curl,
-        ["-fsSL", "--connect-timeout", "10", "--max-time", "30", url],
+        [
+            "--disable",
+            "-fsSL",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--",
+            url,
+        ],
         METADATA_TIMEOUT,
     )
     .await?;
     ensure_success(&output, "download application update metadata signature")?;
-    if output.stdout.is_empty() || output.stdout.len() > 16 * 1024 {
+    if output.stdout.is_empty() || output.stdout.len() > MAX_SIGNATURE {
         return Err(AppError::BadRequest(
             "invalid application update metadata signature size".to_string(),
         ));
@@ -730,6 +879,9 @@ fn validate_update_filename(filename: &str) -> Result<()> {
 }
 
 fn validate_version(version: &str) -> Result<()> {
+    if version.len() as u64 > MAX_APP_VERSION_BYTES {
+        return Err(AppError::BadRequest("release version is too long".into()));
+    }
     let mut parts = version.split('.');
     let valid = (0..3).all(|_| {
         parts
@@ -1342,7 +1494,24 @@ mod tests {
             signature_key_id: "hardened-system-dev".to_string(),
         };
 
-        assert_eq!(newer_release(preview, stable).version, "2.0.0");
+        // Selection must move the matching exact bytes/signature, not only the
+        // parsed version. These placeholders are NOT signature verification.
+        let stable_bytes = serde_json::to_vec(&stable).unwrap();
+        let chosen = newer_release(
+            VerifiedAppMetadata {
+                metadata: serde_json::to_vec(&preview).unwrap(),
+                latest: preview,
+                signature: vec![1; 256],
+            },
+            VerifiedAppMetadata {
+                metadata: stable_bytes.clone(),
+                latest: stable,
+                signature: vec![2; 256],
+            },
+        );
+        assert_eq!(chosen.latest.version, "2.0.0");
+        assert_eq!(chosen.metadata, stable_bytes);
+        assert_eq!(chosen.signature, vec![2; 256]);
     }
 
     #[test]
@@ -1442,3 +1611,7 @@ mod tests {
         assert!(err.to_string().contains("symlink"));
     }
 }
+
+#[cfg(test)]
+#[path = "application_trust_tests.rs"]
+mod trust_tests;
