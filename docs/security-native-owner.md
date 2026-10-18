@@ -68,7 +68,7 @@ are not yet accepted from these fixtures.
 owner processes. It never installs a subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
 only `/kvmapp/server/nanokvm-native-owner --scope <fixed-role>`. The controller
-is compiled, but has **no production caller or packaging/S95 switch yet**.
+is compiled and used by the broker component, but has **no packaging/S95 switch yet**.
 
 `begin_drain` moves the complete launch capability into a non-cloneable `Drain`
 before sending Stop to every cell. While retained, no `Group::start` capability
@@ -145,8 +145,9 @@ Publication errors poison the live store. A leftover temporary member is not
 removed automatically, and missing PID/socket/name is never used to clear Active.
 Reopening may accept a complete Closed record after an ambiguous final fsync,
 but only the controller's proven drain can attempt that Closed publication.
-Recovery from an incomplete record and supported operator recovery remain open;
-this fail-closed prototype must not be enabled in S95 without that lifecycle.
+An explicit recovery component now handles native journal interruption after a
+verified new kernel boot, as described below. It is not connected to init or a
+device recovery UI yet; production lifecycle/restore gates remain mandatory.
 
 Host verification injects I/O failures and kills real journal-owner subprocesses
 at six publication boundaries. Broker tests check pre-launch intent, retained
@@ -204,13 +205,79 @@ A separate real subreaper fixture holds journal/listener/client descriptors whil
 launching and draining a daemonized tree to check descriptor isolation. These
 tests do not execute production native roles or establish target runtime health.
 
-Build all three static RV64 executables with
+## Explicit native journal recovery
+
+`nanokvm-native-recovery` accepts only `status`, `prepare` and `complete`, with
+fixed protected paths and kernel boot identity. It is built but **not packaged,
+deployed or automatically called by S95**. No force/reset/path/epoch override is
+accepted. A live broker's flock refuses recovery; socket/PID absence does not
+replace that lease. Status does not create missing journal storage and is not
+permission to start services or write partitions.
+
+Normal same-process maintenance resume still uses the retained IPC connection
+and proven native drain. Explicit recovery is for an unavailable owner or
+incomplete journal where descendant closure cannot be reconstructed. Without
+cgroups/PID namespaces, a new kernel boot is the supported proof that those old
+process lifetimes ended; the CLI does not claim an orphan-tree adoption protocol.
+
+| Recovery step | Native admission |
+| --- | --- |
+| `prepare` | Persist root-only `recovery/boot-<kernel-UUID>-<checksum>`; no stop, reboot, repair or start |
+| Same boot, even after owner/socket disappears | Refuse completion and normal admission |
+| Different kernel boot with a valid fence | Permit explicit native recovery, not raw restore |
+| `complete` | Quarantine exact old members, publish Closed, archive the fence; no service launch |
+
+Any object at the fixed `recovery` name blocks normal broker admission before
+state parsing. A fence is a protected same-rootfs mode-0700 directory, with one
+canonical boot-UUID/checksum empty mode-0600 file. The domain-separated SHA-256
+checksum detects valid-looking epoch-name corruption; it is not authentication.
+An interruption before that marker can
+be completed by repeating prepare, but cannot grant readiness. Unknown/malformed
+members, links, unsafe permissions or conflicting receipts fail closed.
+
+After a different boot, completion moves only `state`, `.state.next` and
+`control.sock` into `recovery/evidence/` with no-replace renames, or durably records
+their original absence. It never follows those original objects or copies their
+content into new authority. Both directories are synced before the quarantine
+receipt. Derived Closed bytes are written to an anonymous rootfs `O_TMPFILE`,
+file-synced, then linked via its own pinned descriptor through verified procfs;
+there is no partial named-file fallback or caller-selected magic link. The file
+identity/length/link count and directory sync are checked before removing the
+active fence. Recreated runtime members are refused before and after publication.
+
+Finally the whole fence is renamed, without replacement, to
+`recovered-<original-boot-UUID>`. Original evidence remains on the private rootfs;
+no recursive cleanup or overwrite of an existing archive is performed. A crash
+during quarantine/publication can resume the same fenced operation, including
+after another reboot. Malformed evidence, unexpected recreated members or an
+archive-name conflict require administrator inspection; there is no broad
+automatic repair or `--force` path. If root compromise is suspected, use trusted
+reflash and separate credential rotation rather than treating journal recovery
+as system cleanup.
+
+Before any operator reboot, independently inspect/settle raw/app/restore state
+and ensure management/recovery access. **The CLI never requests a reboot.** Its
+success resets only native admission: it does not resolve a raw ticket/pending
+install, provision an account, mark boot-good or authorize partition writes.
+Independent early-restore/startup admission must still run before native starts.
+The control is cooperative trusted-root management, not protection from a
+non-cooperating root process or an already compromised OS. None of the runtime
+journal, fence or archived evidence is accepted by settings capture/import/delete.
+
+Host tests inject I/O failures and kill actual recovery subprocesses at ten
+boundaries, check same-boot refusal, replay after another boot, live-owner Busy,
+read-only status, unsafe/foreign members, exact inode/byte preservation and
+unexpected source recreation. Boot IDs are synthetic only in private unit
+fixtures; production has no override. These tests are not physical reboot,
+power-cut, vendor-filesystem or complete product recovery acceptance.
+
+Build all four static RV64 executables with
 `server-rust/scripts/build-native-owner.sh`. The script rejects dynamic loaders,
 shared-library dependencies and wrong ELF architecture. This is not app/full
 pipeline reproducibility or target execution evidence. The ordinary package
 builder intentionally does not include these unused components yet.
 
-Remaining work is production lifecycle integration and supported recovery: close
+Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle
 pending AP attempts. Do not naively nest an independent service owner below a
 watchdog subreaper: that creates ownership/teardown coupling, not independent
@@ -220,7 +287,7 @@ preserve the correct owners and immutable runtime provenance.
 The integration must record unresolved/crashed ownership outside mutable p3 and
 fail before partition writes. A dead owner or EOF without a complete receipt
 cannot establish that its descendants stopped. Parent/controller failure, owner
-SIGKILL/OOM, supported recovery, exact vendor program behavior and physical
+SIGKILL/OOM, production recovery integration, exact vendor program behavior and physical
 acceptance remain open. Cgroups/PID namespaces are not assumed or enabled.
 
 C1, complete service closure, canonical multi-file settings capture, retained

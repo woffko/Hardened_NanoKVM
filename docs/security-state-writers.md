@@ -54,8 +54,10 @@ work on the target computer during ordinary operation.
 A [dedicated native process owner](security-native-owner.md) now provides a
 host-tested subreaper/pidfd scope for fresh launches. It is not packaged or wired
 to S95/capture yet and does not adopt existing services. It therefore does not
-upgrade any source group to runtime-quiescent. Watchdog/native broker integration,
-crashed-owner recovery and actual target support remain required.
+upgrade any source group to runtime-quiescent. The broker's fixed local IPC and
+explicit new-boot native journal recovery are host-tested components, not raw
+restore authority. Watchdog/init/recovery integration and actual target support
+remain required.
 
 Run `make test-state-writer-inventory`. The source security-policy check also
 runs the coverage validator. Missing/new/wrong-kind/duplicate members, unknown

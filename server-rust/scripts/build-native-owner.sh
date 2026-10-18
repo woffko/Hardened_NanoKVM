@@ -10,10 +10,10 @@ export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang
 export CFLAGS_riscv64gc_unknown_linux_musl="${CFLAGS_riscv64gc_unknown_linux_musl:---target=riscv64-unknown-linux-musl -march=rv64gc -mabi=lp64d}"
 cargo build --manifest-path "$ROOT/Cargo.toml" --release --target "$TARGET" \
   --no-default-features --bin nanokvm-native-owner --bin nanokvm-native-broker \
-  --bin nanokvm-native-ctl --locked --offline
+  --bin nanokvm-native-ctl --bin nanokvm-native-recovery --locked --offline
 METADATA="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 --locked --offline)"
 TARGET_DIR="$(printf '%s' "$METADATA" | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')"
-for NAME in nanokvm-native-owner nanokvm-native-broker nanokvm-native-ctl; do
+for NAME in nanokvm-native-owner nanokvm-native-broker nanokvm-native-ctl nanokvm-native-recovery; do
   BINARY="$TARGET_DIR/$TARGET/release/$NAME"
   HEADER="$(LC_ALL=C readelf -h "$BINARY")"
   PROGRAMS="$(LC_ALL=C readelf -l "$BINARY")"

@@ -15,6 +15,7 @@ use std::{
 const DIRECTORY: &str = "native-runtime-owner";
 const STATE: &str = "state";
 const NEXT: &str = ".state.next";
+const RECOVERY: &str = "recovery";
 const MAGIC: &[u8; 8] = b"NKBROK01";
 const BYTES: usize = 80;
 const HASH: usize = 48;
@@ -22,6 +23,8 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
+#[path = "recovery.rs"]
+pub mod recovery;
 #[path = "broker_socket.rs"]
 pub(super) mod socket;
 
@@ -37,6 +40,12 @@ pub enum Error {
     Unresolved,
     #[error("native runtime journal publication is ambiguous")]
     Ambiguous,
+    #[error("native runtime recovery is fenced and requires explicit completion")]
+    Recovery,
+    #[error("native runtime recovery requires a different kernel boot epoch")]
+    Reboot,
+    #[error("native runtime journal directory does not exist")]
+    Absent,
     #[error("native runtime journal I/O failed")]
     Io,
 }
@@ -60,17 +69,14 @@ impl Epoch {
     }
 
     fn current() -> Result<Self, Error> {
-        let root = File::open("/")?;
-        let proc = open(&root, "proc", OFlags::RDONLY | OFlags::DIRECTORY, false)?;
+        let proc = kernel_proc()?;
         let mut file = open(
             &proc,
             "sys/kernel/random/boot_id",
             OFlags::RDONLY | OFlags::NONBLOCK,
             false,
         )?;
-        if fstatfs(&proc).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC
-            || fstatfs(&file).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC
-        {
+        if fstatfs(&file).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC {
             return Err(Error::Unsafe);
         }
         let mut bytes = [0; 37];
@@ -124,6 +130,10 @@ impl Store {
     }
 
     pub(super) fn open() -> Result<Self, Error> {
+        Self::lock_root(true)?.admit()
+    }
+
+    fn lock_root(create: bool) -> Result<Self, Error> {
         if !nix::unistd::geteuid().is_root() {
             return Err(Error::Unsafe);
         }
@@ -131,18 +141,28 @@ impl Store {
         protected(&root, 0, false)?;
         let etc = open(&root, "etc", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
         protected(&etc, 0, false)?;
-        let parent = open(&etc, "kvm", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
-        Self::at_parent(&parent, 0, Epoch::current()?)
+        let parent = match open(&etc, "kvm", OFlags::RDONLY | OFlags::DIRECTORY, true) {
+            Ok(parent) => parent,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Err(Error::Absent),
+            Err(_) => return Err(Error::Io),
+        };
+        Self::lease(&parent, 0, Epoch::current()?, create)
     }
 
-    fn at_parent(parent: &File, uid: u32, epoch: Epoch) -> Result<Self, Error> {
+    fn lease(parent: &File, uid: u32, epoch: Epoch, create: bool) -> Result<Self, Error> {
         protected(parent, uid, false)?;
-        match mkdirat(parent, DIRECTORY, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-            Ok(()) => parent.sync_all()?,
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(Error::Io),
+        if create {
+            match mkdirat(parent, DIRECTORY, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                Ok(()) => parent.sync_all()?,
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(_) => return Err(Error::Io),
+            }
         }
-        let directory = open(parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        let directory = match open(parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY, true) {
+            Ok(directory) => directory,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Err(Error::Absent),
+            Err(_) => return Err(Error::Io),
+        };
         protected(&directory, uid, true)?;
         let device = directory.metadata()?.dev();
         if device != parent.metadata()?.dev() {
@@ -157,7 +177,7 @@ impl Store {
         })?;
         // Construct the owner immediately: even a failed load must explicitly
         // unlock, not leave a transient pre-exec alias extending this lease.
-        let mut store = Self {
+        Ok(Self {
             directory,
             uid,
             device,
@@ -169,17 +189,31 @@ impl Store {
             fail_at: None,
             #[cfg(test)]
             pause_at: None,
-        };
-        if store.member(NEXT)?.is_some() {
+        })
+    }
+
+    fn admit(mut self) -> Result<Self, Error> {
+        // Any fence object blocks admission before parsing or repairing state.
+        // Missing socket/PID is never authority to bypass explicit recovery.
+        match rustix::fs::statat(
+            &self.directory,
+            RECOVERY,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => return Err(Error::Recovery),
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(Error::Io),
+        }
+        if self.member(NEXT)?.is_some() {
             return Err(Error::Ambiguous);
         }
-        if let Some((prior, phase)) = store.read()? {
-            if prior == epoch && phase != Phase::Closed {
+        if let Some((prior, phase)) = self.read()? {
+            if prior == self.epoch && phase != Phase::Closed {
                 return Err(Error::Unresolved);
             }
-            store.previous_boot = prior != epoch;
+            self.previous_boot = prior != self.epoch;
         }
-        Ok(store)
+        Ok(self)
     }
 
     pub(super) fn previous_boot(&self) -> bool {
@@ -188,7 +222,7 @@ impl Store {
 
     #[cfg(test)]
     pub(super) fn fixture(parent: &File, uid: u32, boot: &str) -> Result<Self, Error> {
-        Self::at_parent(parent, uid, Epoch::parse(boot.as_bytes())?)
+        Self::lease(parent, uid, Epoch::parse(boot.as_bytes())?, true)?.admit()
     }
 
     pub(super) fn begin(&mut self) -> Result<(), Error> {
@@ -277,12 +311,7 @@ impl Store {
     }
 
     fn publish(&mut self, phase: Phase) -> Result<(), Error> {
-        let mut bytes = [0; BYTES];
-        bytes[..8].copy_from_slice(MAGIC);
-        bytes[8..44].copy_from_slice(&self.epoch.0);
-        bytes[44] = phase as u8;
-        let hash = Sha256::digest(&bytes[..HASH]);
-        bytes[HASH..].copy_from_slice(&hash);
+        let bytes = record(self.epoch, phase);
         let result = (|| -> Result<(), Error> {
             #[cfg(test)]
             self.inject(Step::BeforeCreate)?;
@@ -343,6 +372,25 @@ impl Store {
             Ok(())
         }
     }
+}
+
+fn record(epoch: Epoch, phase: Phase) -> [u8; BYTES] {
+    let mut bytes = [0; BYTES];
+    bytes[..8].copy_from_slice(MAGIC);
+    bytes[8..44].copy_from_slice(&epoch.0);
+    bytes[44] = phase as u8;
+    let hash = Sha256::digest(&bytes[..HASH]);
+    bytes[HASH..].copy_from_slice(&hash);
+    bytes
+}
+
+fn kernel_proc() -> Result<File, Error> {
+    let root = File::open("/")?;
+    let proc = open(&root, "proc", OFlags::RDONLY | OFlags::DIRECTORY, false)?;
+    if fstatfs(&proc).map_err(|_| Error::Io)?.f_type != PROC_SUPER_MAGIC {
+        return Err(Error::Unsafe);
+    }
+    Ok(proc)
 }
 
 impl Drop for Store {

@@ -21,6 +21,16 @@ fn shipped_broker_and_ctl_reject_generic_paths_and_maintenance_cli() {
                 vec!["--path", "/tmp/other"],
             ],
         ),
+        (
+            env!("CARGO_BIN_EXE_nanokvm-native-recovery"),
+            vec![
+                vec![],
+                vec!["reset"],
+                vec!["--force"],
+                vec!["complete", "extra"],
+                vec!["--path", "/tmp/other"],
+            ],
+        ),
     ] {
         for args in cases {
             let status = Command::new(binary)

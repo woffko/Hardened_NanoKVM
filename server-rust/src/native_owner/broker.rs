@@ -5,6 +5,7 @@ use super::controller::{self, DrainStatus, Group, Role, StartError, Status};
 #[path = "journal.rs"]
 mod journal;
 pub use journal::Error as JournalError;
+pub use journal::recovery;
 #[path = "ipc.rs"]
 pub mod ipc;
 

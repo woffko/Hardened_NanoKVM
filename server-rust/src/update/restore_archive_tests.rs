@@ -155,6 +155,10 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/native-runtime-owner/control.sock",
+        "etc/kvm/native-runtime-owner/recovery/boot-12345678-1234-1234-1234-123456789abc",
+        "etc/kvm/native-runtime-owner/recovery/evidence/state",
+        "etc/kvm/native-runtime-owner/recovery/quarantined",
+        "etc/kvm/native-runtime-owner/recovered-12345678-1234-1234-1234-123456789abc/evidence/state",
     ] {
         put(
             source.path(),
@@ -193,6 +197,10 @@ fn capture_seal_validate_and_read_preserves_settings_not_executables() {
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/native-runtime-owner/control.sock",
+        "etc/kvm/native-runtime-owner/recovery/boot-12345678-1234-1234-1234-123456789abc",
+        "etc/kvm/native-runtime-owner/recovery/evidence/state",
+        "etc/kvm/native-runtime-owner/recovery/quarantined",
+        "etc/kvm/native-runtime-owner/recovered-12345678-1234-1234-1234-123456789abc/evidence/state",
         "root/.picoclaw/workspace/AGENT.md",
         "root/.picoclaw/workspace/skills/kvm-control/tool.sh",
     ] {
@@ -458,6 +466,10 @@ fn unauthorized_system_code_trust_runtime_and_private_paths_are_rejected() {
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/native-runtime-owner/control.sock",
+        "etc/kvm/native-runtime-owner/recovery/boot-12345678-1234-1234-1234-123456789abc",
+        "etc/kvm/native-runtime-owner/recovery/evidence/state",
+        "etc/kvm/native-runtime-owner/recovery/quarantined",
+        "etc/kvm/native-runtime-owner/recovered-12345678-1234-1234-1234-123456789abc/evidence/state",
         "etc/kvm/update-key-policy",
         "etc/kvm/update-keys/key.pub.pem",
         "etc/kvm/.picoclaw_internal_token",
@@ -484,6 +496,10 @@ fn absent_records_cannot_delete_identity_or_authorize_unknown_paths() {
         "etc/kvm/native-runtime-owner/state",
         "etc/kvm/native-runtime-owner/.state.next",
         "etc/kvm/native-runtime-owner/control.sock",
+        "etc/kvm/native-runtime-owner/recovery/boot-12345678-1234-1234-1234-123456789abc",
+        "etc/kvm/native-runtime-owner/recovery/evidence/state",
+        "etc/kvm/native-runtime-owner/recovery/quarantined",
+        "etc/kvm/native-runtime-owner/recovered-12345678-1234-1234-1234-123456789abc/evidence/state",
     ] {
         let mut items = records();
         items.push((format!("absent/{path}"), vec![], 0o600, EntryType::Regular));
