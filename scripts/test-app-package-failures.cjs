@@ -23,6 +23,12 @@ try {
     path.join(project, 'scripts/ssh-runtime-binding.py'));
   fs.symlinkSync(path.join(root, 'scripts/app-recovery-binding.py'),
     path.join(project, 'scripts/app-recovery-binding.py'));
+  fs.symlinkSync(path.join(root, 'scripts/app-boot-delivery.py'),
+    path.join(project, 'scripts/app-boot-delivery.py'));
+  const compat = path.join(project, 'support/update-compat/rc12/S95nanokvm');
+  fs.mkdirSync(path.dirname(compat), { recursive: true });
+  const compatBytes = fs.readFileSync(path.join(root, 'support/update-compat/rc12/S95nanokvm'));
+  fs.writeFileSync(compat, compatBytes);
   const script = path.join(project, 'scripts/package-rust-kvmapp.sh');
   if (args[1]) {
     const source = spawnSync('git', ['show', `${args[1]}:scripts/package-rust-kvmapp.sh`],
@@ -58,6 +64,8 @@ try {
   appHeader.write('NKAPPBT1');
   const appEnvelope = Buffer.concat([appHeader, helper]);
   const host = fs.readFileSync('/bin/true');
+  const bootNames = ['S02apprecover', 'S30eth', 'S30wifi', 'S95nanokvm'];
+  const bootBytes = bootNames.map(name => fs.readFileSync(path.join(root, 'kvmapp/system/init.d', name)));
   const cases = [
     ['valid package matches its checksum', null],
     ['tar creation failure does not publish', 'tar-create'],
@@ -81,6 +89,10 @@ try {
       ['bundled app recovery cannot replace embedded bytes', 'app-binding-bundled'],
       ['absolute CARGO_TARGET_DIR is honored', 'target-absolute'],
       ['relative CARGO_TARGET_DIR is honored', 'target-relative'],
+      ['missing compile-bound boot scripts rejects', 'boot-binding-missing'],
+      ['duplicate compile-bound boot scripts rejects', 'boot-binding-duplicate'],
+      ['changed compatibility script rejects', 'boot-compat-corrupt'],
+      ['nonrelease app version rejects before publication', 'version-prerelease'],
     ] : []),
   ];
   for (const [index, [label, fault]] of cases.entries()) {
@@ -101,12 +113,16 @@ try {
       binding = Buffer.alloc(0);
       appBinding = Buffer.from(envelope);
     }
-    fs.writeFileSync(backend, Buffer.concat([host, binding, appBinding]), { mode: 0o755 });
+    let boot = fault === 'boot-binding-missing' ? [] : bootBytes;
+    if (fault === 'boot-binding-duplicate') boot = [...boot, ...boot];
+    fs.writeFileSync(backend, Buffer.concat([host, binding, appBinding, ...boot]), { mode: 0o755 });
+    if (fault === 'boot-compat-corrupt') fs.writeFileSync(compat, 'foreign compatibility code\n');
     const env = { ...process.env, BUILD_DIR: build, STAGE_DIR: path.join(build, 'stage'),
       OUT_DIR: out, ARTIFACT_NAME: 'fixture.tar.gz', RUST_BINARY: backend,
       HWMON_BINARY: '/bin/true', KVM_SYSTEM_SOURCE: '/bin/true', NATIVE_LIB_DIR: native,
       EXTRA_NATIVE_LIB_DIR: '', WEB_DIST: web, APP_VERSION: '2.0.43' };
     const succeeds = !fault || fault === 'target-absolute' || fault === 'target-relative';
+    if (fault === 'version-prerelease') env.APP_VERSION = '2.0.43-dev';
     if (fault === 'target-absolute' || fault === 'target-relative') {
       const target = path.join(build, 'custom-target');
       const release = path.join(target, 'riscv64gc-unknown-linux-musl', 'release');
@@ -163,6 +179,21 @@ try {
           assert(manifest.includes(`app_recovery_sha256: ${crypto.createHash('sha256').update(helper).digest('hex')}\n`));
           assert(manifest.includes('app_recovery_size: 120\n'));
           assert.deepEqual(fs.readFileSync(path.join(env.STAGE_DIR, 'kvmapp/system/bin/nanokvm-app-recovery')), helper);
+          assert(manifest.includes('app_archive_boot_profile: rc12-compat-bootstrap-v1\n'));
+          const listing = spawnSync('tar', ['-tzf', archive], { encoding: 'utf8' });
+          if (listing.error) throw listing.error;
+          assert.equal(listing.status, 0, listing.stderr);
+          const names = listing.stdout.split('\n');
+          for (const name of bootNames.slice(0, -1)) {
+            assert(!names.includes('kvmapp/system/init.d/' + name));
+          }
+          const archived = spawnSync('tar', ['-xOf', archive, 'kvmapp/system/init.d/S95nanokvm']);
+          if (archived.error) throw archived.error;
+          assert.equal(archived.status, 0, archived.stderr.toString());
+          assert.deepEqual(archived.stdout, compatBytes);
+          for (const [n, name] of bootNames.entries()) {
+            assert.deepEqual(fs.readFileSync(path.join(env.STAGE_DIR, 'kvmapp/system/init.d', name)), bootBytes[n]);
+          }
         }
       } else {
         assert.notEqual(result.status, 0, 'faulty package reported success');
@@ -176,6 +207,7 @@ try {
     } finally {
       fs.rmSync(sentinel, { force: true });
       if (fault === 'app-binding-bundled') fs.rmSync(bundledRecovery);
+      if (fault === 'boot-compat-corrupt') fs.writeFileSync(compat, compatBytes);
     }
   }
 } finally {

@@ -212,8 +212,10 @@ existing admission before legacy mutation; see
 [app-slot recovery](security-app-slot-recovery.md). S02/individual app-consumer
 gates are now wired and host-tested, with compile-bound critical init scripts and
 helper-before-gate publication by the new backend. They are snapshot checks, not
-native launch ownership. The trusted producer, old-installer bridge ordering,
-helper migration and first-restart acceptance remain open. Independent
+native launch ownership. App archives now use a pinned legacy-S95 delivery view
+without premature ancillary gates; full-image staging remains canonical. This
+addresses the exact RC12 copier ordering at host scope, not device acceptance.
+The trusted producer, helper migration and first-restart acceptance remain open. Independent
 installation has no full target acceptance. The app API still uses its
 legacy swap; no interrupted-install acceptance is claimed from this component.
 

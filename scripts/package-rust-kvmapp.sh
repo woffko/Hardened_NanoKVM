@@ -21,6 +21,7 @@ KVM_SYSTEM_BUILD_SOURCE="${KVM_SYSTEM_BUILD_SOURCE:-$ROOT_DIR/support/sg2002/kvm
 NATIVE_LIB_DIR="${NATIVE_LIB_DIR:-$ROOT_DIR/server-rust/native/dl_lib}"
 EXTRA_NATIVE_LIB_DIR="${EXTRA_NATIVE_LIB_DIR:-}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1782723554}"
+BOOT_COMPAT_SCRIPT="$ROOT_DIR/support/update-compat/rc12/S95nanokvm"
 
 case "$SOURCE_DATE_EPOCH" in
   '' | *[!0-9]*)
@@ -151,6 +152,12 @@ python3 "$ROOT_DIR/scripts/app-recovery-binding.py" extract \
   --backend "$KVMAPP_STAGE/server/NanoKVM-Server" \
   --destination "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
 chmod 0755 "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
+boot_delivery=$(python3 "$ROOT_DIR/scripts/app-boot-delivery.py" verify-inputs \
+  --backend "$KVMAPP_STAGE/server/NanoKVM-Server" \
+  --scripts "$KVMAPP_STAGE/system/init.d" --compat "$BOOT_COMPAT_SCRIPT" \
+  --version-file "$KVMAPP_STAGE/version")
+boot_profile=${boot_delivery% *}
+boot_compat_sha256=${boot_delivery#* }
 cp "$HWMON_BINARY" "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 chmod 0755 "$KVMAPP_STAGE/hwmon/nanokvm-hwmon"
 
@@ -211,6 +218,8 @@ kvm_system_sha256=$(build_file_sha256 "$KVMAPP_STAGE/kvm_system/kvm_system")
   printf 'app_recovery: embedded-static-rv64-v1\n'
   printf 'app_recovery_sha256: %s\n' "$app_recovery_sha256"
   printf 'app_recovery_size: %s\n' "$app_recovery_size"
+  printf 'app_archive_boot_profile: %s\n' "$boot_profile"
+  printf 'app_archive_s95_sha256: %s\n' "$boot_compat_sha256"
   printf 'hwmon_binary: kvmapp/hwmon/nanokvm-hwmon\n'
   printf 'hwmon_binary_sha256: %s\n' "$hwmon_binary_sha256"
   printf 'rust_target: %s\n' "${RUST_TARGET:-host}"
@@ -252,9 +261,20 @@ for artifact in "$ARCHIVE" "$ARCHIVE.sha256"; do
 done
 build_assert_no_private_keys "$KVMAPP_STAGE" || exit 1
 PACKAGE_WORK=$(mktemp -d "$OUT_DIR/.nanokvm-package.XXXXXX")
+# Keep the full-image stage canonical. Only the app archive uses a pinned old
+# S95: RC12 requires that file, and an equal copy avoids overwriting the shell
+# still executing it. New consumer gates are published by backend helper-first.
+cp -R "$KVMAPP_STAGE" "$PACKAGE_WORK/kvmapp"
+cp "$STAGE_DIR/MANIFEST.txt" "$PACKAGE_WORK/MANIFEST.txt"
+rm -f "$PACKAGE_WORK/kvmapp/system/init.d/S02apprecover" \
+  "$PACKAGE_WORK/kvmapp/system/init.d/S30eth" \
+  "$PACKAGE_WORK/kvmapp/system/init.d/S30wifi"
+cp "$BOOT_COMPAT_SCRIPT" "$PACKAGE_WORK/kvmapp/system/init.d/S95nanokvm"
+chmod 0755 "$PACKAGE_WORK/kvmapp/system/init.d/S95nanokvm"
+build_assert_no_private_keys "$PACKAGE_WORK/kvmapp" || exit 1
 # A regular intermediate tar makes both producer and compressor errors visible
 # under POSIX sh; an unguarded tar | gzip pipeline only reports gzip's status.
-tar -C "$STAGE_DIR" \
+tar -C "$PACKAGE_WORK" \
   --sort=name \
   --format=gnu \
   --mtime="@$SOURCE_DATE_EPOCH" \
@@ -275,6 +295,8 @@ if ! awk '
   echo "application archive contains an entry type rejected by the hardened updater" >&2
   exit 1
 fi
+python3 "$ROOT_DIR/scripts/app-boot-delivery.py" verify-archive \
+  --archive "$PACKAGE_WORK/archive.tar.gz"
 archive_sha256=$(build_file_sha256 "$PACKAGE_WORK/archive.tar.gz")
 printf '%s  %s\n' "$archive_sha256" "$ARCHIVE" > "$PACKAGE_WORK/checksum"
 mv "$PACKAGE_WORK/checksum" "$ARCHIVE.sha256"

@@ -1452,6 +1452,51 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore = "requires retained development app boot-delivery package fixtures"]
+    fn boot_delivery_packages_use_private_production_preflight_without_installing() {
+        use sha2::{Digest, Sha256};
+        let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for side in ["a", "b"] {
+            let path = project.join(format!(
+                "build/audit/remediation-2026-10-17/host/app-boot-delivery-valid-{side}/out/boot-delivery-fixture.tar.gz"
+            ));
+            let root = tempfile::tempdir().unwrap();
+            let stage = AppStage::fixture(root.path()).unwrap();
+            let mut download = stage.create_archive().unwrap();
+            let mut source = fs::File::open(path).unwrap();
+            assert!(source.metadata().unwrap().len() <= MAX_UPDATE_BYTES);
+            let mut hash = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = source.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+                download.append(&buffer[..count]).unwrap();
+            }
+            assert_eq!(
+                format!("{:x}", hash.finalize()),
+                "c347842bb1fbbabd645a4feefcc5d9c50f4b38a3f798bdf8a153ffaddcafcbd0"
+            );
+            let archive = download.finish_manual_import().unwrap();
+            let app =
+                prepare_app_candidate(archive, &stage, &InstallAuthority::ManualImport).unwrap();
+            assert_eq!(read_candidate_version(&app).unwrap(), "0.0.0");
+            for name in ["S02apprecover", "S30eth", "S30wifi"] {
+                assert!(!app.join("system/init.d").join(name).exists());
+            }
+            let s95 = fs::read(app.join("system/init.d/S95nanokvm")).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&s95)),
+                "8030d0f81581a417eca91e3db7e0c3d96cba197b519022d7c73c3c5caca05365"
+            );
+            assert!(!root.path().join("kvmapp").exists());
+            assert!(!root.path().join("etc/init.d").exists());
+        }
+    }
+
     use std::os::unix::fs::symlink;
 
     #[test]

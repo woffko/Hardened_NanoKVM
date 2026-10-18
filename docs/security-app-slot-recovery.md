@@ -6,7 +6,7 @@ API still uses its legacy slot swap. The new helper is compile-bound into the li
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
 installation for an app-only bridge. S02 and individual consumer gates now invoke
-it, but the trusted producer, legacy first-bridge ordering, helper migration and
+it, but the trusted producer, legacy first-bridge target acceptance, helper migration and
 device acceptance remain open. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
@@ -136,20 +136,19 @@ need the composed native-owner lifecycle; passive app-file health probes are
 not individually fenced by this protocol. Do not claim that all concurrent
 runtime reads/writes are excluded or that an app install is now crash-safe.
 
-**Legacy first-bridge ordering is still a release blocker.** An old S95 can copy
-new bundled gated scripts before the new backend has established the helper.
+**Legacy first-bridge target acceptance is still a release blocker.** An old S95
+can copy new bundled gated scripts before the backend has established the helper.
 In RC12 source `387793ab944437bbedc534d2ba231dd88d1fd2ca`, the old app API first
 swaps `/kvmapp`, then invokes S95 `restart`. S95's `start_runtime` calls
 `install_boot_scripts` before starting either native runtime or backend; its
 copier also overwrites S95 itself in place. Safe continuation of that already
 running shell must not be assumed. The old backend's own script synchronization
 occurs only after it has been launched and cannot close this earlier window.
-Power loss in that window is not covered by the new backend's safer publication
-order. A new bridge must establish independent support before that old installer
-can publish gates, or use a reviewed distinct transition flow. No `/kvmapp`
-execution fallback, journal deletion or policy relaxation is added here to mask
-this gap. Old backends may also overwrite rootfs gates after rollback; legacy
-rollback/migration must account for this before acceptance.
+Power loss in that window is not covered by the backend's safer publication
+order alone. The archive-delivery profile below addresses premature gate/self-copy
+publication for exact RC12/app42 inputs at source/host scope. It is not the full
+legacy migration, old-installer crash-safety or helper-version lifecycle. Old
+backends may also overwrite rootfs gates after rollback; this still needs acceptance.
 
 Host user-namespace/chroot fixtures exercise the actual fixed-root gate with
 held admission in no-transaction/terminal states, Busy for active nonterminal
@@ -159,6 +158,50 @@ protected-script non-copying and rootfs validator errors. Historical ungated
 bodies are rejected structurally, never executed on the host. Source guards for
 the picoclaw API (including independent Stop selection) are not HTTP/device
 acceptance; no live processes are signalled by those tests.
+
+### App archive delivery versus full-image staging
+
+`package-rust-kvmapp.sh` now keeps its ordinary full-image staging tree canonical,
+with all four current compile-bound scripts. The app archive is produced from a
+separate private copy. That copy omits S02apprecover/S30eth/S30wifi and carries an
+exact historical S95 from app 2.0.42, SHA-256
+`8030d0f81581a417eca91e3db7e0c3d96cba197b519022d7c73c3c5caca05365`.
+The historical source and provenance are retained as a non-executable data asset
+under `support/update-compat/rc12`, not as the current rootfs init script.
+
+S95 cannot simply be omitted: the old app archive validator requires it. For the
+exact supported installed RC12/app42 S95 bytes, the old copier's equality check
+leaves the executing shell untouched. Absent ancillary sources leave the old
+rootfs files untouched too. The new backend then verifies/installs the independent
+helper and publishes its compile-bound canonical scripts. Once current rootfs S95
+is installed, its protected-script skip never recopies the archive's legacy S95.
+Full SD/raw rootfs construction uses the unchanged canonical stage, not the
+app-archive view. Do not substitute an unpacked app archive for that image stage.
+
+`app-boot-delivery.py` refuses a backend lacking any exact canonical embedded
+script, a changed historical asset, or a final archive with premature gate paths,
+aliases, links, special objects, duplicate/foreign/missing S95 or exceeded bounds.
+The manifest labels `app_archive_boot_profile: rc12-compat-bootstrap-v1`; this is
+build consistency metadata, not a signature, runtime receipt or recovery authority.
+The normal app metadata/checksum/signature rules are unchanged.
+
+This profile does not add another user bridge step: app 2.0.40/41 still need the
+existing published 2.0.42 key bridge; exact app42 proceeds to one fixing app.
+It does not authorize arbitrary customized/unknown old S95 bytes, for which the
+old copier could still overwrite its executing script. Exact legacy init identity
+and first-restart/power-loss behavior must be verified before any device acceptance.
+The already-vulnerable portion of an old install cannot be made retrospectively
+atomic or safe against prior root compromise. Keep USB-data isolated and use
+trusted reflash/recovery for unsupported or compromised states.
+
+Host tests cover the exact old copier's equal/missing-source behavior and detect
+the pre-fix copy attempt, plus package fault rejection and unchanged full-image
+staging. Repeated packaging of the same actual RV64 inputs gives equal archives;
+this is NOT independent backend/full-pipeline reproducibility. A retained-input
+Rust test feeds those exact archive bytes through private production extraction
+and candidate preflight without invoking installation, helper migration or restart.
+No `/kvmapp` recovery-helper execution fallback, forced helper replacement,
+journal deletion or trust relaxation is introduced.
 
 ## Build and verification boundaries
 
@@ -265,9 +308,10 @@ not physical power-loss, ext4 write-cache or target acceptance.
   exact-existing/no-replacement rule is a fail-closed prerequisite, not a final
   upgrade lifecycle. This remains required for WP-04 acceptance, not an implicit
   waiver of app-only updates.
-- Full target/first-bridge acceptance of the new early/individual consumer gates;
-  establish independent support before old S95 can publish gated scripts and
-  preserve recovery across legacy rollback. Nonzero rcS exits alone are not gates.
+- Full target/first-bridge acceptance of the archive-delivery profile and the
+  early/individual consumer gates; verify exact old S95 identity, establish
+  independent support before publishing gates, and preserve legacy rollback.
+  Nonzero rcS exits alone are not gates.
 - Native/S95/watchdog/raw lifecycle coordination, first restart and runtime
   acceptance; do not replace code used by a running shell/executable in place.
 - Actual installation crash tests, ENOSPC/I/O failure, target mount negatives,

@@ -1,0 +1,739 @@
+#!/bin/sh
+# nanokvm Rev3.1
+
+disable_stale_autostarts() {
+    for script in /etc/init.d/S95nanokvm.*; do
+        [ -e "$script" ] || continue
+        mv "$script" "/etc/init.d/disabled-${script##*/}" 2>/dev/null || chmod 0644 "$script" 2>/dev/null
+    done
+}
+
+WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
+H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
+SERVER_SOURCE_DIR=/kvmapp/server
+SERVER_RUNTIME_DIR=/tmp/server
+SERVER_LOG=/tmp/nanokvm-server.log
+SERVER_PID_FILE=/tmp/nanokvm-server.pid
+NANOKVM_NATIVE_LIBRARY_PATH=/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd
+NANOKVM_XTHEAD_LOADER=/lib/ld-musl-riscv64xthead.so.1
+NANOKVM_V0P7_LOADER=/lib/ld-musl-riscv64v0p7_xthead.so.1
+KVM_SYSTEM_SOURCE_DIR=/kvmapp/kvm_system
+KVM_SYSTEM_RUNTIME_DIR=/tmp/kvm_system
+KVM_SYSTEM_LOG=/tmp/kvm_system.log
+KVM_SYSTEM_PID_FILE=/tmp/kvm-system.pid
+HWMON_SOURCE=/kvmapp/hwmon/nanokvm-hwmon
+HWMON_PID_FILE=/tmp/nanokvm-hwmon.pid
+HWMON_LOG=/tmp/nanokvm-hwmon.log
+HWMON_START_DELAY_SECS=20
+RUST_HWMON_FLAG=/etc/kvm/rust_hwmon_enabled
+SYSTEM_UPDATE_WATCHDOG_PID_FILE=/tmp/system-update-watchdog.pid
+SYSTEM_UPDATE_LOG=/tmp/system-update-watchdog.log
+SYSTEM_VERSION_FILE=/etc/kvm/system-version.json
+SYSTEM_PENDING_FILE=/etc/kvm/system-update-pending.json
+SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
+SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
+SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
+SYSTEM_RAW_INSTALL_MARKER=/data/hardened-system-raw-update-pending.json
+SYSTEM_UPDATE_STAGE_DIR=/data/.hardened-kvmcache/system-update
+SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
+SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
+SYSTEM_UPDATE_KEYRING_DIR=/etc/kvm/update-keys
+SYSTEM_UPDATE_BUNDLED_KEYRING_DIR=/kvmapp/system/keys/update-keys
+SYSTEM_UPDATE_KEY_POLICY=/etc/kvm/update-key-policy
+SYSTEM_UPDATE_BUNDLED_KEY_POLICY=/kvmapp/system/keys/update-key-policy
+SENSOR_BUNDLE_DIR=/kvmapp/system/mnt-data
+SENSOR_DATA_DIR=/mnt/data
+LEGACY_NEW_APP_MARKER=/kvmapp/kvm_new_app
+MIPI_RX_MODULE=/mnt/system/ko/soph_mipi_rx.ko
+MIPI_RX_BUNDLED_MODULE=/kvmapp/system/ko/soph_mipi_rx.ko
+MIPI_RX_LEGACY_MD5=086ed01749188975afaa40fb569374f8
+MIPI_RX_CURRENT_MD5=69be7eeded3777f750480a5dd5a1aa26
+BOOT_INIT_SCRIPTS="S00kmod S01fs S01syslogd S02klogd S03usbdev S15kvmhwd S30eth S30wifi S40firewall S49ntp S50avahi-daemon S50sshd S95nanokvm"
+OPTIONAL_BOOT_INIT_SCRIPTS="S98tailscaled"
+
+runtime_log() {
+    message="$*"
+    command -v logger >/dev/null 2>&1 && logger -t nanokvm-runtime "$message" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $message" >> /tmp/nanokvm-watchdog.log 2>/dev/null || true
+}
+
+cleanup_legacy_app_artifacts() {
+    mkdir -p /etc/kvm /kvmapp/kvm
+    touch /etc/kvm/frame_detact 2>/dev/null || true
+
+    if [ -f /kvmapp/system/update-nanokvm.py ]; then
+        if ! cmp -s /kvmapp/system/update-nanokvm.py /etc/kvm/update-nanokvm.py; then
+            cp /kvmapp/system/update-nanokvm.py /etc/kvm/update-nanokvm.py
+        fi
+        chmod 0755 /etc/kvm/update-nanokvm.py 2>/dev/null || true
+    fi
+
+    rm -f \
+        /boot/logo.jpeg \
+        /etc/init.d/S02udisk \
+        /etc/init.d/S04backlight \
+        /etc/init.d/S05tp \
+        /etc/init.d/S40bluetoothd \
+        /etc/init.d/S50ssdpd \
+        /kvmapp/kvm_system/kvm_stream 2>/dev/null || true
+
+    rm -rf /kvmapp/jpg_stream 2>/dev/null || true
+}
+
+install_optional_boot_scripts() {
+    for name in $OPTIONAL_BOOT_INIT_SCRIPTS; do
+        [ -e "/etc/init.d/$name" ] || continue
+        install_boot_script "$name"
+    done
+}
+
+file_md5() {
+    md5sum "$1" 2>/dev/null | awk '{ print $1 }'
+}
+
+ensure_hdmi_version_file() {
+    [ -x /kvmapp/system/init.d/S15kvmhwd ] || return
+    /kvmapp/system/init.d/S15kvmhwd get_hdmi_version >/dev/null 2>&1 || true
+}
+
+mipi_rx_module_is_compatible() {
+    current_md5="$(file_md5 "$MIPI_RX_MODULE")"
+    [ -n "$current_md5" ] || return 1
+
+    hdmi_version="$(cat /etc/kvm/hdmi_version 2>/dev/null | head -c 2)"
+    case "$hdmi_version" in
+        u*|d*)
+            [ "$current_md5" = "$MIPI_RX_CURRENT_MD5" ]
+            ;;
+        *)
+            [ "$current_md5" = "$MIPI_RX_LEGACY_MD5" ] || [ "$current_md5" = "$MIPI_RX_CURRENT_MD5" ]
+            ;;
+    esac
+}
+
+update_mipi_rx_module_if_needed() {
+    [ -f "$MIPI_RX_BUNDLED_MODULE" ] || return
+
+    ensure_hdmi_version_file
+    if mipi_rx_module_is_compatible; then
+        return
+    fi
+
+    if cp "$MIPI_RX_BUNDLED_MODULE" "$MIPI_RX_MODULE"; then
+        runtime_log "updated legacy soph_mipi_rx.ko; rebooting before runtime start"
+        sync
+        reboot
+        exit 0
+    fi
+
+    runtime_log "failed to update legacy soph_mipi_rx.ko; continuing boot"
+}
+
+cleanup_legacy_new_app_marker() {
+    [ -e "$LEGACY_NEW_APP_MARKER" ] || return
+
+    runtime_log "handling legacy kvm_new_app marker in S95nanokvm"
+    rmmod soph_saradc 2>/dev/null || true
+    rm -f /mnt/system/ko/soph_saradc.ko 2>/dev/null || true
+    update_mipi_rx_module_if_needed
+    [ -e /root/old/kvm_new_img ] && rm -rf /root/old 2>/dev/null || true
+    rm -f "$LEGACY_NEW_APP_MARKER" 2>/dev/null || true
+}
+
+cleanup_legacy_new_image_marker() {
+    [ -e /kvmapp/kvm_new_img ] || return
+    runtime_log "removed legacy kvm_new_img marker; DNS is managed by network config"
+    rm -f /kvmapp/kvm_new_img 2>/dev/null || true
+}
+
+wait_process_exit() {
+    name="$1"
+    for _ in 1 2 3 4 5; do
+        pidof "$name" >/dev/null 2>&1 || return 0
+        sleep 1
+    done
+    killall -9 "$name" 2>/dev/null
+    sleep 1
+    pidof "$name" >/dev/null 2>&1 && return 1
+    return 0
+}
+
+server_is_running() {
+    [ -f "$SERVER_PID_FILE" ] || return 1
+    pid="$(cat "$SERVER_PID_FILE" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+find_kvm_system_pids() {
+    for proc in /proc/[0-9]*; do
+        cmdline="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+        case "$cmdline" in
+            /lib/ld-musl-riscv64v0p7_xthead.so.1*'/tmp/kvm_system/kvm_system'*)
+                printf '%s\n' "${proc##*/}"
+                ;;
+        esac
+    done
+}
+
+kvm_system_pid_matches() {
+    pid="$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmdline" in
+        /lib/ld-musl-riscv64v0p7_xthead.so.1*'/tmp/kvm_system/kvm_system'*) return 0 ;;
+    esac
+    return 1
+}
+
+kvm_system_is_running() {
+    [ -f "$KVM_SYSTEM_PID_FILE" ] || return 1
+    pid="$(cat "$KVM_SYSTEM_PID_FILE" 2>/dev/null)"
+    kvm_system_pid_matches "$pid"
+}
+
+adopt_single_kvm_system_process() {
+    pids="$(find_kvm_system_pids)"
+    set -- $pids
+    [ "$#" -eq 1 ] || return 1
+    printf '%s\n' "$1" > "$KVM_SYSTEM_PID_FILE"
+    kvm_system_is_running
+}
+
+stop_kvm_system_process() {
+    pids="$(find_kvm_system_pids)"
+    for pid in $pids; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for _ in 1 2 3 4 5; do
+        alive=0
+        for pid in $pids; do
+            kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        [ "$alive" -eq 0 ] && break
+        sleep 1
+    done
+    for pid in $pids; do
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    done
+    rm -f "$KVM_SYSTEM_PID_FILE"
+    for pid in $pids; do
+        kill -0 "$pid" 2>/dev/null && return 1
+    done
+    return 0
+}
+
+start_kvm_system_runtime() {
+    [ -x "$KVM_SYSTEM_SOURCE_DIR/kvm_system" ] || {
+        runtime_log "kvm_system source is missing or not executable"
+        return 1
+    }
+    rm -rf "$KVM_SYSTEM_RUNTIME_DIR"
+    cp -r "$KVM_SYSTEM_SOURCE_DIR" "$KVM_SYSTEM_RUNTIME_DIR" || {
+        runtime_log "failed to stage kvm_system in /tmp"
+        return 1
+    }
+    : > "$KVM_SYSTEM_LOG" 2>/dev/null || KVM_SYSTEM_LOG=/dev/null
+    nohup "$NANOKVM_V0P7_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" \
+        "$KVM_SYSTEM_RUNTIME_DIR/kvm_system" >"$KVM_SYSTEM_LOG" 2>&1 &
+    launched_pid=$!
+    rm -f "$KVM_SYSTEM_PID_FILE"
+    for _ in 1 2 3 4 5; do
+        pids="$(find_kvm_system_pids)"
+        set -- $pids
+        if [ "$#" -eq 1 ]; then
+            printf '%s\n' "$1" > "$KVM_SYSTEM_PID_FILE"
+            runtime_log "started kvm_system pid $1 (launcher $launched_pid)"
+            return 0
+        fi
+        sleep 1
+    done
+    runtime_log "kvm_system process count was not one after startup: $(find_kvm_system_pids | tr '\n' ' ')"
+    stop_kvm_system_process >/dev/null 2>&1 || true
+    return 1
+}
+
+stop_server_process() {
+    pid="$(cat "$SERVER_PID_FILE" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    rm -f "$SERVER_PID_FILE"
+    killall NanoKVM-Server 2>/dev/null || true
+    [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null
+}
+
+reboot_after_unrecoverable_server() {
+    reason="$1"
+    runtime_log "NanoKVM-Server did not exit during $reason; rebooting to recover vendor video driver"
+    sync
+    reboot
+    exit 1
+}
+
+tmp_available_kb() {
+    df -k /tmp 2>/dev/null | awk 'NR == 2 { print $4 + 0 }'
+}
+
+stop_pid_file() {
+    pid_file="$1"
+    if [ -f "$pid_file" ]; then
+        pid="$(cat "$pid_file" 2>/dev/null)"
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+        rm -f "$pid_file"
+    fi
+}
+
+stop_watchdog() {
+    stop_pid_file "$WATCHDOG_PID_FILE"
+}
+
+start_hwmon_shadow() {
+    [ -x "$HWMON_SOURCE" ] || return
+    [ -f "$HWMON_PID_FILE" ] && kill -0 "$(cat "$HWMON_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+
+    : > "$HWMON_LOG" 2>/dev/null || HWMON_LOG=/dev/null
+    runtime_log "starting nanokvm-hwmon shadow monitor after ${HWMON_START_DELAY_SECS}s delay"
+    (
+        sleep "$HWMON_START_DELAY_SECS"
+        exec "$NANOKVM_XTHEAD_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" "$HWMON_SOURCE"
+    ) >"$HWMON_LOG" 2>&1 &
+    echo $! > "$HWMON_PID_FILE"
+}
+
+enable_rust_hwmon_state() {
+    [ -x "$HWMON_SOURCE" ] || return
+    mkdir -p /etc/kvm
+    : > "$RUST_HWMON_FLAG" 2>/dev/null || true
+    chmod 0600 "$RUST_HWMON_FLAG" 2>/dev/null || true
+}
+
+stop_hwmon_shadow() {
+    pidof nanokvm-hwmon >/dev/null 2>&1 && runtime_log "stopping nanokvm-hwmon shadow monitor"
+    stop_pid_file "$HWMON_PID_FILE"
+    killall nanokvm-hwmon 2>/dev/null || true
+    wait_process_exit nanokvm-hwmon >/dev/null 2>&1 || true
+}
+
+stop_system_update_watchdog() {
+    stop_pid_file "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
+}
+
+cleanup_server_backups() {
+    rm -rf \
+        /kvmapp/server/web.old \
+        /kvmapp/server/web.prev \
+        /kvmapp/server/web.backup \
+        /kvmapp/server/web.backup-* \
+        /kvmapp/server/web.before-* \
+        /kvmapp/server/web.after-* \
+        /kvmapp/server/NanoKVM-Server.before-* \
+        /kvmapp/server/*.before-* 2>/dev/null || true
+}
+
+ensure_kvm_state_files() {
+    mkdir -p /kvmapp/kvm
+    [ -f /kvmapp/kvm/now_fps ] || printf '0\n' > /kvmapp/kvm/now_fps
+    [ -f /kvmapp/kvm/fps ] || printf '30\n' > /kvmapp/kvm/fps
+    [ -f /kvmapp/kvm/qlty ] || printf '2000\n' > /kvmapp/kvm/qlty
+    [ -f /kvmapp/kvm/res ] || printf '0\n' > /kvmapp/kvm/res
+    # H.264 can wedge the vendor encoder badly enough that the web backend
+    # keeps listening on TCP but stops answering HTTP. Always boot into MJPEG;
+    # users can still select H.264 explicitly after the UI is reachable.
+    printf 'mjpeg\n' > /kvmapp/kvm/type
+    [ -f /kvmapp/kvm/gop ] || printf '50\n' > /kvmapp/kvm/gop
+    [ -f /kvmapp/kvm/state ] || printf '0\n' > /kvmapp/kvm/state
+    [ -f /kvmapp/kvm/width ] || printf '1920\n' > /kvmapp/kvm/width
+    [ -f /kvmapp/kvm/height ] || printf '1080\n' > /kvmapp/kvm/height
+}
+
+install_system_update_public_key() {
+    mkdir -p /etc/kvm
+    if [ -f "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" ] && \
+       ! cmp -s "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"; then
+        cp "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"
+        chmod 0644 "$SYSTEM_UPDATE_PUBLIC_KEY"
+    fi
+
+    if [ -d "$SYSTEM_UPDATE_BUNDLED_KEYRING_DIR" ]; then
+        mkdir -p "$SYSTEM_UPDATE_KEYRING_DIR"
+        chmod 0755 "$SYSTEM_UPDATE_KEYRING_DIR"
+        for src in "$SYSTEM_UPDATE_BUNDLED_KEYRING_DIR"/*.pub.pem; do
+            [ -f "$src" ] || continue
+            name="${src##*/}"
+            case "$name" in
+                '' | .* | *..* | *[!A-Za-z0-9._+-]*)
+                    runtime_log "ignoring unsafe update key filename: $name"
+                    continue
+                    ;;
+            esac
+            dst="$SYSTEM_UPDATE_KEYRING_DIR/$name"
+            if ! cmp -s "$src" "$dst"; then
+                cp "$src" "$dst"
+                chmod 0644 "$dst"
+            fi
+        done
+    fi
+
+    if [ -f "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" ] && \
+       ! cmp -s "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" "$SYSTEM_UPDATE_KEY_POLICY"; then
+        cp "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" "$SYSTEM_UPDATE_KEY_POLICY"
+        chmod 0644 "$SYSTEM_UPDATE_KEY_POLICY"
+    fi
+}
+
+install_boot_script() {
+    name="$1"
+    src="/kvmapp/system/init.d/$name"
+    dst="/etc/init.d/$name"
+
+    [ -f "$src" ] || return
+    if ! cmp -s "$src" "$dst"; then
+        cp "$src" "$dst"
+        chmod 0755 "$dst"
+    fi
+}
+
+install_boot_scripts() {
+    for name in $BOOT_INIT_SCRIPTS; do
+        install_boot_script "$name"
+    done
+    install_optional_boot_scripts
+}
+
+restore_sensor_configs() {
+    mkdir -p "$SENSOR_DATA_DIR"
+
+    if [ -d "$SENSOR_BUNDLE_DIR" ]; then
+        for name in sensor_cfg.ini.LT sensor_cfg.ini.OA sensor_cfg.ini.SC035 sensor_cfg.ini.alpha sensor_cfg.ini.beta; do
+            src="$SENSOR_BUNDLE_DIR/$name"
+            dst="$SENSOR_DATA_DIR/$name"
+            [ -s "$src" ] || continue
+            if [ ! -s "$dst" ]; then
+                cp "$src" "$dst"
+                chmod 0644 "$dst"
+            fi
+        done
+    fi
+
+    if [ -s "$SENSOR_DATA_DIR/sensor_cfg.ini.LT" ]; then
+        cp "$SENSOR_DATA_DIR/sensor_cfg.ini.LT" "$SENSOR_DATA_DIR/sensor_cfg.ini"
+        chmod 0644 "$SENSOR_DATA_DIR/sensor_cfg.ini"
+    fi
+}
+
+start_server_runtime() {
+    server_bin="$SERVER_SOURCE_DIR/NanoKVM-Server"
+    tmp_free="$(tmp_available_kb)"
+
+    if [ -z "$tmp_free" ] || [ "$tmp_free" -gt 20480 ]; then
+        runtime_new="$(mktemp -d /tmp/nanokvm-server.XXXXXX 2>/dev/null || true)"
+        if [ -n "$runtime_new" ] && \
+           install -m 0755 "$server_bin" "$runtime_new/NanoKVM-Server" \
+               2>/tmp/nanokvm-server-copy.err; then
+            rm -rf "$SERVER_RUNTIME_DIR" 2>/dev/null
+            mv "$runtime_new" "$SERVER_RUNTIME_DIR"
+            server_bin="$SERVER_RUNTIME_DIR/NanoKVM-Server"
+        else
+            runtime_log "failed to stage NanoKVM-Server in /tmp; running from $SERVER_SOURCE_DIR"
+            [ -z "$runtime_new" ] || rm -rf "$runtime_new" 2>/dev/null
+        fi
+    else
+        runtime_log "/tmp has only ${tmp_free} KiB free; running NanoKVM-Server from $SERVER_SOURCE_DIR"
+    fi
+
+    : > "$SERVER_LOG" 2>/dev/null || SERVER_LOG=/dev/null
+    runtime_log "starting NanoKVM-Server from $server_bin"
+    nohup "$NANOKVM_XTHEAD_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" \
+        "$server_bin" >"$SERVER_LOG" 2>&1 &
+    echo $! > "$SERVER_PID_FILE"
+}
+
+restart_server_runtime() {
+    stop_watchdog
+    stop_server_process || reboot_after_unrecoverable_server "restart-server"
+    start_server_runtime
+    start_watchdog
+}
+
+health_check() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -kfsS --max-time 3 https://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+        curl -fsS --max-time 3 http://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget --no-check-certificate -q -T 3 -O - https://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+        wget -q -T 3 -O - http://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"' && return 0
+    fi
+    return 1
+}
+
+restart_server_safe() {
+    mkdir -p /etc/kvm /kvmapp/kvm
+    printf 'mjpeg\n' > /kvmapp/kvm/type
+    printf 'H.264 encoder health check failed; restarted in MJPEG safe mode\n' > "$H264_SAFE_MODE_FILE"
+    stop_server_process || reboot_after_unrecoverable_server "H.264 safe restart"
+    start_server_runtime
+}
+
+start_watchdog() {
+    [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+
+    (
+        failures=0
+        sleep 20
+        while true; do
+            if ! kvm_system_is_running; then
+                if adopt_single_kvm_system_process; then
+                    runtime_log "adopted live kvm_system pid $(cat "$KVM_SYSTEM_PID_FILE")"
+                else
+                    runtime_log "kvm_system is not running; restarting helper"
+                    stop_kvm_system_process >/dev/null 2>&1 || true
+                    if ! start_kvm_system_runtime; then
+                        runtime_log "failed to restart kvm_system helper"
+                    fi
+                fi
+            fi
+
+            if ! server_is_running; then
+                runtime_log "NanoKVM-Server is not running; restarting in MJPEG safe mode"
+                restart_server_safe
+                failures=0
+                sleep 10
+                continue
+            fi
+
+            if health_check; then
+                failures=0
+            else
+                failures=$((failures + 1))
+                runtime_log "NanoKVM-Server health check failed ($failures/3)"
+            fi
+
+            if [ "$failures" -ge 3 ]; then
+                runtime_log "restarting NanoKVM-Server in MJPEG safe mode"
+                restart_server_safe
+                failures=0
+                sleep 10
+            fi
+
+            sleep 10
+        done
+    ) &
+    echo $! > "$WATCHDOG_PID_FILE"
+}
+
+json_string_value() {
+    file="$1"
+    key="$2"
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | head -n 1
+}
+
+pending_update_file() {
+    if [ -f "$SYSTEM_PENDING_FILE" ]; then
+        printf '%s\n' "$SYSTEM_PENDING_FILE"
+        return 0
+    fi
+    if [ -f "$SYSTEM_RAW_INSTALL_MARKER" ]; then
+        printf '%s\n' "$SYSTEM_RAW_INSTALL_MARKER"
+        return 0
+    fi
+    return 1
+}
+
+pending_update_exists() {
+    pending_update_file >/dev/null 2>&1
+}
+
+system_update_version_matches() {
+    pending_file="$(pending_update_file)" || return 1
+    pending_version="$(json_string_value "$pending_file" version)"
+    pending_target="$(json_string_value "$pending_file" target)"
+    current_version="$(json_string_value "$SYSTEM_VERSION_FILE" version)"
+    current_target="$(json_string_value "$SYSTEM_VERSION_FILE" target)"
+
+    [ -n "$pending_version" ] && [ "$pending_version" = "$current_version" ] || return 1
+    [ -n "$pending_target" ] && [ "$pending_target" = "$current_target" ] || return 1
+    return 0
+}
+
+system_update_boot_healthy() {
+    pending_update_exists || return 1
+    [ -f /boot/ver ] || return 1
+    [ -f /kvmapp/server/web/index.html ] || return 1
+    system_update_version_matches || return 1
+    kvm_system_is_running || return 1
+    health_check || return 1
+    return 0
+}
+
+confirm_system_update_boot() {
+    pending_file="$(pending_update_file)" || return 1
+    version="$(json_string_value "$pending_file" version)"
+    target="$(json_string_value "$pending_file" target)"
+    now="$(date +%s 2>/dev/null || echo 0)"
+
+    mkdir -p /etc/kvm
+    cat > "$SYSTEM_BOOT_GOOD_FILE" <<EOF
+{
+  "confirmedAt": $now,
+  "confirmedBy": "S95nanokvm",
+  "version": "$version",
+  "target": "$target",
+  "health": {
+    "backendRunning": true,
+    "versionMatchesPending": true,
+    "bootMarkerPresent": true,
+    "webRootPresent": true,
+    "healthy": true
+  }
+}
+EOF
+    chmod 0644 "$SYSTEM_BOOT_GOOD_FILE"
+    rm -f "$SYSTEM_PENDING_FILE" "$SYSTEM_RAW_INSTALL_MARKER" "$SYSTEM_UPDATE_STAGE_DIR/progress.json" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update auto-confirmed" >> "$SYSTEM_UPDATE_LOG"
+}
+
+run_system_update_rollback() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') system update boot health failed; rolling back" >> "$SYSTEM_UPDATE_LOG"
+    printf '%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" > "$SYSTEM_ROLLBACK_ATTEMPT_FILE"
+
+    if [ ! -x "$SYSTEM_ROLLBACK_SCRIPT" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') rollback script is missing or not executable: $SYSTEM_ROLLBACK_SCRIPT" >> "$SYSTEM_UPDATE_LOG"
+        return 1
+    fi
+
+    if sh "$SYSTEM_ROLLBACK_SCRIPT" >> "$SYSTEM_UPDATE_LOG" 2>&1; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') rebooting after automatic system update rollback" >> "$SYSTEM_UPDATE_LOG"
+        sync
+        reboot -f 2>/dev/null || reboot
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') automatic system update rollback failed" >> "$SYSTEM_UPDATE_LOG"
+        return 1
+    fi
+}
+
+start_system_update_watchdog() {
+    pending_update_exists || return
+    [ -f "$SYSTEM_BOOT_GOOD_FILE" ] && return
+    [ -f "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+
+    (
+        echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update detected; waiting for boot health" >> "$SYSTEM_UPDATE_LOG"
+
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if ! pending_update_exists || [ -f "$SYSTEM_BOOT_GOOD_FILE" ]; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update was cleared" >> "$SYSTEM_UPDATE_LOG"
+                exit 0
+            fi
+            if system_update_boot_healthy; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update boot health is OK" >> "$SYSTEM_UPDATE_LOG"
+                confirm_system_update_boot
+                exit 0
+            fi
+            sleep 10
+        done
+
+        if [ -f "$SYSTEM_ROLLBACK_ATTEMPT_FILE" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') automatic system update rollback already attempted; leaving device for manual recovery" >> "$SYSTEM_UPDATE_LOG"
+            exit 0
+        fi
+
+        run_system_update_rollback
+    ) &
+    echo $! > "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
+}
+
+stop_runtime() {
+    stop_system_update_watchdog
+    stop_watchdog
+    stop_hwmon_shadow
+    stop_server_process || reboot_after_unrecoverable_server "runtime stop"
+    stop_kvm_system_process || true
+    rm -rf /tmp/kvm_system /tmp/server 2>/dev/null
+}
+
+start_runtime() {
+    cleanup_server_backups
+    ensure_kvm_state_files
+    install_system_update_public_key
+    install_boot_scripts
+    cleanup_legacy_app_artifacts
+    cleanup_legacy_new_app_marker
+    cleanup_legacy_new_image_marker
+    enable_rust_hwmon_state
+
+    start_kvm_system_runtime || runtime_log "continuing without kvm_system; watchdog will retry"
+
+    start_server_runtime
+    start_watchdog
+    start_system_update_watchdog
+    start_hwmon_shadow
+}
+
+case "$1" in
+  start)
+    disable_stale_autostarts
+    stop_runtime
+
+    echo -n kvm > /boot/hostname.prefix
+
+    restore_sensor_configs
+
+    # Generate unique device key
+    if [ -f /sys/class/cvi-base/base_uid ]; then
+        str_value=$(awk '{print $2}' /sys/class/cvi-base/base_uid)
+        first_uint=$(echo "$str_value" | cut -d'_' -f1)
+        second_uint=$(echo "$str_value" | cut -d'_' -f2)
+        echo "$first_uint$second_uint" > /device_key
+    fi
+
+    install_boot_scripts
+    [ -x /etc/init.d/S40firewall ] && /etc/init.d/S40firewall start
+
+    # Logo selection
+    if [ -f /boot/logo.ico ]; then
+        if [ ! -f /kvmapp/server/web/original.ico ]; then
+            mv /kvmapp/server/web/sipeed.ico /kvmapp/server/web/original.ico
+            cp /boot/logo.ico /kvmapp/server/web/sipeed.ico
+        fi
+    else
+        if [ -f /kvmapp/server/web/original.ico ]; then
+            mv /kvmapp/server/web/original.ico /kvmapp/server/web/sipeed.ico
+        fi
+    fi
+
+    # Start services
+    start_runtime
+   ;;
+
+  stop)
+    stop_runtime
+    echo "OK"
+   ;;
+
+  restart)
+    stop_runtime
+    start_runtime
+    sync
+    echo "OK"
+   ;;
+
+  restart-server)
+    restart_server_runtime
+    sync
+    echo "OK"
+   ;;
+    
+  *)
+    echo "Usage: $0 {start|stop|restart|restart-server}"
+    exit 1
+  ;;
+esac
