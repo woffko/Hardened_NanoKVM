@@ -222,8 +222,8 @@ serial conflict/retry without lost fields, session retiming, startup secret reus
 publication errors and retained command/follow-up lifetime. They do not execute
 native firewall, TLS generation at device paths or reboot.
 
-Network, time/syslog, active terminal sessions,
-scripts, optional apps and other service/background writers are not quiesced.
+Network, active terminal sessions, scripts, optional apps and independent native
+service/background writers are not quiesced.
 No coherent preservation snapshot, all-writer freeze, phase-aware Stop/join,
 service stop, raw-writer ticket
 or retained transaction is accepted from this component. The host fixtures do
@@ -285,6 +285,39 @@ foreign/orphan marker rejection, already-admitted TLS follow-up and independent
 exec ownership. Fixture paths/commands exist only under cfg(test); they do not
 alter firewall rules or invoke device services on the host.
 
+### Owned time and syslog settings
+
+Time set, explicit time synchronization and syslog set now use the Config serial
+domain and common writer activity. Their runtime-owned root work survives a lost
+HTTP reply. Time set owns validation, time JSON, NTP configuration/defaults and
+timezone-link publication, then the service action. Sync owns its selected config,
+ntpdate and subsequent NTP restart. Syslog set owns JSON, syslog/klogd defaults and
+both service actions. Blocking publication and native command cleanup retain
+their own shares. Other Config operations receive a retryable conflict while
+this serial operation is active; account authorization remains a separate role.
+
+The composed admission/drain waits for these enrolled operations to finish; it
+does not cancel them at an arbitrary file/service boundary. A deadline returns
+no drained guard while the root owner or direct-child cleanup is still active.
+Ordinary status/log readers remain readers, not quiescence owners. Their returned
+values are not a coherent snapshot or proof of effective daemon state.
+
+This is not atomic multi-file publication or rollback. A later write/command
+failure can follow successful earlier writes. Explicit negative tests preserve
+that fact; no coherent-state claim follows merely because activity drained after
+an error. Protected publication/recovery and canonical legacy time/syslog capture
+plus signed-image regeneration remain required before production capture.
+
+Native service ownership is separate. S49ntp normally waits for its ntpdate child,
+but its killed watchdog is not joined, the descendant sleep/process-tree and
+timeout boundaries are not closed, and stop does not prove ntpd completion.
+S01syslogd/S02klogd also do not join their daemons. Echo-based status paths can
+hide native failure. A completed API service command is not daemon-stop/readback
+acceptance, especially after timeout. Independent init calls still bypass API
+admission. No service script changes or target clock/logging operations are
+included here. Fixtures use explicit cfg(test)-only rooted files and commands,
+never process-global environment changes or production-command fallback.
+
 ## Explicit remaining boundaries
 
 - The front-end kernel lease is cooperative cross-process admission, not a
@@ -307,9 +340,10 @@ alter firewall rules or invoke device services on the host.
   transaction authority. A callback lease alone is still not proof that every
   process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
-- Other startup writes, network, time/syslog, active terminal,
+- Other startup writes, network, active terminal,
   scripts, optional-app workers and other configuration writers do not yet
-  acquire the shared quiescence permit. Account/Config/firewall enrollment is partial
+  acquire the shared quiescence permit. Account/Config/firewall/time/syslog API
+  enrollment is partial
   coverage, not a credential/TLS/config rollback protocol. No snapshot may claim
   all writers are stopped merely because update admission or this drain is held.
 - No generic abort handle is exposed. Explicit Stop must use phase-aware

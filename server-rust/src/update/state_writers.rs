@@ -1,5 +1,6 @@
 //! Cooperative writer admission/drain. Only enrolled writers are covered;
-//! currently account mutation/legacy seed, Config YAML/startup secret and firewall.
+//! currently account mutation/legacy seed, Config YAML/startup secret, firewall,
+//! time settings/sync and syslog settings. Native services remain separate owners.
 //! NOT a coherent device snapshot, service stop, raw-writer ticket or durable crash protocol.
 
 use super::operation_lock::{Domain, LockError, ProcessLock};
@@ -267,3 +268,7 @@ mod tests;
 #[cfg(test)]
 #[path = "state_writers_config_tests.rs"]
 mod config_tests;
+
+#[cfg(test)]
+#[path = "state_writers_settings_tests.rs"]
+mod settings_tests;

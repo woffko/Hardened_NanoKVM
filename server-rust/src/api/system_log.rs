@@ -2,13 +2,13 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use axum::{
     Json,
-    extract::{ConnectInfo, Query},
+    extract::{ConnectInfo, Query, State},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,12 @@ use crate::{
     AppError, Result,
     error::ApiResponse,
     http::tls::ClientAddr,
+    state::AppState,
     system::{
         audit,
         command::{AllowedCommand, CommandOutput, run_allowed},
     },
+    update::state_writers::ConfigPermit,
 };
 
 const CONFIG_FILE: &str = "/etc/kvm/syslog.json";
@@ -33,6 +35,33 @@ const BACKEND_LOG_FILE: &str = "/tmp/nanokvm-server.log";
 const MAX_LOG_VIEW_BYTES: usize = 256 * 1024;
 const DEFAULT_LINES: usize = 200;
 const MAX_LINES: usize = 1000;
+
+struct LogPaths {
+    config: PathBuf,
+    syslog_default: PathBuf,
+    klog_default: PathBuf,
+    log_dir: PathBuf,
+}
+
+impl LogPaths {
+    fn for_writer(_writer: &ConfigPermit) -> Self {
+        #[cfg(test)]
+        if let Some(root) = _writer.fixture_config_path().and_then(Path::parent) {
+            return Self {
+                config: root.join(CONFIG_FILE.trim_start_matches('/')),
+                syslog_default: root.join(SYSLOGD_DEFAULT_FILE.trim_start_matches('/')),
+                klog_default: root.join(KLOGD_DEFAULT_FILE.trim_start_matches('/')),
+                log_dir: root.join(LOG_DIR.trim_start_matches('/')),
+            };
+        }
+        Self {
+            config: CONFIG_FILE.into(),
+            syslog_default: SYSLOGD_DEFAULT_FILE.into(),
+            klog_default: KLOGD_DEFAULT_FILE.into(),
+            log_dir: LOG_DIR.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -100,14 +129,27 @@ pub async fn get_config() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_config(Json(req): Json<SystemLogConfig>) -> Result<impl IntoResponse> {
+pub async fn set_config(
+    State(state): State<AppState>,
+    Json(req): Json<SystemLogConfig>,
+) -> Result<impl IntoResponse> {
     let config = validate_config(req)?;
-
-    fs::create_dir_all(LOG_DIR)?;
-    write_config(&config)?;
-    write_defaults(&config)?;
-    apply_config(&config).await?;
-
+    let writer = state.writers.configuration()?;
+    let config = writer
+        .run(move |writer| async move {
+            let config = writer
+                .blocking(move |permit| {
+                    let paths = LogPaths::for_writer(permit);
+                    fs::create_dir_all(&paths.log_dir)?;
+                    write_config(&config, &paths.config)?;
+                    write_defaults(&config, &paths)?;
+                    Ok(config)
+                })
+                .await?;
+            apply_config(&writer, &config).await?;
+            Ok(config)
+        })
+        .await?;
     Ok(Json(ApiResponse::ok(SystemLogConfigRsp {
         config,
         local_log_file: LOG_FILE,
@@ -197,30 +239,20 @@ fn valid_remote_host(host: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_')
 }
 
-fn write_config(config: &SystemLogConfig) -> Result<()> {
+fn write_config(config: &SystemLogConfig, path: &Path) -> Result<()> {
     let content = serde_json::to_vec_pretty(config)
         .map_err(|err| AppError::Internal(format!("encode syslog config: {err}")))?;
-    write_file_atomic(Path::new(CONFIG_FILE), &content, 0o644)
+    write_file_atomic(path, &content, 0o644)
 }
 
-fn write_defaults(config: &SystemLogConfig) -> Result<()> {
-    fs::create_dir_all("/etc/default")?;
-
+fn write_defaults(config: &SystemLogConfig, paths: &LogPaths) -> Result<()> {
     let syslog_args = build_syslogd_args(config);
     let syslog_default = format!("SYSLOGD_ARGS={}\n", shell_quote(&syslog_args));
-    write_file_atomic(
-        Path::new(SYSLOGD_DEFAULT_FILE),
-        syslog_default.as_bytes(),
-        0o644,
-    )?;
+    write_file_atomic(&paths.syslog_default, syslog_default.as_bytes(), 0o644)?;
 
     let klog_args = format!("-c {}", config.kernel_console_level);
     let klog_default = format!("KLOGD_ARGS={}\n", shell_quote(&klog_args));
-    write_file_atomic(
-        Path::new(KLOGD_DEFAULT_FILE),
-        klog_default.as_bytes(),
-        0o644,
-    )
+    write_file_atomic(&paths.klog_default, klog_default.as_bytes(), 0o644)
 }
 
 fn build_syslogd_args(config: &SystemLogConfig) -> String {
@@ -250,8 +282,9 @@ fn build_syslogd_args(config: &SystemLogConfig) -> String {
     args.join(" ")
 }
 
-async fn apply_config(config: &SystemLogConfig) -> Result<()> {
+async fn apply_config(writer: &ConfigPermit, config: &SystemLogConfig) -> Result<()> {
     restart_service(
+        writer,
         AllowedCommand::ServiceSyslogd,
         "restart",
         "failed to restart syslogd",
@@ -260,18 +293,38 @@ async fn apply_config(config: &SystemLogConfig) -> Result<()> {
 
     if config.kernel_enabled {
         restart_service(
+            writer,
             AllowedCommand::ServiceKlogd,
             "restart",
             "failed to restart klogd",
         )
         .await
     } else {
-        restart_service(AllowedCommand::ServiceKlogd, "stop", "failed to stop klogd").await
+        restart_service(
+            writer,
+            AllowedCommand::ServiceKlogd,
+            "stop",
+            "failed to stop klogd",
+        )
+        .await
     }
 }
 
-async fn restart_service(command: AllowedCommand, action: &str, message: &str) -> Result<()> {
-    let output = run_allowed(command, [action], Duration::from_secs(8)).await?;
+async fn restart_service(
+    writer: &ConfigPermit,
+    command: AllowedCommand,
+    action: &str,
+    message: &str,
+) -> Result<()> {
+    #[cfg(test)]
+    let command = if let Some(root) = writer.fixture_config_path().and_then(Path::parent) {
+        AllowedCommand::CustomForTest(root.join("syslog-command"))
+    } else {
+        command
+    };
+    let output = writer
+        .command(command, [action], Duration::from_secs(8))
+        .await?;
     if output.status != 0 {
         return Err(AppError::Internal(command_error(message, output)));
     }
