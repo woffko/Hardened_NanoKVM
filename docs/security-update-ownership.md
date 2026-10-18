@@ -51,6 +51,45 @@ errors. Receipts are in-memory and disappear on process restart.
 7. Only the last owner releases active admission. Follow-up ownership must not
    be sent back through the HTTP reply and then scheduled by a cancelable handler.
 
+## Command lifetime within the update worker
+
+`system::command` now gives each capture or stderr-matcher command one runtime
+owner. There are no separately spawned stdin/stdout/stderr tasks. Capture runs
+direct-child wait, stdin write/shutdown and bounded stdout/stderr drains together
+under one wall deadline. Both output buffers retain at most 256 KiB while
+continuing to drain; reaching EOF, not merely child exit, is required for capture
+success. Blocked stdin or a retained pipe writer cannot escape the same deadline.
+The internal copied stdin is zeroizing; this does not claim to clear caller-owned
+password strings or make command output safe for arbitrary logging.
+
+On capture timeout/I/O failure, the owner closes its I/O futures, requests kill
+of the direct child and explicitly awaits reap before sending a result. A kill
+error cannot skip the wait; successful reap accepts a racing natural exit. There
+is no second short reap timeout that abandons a still-live direct child. Kernel
+wait/I/O failure can still produce a cleanup error or prevent completion; a
+command deadline is not a promise of bounded kernel teardown.
+
+The Tailscale login matcher preserves first matching URL, CRLF and final-line
+behavior. It bounds each stderr line to 256 KiB, rejects invalid UTF-8/oversized
+lines and stops/reaps the direct CLI on a match, timeout or error. EOF without a
+match still waits for the direct child under the same deadline. For `passwd`,
+an early stdin failure remains secondary to nonzero exit/status output; a zero
+exit still requires successful input delivery.
+
+Loss of a command's caller signals the runtime owner to cancel and reap; dropping
+the waiting future is **not** a synchronous cleanup join. The registered update
+worker is not canceled by HTTP reply loss, so its command timeout/error result
+and update admission release occur after explicit direct-child cleanup. Generic
+configuration callers still need future permit/Stop integration that retains
+quiescence ownership until such cleanup is joined.
+
+Init scripts deliberately daemonize services. No process-group kill or claim of
+descendant quiescence is added: surviving daemon children are not update-owned
+transactions, and descendants retaining pipe ends cause a bounded capture error.
+Runtime shutdown/unexpected task panic remains outside normal Result-path reap
+proof. Host tests verify direct-child reap and absence of orphaned pipe readers;
+they do not establish target init-script compatibility or physical acceptance.
+
 System progress normalization is now read-only. It may return a diagnostic
 failure for stale interrupted work but does not overwrite/delete a concurrently
 updated progress file. A currently registered system operation is not declared
@@ -69,10 +108,11 @@ visible in `/proc`.
   immutable image descriptors, protected ticket, retained runtime and early
   fail-closed restore are not implemented by this coordinator. A system request
   finishing after launch is not the raw transaction finishing.
-- The old command helper's timeout, pipe-drain and child-reap semantics remain
-  a separate gap. A callback lease is not proof that every process it started
-  has been reaped. Cancellation-safe process ownership must be wired before
-  claiming complete raw/app transaction acceptance.
+- The command helper now owns normal direct-child timeout/pipe/reap cleanup,
+  but is not a process-tree manager, a synchronous Drop join or a protected
+  transaction authority. A callback lease alone is still not proof that every
+  process it started has been reaped. Raw writer handoff, generic configuration
+  cancellation/permit joining and target service behavior remain separate gates.
 - Account/password, network, firewall rollback, time/syslog, local terminal,
   scripts, optional-app workers and other configuration writers do not yet
   acquire a shared quiescence permit. No preservation snapshot may claim those

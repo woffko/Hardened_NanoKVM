@@ -122,3 +122,56 @@ async fn cloned_app_state_exposes_one_readonly_bounded_operation_status() {
             == Phase::Failed
     );
 }
+
+#[tokio::test]
+async fn lost_update_reply_keeps_admission_until_command_timeout_and_reap() {
+    use nanokvm_rust_server::system::command::{AllowedCommand, run_allowed};
+    use nix::{errno::Errno, sys::wait::waitpid, unistd::Pid};
+    use std::time::Duration;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let state = state(temporary.path()).await;
+    let owner = state.updates.acquire(Kind::ApplicationOnline).unwrap();
+    let path = temporary.path().join("pid");
+    let argument = path.clone();
+    let request = tokio::spawn(owner.run(move |job| async move {
+        let _owner = job;
+        run_allowed(
+            AllowedCommand::CustomForTest("/bin/sh".into()),
+            [
+                "-c",
+                "echo $$ > \"$1\"; exec sleep 30",
+                "fixture",
+                argument.to_str().unwrap(),
+            ],
+            Duration::from_millis(500),
+        )
+        .await?;
+        Ok(())
+    }));
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(state.updates.acquire(Kind::SystemInstall).is_err());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.updates.snapshot().unwrap().active.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("update admission was not released after command cleanup");
+    assert!(state.updates.snapshot().unwrap().last.unwrap().phase == Phase::Failed);
+    assert_eq!(waitpid(Pid::from_raw(pid), None), Err(Errno::ECHILD));
+    assert!(!std::path::PathBuf::from(format!("/proc/{pid}")).exists());
+}
