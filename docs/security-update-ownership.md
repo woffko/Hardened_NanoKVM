@@ -356,8 +356,11 @@ host/device networking, transmit real WOL packets or test physical connectivity.
 ## Explicit remaining boundaries
 
 The [native owner component](security-native-owner.md) supplies separate-process
-child-tree Stop/reap machinery. It is not yet the service broker, retained raw
-writer or a caller of the composed writer drain. Its presence does not close the
+child-tree Stop/reap and sibling-controller drain machinery. Moving its launch
+capability into a retained drain closes in-process starts; receipts, owner exits
+and EOF are checked independently, and uncertainty cannot resume. This is not
+durable/interprocess respawner admission. It is not yet the service broker,
+retained raw writer or a caller of the composed writer drain. Its presence does not close the
 following production boundaries.
 
 - The front-end kernel lease is cooperative cross-process admission, not a

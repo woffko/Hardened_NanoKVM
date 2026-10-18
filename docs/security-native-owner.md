@@ -62,14 +62,47 @@ No actual KVM program, network service or device is run. A dedicated unusual
 clone-exit-signal scenario, forced owner death and vendor-kernel runtime checks
 are not yet accepted from these fixtures.
 
+## Controller-side sibling ownership
+
+`native_owner::controller::Group` now owns the two fixed native roles as sibling
+owner processes. It never installs a subreaper in the async backend and has no
+public arbitrary-command/path/environment selector. Production commands select
+only `/kvmapp/server/nanokvm-native-owner --scope <fixed-role>`. The controller
+is compiled, but has **no production caller or packaging/S95 switch yet**.
+
+`begin_drain` moves the complete launch capability into a non-cloneable `Drain`
+before sending Stop to every cell. While retained, no `Group::start` capability
+exists. Explicit `try_resume` returns it only after every cell has all three:
+an unambiguous complete `D` receipt, matching direct-owner exit status/reap, and
+control EOF. Readiness is only process spawn, not native service health. A caller
+deadline leaves the same drain pending; it must retain and continue polling that
+owner. No cleanup deadline kills the subreaper or declares successful closure.
+
+Missing/truncated/duplicate/unknown protocol, a receipt/exit mismatch, or owner
+death without a receipt makes ownership sticky-uncertain. The group requests
+Stop on siblings and refuses new starts/resume. Even reaping all direct owner
+processes does **not** clear uncertainty or prove their descendants are gone.
+Dropping a controller/drain sends Stop/EOF without respawn but forfeits the
+receipt and join; it is not a maintenance success path. A real lifecycle broker
+must retain ownership and journal unresolved intent before any process launch.
+
+Host tests cover two real daemonized trees, parallel Stop, explicit restart after
+join, caller timeout/retry, immediate pre-readiness drain, controller drop,
+fragmented frames, valid receipt before owner exit, delayed EOF, malformed frames,
+missing receipt and forced death of a childless wire stub with a real sibling.
+That forced-death fixture tests detection/admission, **not recovery of an orphaned
+native tree after killing a real subreaper**. Process-tree size/high-churn limits,
+unusual clone exit signals, durable crash recovery and vendor runtime remain open.
+
 Build the static RV64 component with
 `server-rust/scripts/build-native-owner.sh`. The script rejects dynamic loaders,
 shared-library dependencies and wrong ELF architecture. This is not app/full
 pipeline reproducibility or target execution evidence. The ordinary package
 builder intentionally does not include this unused component yet.
 
-Remaining work is a production lifecycle broker/retained owner: close admission
-to respawners, stop/join watchdog work, then stop/join native services and settle
+Remaining work is a production lifecycle broker/retained owner: integrate this
+in-process admission owner with durable intent and authenticated IPC; close
+admission to respawners, stop/join watchdog work, then stop/join native services and settle
 pending AP attempts. Do not naively nest an independent service owner below a
 watchdog subreaper: that creates ownership/teardown coupling, not independent
 service lifetimes. Broker commands, app restart and raw handoff must explicitly

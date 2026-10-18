@@ -3,6 +3,7 @@ mod scope;
 
 use std::{
     fs::{self, File},
+    io::{Read, Write},
     os::unix::{net::UnixStream, process::CommandExt},
     path::Path,
     process::{Command, ExitCode, Stdio},
@@ -70,6 +71,44 @@ fn child(mode: &str, root: &Path) -> ! {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("wire") {
+        let root = Path::new(&args[3]);
+        fs::write(root.join("owner.pid"), std::process::id().to_string()).unwrap();
+        let mut control = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
+        control
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        control.write_all(b"R").unwrap();
+        match args[2].as_str() {
+            "missing" => return ExitCode::SUCCESS,
+            "malformed" => control.write_all(b"X").unwrap(),
+            "duplicate" => control.write_all(b"R").unwrap(),
+            "killed" => {
+                let mut stop = [0];
+                let _ = control.read(&mut stop);
+                return ExitCode::from(72);
+            }
+            "receipt-before-exit" => {
+                control.write_all(b"D\x01").unwrap();
+                let mut stop = [0];
+                let _ = control.read(&mut stop);
+                return ExitCode::SUCCESS;
+            }
+            "wrong-exit" => {
+                control.write_all(b"D\x01").unwrap();
+                return ExitCode::from(71);
+            }
+            "truncated" => {
+                control.write_all(b"D").unwrap();
+                return ExitCode::SUCCESS;
+            }
+            _ => return ExitCode::from(64),
+        }
+        let mut stop = [0];
+        let _ = control.read(&mut stop);
+        control.write_all(b"D\0").unwrap();
+        return ExitCode::SUCCESS;
+    }
     if args.get(1).map(String::as_str) == Some("foreign") {
         let pid = args[2]
             .parse()
@@ -87,6 +126,7 @@ fn main() -> ExitCode {
     if args[1] == "child" {
         child(mode, root);
     }
+    fs::write(root.join("owner.pid"), std::process::id().to_string()).unwrap();
     let fd = rustix::io::dup(std::io::stdin()).unwrap();
     let control = UnixStream::from(fd);
     let mut command = Command::new(std::env::current_exe().unwrap());
