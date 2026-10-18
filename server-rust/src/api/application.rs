@@ -535,6 +535,12 @@ fn install_package(
 ) -> Result<()> {
     let update_root = prepare_app_candidate(source, &stage, &authority)?;
 
+    // Startup attempts a fixed independent bootstrap. Recheck its exact bytes
+    // and absence of any journal while this job owns app/system admission.
+    // This prerequisite does not make the remaining legacy swap crash-safe.
+    #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
+    crate::update::app_bootstrap::check_before_legacy_install()?;
+
     // From the first live-slot/backup mutation onward, retain the candidate on
     // every error (including failed backup restore). No cleanup is recovery.
     stage.preserve_recovery();

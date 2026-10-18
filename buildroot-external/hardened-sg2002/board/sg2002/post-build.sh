@@ -61,8 +61,8 @@ cmp "$TARGET_DIR/kvmapp/server/NanoKVM-Server" "$TARGET_DIR/kvmapp/backends/Nano
 	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" --quiet
 
 # Restore the bundled static recovery after generic ELF fixups, then bind its
-# final bytes to the final backend. Independent rootfs bootstrap activation is
-# separate; this is not yet installed outside /kvmapp or called during boot.
+# final bytes to the final backend. Install the independent rootfs copy too;
+# early boot activation remains separate from installation/provenance.
 "${HOST_DIR:-}/bin/python3" "$ROOT/scripts/app-recovery-binding.py" verify \
 	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
 	--helper "$KVMAPP_SOURCE/system/bin/nanokvm-app-recovery"
@@ -71,6 +71,11 @@ install -D -m 0755 "$KVMAPP_SOURCE/system/bin/nanokvm-app-recovery" \
 "${HOST_DIR:-}/bin/python3" "$ROOT/scripts/app-recovery-binding.py" verify \
 	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
 	--helper "$TARGET_DIR/kvmapp/system/bin/nanokvm-app-recovery"
+install -D -m 0755 "$KVMAPP_SOURCE/system/bin/nanokvm-app-recovery" \
+	"$TARGET_DIR/usr/libexec/nanokvm-app-recovery"
+"${HOST_DIR:-}/bin/python3" "$ROOT/scripts/app-recovery-binding.py" verify \
+	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
+	--helper "$TARGET_DIR/usr/libexec/nanokvm-app-recovery"
 
 if [ -n "$RUNTIME_SYSTEM_VERSION" ] || [ -n "$RUNTIME_KERNEL_VERSION" ] || [ -n "$RUNTIME_SECURITY_PATCH_LEVEL" ]; then
 	case "$RUNTIME_SYSTEM_VERSION$RUNTIME_KERNEL_VERSION$RUNTIME_SECURITY_PATCH_LEVEL" in

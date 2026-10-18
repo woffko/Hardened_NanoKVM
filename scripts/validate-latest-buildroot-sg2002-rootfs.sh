@@ -3,6 +3,7 @@ set -eu
 
 usage() {
 	echo "usage: $0 <rootfs.ext4>" >&2
+	echo "Current security candidates only; historical RC12 uses verify-rc12-raw-bundle.sh." >&2
 	exit 1
 }
 
@@ -275,6 +276,9 @@ readelf -rW "$KVM_SYSTEM" >/dev/null 2>&1 || \
 	die "kvm_system relocation table is invalid"
 readelf -A "$KVM_SYSTEM" 2>/dev/null | grep -Fq 'v0p7' || \
 	die "kvm_system is not the expected RISC-V v0p7 binary"
+
+python3 "$ROOT/scripts/verify-app-recovery-rootfs.py" "$IMAGE" || \
+	die "independent app recovery does not match its protected rootfs/backend binding"
 
 KVMAPP_S95="$TMP_DIR/kvmapp-S95nanokvm"
 ETC_S95="$TMP_DIR/etc-S95nanokvm"

@@ -3,9 +3,10 @@
 This describes a source/host-tested rollback component, not an activated
 installer or a completed WP-04/C1 fix. The actual app API still uses its legacy
 slot swap. The new helper is compile-bound into the linked RV64 backend and
-packaged under `/kvmapp/system/bin`, but is not yet installed independently in
-rootfs, invoked by boot scripts, or accepted on a device. The full remediation
-scope is unchanged.
+packaged under `/kvmapp/system/bin`. Build recipes now install an independent
+`/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
+installation for an app-only bridge. Early boot invocation and device acceptance
+are still absent. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
 
@@ -108,6 +109,54 @@ build/package consistency checks, not RSA release authentication or permission
 to execute code supplied by an attacker. A helper living only inside `/kvmapp`
 still cannot recover a missing app slot.
 
+### Independent publication and app-only bridge
+
+On linked RV64 startup, after closing legacy USB storage and loading config,
+the backend attempts fixed-rootfs bootstrap under the shared app/system
+admission lock. All of `/`, `/usr` and `/usr/libexec` must be root-owned,
+non-group/other-writable and on the same rootfs, with symlink/mount crossings
+rejected. A missing `libexec` directory may be created under the protected `/usr`;
+no existing directory or helper is chmod-repaired. Publication uses only the
+compile-bound bytes, not the bundled helper as a runtime fallback.
+
+An existing helper must be a single-link regular root-owned file of mode 0755,
+exact size and exact bytes. It is opened for inspection without data access,
+then reopened read-only/nonblocking, with inode/layout checks before/after the
+read. A different or unsafe helper is retained and refused, not overwritten.
+The first fixing app supports the historical states where this path is absent;
+replacement of a different independently installed helper needs a separately
+reviewed protocol migration. Do not delete journals or replace files manually
+to turn a mismatch into a successful check.
+
+A missing helper is written to a fresh exclusive random sibling, chmodded only
+through that new FD, file-synced, renamed with NOREPLACE and directory-synced.
+The result is rechecked. A competing canonical winner must be exact; an unknown
+winner and all torn temporaries are preserved. Temporary names are never read
+as fallback or selected as authority. A pending, terminal or corrupt app-slot
+journal never permits a new helper to be installed over missing support.
+
+Bootstrap failure leaves authenticated management available for diagnosis.
+The target app install API independently rechecks the exact helper and requires
+no app-slot transaction before its first legacy slot/backup mutation, while
+already owning shared update admission. This is an installation prerequisite,
+not a durable receipt or a claim that the remaining legacy swap is crash-safe.
+
+Buildroot installs both copies up front and restores/verifies both after ELF
+fixups. The legacy SD assembler also writes a mode-0755 root-owned independent
+copy. `scripts/verify-app-recovery-rootfs.py` reads an ext image without mounting,
+checks protected independent parents/owner/mode/link count and verifies both
+helper copies against the final backend's exact embedded image. Its real ext4
+fixtures include missing/mismatched payloads, missing binding, symlink/hardlink,
+permissions, ownership and oversized data. These are not full pipeline/boot gates.
+
+Current generic/Buildroot rootfs validators require this new protocol by default;
+they must reject historical images missing independent recovery, not silently
+skip it based on a version label. Historical RC12 validation remains separate:
+`scripts/verify-rc12-raw-bundle.sh` pins the accepted rootfs/boot hashes and does
+not call the new rootfs gate. Use its signed mode and the matching retained
+metadata/signature/public key for signed RC12 evidence. This is not a way to
+authorize a new candidate without independent support.
+
 `server-rust/scripts/test-embedded-app-recovery.sh` checks host capture of the
 actual static RV64 input, without executing that foreign-architecture image.
 The binding CLI tests cover distinct domains, corruption, ambiguity, ELF
@@ -129,9 +178,12 @@ not physical power-loss, ext4 write-cache or target acceptance.
 
 - Trusted journal producer with same-filesystem durable preparation/publication,
   exact signed/manual authority and retained metadata/key/policy context.
-- Atomic bootstrap installation of the compile-bound helper outside `/kvmapp`,
-  both for rootfs builds and the historical app-only bridge; the current bundled
-  copy is not independent recovery support.
+- Full pipeline/target acceptance of independent rootfs installation and the
+  atomic app-only bootstrap, including actual I/O failure and mount negatives.
+- Reviewed helper-version migration across subsequent app updates; the current
+  exact-existing/no-replacement rule is a fail-closed prerequisite, not a final
+  upgrade lifecycle. This remains required for WP-04 acceptance, not an implicit
+  waiver of app-only updates.
 - Recovery before the first boot app consumer, with fail-closed consumer gates;
   a failed init-script exit alone must not be assumed to stop rcS.
 - Native/S95/watchdog/raw lifecycle coordination, first restart and runtime
@@ -139,5 +191,7 @@ not physical power-loss, ext4 write-cache or target acceptance.
 - Actual installation crash tests, ENOSPC/I/O failure, target mount negatives,
   legacy migration and complete device/release acceptance.
 
-No current API behavior, account, SSH setting, signature algorithm/key ID,
+The app API now refuses a missing/mismatched independent helper or any app-slot
+journal before legacy slot mutation. It still does not publish a journal or
+invoke recovery at boot. No account, SSH setting, signature algorithm/key ID,
 version, release channel or accepted image is changed by this component.

@@ -29,6 +29,8 @@ define HARDENED_NANOKVM_KVMAPP_INSTALL_TARGET_CMDS
 	$(INSTALL) -d $(TARGET_DIR)/kvmapp $(TARGET_DIR)/etc/kvm \
 		$(TARGET_DIR)/etc/init.d $(TARGET_DIR)/mnt/data
 	cp -a $(@D)/. $(TARGET_DIR)/kvmapp/
+	$(INSTALL) -D -m 0755 $(@D)/system/bin/nanokvm-app-recovery \
+		$(TARGET_DIR)/usr/libexec/nanokvm-app-recovery
 	rm -f $(TARGET_DIR)/kvmapp/.files-list*
 	printf 'rust\n' > $(TARGET_DIR)/etc/kvm/backend
 	chmod 0644 $(TARGET_DIR)/etc/kvm/backend

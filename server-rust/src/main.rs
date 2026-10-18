@@ -64,6 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     media::secure_device_mounts().await?;
     let config = Config::load()?;
     config.log_runtime_warnings();
+    #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
+    if let Err(error) = nanokvm_rust_server::update::app_bootstrap::ensure_installed() {
+        // Keep authenticated management available for diagnosis. App installs
+        // independently recheck this prerequisite under their existing lease.
+        warn!(%error, "independent app recovery unavailable; app installs will refuse");
+    }
     let migration = media::prepare_and_migrate(Path::new("/data"), Path::new(media::MEDIA_ROOT))?;
     if migration.moved > 0 || migration.collisions > 0 {
         info!(

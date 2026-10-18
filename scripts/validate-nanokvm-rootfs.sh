@@ -3,6 +3,8 @@ set -eu
 
 usage() {
   echo "usage: $0 <rootfs.ext4>" >&2
+  echo "Current security-candidate protocol only (independent app recovery required)." >&2
+  echo "Historical RC12 raw assets: scripts/verify-rc12-raw-bundle.sh (fixed hashes)." >&2
   echo "" >&2
   echo "environment:" >&2
   echo "  EXPECTED_BACKEND=rust|any      default: rust" >&2
@@ -109,6 +111,8 @@ require_dir /mnt/data
 require_regular /kvmapp/version
 require_regular /kvmapp/server/NanoKVM-Server
 require_regular /kvmapp/backends/NanoKVM-Server.rust
+python3 "$(dirname "$0")/verify-app-recovery-rootfs.py" "$IMAGE" || \
+  die "independent app recovery is missing/unsafe/mismatched; this validator is for current candidates, not historical RC12"
 require_regular /kvmapp/hwmon/nanokvm-hwmon
 require_regular /kvmapp/kvm_system/kvm_system
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem

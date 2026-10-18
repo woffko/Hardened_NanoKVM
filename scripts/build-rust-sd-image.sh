@@ -51,6 +51,10 @@ require_dir() {
 require_file "$BASE_IMAGE"
 require_dir "$KVMAPP_DIR"
 require_file "$KVMAPP_DIR/server/NanoKVM-Server"
+require_file "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+python3 "$ROOT/scripts/app-recovery-binding.py" verify \
+  --backend "$KVMAPP_DIR/server/NanoKVM-Server" \
+  --helper "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
 
 mkdir -p "$OUT_DIR"
 
@@ -172,6 +176,18 @@ fi
       printf 'sif /mnt/data/sensor_cfg.ini gid 0\n'
     fi
   fi
+
+  # Recovery bytes must survive an absent /kvmapp; this installs support only,
+  # not an early-boot hook or authorization to use a legacy p3 restore journal.
+  printf 'mkdir /usr/libexec\n'
+  printf 'sif /usr/libexec mode 040755\n'
+  printf 'sif /usr/libexec uid 0\n'
+  printf 'sif /usr/libexec gid 0\n'
+  printf 'rm /usr/libexec/nanokvm-app-recovery\n'
+  printf 'write %s /usr/libexec/nanokvm-app-recovery\n' "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+  printf 'sif /usr/libexec/nanokvm-app-recovery mode 0100755\n'
+  printf 'sif /usr/libexec/nanokvm-app-recovery uid 0\n'
+  printf 'sif /usr/libexec/nanokvm-app-recovery gid 0\n'
 
   for script in "${BOOT_INIT_SCRIPTS[@]}"; do
     script_path="$KVMAPP_DIR/system/init.d/$script"

@@ -167,6 +167,7 @@ class BindingTests(unittest.TestCase):
                     self.assertEqual((target / "kvmapp/server/NanoKVM-Server").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/backends/NanoKVM-Server.rust").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/system/bin/nanokvm-app-recovery").read_bytes(), image())
+                    self.assertEqual((target / "usr/libexec/nanokvm-app-recovery").read_bytes(), image())
 
 
 if __name__ == "__main__":
