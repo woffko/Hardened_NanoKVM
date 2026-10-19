@@ -86,6 +86,15 @@ acceptance are still to be designed/wired and tested before the new installer
 can be considered complete. `no-transaction` is diagnostics, not boot-good or
 permission to execute an arbitrary app directory.
 
+Absence means no canonical `current` transaction, even when protected unpublished
+preparation siblings remain. Such siblings are retained but never scanned,
+decoded, selected or promoted by recovery/bootstrap. Installing the trusted
+backend's compile-bound independent helper in that state is the same operation
+as the ordinary historical-absence case; it does not use orphan bytes as authority
+and does not publish/execute an app. Unknown installed helpers still refuse.
+The future trusted producer must explicitly handle its retained preparation
+material; no deletion or automatic orphan activation is implied here.
+
 ## Early consumer integration (development branch)
 
 `/etc/init.d/S02apprecover` invokes the independent helper after S01 mounts and
@@ -257,7 +266,7 @@ A missing helper is written to a fresh exclusive random sibling, chmodded only
 through that new FD, file-synced, renamed with NOREPLACE and directory-synced.
 The result is rechecked. A competing canonical winner must be exact; an unknown
 winner and all torn temporaries are preserved. Temporary names are never read
-as fallback or selected as authority. A pending, terminal or corrupt app-slot
+as fallback or selected as authority. A pending, terminal or corrupt canonical app-slot
 journal never permits a new helper to be installed over missing support.
 
 ### Directed v1 helper migration
@@ -302,14 +311,31 @@ privileged writer racing after the final check.
 
 Host tests cover the state decision, pinned actual old RV64 bytes (never executed),
 unknown/unsafe refusal, competing admission, SIGKILL at staging/exchange boundaries,
-pre-exchange canonical replacement and a post-exchange sync-error path. Journal
-states in migration unit tests are supplied enums; actual fixed-root decoded
-terminal-journal/startup composition and physical power-cut acceptance remain
-open. The retained-input test is explicitly ignored by default and was run in
+pre-exchange canonical replacement and a post-exchange sync-error path. Migration
+unit tests supply status enums; the separate bound-root gate now calls the actual
+fixed-root `ensure_installed()` in disposable user-namespace/chroot children.
+It independently encodes v1 records using real directory device/inodes and checks
+terminal/nonterminal/corrupt/foreign/orphan cases, exact-current verification,
+both update-admission and store-lock contention, and SIGKILL before/after exchange
+with repeated inspection. Actual old/new RV64 files are data, never executed.
+This covers the bootstrap entry, not the full main/S95/native lifecycle, target
+startup or physical power-cut acceptance. The retained-input unit test is
+explicitly ignored by default and was run in
 the full `--include-ignored` gate; ordinary default tests do not cover that input.
 The new test image is synthetic, not a deployable successor helper. This
 is forward publication, not automatic executable rollback, the trusted app-slot
 producer, retained native ownership or full C1 closure.
+
+Run `server-rust/scripts/test-app-bootstrap-root.sh` for the bound-root gate. It
+requires matching retained backend/helper build inputs and the exact predecessor
+evidence; it verifies their binding before compiling the explicit
+`app-bootstrap-bound-test-fixture` feature. Missing/unbound inputs fail, rather
+than silently skipping composition checks. The feature only selects a `cfg(test)`
+module and adds no shipped CLI, root override or runtime fallback. The harness
+bounds child execution and captured output, drains pipes and kills/reaps its own
+direct child on timeout or assertion unwind. This is not a generic process-tree
+supervisor or a bounded-kernel-I/O guarantee. Ordinary default tests do not
+select this retained-input gate.
 
 If the backend has already launched, a helper-bootstrap failure alone is logged
 without terminating it, preserving authenticated management for diagnosis.
@@ -359,8 +385,9 @@ not physical power-loss, ext4 write-cache or target acceptance.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
 - Complete helper-version lifecycle across subsequent app updates. The pinned
-  v1 forward-publication path is host-tested, but actual decoded-terminal-journal
-  startup, released successor/predecessor pairs and old-backend rollback still
+  v1 forward-publication path and fixed-root decoded-journal bootstrap are
+  host-tested, but target startup, released successor/predecessor pairs and
+  old-backend rollback still
   need acceptance. This remains required for WP-04, not an implicit waiver of
   app-only updates or permission to replace unknown support.
 - Full target/first-bridge acceptance of the archive-delivery profile and the

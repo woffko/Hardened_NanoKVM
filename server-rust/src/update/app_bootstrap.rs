@@ -446,3 +446,7 @@ fn checkpoint(position: &str) {
 #[cfg(test)]
 #[path = "app_bootstrap_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "app-bootstrap-bound-test-fixture"))]
+#[path = "app_bootstrap_root_tests.rs"]
+mod root_tests;
