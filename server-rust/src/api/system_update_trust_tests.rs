@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 use std::process::Command;
 use tempfile::{TempDir, tempdir};
 

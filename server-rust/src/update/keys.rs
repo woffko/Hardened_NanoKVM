@@ -3,12 +3,18 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::Path,
     process,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::{AppError, Result, update::state_writers::StateWriters};
+#[cfg(test)]
+use std::path::PathBuf;
+
+#[path = "trust_snapshot.rs"]
+mod snapshot;
+pub(crate) use snapshot::verify_metadata_signature;
 
 pub const LEGACY_UPDATE_KEY_ID: &str = "hardened-system-dev";
 pub const LEGACY_TEST_UPDATE_KEY_ID: &str = "hardened-system-test";
@@ -143,7 +149,10 @@ pub fn install_bundled_update_trust(
     Ok(changed)
 }
 
-pub fn resolve_update_public_key(configured_key: &Path, key_id: &str) -> Result<PathBuf> {
+// Historical pathname resolver is retained only for compatibility regression
+// fixtures. Production metadata verification must use descriptor-bound capture.
+#[cfg(test)]
+fn resolve_update_public_key(configured_key: &Path, key_id: &str) -> Result<PathBuf> {
     validate_update_key_id(key_id)?;
 
     let parent = configured_key.parent().ok_or_else(|| {
@@ -165,6 +174,7 @@ pub fn resolve_update_public_key(configured_key: &Path, key_id: &str) -> Result<
     require_public_key(candidate, key_id)
 }
 
+#[cfg(test)]
 fn require_public_key(path: PathBuf, key_id: &str) -> Result<PathBuf> {
     let metadata = fs::symlink_metadata(&path).map_err(|_| {
         AppError::Config(format!(
@@ -198,6 +208,7 @@ fn validate_update_key_id(key_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn enforce_update_key_policy(parent: &Path, key_id: &str) -> Result<()> {
     let path = parent.join(UPDATE_KEY_POLICY_FILE);
     let metadata = match fs::symlink_metadata(&path) {

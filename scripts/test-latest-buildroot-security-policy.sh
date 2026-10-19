@@ -111,6 +111,15 @@ reject_text 'SYSTEM_UPDATE_BUNDLED_' "$ROOT/kvmapp/system/init.d/S95nanokvm"
 reject_text 'system-update-signing.pub.pem' "$ROOT/kvmapp/system/init.d/S95nanokvm"
 reject_text 'update-key-policy' "$ROOT/kvmapp/system/init.d/S95nanokvm"
 reject_text 'update-keys' "$ROOT/kvmapp/system/init.d/S95nanokvm"
+for verifier in application system_update; do
+	source="$ROOT/server-rust/src/api/$verifier.rs"
+	grep -Fq 'keys::verify_metadata_signature,' "$source"
+	reject_text 'resolve_update_public_key' "$source"
+	reject_text 'temp_verify_path' "$source"
+	reject_text 'write_verify_temp_file' "$source"
+done
+grep -Fq 'run_allowed_owned(AllowedCommand::OpenSsl, arguments, timeout, self)' \
+	"$ROOT/server-rust/src/update/trust_snapshot.rs"
 
 if [ -d "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib" ]; then
 	test ! -e "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib/libz.so"

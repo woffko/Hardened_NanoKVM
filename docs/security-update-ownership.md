@@ -152,9 +152,33 @@ This freezes only cooperating enrolled writers. It does not stop native/S95
 services, privileged sessions, scripts, or other unenrolled startup writers.
 The barrier currently ends when the blocking install returns, before the
 delayed legacy restart: retained native lifecycle, journaled swap and first-start
-recovery are still mandatory, not provided by this prerequisite. The existing
-key resolver and OpenSSL path-based verifier are retained; protected key/input
-snapshots and independent recovery provenance remain separate work.
+recovery are still mandatory, not provided by this prerequisite.
+
+App and system metadata now share a descriptor-bound signature verifier. It
+captures the selected public key and optional allowlist from protected rootfs
+directories, enforcing key ID syntax, regular files, effective-owner identity,
+single links, bounded lengths, and non-group/other-writable modes. Every parent
+is opened descriptor-relative with no symlink/magic-link/mount crossing. An
+intermediate root-owned sticky shared directory is allowed only with ownership
+checks on every protected child; the trust root/keyring themselves may never be
+shared/sticky. Nonsticky writable ancestors, relative/parent traversal, alias
+files and unsafe configured locations fail closed instead of falling back.
+
+Policy/key source identity, mode, link count, length, mtime and ctime are checked
+again around bounded reads. The key, exact metadata and signature are each
+copied into anonymous rootfs files, synced and reopened independently O_RDONLY
+through verified procfs; all writable aliases close before verification. Fixed
+OpenSSL arguments point only to `/proc/PARENT/fd/N`, not to mutable configured
+source names or named `/tmp` inputs. The command supervisor owns all three
+descriptors through pipe cleanup and direct-child reap, including cancellation.
+No new unsafe code/dependency, key ID/algorithm or unsigned/manual-import policy
+is introduced. Historical absence of an allowlist keeps its existing semantics;
+a present malformed/empty/disallowing policy still refuses verification.
+
+This is an in-process signature-input snapshot, not a durable app-slot receipt
+or raw-writer ticket. Final install still needs current policy under the writer
+freeze. Hostile local root, target mount/procfs/O_TMPFILE acceptance, retained
+issuer provenance and independent recovery remain separate obligations.
 There is still no durable signed app-slot receipt. The explicit lab-only
 unsigned setting, production key IDs/algorithms and manual bridge path are unchanged.
 The version-only query still uses its startup Config snapshot; it is status,

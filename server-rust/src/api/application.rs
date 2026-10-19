@@ -7,12 +7,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
-    fs,
-    io::{self, Write},
+    fs, io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time;
 
@@ -26,7 +25,7 @@ use crate::{
     update::{
         app_stage::{AppArchive, AppDownload, AppStage, MAX_ARCHIVE_BYTES as MAX_UPDATE_BYTES},
         archive::extract_app_tar_gz,
-        keys::resolve_update_public_key,
+        keys::verify_metadata_signature,
         operation::{Kind, Snapshot, UpdateOwner},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE},
         state_writers::WriterDrain,
@@ -742,12 +741,14 @@ async fn verify_app_metadata_with_policy(
             "invalid application update metadata signature size".into(),
         ));
     }
-    let public_key = resolve_update_public_key(
+    verify_metadata_signature(
+        metadata,
+        signature,
         &config.paths.system_update_public_key,
         &latest.signature_key_id,
-    )?;
-
-    verify_app_metadata_signature(metadata, signature, &public_key).await
+        METADATA_TIMEOUT,
+    )
+    .await
 }
 
 fn app_metadata_is_unsigned(latest: &LatestRelease) -> bool {
@@ -825,50 +826,6 @@ async fn fetch_app_metadata_signature(url: &str) -> Result<Vec<u8>> {
         ));
     }
     Ok(output.stdout)
-}
-
-async fn verify_app_metadata_signature(
-    metadata: &[u8],
-    signature: &[u8],
-    public_key: &Path,
-) -> Result<()> {
-    let metadata_path = temp_verify_path("metadata")?;
-    let signature_path = temp_verify_path("signature")?;
-
-    let result = async {
-        write_verify_temp_file(&metadata_path, metadata)?;
-        write_verify_temp_file(&signature_path, signature)?;
-
-        let output = run_allowed(
-            AllowedCommand::OpenSsl,
-            [
-                "dgst",
-                "-sha256",
-                "-verify",
-                path_arg(public_key)?,
-                "-signature",
-                path_arg(&signature_path)?,
-                path_arg(&metadata_path)?,
-            ],
-            METADATA_TIMEOUT,
-        )
-        .await?;
-
-        if output.status == 0 {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(error = %stderr, "application update metadata signature verification failed");
-            Err(AppError::BadRequest(
-                "application update metadata signature verification failed".to_string(),
-            ))
-        }
-    }
-    .await;
-
-    let _ = remove_file_if_exists(&metadata_path);
-    let _ = remove_file_if_exists(&signature_path);
-    result
 }
 
 fn validate_update_filename(filename: &str) -> Result<()> {
@@ -969,48 +926,8 @@ fn ensure_success(output: &CommandOutput, action: &str) -> Result<()> {
     )))
 }
 
-fn path_arg(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))
-}
-
-fn temp_verify_path(kind: &str) -> Result<PathBuf> {
-    match kind {
-        "metadata" | "signature" => {}
-        _ => {
-            return Err(AppError::BadRequest(
-                "invalid temporary file kind".to_string(),
-            ));
-        }
-    }
-    Ok(PathBuf::from(format!(
-        "/tmp/hardened-app-update-{}-{}-{kind}.tmp",
-        std::process::id(),
-        now_unix_nanos()
-    )))
-}
-
-fn write_verify_temp_file(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 fn remove_dir_if_exists(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
@@ -1113,17 +1030,10 @@ pub(crate) fn current_app_version() -> String {
     read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| DEFAULT_APP_VERSION.to_string())
 }
 
-fn now_unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
         use axum::{body::Body, extract::FromRequest, http::Request};

@@ -8,7 +8,7 @@ use crate::{
     system::command::{AllowedCommand, CommandOutput, run_allowed},
     update::{
         archive::extract_tar_gz_reader,
-        keys::resolve_update_public_key,
+        keys::verify_metadata_signature,
         operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
         staged_archive::{StageDirectory, StagedDownload},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
@@ -23,7 +23,7 @@ use std::{
     cmp::Ordering,
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Read, Seek, Write},
+    io::{self, Read, Seek},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
@@ -983,12 +983,14 @@ async fn verify_system_metadata_with_policy(
             "invalid system update metadata signature size".to_string(),
         ));
     }
-    let public_key = resolve_update_public_key(
+    verify_metadata_signature(
+        metadata,
+        signature,
         &config.paths.system_update_public_key,
         &latest.signature_key_id,
-    )?;
-
-    verify_system_metadata_signature(metadata, signature, &public_key).await
+        METADATA_TIMEOUT,
+    )
+    .await
 }
 
 async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
@@ -1005,50 +1007,6 @@ async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
         ));
     }
     Ok(output.stdout)
-}
-
-async fn verify_system_metadata_signature(
-    metadata: &[u8],
-    signature: &[u8],
-    public_key: &Path,
-) -> Result<()> {
-    let metadata_path = temp_verify_path("metadata")?;
-    let signature_path = temp_verify_path("signature")?;
-
-    let result = async {
-        write_verify_temp_file(&metadata_path, metadata)?;
-        write_verify_temp_file(&signature_path, signature)?;
-
-        let output = run_allowed(
-            AllowedCommand::OpenSsl,
-            [
-                "dgst",
-                "-sha256",
-                "-verify",
-                path_arg(public_key)?,
-                "-signature",
-                path_arg(&signature_path)?,
-                path_arg(&metadata_path)?,
-            ],
-            METADATA_TIMEOUT,
-        )
-        .await?;
-
-        if output.status == 0 {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(error = %stderr, "system update metadata signature verification failed");
-            Err(AppError::BadRequest(
-                "system update metadata signature verification failed".to_string(),
-            ))
-        }
-    }
-    .await;
-
-    let _ = remove_file_if_exists(&metadata_path);
-    let _ = remove_file_if_exists(&signature_path);
-    result
 }
 
 fn metadata_signature_url(metadata_url: &str) -> Result<String> {
@@ -2841,29 +2799,10 @@ fn hash_reader(file: &mut impl Read) -> Result<FileHashes> {
     })
 }
 
+#[cfg(test)]
 fn path_arg(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))
-}
-
-fn temp_verify_path(kind: &str) -> Result<PathBuf> {
-    validate_token("temporary file kind", kind)?;
-    Ok(PathBuf::from(format!(
-        "/tmp/hardened-system-update-{}-{}-{kind}.tmp",
-        std::process::id(),
-        now_unix_nanos()
-    )))
-}
-
-fn write_verify_temp_file(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 fn remove_dir_if_exists(path: &Path) -> Result<()> {
@@ -2878,13 +2817,6 @@ fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-fn now_unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
         .unwrap_or_default()
 }
 
