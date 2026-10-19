@@ -119,10 +119,26 @@ fn pair() -> Result<(Sender, Receiver), Error> {
 }
 
 impl Sender {
+    /// Connect to the independent fixed broker. A successful send still means
+    /// queued only; inspect canonical transaction state, never resubmit blindly.
+    pub fn connect_broker() -> Result<Self, Error> {
+        let socket = crate::native_owner::broker::app_install::connect_peer()?;
+        let peer = socket_peercred(&socket).map_err(io::Error::from)?;
+        prepare(&socket, peer.pid.as_raw_nonzero().get() as u32, 0)?;
+        Ok(Self { socket })
+    }
+
     /// Consumes once, including on error. Queued does NOT mean accepted,
     /// installed or healthy. Do not retry an ambiguous send as a new install.
     pub fn send(self, handoff: Handoff) -> Result<(), Error> {
         send(&self.socket, &handoff.transaction, &handoff.files)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(socket: OwnedFd, uid: u32) -> Result<Self, Error> {
+        let peer = socket_peercred(&socket).map_err(io::Error::from)?;
+        prepare(&socket, peer.pid.as_raw_nonzero().get() as u32, uid)?;
+        Ok(Self { socket })
     }
 }
 
@@ -209,6 +225,78 @@ fn receive(
     if expected == [0; 16] {
         return Err(Error::Record);
     }
+    receive_packet(socket, Some(expected), parent, uid)
+}
+
+/// One bounded nonblocking incoming offer. The parent is pinned before any
+/// packet/rights are accepted; root credentials are not candidate authority.
+pub(crate) struct Incoming {
+    socket: OwnedFd,
+    parent: File,
+    uid: u32,
+    consumed: bool,
+}
+impl Incoming {
+    pub(crate) fn open(socket: OwnedFd) -> Result<Self, Error> {
+        if !nix::unistd::geteuid().is_root() {
+            return Err(Error::Channel);
+        }
+        for path in ["/", "/etc"] {
+            protected(&restore_fs::open_root(Path::new(path), true)?, 0, false)?;
+        }
+        Self::at_parent(
+            socket,
+            restore_fs::open_root(Path::new("/etc/kvm"), true)?,
+            0,
+        )
+    }
+
+    fn at_parent(socket: OwnedFd, parent: File, uid: u32) -> Result<Self, Error> {
+        protected(&parent, uid, false)?;
+        let peer = socket_peercred(&socket).map_err(io::Error::from)?;
+        prepare(&socket, peer.pid.as_raw_nonzero().get() as u32, uid)?;
+        let flags = fcntl_getfl(&socket).map_err(io::Error::from)?;
+        rustix::fs::fcntl_setfl(&socket, flags | OFlags::NONBLOCK).map_err(io::Error::from)?;
+        Ok(Self {
+            socket,
+            parent,
+            uid,
+            consumed: false,
+        })
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<Option<Accepted>, Error> {
+        if self.consumed {
+            return Err(Error::Record);
+        }
+        match receive_packet(&self.socket, None, &self.parent, self.uid) {
+            Err(Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(None)
+            }
+            result => {
+                self.consumed = true;
+                result.map(Some)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(socket: OwnedFd, parent: File, uid: u32) -> Result<Self, Error> {
+        Self::at_parent(socket, parent, uid)
+    }
+}
+
+fn receive_packet(
+    socket: &OwnedFd,
+    expected: Option<[u8; 16]>,
+    parent: &File,
+    uid: u32,
+) -> Result<Accepted, Error> {
     protected(parent, uid, false)?;
     let mut bytes = [0; BYTES];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(3))];
@@ -225,7 +313,8 @@ fn receive(
             .flags
             .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
         || &bytes[..8] != MAGIC
-        || bytes[8..24] != expected
+        || bytes[8..24] == [0; 16]
+        || expected.is_some_and(|id| bytes[8..24] != id)
     {
         return Err(Error::Record);
     }
@@ -289,7 +378,7 @@ fn receive(
     }
     Ok(Accepted {
         _files: files,
-        transaction: expected,
+        transaction: bytes[8..24].try_into().map_err(|_| Error::Record)?,
     })
 }
 

@@ -93,19 +93,21 @@ drop extra queued rights. The library does not mutate process-global stdio.
 
 This proves admission lifetime, not issuer provenance or durable installation
 state. Root peer identity is not executable attestation. The ID is not a secret,
-signature, health acknowledgement or a fresh installation receipt. New-process
-status/restart acceptance, independent installer activation, authenticated
-candidate receipt, journaled publication/health/retirement/rollback and helper
-version migration still need integration before this can replace the current
-app path. Never release UpdateEX and then reacquire it around backend restart.
+signature, health acknowledgement or a fresh installation receipt. The composed
+daemon now additionally requires the archive-derived canonical prepared receipt
+and owns native-closed publication/rollback. New-process status, frozen trial
+health/commit/retirement and helper-version migration still need integration
+before this can replace the current app path. Never release UpdateEX and then
+reacquire it around backend restart.
 
-The eventual installer worker must be launched by the independent broker as a
-sibling of the serving backend scope, not as a descendant of that backend.
+Installation must remain owned outside the serving backend scope, not as a
+descendant of that backend. The independent broker now owns the app session
+itself, preserving its actual controller and journal capabilities together.
 Daemonizing a backend child cannot escape its subreaper. An update lease does
 not exempt a process from a scope Stop: backend shutdown would still kill a
-worker nested inside that tree. The present handoff module launches no worker;
-broker-owned delivery, stop authority, app journal/health and durable job status
-remain the next integration work rather than a backend-spawned fallback.
+worker nested inside that tree. The handoff module launches no worker and adds
+no backend-spawned fallback. The daemon delivers accepted admission to the
+retained app/native session; durable API job status and health remain open.
 
 Host fixtures use explicit cfg(test)-only constructors and synthetic private
 parents owned by the test UID. These constructors and environment-controlled
@@ -595,12 +597,16 @@ with the retained app handoff and atomically publishes a complete protected
 `prepared` receipt without touching `/kvmapp`. A receiver must bind its three
 accepted leases to that exact transaction and old-live/new-staged layout.
 The [preparation protocol](security-app-slot-recovery.md#durable-preparation-and-lease-acceptance-not-activated)
-and its real exec/fixed-root host test do not activate a broker-owned installer.
+is now connected to independent daemon delivery through a separate fixed
+root-only SEQPACKET endpoint. The daemon itself retains the native controller and
+accepted app store; no installer is spawned under the backend process tree.
 The new [native-closed publication component](security-app-slot-recovery.md#native-closed-publication-and-retained-rollback-not-activated)
 consumes the accepted install with the broker, durably fences native startup
 before stopping all three scopes, and retains all exclusions through journaled
-publication or old-slot rollback. It does not yet implement daemon transport,
-frozen trial startup, first-start health, commit or terminal retirement. The API
+publication or old-slot rollback. Queued frontend death, canonical acceptance,
+publication and explicit rollback are tested in independent host processes. It
+does not yet implement durable API job status, frozen trial startup, first-start
+health, commit or terminal retirement. The API
 still uses the legacy swap/restart and is not accepted for deployment.
 
 The [native owner component](security-native-owner.md) supplies separate-process

@@ -1,6 +1,9 @@
 //! Root-only, fixed-frame native lifecycle transport. No raw-write authority.
-use super::{Broker, Resume, RetainedDrain, RuntimePermit, Shutdown, StartFailure, journal};
+use super::{
+    Broker, Resume, RetainedDrain, RuntimePermit, Shutdown, StartFailure, app_install, journal,
+};
 use crate::native_owner::controller::{Completion, DrainStatus, Role, StartError, Status};
+use crate::update::{app_install_lease, app_slot};
 use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
@@ -12,6 +15,7 @@ const CLIENTS: usize = 16;
 const STEP: Duration = Duration::from_millis(20);
 const IDLE: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(2);
+const INSTALL_OFFERS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -25,6 +29,7 @@ pub enum Operation {
     BackendRunning = 8,
     RestartBackend = 9,
     RestartBackendSafe = 10,
+    CancelAppInstall = 11,
 }
 impl Operation {
     fn decode(byte: u8) -> Option<Self> {
@@ -39,6 +44,7 @@ impl Operation {
             8 => Some(Self::BackendRunning),
             9 => Some(Self::RestartBackend),
             10 => Some(Self::RestartBackendSafe),
+            11 => Some(Self::CancelAppInstall),
             _ => None,
         }
     }
@@ -52,6 +58,7 @@ pub enum Mode {
     Uncertain = 5,
     Stopping = 6,
     Stopped = 7,
+    Installing = 8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Code {
@@ -118,6 +125,7 @@ impl Reply {
             5 => Mode::Uncertain,
             6 => Mode::Stopping,
             7 => Mode::Stopped,
+            8 => Mode::Installing,
             _ => return Err(invalid()),
         };
         Ok(Self {
@@ -243,8 +251,27 @@ enum Owner {
     Paused(RetainedDrain),
     Stopping(RetainedDrain),
 }
+
+enum InstallOwner {
+    Draining(app_install::Session),
+    Refused {
+        broker: Broker,
+        _install: app_slot::AcceptedInstall,
+    },
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallStage {
+    Draining,
+    Published,
+    Failed,
+}
+struct Install {
+    owner: InstallOwner,
+    stage: InstallStage,
+}
 struct Engine {
     owner: Option<Owner>,
+    install: Option<Install>,
     wanted: [bool; 2],
     retry: [Instant; 2],
     lease: Option<u64>,
@@ -269,6 +296,7 @@ impl Engine {
     fn new(broker: Broker) -> Self {
         Self {
             owner: Some(Owner::Running(broker)),
+            install: None,
             wanted: [false; 2],
             retry: [Instant::now(); 2],
             lease: None,
@@ -294,6 +322,46 @@ impl Engine {
         role.command()
     }
     fn tick(&mut self) {
+        if let Some(install) = self.install.as_mut() {
+            match &mut install.owner {
+                InstallOwner::Draining(session) => {
+                    match session.poll() {
+                        Ok(DrainStatus::Drained) => {
+                            self.roles = [4; 2];
+                            self.backend_status = Some(Status::Closed(Completion::Stopped));
+                            if install.stage == InstallStage::Draining {
+                                // Exactly one attempt. An ambiguous I/O result is
+                                // retained, never retried as a fresh transaction.
+                                install.stage = match session.publish() {
+                                    Ok(app_slot::Status::Transaction(
+                                        app_slot::Phase::Published,
+                                    )) => InstallStage::Published,
+                                    _ => InstallStage::Failed,
+                                };
+                            }
+                        }
+                        Ok(DrainStatus::Pending) => self.roles = [3; 2],
+                        _ => {
+                            self.roles = [6; 2];
+                            install.stage = InstallStage::Failed;
+                        }
+                    }
+                }
+                InstallOwner::Refused { broker, .. } => {
+                    // Journal failure does not discard live scope owners or
+                    // admission. Poll only; never launch or fabricate Stop.
+                    self.roles = broker.poll().map(role_status);
+                    self.backend_status = broker.backend_status();
+                    install.stage = InstallStage::Failed;
+                }
+            }
+            self.mode = if install.stage == InstallStage::Failed {
+                Mode::Uncertain
+            } else {
+                Mode::Installing
+            };
+            return;
+        }
         let Some(owner) = self.owner.take() else {
             self.mode = Mode::Uncertain;
             return;
@@ -431,11 +499,89 @@ impl Engine {
             roles: self.roles,
         }
     }
+
+    fn accept_install(&mut self, admission: app_install_lease::Accepted) -> Code {
+        // Retained lifecycle/maintenance work cannot be replaced by an offer.
+        if self.mode != Mode::Running
+            || self.install.is_some()
+            || self.lease.is_some()
+            || self.abandoned
+            || self.backend_restart.is_some()
+            || !matches!(self.owner, Some(Owner::Running(_)))
+        {
+            return Code::Busy;
+        }
+        #[cfg(test)]
+        let accepted = match &self.fixture {
+            Some(root) => app_slot::issuer_tests::accept_fixture(root, admission),
+            None => app_slot::accept_prepared(admission),
+        };
+        #[cfg(not(test))]
+        let accepted = app_slot::accept_prepared(admission);
+        let install = match accepted {
+            Ok(install) => install,
+            Err(app_slot::SlotError::Busy) => return Code::Busy,
+            Err(_) => return Code::Invalid,
+        };
+        let Some(Owner::Running(broker)) = self.owner.take() else {
+            return Code::Uncertain;
+        };
+        self.install = Some(match broker.begin_app_install(install) {
+            app_install::Start::Draining(session) => Install {
+                owner: InstallOwner::Draining(session),
+                stage: InstallStage::Draining,
+            },
+            app_install::Start::Retained { broker, install } => Install {
+                owner: InstallOwner::Refused {
+                    broker,
+                    _install: install,
+                },
+                stage: InstallStage::Failed,
+            },
+        });
+        self.tick();
+        if self.mode == Mode::Uncertain {
+            Code::Uncertain
+        } else {
+            Code::Ok
+        }
+    }
+
+    fn cancel_install(&mut self) -> Code {
+        let Some(install) = self.install.take() else {
+            return Code::Busy;
+        };
+        let Install { owner, stage } = install;
+        match owner {
+            InstallOwner::Draining(session) => match session.rollback() {
+                app_install::Rollback::Restored(restored) => {
+                    self.owner = Some(Owner::Running(restored.release()));
+                    self.mode = Mode::Running;
+                    self.retry = [Instant::now(); 2];
+                    self.backend_retry = Instant::now();
+                    self.tick();
+                    Code::Ok
+                }
+                app_install::Rollback::Retained(session) => {
+                    self.install = Some(Install {
+                        owner: InstallOwner::Draining(session),
+                        stage,
+                    });
+                    Code::Busy
+                }
+            },
+            owner @ InstallOwner::Refused { .. } => {
+                self.install = Some(Install { owner, stage });
+                Code::Uncertain
+            }
+        }
+    }
     fn request(&mut self, key: u64, op: Operation) -> Reply {
         self.tick();
         let mut code = Code::Ok;
         match op {
             Operation::Observe => {}
+            Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::BackendRunning => {
                 if self.backend_restart.is_some() || self.backend_status != Some(Status::Running) {
                     code = Code::Unavailable;
@@ -678,6 +824,9 @@ impl Client {
 struct Server {
     // Drop the endpoint before releasing the journal owner/lease.
     endpoint: journal::socket::Endpoint,
+    install_endpoint: journal::socket::Endpoint,
+    // Close queued rights before dropping accepted engine ownership/admission.
+    offers: [Option<(app_install_lease::Incoming, Instant)>; INSTALL_OFFERS],
     engine: Engine,
     clients: [Option<Client>; CLIENTS],
     next_key: u64,
@@ -690,6 +839,8 @@ impl Server {
     fn new(broker: Broker, uid: u32) -> io::Result<Self> {
         Ok(Self {
             endpoint: broker.journal.endpoint()?,
+            install_endpoint: broker.journal.install_endpoint()?,
+            offers: std::array::from_fn(|_| None),
             engine: Engine::new(broker),
             clients: std::array::from_fn(|_| None),
             next_key: 1,
@@ -710,6 +861,30 @@ impl Server {
                 return Err(io::ErrorKind::Interrupted.into());
             }
             self.engine.tick();
+            for slot in &mut self.offers {
+                #[cfg(test)]
+                if self
+                    .engine
+                    .fixture
+                    .as_ref()
+                    .is_some_and(|root| root.join("hold-install-offer").exists())
+                {
+                    continue;
+                }
+                let Some((offer, since)) = slot.as_mut() else {
+                    continue;
+                };
+                match offer.poll() {
+                    Ok(Some(admission)) => {
+                        // Ownership moves to the independent daemon before any
+                        // backend Stop. Peer EOF no longer controls this job.
+                        self.engine.accept_install(admission);
+                        *slot = None;
+                    }
+                    Ok(None) if since.elapsed() < self.idle => {}
+                    _ => *slot = None,
+                }
+            }
             for slot in &mut self.clients {
                 let Some(client) = slot.as_mut() else {
                     continue;
@@ -756,6 +931,36 @@ impl Server {
                 let key = self.next_key;
                 self.next_key = self.next_key.checked_add(1).ok_or(io::ErrorKind::Other)?;
                 *slot = Client::new(UnixStream::from(fd), key, self.uid).ok();
+            }
+            for _ in 0..INSTALL_OFFERS {
+                let Some(slot) = self.offers.iter_mut().find(|s| s.is_none()) else {
+                    break;
+                };
+                let fd = match rustix::net::accept_with(
+                    &self.install_endpoint.listener,
+                    rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+                ) {
+                    Ok(fd) => fd,
+                    Err(e) if e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR => {
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if rustix::net::sockopt::socket_peercred(&fd)?.uid.as_raw() != self.uid {
+                    continue;
+                }
+                #[cfg(test)]
+                let offer = match &self.engine.fixture {
+                    Some(root) => app_install_lease::Incoming::fixture(
+                        fd,
+                        std::fs::File::open(root)?,
+                        self.uid,
+                    ),
+                    None => app_install_lease::Incoming::open(fd),
+                };
+                #[cfg(not(test))]
+                let offer = app_install_lease::Incoming::open(fd);
+                *slot = offer.ok().map(|offer| (offer, Instant::now()));
             }
             // Every client is nonblocking and gets one bounded read/write tick.
             // Avoid a permanently readable listener spinning when all slots fill.

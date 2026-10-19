@@ -13,7 +13,8 @@ The broker-side [app-install session](security-app-slot-recovery.md#native-close
 now composes accepted app/update/writer admission with durable `Stopping` and a
 three-scope drain before slot publication. It retains that fence through explicit
 old-slot rollback; no native launch or automatic resume is exposed by the session.
-The daemon/API still do not invoke it. Independent delivery, frozen trial startup,
+The daemon now invokes it for a validated prepared offer on its separate
+app-install endpoint. The ordinary API remains legacy; frozen trial startup,
 health/commit/retirement and device acceptance remain required.
 
 ## Implemented boundary
@@ -137,7 +138,7 @@ Maintenance/Stopping phase, not credentials, process-number authority or raw-upd
 authorization.
 The closed restore allowlist does not preserve/import/delete these runtime
 authority members; capture and forged write/absent-archive tests cover state,
-temporary state and the control socket member name.
+temporary state and both control/app-install socket member names.
 
 Before the first possible native launch, Active is written to an exclusive
 temporary member, file-synced, renamed, and directory-synced. The journal lease
@@ -182,7 +183,7 @@ These are not power-cut tests, vendor runtime evidence or device acceptance.
 
 ## Local lifecycle protocol, not raw-write authority
 
-The daemon listens only at the protected journal directory's `control.sock`.
+The lifecycle protocol listens at the protected journal directory's `control.sock`.
 The journal flock remains the singleton authority. A stale socket is removed
 only after journal acquisition has accepted the state, never to clear unresolved
 ownership. The endpoint is mode 0600, opened through the pinned parent directory;
@@ -364,8 +365,8 @@ An interruption before that marker can
 be completed by repeating prepare, but cannot grant readiness. Unknown/malformed
 members, links, unsafe permissions or conflicting receipts fail closed.
 
-After a different boot, completion moves only `state`, `.state.next` and
-`control.sock` into `recovery/evidence/` with no-replace renames, or durably records
+After a different boot, completion moves only `state`, `.state.next`,
+`control.sock` and `app-install.sock` into `recovery/evidence/` with no-replace renames, or durably records
 their original absence. It never follows those original objects or copies their
 content into new authority. Both directories are synced before the quarantine
 receipt. Derived Closed bytes are written to an anonymous rootfs `O_TMPFILE`,

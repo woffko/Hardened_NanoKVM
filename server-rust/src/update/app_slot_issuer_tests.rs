@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn archive() -> Vec<u8> {
+pub(crate) fn archive() -> Vec<u8> {
     let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);
     for (name, data) in [
@@ -69,17 +69,33 @@ fn issue(root: &Path, candidate: AppCandidate, handoff: Handoff) -> Result<Prepa
 }
 
 pub(crate) async fn accepted_fixture(root: &Path) -> AcceptedInstall {
+    let (owner, prepared) = prepared_fixture(root).await;
+    let received = received_fixture(root, prepared);
+    drop(owner);
+    accept_fixture(root, received).unwrap()
+}
+
+pub(crate) async fn prepared_fixture(root: &Path) -> (UpdateOwner, PreparedInstall) {
     if !root.join("kvmapp").exists() {
         init(root);
     }
     let (owner, handoff) = admission(root).await;
     let prepared = issue(root, candidate(root), handoff).unwrap();
-    let received = crate::update::app_install_lease::exchange_fixture(
+    (owner, prepared)
+}
+
+pub(crate) fn accept_fixture(root: &Path, admission: Accepted) -> Result<AcceptedInstall> {
+    accept_at(
+        read_store(root, true)?.ok_or(SlotError::Invalid)?,
+        admission,
+    )
+}
+
+pub(crate) fn received_fixture(root: &Path, prepared: PreparedInstall) -> Accepted {
+    crate::update::app_install_lease::exchange_fixture(
         prepared.into_handoff(),
         &File::open(root).unwrap(),
-    );
-    drop(owner);
-    accept_at(read_store(root, true).unwrap().unwrap(), received).unwrap()
+    )
 }
 
 fn read_store(root: &Path, exclusive: bool) -> Result<Option<Store>> {

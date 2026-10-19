@@ -9,12 +9,13 @@ use std::{
 
 const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
 const OTHER: &str = "87654321-4321-4321-4321-cba987654321";
-const STEPS: [Step; 10] = [
+const STEPS: [Step; 11] = [
     Step::FenceCreated,
     Step::EpochSynced,
     Step::MemberQuarantined(0),
     Step::MemberQuarantined(1),
     Step::MemberQuarantined(2),
+    Step::MemberQuarantined(3),
     Step::EvidenceSynced,
     Step::ClosureFileSynced,
     Step::ClosureLinked,
@@ -200,7 +201,7 @@ fn missing_members_are_recorded_and_quarantine_does_not_follow_original_symlinks
             .is_symlink()
     );
     assert_eq!(fs::read(&outside).unwrap(), b"untouched fixture");
-    for name in [&ABSENT[1], &ABSENT[2]] {
+    for name in [&ABSENT[1], &ABSENT[2], &ABSENT[3]] {
         assert_eq!(fs::metadata(evidence.join(name)).unwrap().len(), 0);
     }
     assert!(acquire(root.path(), OTHER).is_ok());
@@ -335,7 +336,7 @@ fn duplicate_evidence_and_foreign_archive_destination_are_not_overwritten() {
 
 #[test]
 fn recreated_runtime_members_during_closed_publication_keep_the_fence() {
-    for name in [NEXT, MEMBERS[2]] {
+    for name in [NEXT, MEMBERS[2], MEMBERS[3]] {
         let root = tempfile::tempdir().unwrap();
         seed(root.path());
         let r = recovery(root.path(), BOOT).unwrap();

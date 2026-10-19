@@ -1,7 +1,8 @@
 # Independent app-slot recovery component
 
-This describes source/host-tested preparation, native-closed publication, rollback and early consumer gates,
-not an activated journaled installer or a completed WP-04/C1 fix. The actual app
+This describes source/host-tested preparation, independent daemon delivery,
+native-closed publication, rollback and early consumer gates, not a completed
+API installation lifecycle or WP-04/C1 fix. The actual app
 API still uses its legacy slot swap. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
@@ -145,11 +146,10 @@ cover preparation/record/publication; unpublished candidate inode identity and
 old-live preservation are checked. A fresh user/mount/PID namespace with a real
 private procfs exercises the actual fixed-root issuer, an exec'd lease receiver,
 canonical acceptance, sender teardown, continued three-domain exclusion and
-ordinary recovery after receiver exit. It is not the broker-owned production
-worker, HTTP/device acceptance or a complete install lifecycle.
-Production delivery must additionally cover ambiguous queued transfer and peer
-death before acceptance together with canonical transaction state; separate
-lease queue tests alone do not complete that combined worker-delivery gate.
+ordinary recovery after receiver exit. That anonymous-worker fixture is not the
+named daemon endpoint, HTTP/device acceptance or a complete install lifecycle.
+The independent delivery test below additionally covers queued transfer and
+actual frontend death before daemon acceptance with canonical prepared state.
 
 ## Native-closed publication and retained rollback (not activated)
 
@@ -195,12 +195,53 @@ data and is repeatable. These process-death fixtures are not target power-cut or
 vendor-native acceptance. The existing standalone scope tests separately cover
 subreaper descendant closure; the new protocol stubs do not replace that proof.
 
-The production API/daemon transport, independent installer invocation, safe
-executable permissions, frozen read-only trial startup, runtime-health handshake,
+The production API activation, durable job status, safe executable permissions,
+frozen read-only trial startup, runtime-health handshake,
 commit and retirement are still missing. Ordinary backend startup is not a
 usable trial path while writer exclusions are retained: it acquires writer/update
 admission and performs storage, helper, trust and init-script writes. Do not
 release/reacquire the exclusions to make that startup succeed.
+
+## Independent daemon delivery (API/trial not activated)
+
+The existing independent native broker is itself the installation owner; an
+additional installer child is not spawned below the backend's subreaper. This
+keeps the real native controller/journal owners and accepted app store together.
+The fixed root-only `/etc/kvm/native-runtime-owner/app-install.sock` is mode0600
+SEQPACKET, distinct from the mode0600 STREAM lifecycle endpoint. Parent checks,
+pinned proc-fd addressing, CLOEXEC/NONBLOCK and exact-inode cleanup apply to both.
+There is no generic pathname/program/root selector or FD-carrying lifecycle op.
+
+`Sender::connect_broker` selects only this protected endpoint. `send` still means
+queued, not accepted, published, committed or healthy; an ambiguous send does
+not authorize submitting another transaction. The daemon retains at most four
+nonblocking offers, with the normal five-second idle budget, while continuing
+lifecycle servicing. It reuses the exact 72-byte/three-rights lease parser,
+validates the pinned protected lock domains and requires canonical prepared
+receipt/layout acceptance before any native Stop. A root peer or lease packet
+alone cannot supply candidate/signature authority.
+
+After acceptance the daemon owns Session independently of the offer socket.
+Sender death/EOF does not cancel it or release its three exclusions. It drains
+all three runtime scopes and attempts publication once. Published stays
+`Installing` and holds admission; no ordinary launch/restart/pause/resume/shutdown
+can replace this owner. The lifecycle protocol's fixed `CancelAppInstall` action
+can request pre-trial rollback. Pending or uncertain closure retains Session;
+only proven durable old-slot restoration returns ordinary runtime ownership.
+This is local root administration, not a remote unauthenticated cancellation API.
+There is no trial runtime yet and no app-health/commit success response.
+
+Host tests run broker and sender as separate exec'd processes. They kill the
+sender after queuing but before daemon acceptance, then prove retained exclusion,
+canonical publication, blocked ordinary lifecycle operations and explicit rollback.
+Other tests cover malformed/stalled offers, expiry and slot reuse, invalid receipt
+before Stop, endpoint type/permissions and preserving a foreign replacement on
+Drop. These use cfg(test)-only rooted data and native protocol stubs. A second
+private user/mount/PID namespace with real procfs exercises production
+`Sender::connect_broker`, `Incoming::open`, fixed-root preparation/acceptance,
+publication and rollback without their rooted-path overrides. Native enrollment
+and process execution are fixture supplied there: this is not production-daemon
+CLI, target boot, vendor-native or device acceptance.
 
 ## Early consumer integration (development branch)
 
@@ -491,10 +532,11 @@ not physical power-loss, ext4 write-cache or target acceptance.
 
 ## Remaining activation prerequisites
 
-- Connect the host-tested preparation issuer/lease acceptance to a broker-owned
-  independent installer, exact metadata/key/policy lifetime and durable job
-  observability. Implement journaled live swap, trial health, rollback and
-  terminal retirement; the app API still uses its old swap.
+- Activate the independently delivered native-closed installer in the API only
+  after exact metadata/key/policy lifetime, durable job observability, safe
+  executable permissions, frozen trial startup, health/commit and terminal
+  retirement are implemented. Host-tested publication/rollback is not a complete
+  lifecycle; the app API still uses its old swap.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
 - Complete helper-version lifecycle across subsequent app updates. The pinned

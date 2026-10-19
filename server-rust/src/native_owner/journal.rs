@@ -121,7 +121,19 @@ impl Store {
         socket::Endpoint::bind(&self.directory, self.uid, self.device)
     }
 
+    pub(super) fn install_endpoint(&self) -> io::Result<socket::Endpoint> {
+        socket::Endpoint::bind_install(&self.directory, self.uid, self.device)
+    }
+
     pub(super) fn connect_control() -> io::Result<std::os::unix::net::UnixStream> {
+        socket::connect(&Self::control_directory()?, 0)
+    }
+
+    pub(super) fn connect_install() -> io::Result<std::os::fd::OwnedFd> {
+        socket::connect_install(&Self::control_directory()?, 0)
+    }
+
+    fn control_directory() -> io::Result<File> {
         if !nix::unistd::geteuid().is_root() {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
@@ -133,7 +145,7 @@ impl Store {
             protected(file, 0, false).map_err(|_| io::ErrorKind::PermissionDenied)?;
         }
         protected(&directory, 0, true).map_err(|_| io::ErrorKind::PermissionDenied)?;
-        socket::connect(&directory, 0)
+        Ok(directory)
     }
 
     pub(super) fn open() -> Result<Self, Error> {

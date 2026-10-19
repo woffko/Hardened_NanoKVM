@@ -15,8 +15,13 @@ use std::{
 
 const EVIDENCE: &str = "evidence";
 const QUARANTINED: &str = "quarantined";
-const MEMBERS: [&str; 3] = [STATE, NEXT, "control.sock"];
-const ABSENT: [&str; 3] = ["absent-state", "absent-next", "absent-control"];
+const MEMBERS: [&str; 4] = [STATE, NEXT, "control.sock", "app-install.sock"];
+const ABSENT: [&str; 4] = [
+    "absent-state",
+    "absent-next",
+    "absent-control",
+    "absent-app-install",
+];
 
 fn boot_name(epoch: Epoch) -> Result<String, Error> {
     let mut hash = Sha256::new();
@@ -315,6 +320,7 @@ impl Recovery {
         // No service can recreate these while the recovery fence is present.
         if Self::exists(&self.store.directory, NEXT)?
             || Self::exists(&self.store.directory, MEMBERS[2])?
+            || Self::exists(&self.store.directory, MEMBERS[3])?
         {
             return Err(Error::Ambiguous);
         }
@@ -325,6 +331,7 @@ impl Recovery {
         }
         if Self::exists(&self.store.directory, NEXT)?
             || Self::exists(&self.store.directory, MEMBERS[2])?
+            || Self::exists(&self.store.directory, MEMBERS[3])?
         {
             return Err(Error::Ambiguous);
         }

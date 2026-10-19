@@ -5,6 +5,11 @@
 use super::{Broker, JournalError, controller, journal};
 use crate::update::app_slot::{AcceptedInstall, SlotError, Status};
 
+/// Only the fixed protected broker endpoint, never a caller-selected address.
+pub(crate) fn connect_peer() -> std::io::Result<std::os::fd::OwnedFd> {
+    journal::Store::connect_install()
+}
+
 pub enum Start {
     Draining(Session),
     Retained {

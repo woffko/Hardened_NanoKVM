@@ -6,6 +6,8 @@ use std::{
     process::{Command, Stdio},
 };
 const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
+#[path = "app_delivery_tests.rs"]
+mod delivery;
 fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
