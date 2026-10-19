@@ -147,7 +147,11 @@ impl UpdateCoordinator {
                 }
             };
         }
-        ProcessLock::acquire().map(Some).map_err(lock_error)
+        let lock = ProcessLock::acquire().map_err(lock_error)?;
+        crate::native_owner::broker::check_update_admission().map_err(|_| {
+            AppError::Conflict("native lifecycle is fenced; update admission refused".into())
+        })?;
+        Ok(Some(lock))
     }
 
     #[cfg(test)]

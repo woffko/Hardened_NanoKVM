@@ -29,7 +29,7 @@ class NativeInitTests(unittest.TestCase):
 echo "ctl:$1" >> "$CALLS"
 case "$1:$MODE" in
  boot-ready:unready) exit 78 ;;
- status:absent|running:absent|ensure-kvm:denied|shutdown:denied) exit 1 ;;
+ status:absent|running:absent|ensure-kvm:denied|ensure-backend:denied|restart-backend:denied|restart-backend-safe:denied|shutdown:denied) exit 1 ;;
  running:paused) exit 1 ;;
 esac
 exit 0
@@ -45,8 +45,6 @@ exit 0
                 'runtime_log() { :; }', 'sleep() { :; }',
                 'stop_system_update_watchdog() { echo stop-update-watchdog >> "$CALLS"; }',
                 'stop_watchdog() { echo stop-watchdog >> "$CALLS"; }',
-                'stop_server_process() { echo stop-server >> "$CALLS"; }',
-                'reboot_after_unrecoverable_server() { echo unexpected-reboot >> "$CALLS"; return 1; }',
                 'rm() { echo cleanup >> "$CALLS"; }',
             ])
             body = function(name).replace("/usr/libexec/nanokvm-app-recovery", str(app))
@@ -78,21 +76,32 @@ exit 0
         self.assertNotEqual(code, 0)
         self.assertEqual(calls, ["app:gate", "ctl:ensure-kvm"])
 
-    def test_stop_requires_boot_and_durable_closure_before_backend_or_cleanup(self):
+    def test_stop_requires_boot_and_durable_closure_before_watchdog_cleanup(self):
         code, calls = self.run_function("stop_runtime", "unready")
         self.assertNotEqual(code, 0)
         self.assertEqual(calls, ["ctl:boot-ready"])
         code, calls = self.run_function("stop_runtime", "denied")
         self.assertNotEqual(code, 0)
-        self.assertNotIn("stop-server", calls)
-        self.assertNotIn("cleanup", calls)
+        self.assertEqual(calls, ["ctl:boot-ready", "ctl:shutdown"])
         code, calls = self.run_function("stop_runtime", "running")
         self.assertEqual(code, 0)
-        self.assertEqual(calls, ["ctl:boot-ready", "stop-update-watchdog", "stop-watchdog", "ctl:shutdown", "stop-server", "cleanup"])
+        self.assertEqual(calls, ["ctl:boot-ready", "ctl:shutdown", "stop-update-watchdog", "stop-watchdog"])
+
+    def test_backend_start_and_restarts_have_no_denial_fallback(self):
+        for name, operation in [("start_server_runtime", "ensure-backend"),
+                                ("restart_server_runtime", "restart-backend"),
+                                ("restart_server_safe", "restart-backend-safe")]:
+            for mode in ["denied", "running"]:
+                with self.subTest(name=name, mode=mode):
+                    code, calls = self.run_function(name, mode)
+                    self.assertEqual(code == 0, mode == "running")
+                    self.assertEqual(calls, ["app:gate", "ctl:" + operation])
 
     def test_no_native_pid_adoption_or_direct_launch_remains(self):
         for forbidden in ["find_kvm_system_pids", "adopt_single_kvm_system_process", "KVM_SYSTEM_PID_FILE",
-                          "KVM_SYSTEM_RUNTIME_DIR", "HWMON_PID_FILE", "killall nanokvm-hwmon"]:
+                          "KVM_SYSTEM_RUNTIME_DIR", "HWMON_PID_FILE", "killall nanokvm-hwmon",
+                          "SERVER_PID_FILE", "SERVER_RUNTIME_DIR", "stop_server_process",
+                          "killall NanoKVM-Server", "NANOKVM_XTHEAD_LOADER", "wait_process_exit"]:
             self.assertNotIn(forbidden, SOURCE)
         self.assertIn('exec "$NATIVE_CTL" ensure-hwmon', function("start_hwmon_shadow"))
         self.assertIn('"$NATIVE_CTL" ensure-kvm', function("start_kvm_system_runtime"))

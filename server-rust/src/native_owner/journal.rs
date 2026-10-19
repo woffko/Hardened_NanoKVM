@@ -23,6 +23,8 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
+#[path = "backend_policy.rs"]
+pub(super) mod backend_policy;
 #[path = "boot_activation.rs"]
 pub mod boot;
 #[path = "recovery.rs"]
@@ -97,6 +99,7 @@ enum Phase {
     Active = 1,
     Closed = 2,
     Maintenance = 3,
+    Stopping = 4,
 }
 
 pub(super) struct Store {
@@ -266,6 +269,95 @@ impl Store {
         }
     }
 
+    pub(super) fn resume_active(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        // Native maintenance may retain a live backend. Never interpose a
+        // false Closed receipt while that sibling still owns a process tree.
+        self.publish(Phase::Active)?;
+        self.active = true;
+        Ok(())
+    }
+
+    pub(super) fn stopping(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        self.publish(Phase::Stopping)?;
+        self.active = true;
+        Ok(())
+    }
+
+    /// Read-only durable stop fence, checked AFTER acquiring update exclusion.
+    /// No journal flock is taken: the running broker retains that singleton.
+    pub(crate) fn check_update_admission() -> Result<(), Error> {
+        if !nix::unistd::geteuid().is_root() {
+            return Err(Error::Unsafe);
+        }
+        let root = File::open("/")?;
+        let etc = open(&root, "etc", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        let parent = open(&etc, "kvm", OFlags::RDONLY | OFlags::DIRECTORY, true)?;
+        for file in [&root, &etc, &parent] {
+            protected(file, 0, false)?;
+        }
+        let directory = match open(&parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY, true) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(Error::Unsafe),
+        };
+        protected(&directory, 0, true)?;
+        if directory.metadata()?.dev() != parent.metadata()?.dev() {
+            return Err(Error::Unsafe);
+        }
+        Self::check_update_at(&directory, 0, Epoch::current()?)
+    }
+
+    fn check_update_at(directory: &File, uid: u32, epoch: Epoch) -> Result<(), Error> {
+        for name in [NEXT, RECOVERY] {
+            match rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => {}
+                _ => return Err(Error::Recovery),
+            }
+        }
+        // Inspect a non-opening O_PATH descriptor first: corrupt journal paths
+        // must not open a device or block on a FIFO before rejecting metadata.
+        let pinned = match open(directory, STATE, OFlags::PATH, true) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(Error::Unsafe),
+        };
+        let m = pinned.metadata()?;
+        if !m.is_file()
+            || m.uid() != uid
+            || m.mode() & 0o7777 != 0o600
+            || m.nlink() != 1
+            || m.dev() != directory.metadata()?.dev()
+            || m.len() != BYTES as u64
+        {
+            return Err(Error::Unsafe);
+        }
+        let mut file = open(directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK, true)?;
+        let reopened = file.metadata()?;
+        if (
+            reopened.dev(),
+            reopened.ino(),
+            reopened.mode(),
+            reopened.uid(),
+            reopened.nlink(),
+            reopened.len(),
+        ) != (m.dev(), m.ino(), m.mode(), m.uid(), m.nlink(), m.len())
+        {
+            return Err(Error::Unsafe);
+        }
+        let mut bytes = [0; BYTES];
+        file.read_exact(&mut bytes)?;
+        let (stored, phase) = decode(&bytes)?;
+        // Native-only Maintenance is not UpdateEX admission: an issuer may
+        // already own UpdateEX when pausing KVM/hwmon. Only Stopping permits a
+        // backend Stop and is serialized under the same update exclusion.
+        if file.read(&mut [0])? != 0 || (stored == epoch && phase == Phase::Stopping) {
+            return Err(Error::Unresolved);
+        }
+        Ok(())
+    }
+
     fn member(&self, name: &str) -> Result<Option<File>, Error> {
         let file = match open(
             &self.directory,
@@ -298,20 +390,10 @@ impl Store {
         }
         let mut bytes = [0; BYTES];
         file.read_exact(&mut bytes)?;
-        if file.read(&mut [0])? != 0
-            || &bytes[..8] != MAGIC
-            || bytes[45..HASH] != [0; 3]
-            || bytes[HASH..] != Sha256::digest(&bytes[..HASH])[..]
-        {
+        if file.read(&mut [0])? != 0 {
             return Err(Error::Invalid);
         }
-        let phase = match bytes[44] {
-            1 => Phase::Active,
-            2 => Phase::Closed,
-            3 => Phase::Maintenance,
-            _ => return Err(Error::Invalid),
-        };
-        Ok(Some((Epoch::parse(&bytes[8..44])?, phase)))
+        Ok(Some(decode(&bytes)?))
     }
 
     fn publish(&mut self, phase: Phase) -> Result<(), Error> {
@@ -386,6 +468,23 @@ fn record(epoch: Epoch, phase: Phase) -> [u8; BYTES] {
     let hash = Sha256::digest(&bytes[..HASH]);
     bytes[HASH..].copy_from_slice(&hash);
     bytes
+}
+
+fn decode(bytes: &[u8; BYTES]) -> Result<(Epoch, Phase), Error> {
+    if &bytes[..8] != MAGIC
+        || bytes[45..HASH] != [0; 3]
+        || bytes[HASH..] != Sha256::digest(&bytes[..HASH])[..]
+    {
+        return Err(Error::Invalid);
+    }
+    let phase = match bytes[44] {
+        1 => Phase::Active,
+        2 => Phase::Closed,
+        3 => Phase::Maintenance,
+        4 => Phase::Stopping,
+        _ => return Err(Error::Invalid),
+    };
+    Ok((Epoch::parse(&bytes[8..44])?, phase))
 }
 
 fn kernel_proc() -> Result<File, Error> {

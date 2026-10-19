@@ -19,10 +19,14 @@ struct Running {
 
 fn start(mode: &str) -> Running {
     let root = tempfile::tempdir().unwrap();
+    start_at(mode, "scope", root)
+}
+
+fn start_at(mode: &str, kind: &str, root: tempfile::TempDir) -> Running {
     let (control, owner) = UnixStream::pair().unwrap();
     control.set_read_timeout(Some(LIMIT)).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-owner-fixture"))
-        .args(["scope", mode])
+        .args([kind, mode])
         .arg(root.path())
         .env_clear()
         .stdin(Stdio::from(std::os::fd::OwnedFd::from(owner)))
@@ -123,6 +127,89 @@ fn assert_exited(fd: &std::os::fd::OwnedFd) {
     };
     assert_eq!(rustix::event::poll(&mut fds, Some(&zero)).unwrap(), 1);
     assert!(fds[0].revents().contains(rustix::event::PollFlags::IN));
+}
+
+fn wait_file(root: &Path, name: &str) {
+    let started = Instant::now();
+    while !root.join(name).exists() {
+        assert!(started.elapsed() < LIMIT, "fixture did not publish {name}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn guarded_fixture() -> (tempfile::TempDir, fs::File) {
+    let root = tempfile::tempdir().unwrap();
+    let lock = fs::File::create(root.path().join("update-lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    (root, lock)
+}
+
+#[test]
+fn backend_disconnect_waits_for_update_and_retains_lock_until_tree_join() {
+    let (root, update) = guarded_fixture();
+    let mut run = start_at("tree", "scope-guarded", root);
+    run.ready();
+    let leader = pin(wait_pid(run.root.path(), "leader.pid"));
+    let leaf = pin(wait_pid(run.root.path(), "leaf.pid"));
+    run.control.shutdown(std::net::Shutdown::Both).unwrap();
+    wait_file(run.root.path(), "orphan-attempt");
+    assert!(!run.root.path().join("orphan-acquired").exists());
+    assert!(run.child.try_wait().unwrap().is_none());
+    let mut fds = [rustix::event::PollFd::new(
+        &leader.0,
+        rustix::event::PollFlags::IN,
+    )];
+    let timeout = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 100_000_000,
+    };
+    assert_eq!(rustix::event::poll(&mut fds, Some(&timeout)).unwrap(), 0);
+    drop(update);
+    wait_file(run.root.path(), "orphan-acquired");
+    let contender = fs::File::open(run.root.path().join("update-lock")).unwrap();
+    assert_eq!(
+        rustix::fs::flock(
+            &contender,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        ),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    );
+    assert!(run.wait().success());
+    assert_exited(&leader);
+    assert_exited(&leaf);
+    rustix::fs::flock(
+        &contender,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+}
+
+#[test]
+fn backend_explicit_stop_uses_controllers_existing_update_exclusion() {
+    let (root, _update) = guarded_fixture();
+    let mut run = start_at("tree", "scope-guarded", root);
+    run.ready();
+    let leaf = pin(wait_pid(run.root.path(), "leaf.pid"));
+    run.control.write_all(b"S").unwrap();
+    run.done(0);
+    assert!(run.wait().success());
+    assert_exited(&leaf);
+    assert!(!run.root.path().join("orphan-attempt").exists());
+}
+
+#[test]
+fn backend_natural_leader_exit_cannot_kill_update_descendants_without_admission() {
+    let (root, update) = guarded_fixture();
+    let mut run = start_at("parent-exit", "scope-guarded", root);
+    run.ready();
+    let leaf = pin(wait_pid(run.root.path(), "leaf.pid"));
+    wait_file(run.root.path(), "orphan-attempt");
+    assert!(!run.root.path().join("orphan-acquired").exists());
+    assert!(run.child.try_wait().unwrap().is_none());
+    drop(update);
+    run.done(1);
+    assert!(run.wait().success());
+    assert_exited(&leaf);
 }
 
 #[test]

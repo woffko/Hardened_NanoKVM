@@ -3,7 +3,7 @@
 #[path = "../src/native_owner/controller.rs"]
 mod controller;
 
-use controller::{Drain, DrainStatus, Group, Role, StartError, Status};
+use controller::{Drain, DrainStatus, Group, Resume, Role, StartError, Status};
 use std::{
     fs,
     path::Path,
@@ -110,14 +110,16 @@ fn sibling_trees_stop_together_and_cannot_restart_until_both_join() {
     let started = Instant::now();
     let paused = group.begin_drain();
     let mut paused = match paused.try_resume() {
-        Ok(_) => panic!("admission reopened before closure"),
-        Err(paused) => paused,
+        Resume::Running(_) => panic!("admission reopened before closure"),
+        Resume::Retained(paused) => paused,
     };
     until(|| paused.poll() == DrainStatus::Drained);
     assert!(started.elapsed() >= Duration::from_millis(1800));
     assert!(leaf_a.exited() && leaf_b.exited());
     // Explicit resume returns the only launch capability, not an automatic respawn.
-    let mut group = paused.try_resume().ok().unwrap();
+    let Resume::Running(mut group) = paused.try_resume() else {
+        panic!("drained group retained")
+    };
     group
         .start_command(Role::Hwmon, command("scope", "hold", b.path()))
         .unwrap();
@@ -164,6 +166,87 @@ fn dropped_controller_requests_eof_cleanup_but_does_not_respawn() {
 }
 
 #[test]
+fn backend_controller_drop_cannot_bypass_guarded_eof_with_implicit_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let update = fs::File::create(root.path().join("update-lock")).unwrap();
+    rustix::fs::flock(
+        &update,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::Backend, command("scope-guarded", "tree", root.path()))
+        .unwrap();
+    ready(&mut group);
+    let owner = Pin::read(root.path(), "owner.pid");
+    let leader = Pin::read(root.path(), "leader.pid");
+    let leaf = Pin::read(root.path(), "leaf.pid");
+    drop(group);
+    until(|| root.path().join("orphan-attempt").exists());
+    assert!(!root.path().join("orphan-acquired").exists());
+    assert!(!leader.exited() && !leaf.exited() && !owner.exited());
+    drop(update);
+    until(|| owner.exited());
+    assert!(leader.exited() && leaf.exited());
+    let raw = fs::read_to_string(root.path().join("owner.pid")).unwrap();
+    rustix::process::waitpid(
+        rustix::process::Pid::from_raw(raw.parse().unwrap()),
+        rustix::process::WaitOptions::empty(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn backend_protocol_failure_closes_control_without_unauthorized_stop_byte() {
+    let root = tempfile::tempdir().unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(
+            Role::Backend,
+            command("wire", "malformed-record", root.path()),
+        )
+        .unwrap();
+    until(|| group.poll()[2] == Some(Status::Uncertain));
+    until(|| root.path().join("received-control").exists());
+    assert!(
+        fs::read(root.path().join("received-control"))
+            .unwrap()
+            .is_empty()
+    );
+    let mut retained = group.begin_drain();
+    until(|| {
+        retained.poll();
+        retained.all_owner_processes_reaped()
+    });
+    assert_eq!(retained.poll(), DrainStatus::Uncertain);
+}
+
+#[test]
+fn native_maintenance_retains_backend_then_full_drain_stops_it() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::KvmSystem, command("scope", "hold", a.path()))
+        .unwrap();
+    group
+        .start_command(Role::Backend, command("scope", "hold", b.path()))
+        .unwrap();
+    ready(&mut group);
+    let backend = Pin::read(b.path(), "leader.pid");
+    let mut paused = drain(group.begin_native_drain());
+    assert_eq!(paused.backend_status(), Some(Status::Running));
+    assert!(!backend.exited());
+    let Resume::Running(mut group) = paused.try_resume() else {
+        panic!("drained group retained")
+    };
+    group.stop_backend();
+    drop(drain(group.begin_drain()));
+    assert!(backend.exited());
+}
+
+#[test]
 fn receipt_without_owner_exit_is_not_drained() {
     let root = tempfile::tempdir().unwrap();
     let mut group = Group::default();
@@ -206,7 +289,7 @@ fn malformed_missing_truncated_duplicate_and_mismatched_receipts_stay_uncertain(
             paused.poll();
             paused.all_owner_processes_reaped()
         });
-        assert!(paused.try_resume().is_err());
+        assert!(matches!(paused.try_resume(), Resume::Retained(_)));
     }
 }
 
@@ -238,7 +321,7 @@ fn killed_owner_without_receipt_closes_sibling_admission_and_stops_sibling() {
         paused.poll();
         paused.all_owner_processes_reaped()
     });
-    assert!(paused.try_resume().is_err());
+    assert!(matches!(paused.try_resume(), Resume::Retained(_)));
 }
 
 #[test]

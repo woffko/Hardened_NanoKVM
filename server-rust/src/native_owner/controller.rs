@@ -12,6 +12,7 @@ use std::{
 pub enum Role {
     KvmSystem,
     Hwmon,
+    Backend,
 }
 
 impl Role {
@@ -19,6 +20,7 @@ impl Role {
         match self {
             Self::KvmSystem => 0,
             Self::Hwmon => 1,
+            Self::Backend => 2,
         }
     }
 
@@ -26,6 +28,7 @@ impl Role {
         let role = match self {
             Self::KvmSystem => "kvm-system",
             Self::Hwmon => "hwmon",
+            Self::Backend => "backend",
         };
         let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
         command
@@ -96,10 +99,11 @@ struct Cell {
     stop_requested: bool,
     stop_sent: bool,
     invalid: bool,
+    guarded_eof: bool,
 }
 
 impl Cell {
-    fn spawn(mut command: Command) -> io::Result<Self> {
+    fn spawn(mut command: Command, role: Role) -> io::Result<Self> {
         let (control, owner) = UnixStream::pair()?;
         control.set_nonblocking(true)?;
         command.stdin(Stdio::from(OwnedFd::from(owner)));
@@ -117,6 +121,7 @@ impl Cell {
             stop_requested: false,
             stop_sent: false,
             invalid: false,
+            guarded_eof: role == Role::Backend,
         })
     }
 
@@ -134,8 +139,8 @@ impl Cell {
                 ) => {}
             _ => {
                 self.invalid = true;
-                // EOF is also Stop. Retain the read side and Child for cleanup;
-                // a broken transport never becomes a successful join.
+                // Backend EOF waits for update admission in the owner. Retain
+                // the read side and Child; transport loss is never a join.
                 let _ = self.control.shutdown(Shutdown::Write);
             }
         }
@@ -187,8 +192,13 @@ impl Cell {
                 Err(_) => self.invalid = true,
             }
         }
-        if self.invalid || self.stop_requested {
+        if self.stop_requested || (self.invalid && !self.guarded_eof) {
             self.stop();
+        } else if self.invalid && self.guarded_eof {
+            // Only an admitted broker operation may send backend Stop. On
+            // protocol failure use EOF, whose independent owner waits for the
+            // update lock before terminating any backend descendants.
+            let _ = self.control.shutdown(Shutdown::Write);
         }
         if self.invalid || (self.eof && (self.done_prefix || self.completion.is_none())) {
             return Status::Uncertain;
@@ -215,7 +225,9 @@ impl Drop for Cell {
     fn drop(&mut self) {
         // Never kill the subreaper to make a timeout look bounded. EOF asks it
         // to finish cleanup; dropping this controller forfeits closure evidence.
-        self.stop();
+        if !self.guarded_eof {
+            self.stop();
+        }
         let _ = self.control.shutdown(Shutdown::Both);
     }
 }
@@ -224,7 +236,7 @@ impl Drop for Cell {
 /// this object (and their durable maintenance intent) across their own deadlines.
 #[derive(Default)]
 pub struct Group {
-    cells: [Option<Cell>; 2],
+    cells: [Option<Cell>; 3],
     uncertain: bool,
 }
 
@@ -246,18 +258,21 @@ impl Group {
         {
             return Err(StartError::AlreadyOwned);
         }
-        self.cells[role.index()] = Some(Cell::spawn(command).map_err(StartError::Spawn)?);
+        self.cells[role.index()] = Some(Cell::spawn(command, role).map_err(StartError::Spawn)?);
         Ok(())
     }
 
-    pub fn poll(&mut self) -> [Option<Status>; 2] {
+    pub fn poll(&mut self) -> [Option<Status>; 3] {
         let status = self
             .cells
             .each_mut()
             .map(|cell| cell.as_mut().map(Cell::poll));
         self.uncertain |= status.contains(&Some(Status::Uncertain));
         if self.uncertain {
-            for cell in self.cells.iter_mut().flatten() {
+            // Native uncertainty closes admission but must not send Stop to a
+            // healthy backend that may own an active update. Full shutdown is
+            // a separate, update-admitted operation.
+            for cell in self.cells[..2].iter_mut().flatten() {
                 cell.stop();
             }
         }
@@ -277,7 +292,28 @@ impl Group {
         for cell in self.cells.iter_mut().flatten() {
             cell.stop();
         }
-        Drain { group: self }
+        Drain {
+            group: self,
+            keep_backend: false,
+        }
+    }
+
+    /// Native-only maintenance retains the serving backend and its update job.
+    /// This is NOT backend/all-writer quiescence or raw handoff authority.
+    pub(super) fn begin_native_drain(mut self) -> Drain {
+        for cell in self.cells[..2].iter_mut().flatten() {
+            cell.stop();
+        }
+        Drain {
+            group: self,
+            keep_backend: true,
+        }
+    }
+
+    pub(super) fn stop_backend(&mut self) {
+        if let Some(cell) = self.cells[Role::Backend.index()].as_mut() {
+            cell.stop();
+        }
     }
 }
 
@@ -292,9 +328,18 @@ pub enum DrainStatus {
 /// never resumes services and cannot be interpreted as a quiescence receipt.
 pub struct Drain {
     group: Group,
+    keep_backend: bool,
+}
+
+pub enum Resume {
+    Running(Group),
+    Retained(Drain),
 }
 
 impl Drain {
+    pub(super) fn backend_status(&mut self) -> Option<Status> {
+        self.group.poll()[2]
+    }
     /// Only the direct owner processes, NOT proof that their native descendants
     /// are gone. An uncertain drain remains uncertain even when this is true.
     pub fn all_owner_processes_reaped(&self) -> bool {
@@ -309,7 +354,7 @@ impl Drain {
         let status = self.group.poll();
         if self.group.uncertain {
             DrainStatus::Uncertain
-        } else if status
+        } else if status[..if self.keep_backend { 2 } else { 3 }]
             .iter()
             .all(|s| matches!(s, None | Some(Status::Closed(_))))
         {
@@ -321,11 +366,11 @@ impl Drain {
 
     /// Explicit reversible abort only after proven closure. No reset is offered
     /// for uncertain ownership; recovery requires the external broker journal.
-    pub fn try_resume(mut self) -> Result<Group, Self> {
+    pub fn try_resume(mut self) -> Resume {
         if self.poll() == DrainStatus::Drained {
-            Ok(self.group)
+            Resume::Running(self.group)
         } else {
-            Err(self)
+            Resume::Retained(self)
         }
     }
 }
@@ -336,7 +381,11 @@ mod tests {
 
     #[test]
     fn production_commands_have_only_fixed_role_arguments_and_environment() {
-        for (role, name) in [(Role::KvmSystem, "kvm-system"), (Role::Hwmon, "hwmon")] {
+        for (role, name) in [
+            (Role::KvmSystem, "kvm-system"),
+            (Role::Hwmon, "hwmon"),
+            (Role::Backend, "backend"),
+        ] {
             let command = role.command();
             assert_eq!(command.get_program(), "/usr/libexec/nanokvm-native-owner");
             assert_eq!(command.get_args().collect::<Vec<_>>(), ["--scope", name]);
@@ -353,7 +402,7 @@ mod tests {
     fn receipt_parser_handles_fragmentation_and_rejects_unsolicited_stop() {
         let mut command = Command::new("/bin/true");
         command.stdout(Stdio::null()).stderr(Stdio::null());
-        let mut cell = Cell::spawn(command).unwrap();
+        let mut cell = Cell::spawn(command, Role::KvmSystem).unwrap();
         cell.byte(b'R');
         cell.byte(b'D');
         assert!(cell.done_prefix && cell.completion.is_none());
@@ -364,7 +413,7 @@ mod tests {
 
         let mut command = Command::new("/bin/true");
         command.stdout(Stdio::null()).stderr(Stdio::null());
-        let mut cell = Cell::spawn(command).unwrap();
+        let mut cell = Cell::spawn(command, Role::KvmSystem).unwrap();
         cell.byte(b'R');
         cell.byte(b'D');
         cell.byte(0);
@@ -396,6 +445,7 @@ mod tests {
             stop_requested: false,
             stop_sent: false,
             invalid: false,
+            guarded_eof: false,
         };
         peer.write_all(b"RD\x01").unwrap();
         assert_eq!(cell.poll(), Status::Running);

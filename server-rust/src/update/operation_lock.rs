@@ -31,7 +31,7 @@ impl Domain {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum LockError {
+pub(crate) enum LockError {
     #[error("update admission is owned by another process")]
     Busy,
     #[error("update admission requires protected rootfs storage")]
@@ -45,7 +45,7 @@ impl From<io::Error> for LockError {
     }
 }
 
-pub(super) struct ProcessLock {
+pub(crate) struct ProcessLock {
     directory: File,
 }
 impl ProcessLock {
@@ -68,7 +68,7 @@ impl ProcessLock {
     }
 
     #[cfg(test)]
-    pub(super) fn from_parent(parent: &File, uid: u32) -> Result<Self, LockError> {
+    pub(crate) fn from_parent(parent: &File, uid: u32) -> Result<Self, LockError> {
         Self::at_parent(parent, uid, Domain::Update, false)
     }
 

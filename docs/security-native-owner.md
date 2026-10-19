@@ -3,10 +3,11 @@
 `nanokvm-native-owner` is a separate single-threaded executable, not a subreaper
 inside the asynchronous backend. It provides one fresh process-tree lifetime.
 All four static native programs are now compile-bound and packaged, with
-independent rootfs copies. The current S95 source launches KVM/hwmon only through
-the broker after fresh-boot enrollment. This wiring is **not deployed or accepted
-on hardware**. Backend/watchdog/network-writer joining and retained installation
-maintenance remain open; this is not production snapshot/capture acceptance.
+independent rootfs copies. The current S95 source launches KVM/hwmon/backend only
+through the broker after fresh-boot enrollment. This wiring is **not deployed or
+accepted on hardware**. Protected app self-restart handoff, watchdog/network-writer
+joining and retained installation maintenance remain open; this is not production
+snapshot/capture acceptance.
 
 ## Implemented boundary
 
@@ -14,8 +15,10 @@ Before launch the owner requires an anonymous Unix socketpair, exactly one
 thread, no pre-existing children, default SIGCHLD disposition, and no extra
 inherited descriptors. Its private control duplicate is CLOEXEC and child stdin
 is `/dev/null`. Production entry additionally requires root and the socket peer
-credentials of its direct parent. Only two fixed native roles are accepted:
-`kvm-system` and `hwmon`, with the existing explicit vendor loaders/library path.
+credentials of its direct parent. Only three fixed roles are accepted:
+`kvm-system`, `hwmon` and `backend`, with explicit vendor loaders/library path.
+Backend executes `/kvmapp/server/NanoKVM-Server` directly; no mutable `/tmp`
+staging copy or PID-file adoption remains in the current S95 launcher.
 There is no generic shell/program/path, environment selector or fixture fallback.
 
 The owner enables the kernel child-subreaper property and checks actual pidfd /
@@ -24,7 +27,11 @@ ordinary daemonization, including `setsid`; it does not itself stop a process.
 See [Linux subreaper semantics](https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html)
 and [pidfd identity/lifetime](https://man7.org/linux/man-pages/man2/pidfd_open.2.html).
 
-Stop or controller EOF starts TERM, followed by KILL after two seconds. Proc child
+Explicit Stop starts TERM, followed by KILL after two seconds. Native KVM/hwmon
+controller EOF also starts cleanup. Backend controller loss, invalid transport
+or natural leader exit instead waits for fixed UpdateEX admission before any
+descendant signal; the acquired guard is retained through complete reap. An
+already admitted explicit Stop uses the broker's retained permit. Proc child
 numbers only nominate candidates: a freshly opened pidfd must pass kernel
 `waitid(P_PIDFD, WNOWAIT)` child-relationship validation before signaling. No PID
 file, integer-PID kill, process-name match or process-group membership supplies
@@ -39,7 +46,8 @@ transaction/maintenance lease until the owner reports closure and itself exits.
 Kernel D-state or permanent cleanup I/O failure can prevent bounded completion.
 
 The private socket carries one `R` after spawn. Controller sends `S` to stop;
-EOF also stops. After complete reap the owner sends `D` plus one result byte:
+EOF also requests cleanup, subject to the backend update gate above. After
+complete reap the owner sends `D` plus one result byte:
 
 | Byte | Meaning |
 | --- | --- |
@@ -67,7 +75,7 @@ are not yet accepted from these fixtures.
 
 ## Controller-side sibling ownership
 
-`native_owner::controller::Group` now owns the two fixed native roles as sibling
+`native_owner::controller::Group` owns the three fixed roles as sibling
 owner processes. It never installs a subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
 only `/usr/libexec/nanokvm-native-owner --scope <fixed-role>`. The controller
@@ -87,7 +95,10 @@ owner. No cleanup deadline kills the subreaper or declares successful closure.
 
 Missing/truncated/duplicate/unknown protocol, a receipt/exit mismatch, or owner
 death without a receipt makes ownership sticky-uncertain. The group requests
-Stop on siblings and refuses new starts/resume. Even reaping all direct owner
+Stop on the two native siblings and refuses new starts/resume. It does not stop
+a healthy backend merely because KVM/hwmon ownership is uncertain. Backend
+protocol failure/drop closes control without fabricating an admitted Stop byte;
+the backend owner then uses its update-gated EOF path. Even reaping all direct owner
 processes does **not** clear uncertainty or prove their descendants are gone.
 Dropping a controller/drain sends Stop/EOF without respawn but forfeits the
 receipt and join; it is not a maintenance success path. A real lifecycle broker
@@ -105,7 +116,7 @@ unusual clone exit signals, durable crash recovery and vendor runtime remain ope
 
 `native_owner::broker::Broker` combines the sibling group with a protected
 singleton journal. The standalone `nanokvm-native-broker --serve` now owns this
-component through a fixed local protocol. Current S95 connects its two native
+component through a fixed local protocol. Current S95 connects its three fixed
 roles to it; this is not a replacement for the separate raw
 restore ticket or proof that existing production services are quiescent.
 
@@ -115,7 +126,7 @@ crossing. A nonblocking exclusive flock uses the stable directory inode, which
 is never unlinked. State is one single-link, root-owned mode-0600, fixed 80-byte
 record. Its SHA-256 detects corruption, not authenticity; protected location is
 the trust boundary. It contains only format, boot epoch and Active/Closed/
-Maintenance phase, not credentials, process-number authority or raw-update
+Maintenance/Stopping phase, not credentials, process-number authority or raw-update
 authorization.
 The closed restore allowlist does not preserve/import/delete these runtime
 authority members; capture and forged write/absent-archive tests cover state,
@@ -124,18 +135,18 @@ temporary state and the control socket member name.
 Before the first possible native launch, Active is written to an exclusive
 temporary member, file-synced, renamed, and directory-synced. The journal lease
 stays owned while native work and the retained drain exist. Closed is published
-only after every controller scope proves complete closure. Maintenance instead
-persists across that closure: stopping native work does not authorize new work
-while a caller may still be preparing a raw handoff. Only explicit resume from
-the retained owner can publish Closed and reopen native admission.
+only after every controller scope proves complete closure. Native-only
+Maintenance drains KVM/hwmon but retains backend and its update jobs. Only
+explicit resume from the retained owner publishes Active and reopens native
+admission; it must never publish Closed while the backend tree remains alive.
 `Resume::Retained` keeps ownership when closure/publication is incomplete or
 uncertain; it never implicitly resumes. Drop merely releases the kernel lease,
-preserving Active or Maintenance.
+preserving Active, Maintenance or Stopping.
 
 | Acquired store observation | Native admission |
 | --- | --- |
 | No record, or valid Closed | Publish current-boot Active before launch |
-| Current-boot Active or Maintenance | Refuse: previous ownership is unresolved |
+| Current-boot Active, Maintenance or Stopping | Refuse: previous ownership is unresolved |
 | Valid record from another boot | Old process lifetime ended; expose prior-boot observation |
 | Corrupt/unsafe state or leftover temporary member | Refuse; preserve evidence |
 
@@ -180,7 +191,7 @@ There is no generic shell, path, environment, raw writer or settings import opco
 Root peer identity is **not** executable attestation or a hostile-root sandbox.
 The later unprivileged picoclaw/admin capability split remains separate work.
 
-The daemon owns both sibling native roles and desired-role retries. `EnsureKvm`
+The daemon owns all three sibling roles and desired-role retries. `EnsureKvm`
 and `EnsureHwmon` request admission, not health acceptance. Pause consumes all
 launch capability before draining and durably records Maintenance. Only that
 same live connection may explicitly resume after proven closure. Caller EOF,
@@ -205,7 +216,8 @@ whose outcome is unknown. A future maintenance transaction must retain this
 channel and the independent raw transaction authority throughout its lifetime.
 
 `nanokvm-native-ctl` accepts only `activate-boot`, `boot-ready`, `status`, `running`,
-`kvm-running`, `ensure-kvm`, `ensure-hwmon` and `shutdown`. Ensure waits for the
+`kvm-running`, `backend-running`, `ensure-kvm`, `ensure-hwmon`, `ensure-backend`,
+`restart-backend`, `restart-backend-safe` and `shutdown`. Ensure waits for the
 role's spawn/liveness acknowledgement (not service/hardware health). There is
 deliberately no short-lived pause/resume command: exiting
 would lose the retained maintenance connection. Shutdown reports completion only
@@ -222,6 +234,42 @@ maintenance EOF and durable reopening refusal, and safe endpoint cleanup.
 A separate real subreaper fixture holds journal/listener/client descriptors while
 launching and draining a daemonized tree to check descriptor isolation. These
 tests do not execute production native roles or establish target runtime health.
+
+## Backend restart and update exclusion
+
+Backend start, restart and full shutdown require the fixed update-operation
+exclusive lock followed by an enrolled configuration permit. Restart/shutdown
+publish and sync Stopping **before** sending backend Stop; both permits remain
+owned through the exact completion receipt, direct-owner exit and EOF. Restart
+then optionally publishes the fixed MJPEG policy, spawns the replacement and
+publishes Active before releasing admission. Safe-mode writes are fixed,
+descriptor-relative, rootfs-only atomic file replacements; unsafe existing
+objects are rejected before either destination is changed. They are not a
+two-file crash-atomic transaction or a service-health receipt.
+
+UpdateCoordinator checks the protected journal after acquiring that same
+UpdateEX lock. Current-boot Stopping, corrupt/unsafe state, temporary publication
+or recovery evidence reject new update admission. This durable fence prevents
+controller death from releasing the kernel lock and admitting a new update
+while a previously stopped backend tree is still being drained. Prior-boot
+state proves old process lifetime only; independent raw/app recovery remains
+required. Native-only Maintenance is deliberately not an UpdateEX fence: it
+must be usable by a future issuer which already owns update admission, and it
+neither stops the backend nor claims all-writer snapshot authority.
+
+The backend owner independently waits for UpdateEX on controller loss. This
+protects a live backend-owned update from a broker/transport failure, not from
+backend death, kernel failure or a raw worker that has not retained independent
+transaction authority. No signal is sent merely to turn a deadline into success.
+
+The existing delayed app self-restart still owns its update lock while invoking
+S95. The new full-shutdown admission therefore refuses that path. **This is an
+open development integration gate, not acceptable final app-update behavior.**
+Do not "fix" it by dropping the update lock before restart: protected retained
+installer/broker handoff, journaled swap, health/retirement and rollback must be
+implemented first. Directed helper upgrades, system watchdog, delayed requests,
+AP/STA/ethernet descendant joining and complete authenticated raw/early apply
+also remain open. No package/image from this intermediate state may be released.
 
 ## Fresh-boot init enrollment
 
@@ -253,7 +301,7 @@ arms **before** publishing scripts, retaining its exclusive boot guard through
 publication; a partial repair cannot activate legacy processes in that same boot.
 Already Ready main startup takes a shared guard after checking exact scripts.
 The broker retains a shared guard through running, drain, maintenance and resume,
-so a live broker prevents re-arming. Native journal Active/Maintenance/recovery
+so a live broker prevents re-arming. Native journal Active/Maintenance/Stopping/recovery
 still independently blocks startup: Ready never clears or overrides it.
 
 State publication uses fresh exclusive random hidden names, file sync, rename
@@ -261,19 +309,20 @@ and directory sync. Hidden orphans are retained evidence and never selected.
 An interrupted arm cannot certify readiness; retry only arms the current epoch.
 No boot-ID, path or environment override exists in production.
 
-Current S95 removes KVM PID scanning/adoption/staging and hwmon PID/killall
-fallbacks. It uses a fixed standalone broker, fixed ctl ensures, and verified
-shutdown before backend stop or runtime cleanup. Watchdog retries can request
-Ensure but cannot bypass maintenance or start a replacement broker. The KVM
+Current S95 removes KVM/backend PID scanning/adoption/staging and hwmon
+PID/killall fallbacks. It uses a fixed standalone broker, fixed ctl commands,
+and verified three-scope shutdown before stopping the watchdog shells. A denied
+shutdown preserves those watchdogs. Watchdog retries request admitted ensures
+or backend restarts, never direct process launch, kill or broker replacement. The KVM
 role runs the foreground vendor program directly from `/kvmapp/kvm_system` with
 the same v0p7 loader/library path. That pathname/ABI and vendor-kernel behavior
 still require target acceptance.
 
-This is deliberately **not** all-writer quiescence: backend restart/watchdog,
-delayed hwmon request shells, STA/ethernet/AP state producers and trusted update
-issuer still need a retained transaction-level join. In particular the current
-watchdog starts backend/update descendants, so wrapping it in a native subreaper
-would kill the update during shutdown. Do not do so or claim C1 closed. Directed
+This is deliberately **not** all-writer quiescence: watchdog and delayed hwmon
+request shells, STA/ethernet/AP state producers and trusted update issuer still
+need a retained transaction-level join. Backend is a sibling, never a descendant
+of the watchdog/native-maintenance tree; wrapping the serving backend and update
+job in a native-only drain would kill that update. Do not do so or claim C1 closed. Directed
 native executable upgrades, app journaled swap/health/rollback and complete
 authenticated raw/early restore remain mandatory. DEVELOPMENT raw barrier must
 not ship; no accepted image/release is produced by these host fixtures.

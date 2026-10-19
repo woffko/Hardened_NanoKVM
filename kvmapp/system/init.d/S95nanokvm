@@ -9,13 +9,6 @@ disable_stale_autostarts() {
 }
 
 WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
-H264_SAFE_MODE_FILE=/etc/kvm/h264_safe_mode
-SERVER_SOURCE_DIR=/kvmapp/server
-SERVER_RUNTIME_DIR=/tmp/server
-SERVER_LOG=/tmp/nanokvm-server.log
-SERVER_PID_FILE=/tmp/nanokvm-server.pid
-NANOKVM_NATIVE_LIBRARY_PATH=/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd
-NANOKVM_XTHEAD_LOADER=/lib/ld-musl-riscv64xthead.so.1
 NATIVE_CTL=/usr/libexec/nanokvm-native-ctl
 NATIVE_BROKER=/usr/libexec/nanokvm-native-broker
 NATIVE_LOG=/tmp/nanokvm-native.log
@@ -135,22 +128,8 @@ cleanup_legacy_new_image_marker() {
     rm -f /kvmapp/kvm_new_img 2>/dev/null || true
 }
 
-wait_process_exit() {
-    name="$1"
-    for _ in 1 2 3 4 5; do
-        pidof "$name" >/dev/null 2>&1 || return 0
-        sleep 1
-    done
-    killall -9 "$name" 2>/dev/null
-    sleep 1
-    pidof "$name" >/dev/null 2>&1 && return 1
-    return 0
-}
-
 server_is_running() {
-    [ -f "$SERVER_PID_FILE" ] || return 1
-    pid="$(cat "$SERVER_PID_FILE" 2>/dev/null)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    "$NATIVE_CTL" backend-running >/dev/null 2>&1
 }
 
 kvm_system_is_running() {
@@ -180,36 +159,6 @@ start_native_broker() {
 start_kvm_system_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
     "$NATIVE_CTL" ensure-kvm >/dev/null
-}
-
-stop_server_process() {
-    pid="$(cat "$SERVER_PID_FILE" 2>/dev/null)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        for _ in 1 2 3 4 5; do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 1
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-    rm -f "$SERVER_PID_FILE"
-    killall NanoKVM-Server 2>/dev/null || true
-    [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null
-}
-
-reboot_after_unrecoverable_server() {
-    reason="$1"
-    runtime_log "NanoKVM-Server did not exit during $reason; rebooting to recover vendor video driver"
-    sync
-    reboot
-    exit 1
-}
-
-tmp_available_kb() {
-    df -k /tmp 2>/dev/null | awk 'NR == 2 { print $4 + 0 }'
 }
 
 stop_pid_file() {
@@ -323,38 +272,12 @@ restore_sensor_configs() {
 
 start_server_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-    server_bin="$SERVER_SOURCE_DIR/NanoKVM-Server"
-    tmp_free="$(tmp_available_kb)"
-
-    if [ -z "$tmp_free" ] || [ "$tmp_free" -gt 20480 ]; then
-        runtime_new="$(mktemp -d /tmp/nanokvm-server.XXXXXX 2>/dev/null || true)"
-        if [ -n "$runtime_new" ] && \
-           install -m 0755 "$server_bin" "$runtime_new/NanoKVM-Server" \
-               2>/tmp/nanokvm-server-copy.err; then
-            rm -rf "$SERVER_RUNTIME_DIR" 2>/dev/null
-            mv "$runtime_new" "$SERVER_RUNTIME_DIR"
-            server_bin="$SERVER_RUNTIME_DIR/NanoKVM-Server"
-        else
-            runtime_log "failed to stage NanoKVM-Server in /tmp; running from $SERVER_SOURCE_DIR"
-            [ -z "$runtime_new" ] || rm -rf "$runtime_new" 2>/dev/null
-        fi
-    else
-        runtime_log "/tmp has only ${tmp_free} KiB free; running NanoKVM-Server from $SERVER_SOURCE_DIR"
-    fi
-
-    : > "$SERVER_LOG" 2>/dev/null || SERVER_LOG=/dev/null
-    runtime_log "starting NanoKVM-Server from $server_bin"
-    nohup "$NANOKVM_XTHEAD_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" \
-        "$server_bin" >"$SERVER_LOG" 2>&1 &
-    echo $! > "$SERVER_PID_FILE"
+    "$NATIVE_CTL" ensure-backend >/dev/null
 }
 
 restart_server_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-    stop_watchdog
-    stop_server_process || reboot_after_unrecoverable_server "restart-server"
-    start_server_runtime || return 1
-    start_watchdog
+    "$NATIVE_CTL" restart-backend >/dev/null
 }
 
 health_check() {
@@ -371,11 +294,7 @@ health_check() {
 
 restart_server_safe() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-    mkdir -p /etc/kvm /kvmapp/kvm
-    printf 'mjpeg\n' > /kvmapp/kvm/type
-    printf 'H.264 encoder health check failed; restarted in MJPEG safe mode\n' > "$H264_SAFE_MODE_FILE"
-    stop_server_process || reboot_after_unrecoverable_server "H.264 safe restart"
-    start_server_runtime
+    "$NATIVE_CTL" restart-backend-safe >/dev/null
 }
 
 start_watchdog() {
@@ -545,14 +464,12 @@ start_system_update_watchdog() {
 
 stop_runtime() {
     "$NATIVE_CTL" boot-ready >/dev/null || return 1
-    stop_system_update_watchdog
-    stop_watchdog
     "$NATIVE_CTL" shutdown >/dev/null || {
-        runtime_log "native closure unproven; preserving backend and runtime files"
+        runtime_log "runtime closure denied or unproven; preserving watchdogs and runtime files"
         return 1
     }
-    stop_server_process || reboot_after_unrecoverable_server "runtime stop"
-    rm -rf /tmp/server 2>/dev/null
+    stop_system_update_watchdog
+    stop_watchdog
 }
 
 start_runtime() {

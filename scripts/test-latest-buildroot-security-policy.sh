@@ -65,8 +65,16 @@ grep -Fq 'EXPECTED_RUST_RUNPATH=' "$POST_BUILD"
 grep -Fq 'restore_rust_elf server/NanoKVM-Server' "$POST_BUILD"
 reject_text '/tmp/server/dl_lib' "$ROOT/server-rust/scripts/build-linked-libkvm.sh"
 reject_text '/tmp/server/dl_lib' "$ROOT/kvmapp/system/init.d/S95nanokvm"
-require_line 'NANOKVM_NATIVE_LIBRARY_PATH=/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd' \
-	"$ROOT/kvmapp/system/init.d/S95nanokvm"
+require_line '            "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",' \
+	"$ROOT/server-rust/src/bin/nanokvm-native-owner.rs"
+require_line '            "/kvmapp/server/NanoKVM-Server",' \
+	"$ROOT/server-rust/src/bin/nanokvm-native-owner.rs"
+for operation in ensure-backend restart-backend restart-backend-safe; do
+	require_line "    \"\$NATIVE_CTL\" $operation >/dev/null" "$ROOT/kvmapp/system/init.d/S95nanokvm"
+done
+for obsolete in SERVER_PID_FILE SERVER_RUNTIME_DIR NANOKVM_XTHEAD_LOADER stop_server_process; do
+	reject_text "$obsolete" "$ROOT/kvmapp/system/init.d/S95nanokvm"
+done
 test -f "$ROOT/kvmapp/system/keys/update-keys/README.md"
 test -f "$ROOT/kvmapp/system/keys/update-keys/hardened-system-prod-2026q3.pub.pem"
 test -f "$ROOT/kvmapp/system/keys/update-key-policy"

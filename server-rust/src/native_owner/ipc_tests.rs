@@ -10,6 +10,7 @@ fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
         enrollment: super::super::boot::Permit::fixture(&File::open(root).unwrap()),
+        update_parent: Some(File::open(root).unwrap()),
         journal: journal::Store::fixture(
             &File::open(root).unwrap(),
             nix::unistd::geteuid().as_raw(),
@@ -41,10 +42,10 @@ pub(super) fn owner_command(root: &Path, role: Role) -> Command {
     .env("NANOKVM_NATIVE_IPC_FIXTURE", root)
     .env(
         "NANOKVM_NATIVE_IPC_ROLE",
-        if role == Role::KvmSystem {
-            "kvm"
-        } else {
-            "hwmon"
+        match role {
+            Role::KvmSystem => "kvm",
+            Role::Hwmon => "hwmon",
+            Role::Backend => "backend",
         },
     )
     .stdout(Stdio::null())
@@ -58,13 +59,244 @@ fn owner_probe() {
     };
     let root = Path::new(&root);
     let role = std::env::var("NANOKVM_NATIVE_IPC_ROLE").unwrap();
-    fs::write(root.join(role), std::process::id().to_string()).unwrap();
+    fs::write(root.join(&role), std::process::id().to_string()).unwrap();
     let mut s = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s.write_all(b"R").unwrap();
     let mut stop = [0];
     let _ = s.read(&mut stop);
+    if role == "backend" && root.join("backend-stop-hold").exists() {
+        fs::write(root.join("backend-stopping"), b"stopping").unwrap();
+        until(|| !root.join("backend-stop-hold").exists());
+    }
     s.write_all(b"D\0").unwrap();
+}
+
+#[test]
+fn native_pause_keeps_backend_and_resume_never_publishes_false_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut e = engine(root.path());
+    for operation in [
+        Operation::EnsureKvm,
+        Operation::EnsureHwmon,
+        Operation::EnsureBackend,
+    ] {
+        assert_eq!(e.request(1, operation).code, Code::Ok);
+    }
+    until(|| {
+        e.tick();
+        e.roles == [2; 2] && e.backend_status == Some(Status::Running)
+    });
+    let backend = fs::read(root.path().join("backend")).unwrap();
+    assert_eq!(e.request(1, Operation::Pause).code, Code::Ok);
+    until(|| {
+        e.tick();
+        e.mode == Mode::Paused
+    });
+    assert_eq!(e.request(1, Operation::BackendRunning).code, Code::Ok);
+    assert_eq!(fs::read(root.path().join("backend")).unwrap(), backend);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        3
+    );
+    assert_eq!(e.request(1, Operation::Resume).mode, Mode::Running);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        1
+    );
+    assert_eq!(e.backend_status, Some(Status::Running));
+    assert_eq!(e.request(1, Operation::Shutdown).code, Code::Ok);
+    until(|| {
+        e.tick();
+        e.mode == Mode::Stopped
+    });
+    assert!(matches!(e.backend_status, Some(Status::Closed(_))));
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        2
+    );
+}
+
+#[test]
+fn update_or_configuration_owner_denies_backend_restart_and_full_shutdown_before_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let mut e = engine(root.path());
+    e.request(1, Operation::EnsureBackend);
+    until(|| {
+        e.tick();
+        e.backend_status == Some(Status::Running)
+    });
+    let parent = File::open(root.path()).unwrap();
+    let pid = fs::read(root.path().join("backend")).unwrap();
+    let update = crate::update::operation_lock::ProcessLock::from_parent(
+        &parent,
+        nix::unistd::geteuid().as_raw(),
+    )
+    .unwrap();
+    for op in [
+        Operation::RestartBackend,
+        Operation::RestartBackendSafe,
+        Operation::Shutdown,
+    ] {
+        assert_eq!(e.request(1, op).code, Code::Busy);
+        assert_eq!(e.backend_status, Some(Status::Running));
+    }
+    drop(update);
+    let writers =
+        crate::update::state_writers::StateWriters::for_test_parent(parent.try_clone().unwrap());
+    let configuration = writers.configuration().unwrap();
+    for op in [
+        Operation::RestartBackend,
+        Operation::RestartBackendSafe,
+        Operation::Shutdown,
+    ] {
+        assert_eq!(e.request(1, op).code, Code::Busy);
+        assert_eq!(e.backend_status, Some(Status::Running));
+    }
+    drop(configuration);
+    assert_eq!(fs::read(root.path().join("backend")).unwrap(), pid);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        1
+    );
+    e.request(1, Operation::Shutdown);
+    until(|| {
+        e.tick();
+        e.mode == Mode::Stopped
+    });
+}
+
+#[test]
+fn restart_publishes_stopping_and_retains_admission_through_exact_backend_join() {
+    let root = tempfile::tempdir().unwrap();
+    let mut e = engine(root.path());
+    e.request(1, Operation::EnsureBackend);
+    until(|| {
+        e.tick();
+        e.backend_status == Some(Status::Running)
+    });
+    let prior = fs::read(root.path().join("backend")).unwrap();
+    fs::write(root.path().join("backend-stop-hold"), b"hold").unwrap();
+    assert_eq!(e.request(1, Operation::RestartBackend).code, Code::Ok);
+    until(|| root.path().join("backend-stopping").exists());
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        4
+    );
+    let parent = File::open(root.path()).unwrap();
+    assert!(matches!(
+        crate::update::operation_lock::ProcessLock::from_parent(
+            &parent,
+            nix::unistd::geteuid().as_raw()
+        ),
+        Err(crate::update::operation_lock::LockError::Busy)
+    ));
+    assert_eq!(e.request(2, Operation::Pause).code, Code::Busy);
+    assert_eq!(e.request(2, Operation::RestartBackend).code, Code::Busy);
+    assert_eq!(
+        e.request(2, Operation::BackendRunning).code,
+        Code::Unavailable
+    );
+    assert_eq!(fs::read(root.path().join("backend")).unwrap(), prior);
+    fs::remove_file(root.path().join("backend-stop-hold")).unwrap();
+    until(|| {
+        e.tick();
+        e.backend_restart.is_none() && e.backend_status == Some(Status::Running)
+    });
+    assert_ne!(fs::read(root.path().join("backend")).unwrap(), prior);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        1
+    );
+    drop(
+        crate::update::operation_lock::ProcessLock::from_parent(
+            &parent,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap(),
+    );
+    e.request(1, Operation::Shutdown);
+    until(|| {
+        e.tick();
+        e.mode == Mode::Stopped
+    });
+}
+
+#[test]
+fn safe_restart_publishes_fixed_policy_only_after_update_admission() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("kvmapp/kvm")).unwrap();
+    fs::create_dir_all(root.path().join("etc/kvm")).unwrap();
+    fs::write(root.path().join("kvmapp/kvm/type"), b"h264\n").unwrap();
+    let mut e = engine(root.path());
+    e.request(1, Operation::EnsureBackend);
+    until(|| {
+        e.tick();
+        e.backend_status == Some(Status::Running)
+    });
+    let parent = File::open(root.path()).unwrap();
+    let update = crate::update::operation_lock::ProcessLock::from_parent(
+        &parent,
+        nix::unistd::geteuid().as_raw(),
+    )
+    .unwrap();
+    assert_eq!(e.request(1, Operation::RestartBackendSafe).code, Code::Busy);
+    assert_eq!(
+        fs::read(root.path().join("kvmapp/kvm/type")).unwrap(),
+        b"h264\n"
+    );
+    assert!(!root.path().join("etc/kvm/h264_safe_mode").exists());
+    drop(update);
+    assert_eq!(e.request(1, Operation::RestartBackendSafe).code, Code::Ok);
+    until(|| {
+        e.tick();
+        e.backend_restart.is_none() && e.backend_status == Some(Status::Running)
+    });
+    assert_eq!(
+        fs::read(root.path().join("kvmapp/kvm/type")).unwrap(),
+        b"mjpeg\n"
+    );
+    assert!(root.path().join("etc/kvm/h264_safe_mode").is_file());
+    e.request(1, Operation::Shutdown);
+    until(|| {
+        e.tick();
+        e.mode == Mode::Stopped
+    });
+}
+
+#[test]
+fn stopping_publication_failure_does_not_send_backend_stop_or_claim_completion() {
+    for operation in [Operation::RestartBackend, Operation::Shutdown] {
+        let root = tempfile::tempdir().unwrap();
+        let mut e = engine(root.path());
+        e.request(1, Operation::EnsureBackend);
+        until(|| {
+            e.tick();
+            e.backend_status == Some(Status::Running)
+        });
+        let next = root.path().join("native-runtime-owner/.state.next");
+        fs::write(&next, b"foreign evidence").unwrap();
+        let reply = e.request(1, operation);
+        assert_eq!(reply.code, Code::Uncertain);
+        assert_eq!(reply.mode, Mode::Uncertain);
+        assert!(e.backend_restart.is_none());
+        e.tick();
+        assert_eq!(e.backend_status, Some(Status::Running));
+        assert_eq!(fs::read(next).unwrap(), b"foreign evidence");
+        assert_eq!(
+            fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+            1
+        );
+        // No Stop was sent, so releasing these short permits is safe. Durable
+        // ambiguous evidence still blocks coordinator admission (root fixture).
+        drop(
+            crate::update::operation_lock::ProcessLock::from_parent(
+                &File::open(root.path()).unwrap(),
+                nix::unistd::geteuid().as_raw(),
+            )
+            .unwrap(),
+        );
+    }
 }
 #[test]
 fn maintenance_stays_durable_after_quiescence_and_only_owner_can_resume() {

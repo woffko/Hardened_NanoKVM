@@ -30,6 +30,10 @@ fn main() -> ExitCode {
             Some("ensure-kvm") => Some(Operation::EnsureKvm),
             Some("ensure-hwmon") => Some(Operation::EnsureHwmon),
             Some("shutdown") => Some(Operation::Shutdown),
+            Some("ensure-backend") => Some(Operation::EnsureBackend),
+            Some("backend-running") => Some(Operation::BackendRunning),
+            Some("restart-backend") => Some(Operation::RestartBackend),
+            Some("restart-backend-safe") => Some(Operation::RestartBackendSafe),
             _ => None,
         }
     } else {
@@ -37,7 +41,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|ensure-kvm|ensure-hwmon|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -52,12 +56,31 @@ fn main() -> ExitCode {
         return ExitCode::from(71);
     }
     let start = Instant::now();
+    let backend_control = matches!(
+        op,
+        Operation::EnsureBackend | Operation::RestartBackend | Operation::RestartBackendSafe
+    );
+    let mut backend_wait = false;
     while start.elapsed() < Duration::from_secs(15) {
         match channel.poll() {
             Ok(Some(reply)) => {
-                if reply.code != Code::Ok {
+                if op == Operation::BackendRunning && reply.code == Code::Unavailable {
+                    return ExitCode::from(1);
+                }
+                if reply.code != Code::Ok && !(backend_wait && reply.code == Code::Unavailable) {
                     eprintln!("broker: {:?} {:?}", reply.code, reply.mode);
                     return ExitCode::from(71);
+                }
+                if backend_control {
+                    if backend_wait && reply.code == Code::Ok {
+                        return ExitCode::SUCCESS;
+                    }
+                    backend_wait = true;
+                    if channel.begin(Operation::BackendRunning).is_err() {
+                        return ExitCode::from(71);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
                 }
                 if op == Operation::Shutdown && reply.mode == Mode::Stopped {
                     // The reply precedes daemon return. Do not let S95 replace
@@ -79,6 +102,7 @@ fn main() -> ExitCode {
                     Operation::EnsureKvm => running && reply.roles[0] == 2,
                     Operation::EnsureHwmon => running && reply.roles[1] == 2,
                     Operation::Observe => true,
+                    Operation::BackendRunning => true,
                     _ => false,
                 };
                 if complete {

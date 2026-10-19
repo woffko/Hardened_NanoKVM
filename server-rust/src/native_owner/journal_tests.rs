@@ -48,6 +48,101 @@ fn kernel_boot_epoch_is_stable_bounded_and_uses_the_ticket_parser() {
 }
 
 #[test]
+fn update_fence_only_grants_backend_stop_under_current_boot_stopping() {
+    let root = tempfile::tempdir().unwrap();
+    let store = acquire(root.path(), BOOT).unwrap();
+    let epoch = Epoch::parse(BOOT.as_bytes()).unwrap();
+    let uid = nix::unistd::geteuid().as_raw();
+    assert!(Store::check_update_at(&store.directory, uid, epoch).is_ok());
+    for boot in [BOOT, OTHER] {
+        for phase in [
+            Phase::Active,
+            Phase::Closed,
+            Phase::Maintenance,
+            Phase::Stopping,
+        ] {
+            private(
+                &root.path().join(DIRECTORY).join(STATE),
+                &record(Epoch::parse(boot.as_bytes()).unwrap(), phase),
+            );
+            assert_eq!(
+                Store::check_update_at(&store.directory, uid, epoch).is_ok(),
+                boot != BOOT || phase != Phase::Stopping
+            );
+        }
+    }
+}
+
+#[test]
+fn update_fence_rejects_unsafe_corrupt_and_ambiguous_objects_without_repair() {
+    for fault in [
+        "hash",
+        "reserved",
+        "phase",
+        "short",
+        "mode",
+        "symlink",
+        "hardlink",
+        "fifo",
+        "directory",
+        "next",
+        "recovery",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let store = acquire(root.path(), BOOT).unwrap();
+        let epoch = Epoch::parse(BOOT.as_bytes()).unwrap();
+        let state = root.path().join(DIRECTORY).join(STATE);
+        let bytes = record(epoch, Phase::Closed);
+        private(&state, &bytes);
+        match fault {
+            "hash" | "reserved" | "phase" => {
+                let mut corrupted = bytes;
+                corrupted[match fault {
+                    "reserved" => 45,
+                    "phase" => 44,
+                    _ => HASH,
+                }] ^= 128;
+                if fault != "hash" {
+                    let hash = Sha256::digest(&corrupted[..HASH]);
+                    corrupted[HASH..].copy_from_slice(&hash);
+                }
+                private(&state, &corrupted);
+            }
+            "short" => private(&state, b"short"),
+            "mode" => fs::set_permissions(&state, fs::Permissions::from_mode(0o644)).unwrap(),
+            "symlink" | "fifo" | "directory" => {
+                fs::remove_file(&state).unwrap();
+                match fault {
+                    "symlink" => symlink(root.path().join("absent"), &state).unwrap(),
+                    "fifo" => nix::unistd::mkfifo(&state, nix::sys::stat::Mode::S_IRUSR).unwrap(),
+                    _ => fs::create_dir(&state).unwrap(),
+                }
+            }
+            "hardlink" => fs::hard_link(&state, root.path().join("alias")).unwrap(),
+            "next" => symlink(
+                root.path().join("absent"),
+                root.path().join(DIRECTORY).join(NEXT),
+            )
+            .unwrap(),
+            "recovery" => fs::create_dir(root.path().join(DIRECTORY).join(RECOVERY)).unwrap(),
+            _ => unreachable!(),
+        }
+        let before = fs::symlink_metadata(&state).unwrap();
+        assert!(
+            Store::check_update_at(&store.directory, nix::unistd::geteuid().as_raw(), epoch)
+                .is_err(),
+            "{fault}"
+        );
+        let after = fs::symlink_metadata(&state).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.mode(), before.len()),
+            (after.dev(), after.ino(), after.mode(), after.len()),
+            "{fault}"
+        );
+    }
+}
+
+#[test]
 fn singleton_active_intent_survives_drop_but_clean_receipt_allows_reopen() {
     let root = tempfile::tempdir().unwrap();
     let mut store = acquire(root.path(), BOOT).unwrap();

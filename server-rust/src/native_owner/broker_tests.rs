@@ -13,6 +13,7 @@ fn acquire(root: &Path) -> Result<Broker, JournalError> {
     Ok(Broker {
         group: Group::default(),
         enrollment: boot::Permit::fixture(&File::open(root).unwrap()),
+        update_parent: Some(File::open(root).unwrap()),
         journal: journal::Store::fixture(
             &File::open(root).unwrap(),
             nix::unistd::geteuid().as_raw(),

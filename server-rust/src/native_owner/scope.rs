@@ -120,11 +120,18 @@ fn initialize(control: &UnixStream) -> Result<(), Error> {
     Ok(())
 }
 
-fn control_event(control: &mut UnixStream) -> Result<bool, Error> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Idle,
+    Stop,
+    Lost,
+}
+
+fn control_event(control: &mut UnixStream) -> Result<Control, Error> {
     let mut byte = [0];
     match control.read(&mut byte) {
-        Ok(0) => Ok(true), // Parent disconnect is Stop, never abandonment.
-        Ok(_) if byte == *b"S" => Ok(true),
+        Ok(0) => Ok(Control::Lost),
+        Ok(_) if byte == *b"S" => Ok(Control::Stop),
         Ok(_) => Err(Error::Control),
         Err(error)
             if matches!(
@@ -132,7 +139,7 @@ fn control_event(control: &mut UnixStream) -> Result<bool, Error> {
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) =>
         {
-            Ok(false)
+            Ok(Control::Idle)
         }
         Err(_) => Err(Error::Control),
     }
@@ -157,9 +164,20 @@ pub(super) fn signal_child(pid: Pid, signal: Signal) -> Result<(), Error> {
     }
 }
 
-pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outcome, Error> {
+pub(super) fn run(command: Command, control: UnixStream) -> Result<Outcome, Error> {
+    run_guarded(command, control, || Some(()))
+}
+
+/// Backend loss must not kill an update owned by the still-live backend.
+/// Callback obtains fixed update exclusion after controller/leader loss.
+/// Explicit Stop has the broker's update permit and durable stopping fence.
+pub(super) fn run_guarded<G>(
+    mut command: Command,
+    mut control: UnixStream,
+    mut orphan_admission: impl FnMut() -> Option<G>,
+) -> Result<Outcome, Error> {
     initialize(&control)?;
-    if control_event(&mut control)? {
+    if control_event(&mut control)? != Control::Idle {
         let _ = control.write_all(b"D\0");
         return Ok(Outcome::Stopped);
     }
@@ -174,7 +192,10 @@ pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outco
     // Child is deliberately reaped only by the single owner below, not Child::wait.
     let _leader = leader;
     let mut failed = control.write_all(b"R").is_err();
-    let mut stopping = failed.then(Instant::now);
+    let mut stop_pending = failed;
+    let mut lost = failed;
+    let mut orphan_guard = None;
+    let mut stopping = None;
     let mut leader_success = None;
     loop {
         // Only a successful kernel ECHILD after all waitable exits is closure.
@@ -186,7 +207,7 @@ pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outco
                         if stopping.is_none() {
                             leader_success = Some(status.exit_status() == Some(0));
                         }
-                        stopping.get_or_insert_with(Instant::now);
+                        stop_pending = true;
                     }
                 }
                 Ok(None) => break,
@@ -197,7 +218,8 @@ pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outco
                 Err(Errno::INTR) => {}
                 Err(_) => {
                     failed = true;
-                    stopping.get_or_insert_with(Instant::now);
+                    stop_pending = true;
+                    lost = true;
                     break;
                 }
             }
@@ -219,16 +241,27 @@ pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outco
             let _ = control.write_all(&[b'D', code]);
             return result;
         }
-        if stopping.is_none() {
+        if stopping.is_none() && !lost {
             match control_event(&mut control) {
-                Ok(true) => {
+                Ok(Control::Stop) => {
                     stopping = Some(Instant::now());
                 }
-                Ok(false) => {}
+                Ok(Control::Lost) => {
+                    stop_pending = true;
+                    lost = true;
+                }
+                Ok(Control::Idle) => {}
                 Err(_) => {
                     failed = true;
-                    stopping = Some(Instant::now());
+                    stop_pending = true;
+                    lost = true;
                 }
+            }
+        }
+        if stopping.is_none() && stop_pending && orphan_guard.is_none() {
+            orphan_guard = orphan_admission();
+            if orphan_guard.is_some() {
+                stopping = Some(Instant::now());
             }
         }
         if let Some(started) = stopping {
@@ -277,14 +310,15 @@ pub(super) fn run(mut command: Command, mut control: UnixStream) -> Result<Outco
             tv_nsec: STEP.as_nanos() as _,
         };
         let mut fds = [PollFd::new(&control, PollFlags::IN)];
-        let fds = if stopping.is_some() {
+        let fds = if stopping.is_some() || lost {
             &mut [][..]
         } else {
             &mut fds[..]
         };
         if !matches!(poll(fds, Some(&timeout)), Ok(_) | Err(Errno::INTR)) {
             failed = true;
-            stopping.get_or_insert_with(Instant::now);
+            stop_pending = true;
+            lost = true;
         }
         // No teardown timeout returns while children still exist. A controller
         // deadline/disconnect cannot manufacture a completed scope receipt.

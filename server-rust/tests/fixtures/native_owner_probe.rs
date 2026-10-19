@@ -82,6 +82,13 @@ fn main() -> ExitCode {
         match args[2].as_str() {
             "missing" => return ExitCode::SUCCESS,
             "malformed" => control.write_all(b"X").unwrap(),
+            "malformed-record" => {
+                control.write_all(b"X").unwrap();
+                let mut stop = [0];
+                let count = control.read(&mut stop).unwrap();
+                fs::write(root.join("received-control"), &stop[..count]).unwrap();
+                return ExitCode::SUCCESS;
+            }
             "duplicate" => control.write_all(b"R").unwrap(),
             "killed" => {
                 let mut stop = [0];
@@ -176,7 +183,23 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         };
     }
-    match scope::run(command, control) {
+    let result = if args[1] == "scope-guarded" {
+        scope::run_guarded(command, control, || {
+            fs::write(root.join("orphan-attempt"), b"attempt").unwrap();
+            let file = File::open(root.join("update-lock")).unwrap();
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {
+                    fs::write(root.join("orphan-acquired"), b"acquired").unwrap();
+                    Some(file)
+                }
+                Err(rustix::io::Errno::WOULDBLOCK) => None,
+                Err(error) => panic!("fixture lock failed: {error}"),
+            }
+        })
+    } else {
+        scope::run(command, control)
+    };
+    match result {
         Ok(scope::Outcome::Stopped | scope::Outcome::Exited(true)) => ExitCode::SUCCESS,
         Ok(scope::Outcome::Exited(false)) => ExitCode::from(71),
         Err(_) => ExitCode::from(72),

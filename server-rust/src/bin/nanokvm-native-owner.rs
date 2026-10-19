@@ -18,6 +18,10 @@ fn command(role: &str) -> Option<Command> {
             "/lib/ld-musl-riscv64xthead.so.1",
             "/kvmapp/hwmon/nanokvm-hwmon",
         ),
+        "backend" => (
+            "/lib/ld-musl-riscv64xthead.so.1",
+            "/kvmapp/server/NanoKVM-Server",
+        ),
         _ => return None,
     };
     let mut command = Command::new(loader);
@@ -40,7 +44,7 @@ fn main() -> ExitCode {
         .then(|| args[2].to_str().and_then(command))
         .flatten()
     else {
-        eprintln!("usage: nanokvm-native-owner --scope {{kvm-system|hwmon}}");
+        eprintln!("usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend}}");
         return ExitCode::from(64);
     };
     // Only a root direct parent over its anonymous socketpair may launch a
@@ -58,7 +62,16 @@ fn main() -> ExitCode {
         return ExitCode::from(70);
     }
     command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    match scope::run(command, control) {
+    let result = if args[2] == "backend" {
+        scope::run_guarded(command, control, || {
+            nanokvm_rust_server::native_owner::broker::BackendOrphanPermit::try_acquire()
+                .ok()
+                .flatten()
+        })
+    } else {
+        scope::run(command, control)
+    };
+    match result {
         Ok(scope::Outcome::Stopped | scope::Outcome::Exited(true)) => ExitCode::SUCCESS,
         Ok(scope::Outcome::Exited(false)) => ExitCode::from(71),
         Err(_) => {
@@ -73,9 +86,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roles_select_only_the_two_fixed_native_programs() {
+    fn roles_select_only_the_three_fixed_programs() {
         assert!(command("kvm-system").is_some());
         assert!(command("hwmon").is_some());
+        assert!(command("backend").is_some());
         let kvm = command("kvm-system").unwrap();
         assert_eq!(kvm.get_program(), "/lib/ld-musl-riscv64v0p7_xthead.so.1");
         assert_eq!(
@@ -86,6 +100,17 @@ mod tests {
                 "/kvmapp/kvm_system/kvm_system"
             ]
         );
+        let backend = command("backend").unwrap();
+        assert_eq!(backend.get_program(), "/lib/ld-musl-riscv64xthead.so.1");
+        assert_eq!(
+            backend.get_args().collect::<Vec<_>>(),
+            [
+                "--library-path",
+                "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",
+                "/kvmapp/server/NanoKVM-Server"
+            ]
+        );
+        assert_eq!(backend.get_envs().count(), 3);
         for role in ["", "/bin/sh", "watchdog", "../../other", "hwmon;reboot"] {
             assert!(command(role).is_none());
         }

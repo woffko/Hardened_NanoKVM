@@ -143,6 +143,10 @@ fn fixed_root_child() {
     nix::unistd::chroot(Path::new(&root)).unwrap();
     std::env::set_current_dir("/").unwrap();
     let result = match expected.as_str() {
+        "update-fence" => {
+            check_production_update_fence();
+            Ok(())
+        }
         "activate" | "activate-failure" => {
             crate::native_owner::broker::boot::activate_early().map_err(io::Error::other)
         }
@@ -165,7 +169,7 @@ fn fixed_root_child() {
             result.unwrap();
             check_installed().unwrap();
         }
-        "activate" | "ready" => result.unwrap(),
+        "activate" | "ready" | "update-fence" => result.unwrap(),
         "activate-failure" | "ready-failure" => assert!(result.is_err()),
         "failure" | "legacy-refusal" => assert!(result.is_err()),
         "busy" => {
@@ -180,6 +184,56 @@ fn fixed_root_child() {
         _ => panic!("invalid native fixture case"),
     }
     println!("native-fixed-root-fixture-ran");
+}
+
+fn check_production_update_fence() {
+    use crate::update::operation::{Kind, UpdateCoordinator};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    // No test-parent escape: exercise the real fixed-root coordinator path
+    // after chroot with actual procfs and kernel boot identity.
+    let coordinator = Arc::new(UpdateCoordinator::default());
+    drop(coordinator.acquire(Kind::SystemInstall).unwrap());
+    let directory = Path::new("/etc/kvm/native-runtime-owner");
+    fs::create_dir(directory).unwrap();
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let boot = fs::read("/proc/sys/kernel/random/boot_id").unwrap();
+    let mut bytes = [0; 80];
+    bytes[..8].copy_from_slice(b"NKBROK01");
+    bytes[8..44].copy_from_slice(&boot[..36]);
+    for phase in [1, 2, 3, 4] {
+        bytes[44] = phase;
+        let hash = Sha256::digest(&bytes[..48]);
+        bytes[48..].copy_from_slice(&hash);
+        fs::write(directory.join("state"), bytes).unwrap();
+        fs::set_permissions(directory.join("state"), fs::Permissions::from_mode(0o600)).unwrap();
+        for kind in [
+            Kind::ApplicationOnline,
+            Kind::ApplicationOffline,
+            Kind::SystemDownload,
+            Kind::SystemInstall,
+            Kind::SystemRollback,
+            Kind::SystemConfirm,
+        ] {
+            let result = coordinator.acquire(kind);
+            assert_eq!(result.is_ok(), phase != 4, "phase={phase}, kind={kind:?}");
+            drop(result);
+            // A denied admission must release the kernel guard, not leak it.
+            drop(ProcessLock::acquire().unwrap());
+        }
+    }
+    fs::write(directory.join(".state.next"), b"foreign evidence").unwrap();
+    assert!(coordinator.acquire(Kind::ApplicationOffline).is_err());
+    assert_eq!(
+        fs::read(directory.join(".state.next")).unwrap(),
+        b"foreign evidence"
+    );
+    drop(ProcessLock::acquire().unwrap());
+}
+
+#[test]
+fn production_update_admission_checks_durable_backend_stop_after_exclusive_lock() {
+    Fixture::new().run("update-fence");
 }
 
 #[test]

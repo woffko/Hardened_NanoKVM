@@ -1,5 +1,5 @@
 //! Root-only, fixed-frame native lifecycle transport. No raw-write authority.
-use super::{Broker, Resume, RetainedDrain, StartFailure, journal};
+use super::{Broker, Resume, RetainedDrain, RuntimePermit, Shutdown, StartFailure, journal};
 use crate::native_owner::controller::{Completion, DrainStatus, Role, StartError, Status};
 use std::{
     io::{self, Read, Write},
@@ -21,6 +21,10 @@ pub enum Operation {
     Pause = 4,
     Resume = 5,
     Shutdown = 6,
+    EnsureBackend = 7,
+    BackendRunning = 8,
+    RestartBackend = 9,
+    RestartBackendSafe = 10,
 }
 impl Operation {
     fn decode(byte: u8) -> Option<Self> {
@@ -31,6 +35,10 @@ impl Operation {
             4 => Some(Self::Pause),
             5 => Some(Self::Resume),
             6 => Some(Self::Shutdown),
+            7 => Some(Self::EnsureBackend),
+            8 => Some(Self::BackendRunning),
+            9 => Some(Self::RestartBackend),
+            10 => Some(Self::RestartBackendSafe),
             _ => None,
         }
     }
@@ -244,10 +252,18 @@ struct Engine {
     mode: Mode,
     roles: [u8; 2],
     stopped_at: Option<Instant>,
+    backend_wanted: bool,
+    backend_status: Option<Status>,
+    backend_retry: Instant,
+    backend_restart: Option<BackendRestart>,
     #[cfg(test)]
     fixture: Option<std::path::PathBuf>,
     #[cfg(test)]
     fixture_request_completed: Option<Instant>,
+}
+struct BackendRestart {
+    _admission: RuntimePermit,
+    safe_mode: bool,
 }
 impl Engine {
     fn new(broker: Broker) -> Self {
@@ -260,6 +276,10 @@ impl Engine {
             mode: Mode::Running,
             roles: [0; 2],
             stopped_at: None,
+            backend_wanted: false,
+            backend_status: None,
+            backend_retry: Instant::now(),
+            backend_restart: None,
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -280,6 +300,7 @@ impl Engine {
         };
         self.owner = Some(match owner {
             Owner::Running(mut broker) => {
+                self.backend_status = broker.backend_status();
                 let states = broker.poll();
                 self.roles = states.map(role_status);
                 if states.contains(&Some(Status::Uncertain)) {
@@ -302,6 +323,51 @@ impl Engine {
                             }
                         }
                     }
+                    if self.backend_restart.is_some()
+                        && matches!(self.backend_status, None | Some(Status::Closed(_)))
+                    {
+                        if let Some(restart) = self.backend_restart.take() {
+                            // Both update/config permits remain held through
+                            // safe-mode publication and the replacement spawn.
+                            let policy = if restart.safe_mode {
+                                broker.prepare_safe_mode(&restart._admission)
+                            } else {
+                                Ok(())
+                            };
+                            let command = self.command(Role::Backend);
+                            if policy.is_err()
+                                || broker.start_backend(command, &restart._admission).is_err()
+                                || broker.finish_backend_restart().is_err()
+                            {
+                                self.mode = Mode::Uncertain;
+                            }
+                            drop(restart);
+                        }
+                    } else if self.backend_restart.is_none()
+                        && self.backend_wanted
+                        && Instant::now() >= self.backend_retry
+                        && matches!(self.backend_status, None | Some(Status::Closed(_)))
+                    {
+                        self.backend_retry = Instant::now() + RETRY;
+                        match broker.runtime_permit() {
+                            Ok(admission) => {
+                                let command = self.command(Role::Backend);
+                                if matches!(
+                                    broker.start_backend(command, &admission),
+                                    Err(StartFailure::Journal(_))
+                                        | Err(StartFailure::Scope(StartError::UncertainOwnership))
+                                ) {
+                                    self.mode = Mode::Uncertain;
+                                }
+                            }
+                            Err(super::JournalError::Busy) => {}
+                            Err(_) => self.mode = Mode::Uncertain,
+                        }
+                    }
+                }
+                self.backend_status = broker.backend_status();
+                if self.backend_status == Some(Status::Uncertain) {
+                    self.mode = Mode::Uncertain;
                 }
                 self.roles = broker.poll().map(role_status);
                 if self.roles.contains(&6) {
@@ -311,6 +377,7 @@ impl Engine {
             }
             Owner::Paused(mut drain) => {
                 let result = drain.poll();
+                self.backend_status = drain.backend_status();
                 self.roles = match result {
                     Ok(DrainStatus::Drained) => [4; 2],
                     Ok(DrainStatus::Pending) => [3; 2],
@@ -333,6 +400,9 @@ impl Engine {
                     }
                     _ => Mode::Uncertain,
                 };
+                if self.backend_status == Some(Status::Uncertain) {
+                    self.mode = Mode::Uncertain;
+                }
                 Owner::Paused(drain)
             }
             Owner::Stopping(mut drain) => {
@@ -344,6 +414,7 @@ impl Engine {
                     }
                     _ => Mode::Uncertain,
                 };
+                self.backend_status = drain.backend_status();
                 self.roles = if self.mode == Mode::Stopped {
                     [4; 2]
                 } else {
@@ -365,6 +436,44 @@ impl Engine {
         let mut code = Code::Ok;
         match op {
             Operation::Observe => {}
+            Operation::BackendRunning => {
+                if self.backend_restart.is_some() || self.backend_status != Some(Status::Running) {
+                    code = Code::Unavailable;
+                }
+            }
+            Operation::EnsureBackend => {
+                if self.mode != Mode::Running || self.backend_restart.is_some() {
+                    code = Code::Busy;
+                } else {
+                    self.backend_wanted = true;
+                    self.backend_retry = Instant::now();
+                    self.tick();
+                }
+            }
+            Operation::RestartBackend | Operation::RestartBackendSafe => {
+                if self.mode != Mode::Running || self.backend_restart.is_some() {
+                    code = Code::Busy;
+                } else if let Some(Owner::Running(broker)) = self.owner.as_mut() {
+                    match broker.runtime_permit() {
+                        Ok(admission) => {
+                            if broker.stop_backend(&admission).is_err() {
+                                self.mode = Mode::Uncertain;
+                                return self.reply(Code::Uncertain);
+                            }
+                            self.backend_wanted = true;
+                            self.backend_restart = Some(BackendRestart {
+                                _admission: admission,
+                                safe_mode: op == Operation::RestartBackendSafe,
+                            });
+                            self.tick();
+                        }
+                        Err(super::JournalError::Busy) => code = Code::Busy,
+                        Err(_) => code = Code::Unavailable,
+                    }
+                } else {
+                    code = Code::Busy;
+                }
+            }
             Operation::EnsureKvm | Operation::EnsureHwmon => {
                 if self.mode != Mode::Running {
                     code = Code::Busy;
@@ -381,7 +490,9 @@ impl Engine {
                 }
             }
             Operation::Pause => {
-                if self.lease == Some(key) && !self.abandoned {
+                if self.backend_restart.is_some() {
+                    code = Code::Busy;
+                } else if self.lease == Some(key) && !self.abandoned {
                 } else {
                     match self.owner.take() {
                         Some(Owner::Running(broker)) => {
@@ -422,15 +533,34 @@ impl Engine {
                 }
             }
             Operation::Shutdown => {
-                if self.lease.is_some() || self.abandoned {
+                if self.lease.is_some() || self.abandoned || self.backend_restart.is_some() {
                     code = Code::Busy;
                 } else {
                     match self.owner.take() {
-                        Some(Owner::Running(broker)) => {
-                            self.wanted = [false; 2];
-                            self.owner = Some(Owner::Stopping(broker.begin_drain()));
-                            self.tick();
-                        }
+                        Some(Owner::Running(broker)) => match broker.runtime_permit() {
+                            Ok(admission) => {
+                                self.wanted = [false; 2];
+                                self.backend_wanted = false;
+                                match broker.shutdown(admission) {
+                                    Shutdown::Draining(drain) => {
+                                        self.owner = Some(Owner::Stopping(drain));
+                                        self.tick();
+                                    }
+                                    Shutdown::Retained(broker) => {
+                                        self.owner = Some(Owner::Running(broker));
+                                        self.mode = Mode::Uncertain;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                code = if matches!(error, super::JournalError::Busy) {
+                                    Code::Busy
+                                } else {
+                                    Code::Unavailable
+                                };
+                                self.owner = Some(Owner::Running(broker));
+                            }
+                        },
                         other => {
                             self.owner = other;
                             code = Code::Busy;
