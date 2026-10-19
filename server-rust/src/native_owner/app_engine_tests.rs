@@ -49,6 +49,10 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
     fs::write(root.join("trial-ack-hold"), b"hold").unwrap();
     let mut engine = engine(root);
     start_all(&mut engine);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
     let native = [
         fs::read(root.join("kvm")).unwrap(),
         fs::read(root.join("hwmon")).unwrap(),
@@ -65,6 +69,10 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
         InstallOwner::Trial(_)
     ));
     assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
     assert_excluded(root);
     for op in [
         Operation::EnsureKvm,
@@ -87,6 +95,11 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
     assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
     assert_eq!(engine.mode, Mode::Installing);
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::CommitPending);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
+    assert_excluded(root);
     assert_eq!(
         engine.request(2, Operation::BackendRunning).code,
         Code::Unavailable
@@ -233,8 +246,33 @@ async fn rollback_retirement_collision_retains_engine_exclusions_and_never_resta
         );
         assert!(!root.join("backend").exists());
     }
-    // This path has proven/reaped every probe before restoring the old slot.
-    drop(engine);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Uncertain
+    );
+    assert_excluded(root);
+    fs::remove_file(collision.join("foreign")).unwrap();
+    fs::remove_dir(&collision).unwrap();
+    // Repairing the known fixture collision does not implicitly retry/release.
+    for _ in 0..3 {
+        engine.tick();
+        assert_excluded(root);
+    }
+    let reply = engine.request(2, Operation::RetryAppRetirement);
+    assert_eq!(reply.code, Code::Ok);
+    assert_eq!(reply.mode, Mode::Running);
+    assert!(engine.install.is_none());
+    let snapshot = app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.phase, app_slot::Phase::RolledBack);
+    assert!(snapshot.archived);
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
+    shutdown(&mut engine);
 }
 
 #[tokio::test]
@@ -250,10 +288,6 @@ async fn committed_retirement_collision_keeps_terminal_owner_without_retry_rever
         engine.tick();
         root.join("trial-authorized").exists()
     });
-    let pid: i32 = fs::read_to_string(root.join("trial-owner-started"))
-        .unwrap()
-        .parse()
-        .unwrap();
     let collision = root
         .join("application-slot/history")
         .join(format!("{:032x}", u128::from_be_bytes(transaction)));
@@ -303,23 +337,103 @@ async fn committed_retirement_collision_keeps_terminal_owner_without_retry_rever
         assert!(!root.join("kvm").exists());
         assert!(!root.join("hwmon").exists());
     }
-    // Explicitly forfeit this childless probe, then reap exactly its PID. Its
-    // EOF cleanup is not closure authority for a production native runtime.
-    drop(engine);
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Uncertain
+    );
+    assert_excluded(root);
+    fs::remove_file(collision.join("foreign")).unwrap();
+    fs::remove_dir(&collision).unwrap();
+    for _ in 0..3 {
+        engine.tick();
+        assert_excluded(root);
+    }
+    let reply = engine.request(2, Operation::RetryAppRetirement);
+    assert_eq!(reply.code, Code::Ok);
+    assert_eq!(reply.mode, Mode::Running);
+    assert!(engine.install.is_none());
     until(|| {
+        engine.tick();
+        engine.backend_status == Some(Status::Running)
+    });
+    let snapshot = app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.phase, app_slot::Phase::Committed);
+    assert!(snapshot.archived);
+    assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert!(!root.join("trial-stopping").exists());
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
+    shutdown(&mut engine);
+    assert!(!root.join("trial-controller-lost").exists());
+}
+
+#[tokio::test]
+async fn terminal_retry_cannot_clear_later_owner_loss_even_after_the_archive_collision_is_removed()
+{
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    fs::write(root.join("trial-ack-hold"), b"hold").unwrap();
+    let mut engine = engine(root);
+    let (_, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        root.join("trial-authorized").exists()
+    });
+    let pid: i32 = fs::read_to_string(root.join("trial-owner-started"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let collision = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    fs::create_dir_all(&collision).unwrap();
+    fs::set_permissions(
+        collision.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_file(root.join("trial-ack-hold")).unwrap();
+    until(|| {
+        engine.tick();
         matches!(
-            nix::sys::wait::waitpid(
-                nix::unistd::Pid::from_raw(pid),
-                Some(nix::sys::wait::WaitPidFlag::WNOHANG)
-            )
-            .unwrap(),
-            nix::sys::wait::WaitStatus::Exited(_, 0)
+            engine.install.as_ref().map(|i| &i.owner),
+            Some(InstallOwner::Committed(_))
         )
     });
-    assert_eq!(
-        fs::read(root.join("trial-controller-lost")).unwrap(),
-        b"lost after commit"
-    );
+    // Exact childless fixture owner, not an arbitrary PID or target process.
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    until(|| {
+        engine.tick();
+        engine.backend_status == Some(Status::Uncertain)
+            && !Path::new("/proc").join(pid.to_string()).exists()
+    });
+    fs::remove_dir(&collision).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            engine.request(2, Operation::RetryAppRetirement).code,
+            Code::Uncertain
+        );
+        assert_excluded(root);
+        assert!(matches!(
+            engine.install.as_ref().unwrap().owner,
+            InstallOwner::Committed(_)
+        ));
+        assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+        assert!(!collision.exists());
+        assert!(root.join("application-slot/current").exists());
+    }
+    // The group reaped the exact probe but did not receive a closure receipt.
+    // No owner destruction, PID disappearance or retry grants closure.
+    drop(engine);
 }
 
 #[tokio::test]
@@ -447,6 +561,10 @@ async fn commit_publication_failure_retains_engine_owner_and_never_retries_or_re
         assert_eq!(engine.mode, Mode::Uncertain);
         assert_eq!(
             engine.request(2, Operation::CancelAppInstall).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            engine.request(2, Operation::RetryAppRetirement).code,
             Code::Uncertain
         );
         assert_excluded(root);

@@ -30,6 +30,7 @@ pub enum Operation {
     RestartBackend = 9,
     RestartBackendSafe = 10,
     CancelAppInstall = 11,
+    RetryAppRetirement = 12,
 }
 impl Operation {
     fn decode(byte: u8) -> Option<Self> {
@@ -45,6 +46,7 @@ impl Operation {
             9 => Some(Self::RestartBackend),
             10 => Some(Self::RestartBackendSafe),
             11 => Some(Self::CancelAppInstall),
+            12 => Some(Self::RetryAppRetirement),
             _ => None,
         }
     }
@@ -764,12 +766,60 @@ impl Engine {
             }
         }
     }
+    fn retry_app_retirement(&mut self) -> Code {
+        let Some(install) = self.install.take() else {
+            return Code::Busy;
+        };
+        // This operation addresses only the current retained live terminal
+        // owner. It cannot publish, commit, cancel or recover a journal-only
+        // transaction. Observe/reconnect never performs this retry implicitly.
+        match install.owner {
+            InstallOwner::Committed(committed) => match committed.release() {
+                app_install::Release::Released(broker) => {
+                    self.backend_wanted = true;
+                    self.finish_install(*broker);
+                    Code::Ok
+                }
+                app_install::Release::Retained(committed) => {
+                    self.install = Some(Install {
+                        owner: InstallOwner::Committed(committed),
+                        stage: InstallStage::Failed,
+                    });
+                    self.mode = Mode::Uncertain;
+                    Code::Uncertain
+                }
+            },
+            InstallOwner::RolledBack(restored) => match restored.release() {
+                app_install::Release::Released(broker) => {
+                    self.finish_install(*broker);
+                    Code::Ok
+                }
+                app_install::Release::Retained(restored) => {
+                    self.install = Some(Install {
+                        owner: InstallOwner::RolledBack(restored),
+                        stage: InstallStage::Failed,
+                    });
+                    self.mode = Mode::Uncertain;
+                    Code::Uncertain
+                }
+            },
+            owner => {
+                self.install = Some(Install {
+                    owner,
+                    stage: install.stage,
+                });
+                Code::Busy
+            }
+        }
+    }
+
     fn request(&mut self, key: u64, op: Operation) -> Reply {
         self.tick();
         let mut code = Code::Ok;
         match op {
             Operation::Observe => {}
             Operation::CancelAppInstall => code = self.cancel_install(),
+            Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
                 if self.install.is_some()
                     || self.backend_restart.is_some()

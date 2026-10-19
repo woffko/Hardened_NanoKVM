@@ -17,9 +17,10 @@ The daemon now invokes it for a validated prepared offer on its separate
 app-install endpoint and now drives its frozen trial, commit and failure/cancel
 stop-join transitions. Successful live terminal archival now preserves the
 receipt/inactive slot and permits a subsequent transaction; archival failure
-retains the owner and exclusions. The ordinary API remains legacy; terminal
-failure/fresh-boot completion, bounded retention, daemon-to-real-backend/runtime
-and device acceptance remain required.
+retains the owner and exclusions. Root has an explicit live-terminal archival
+retry, which cannot reset later ownership uncertainty. The ordinary API remains
+legacy; nonterminal/owner-loss and fresh-boot completion, bounded retention,
+daemon-to-real-backend/runtime and device acceptance remain required.
 
 ## Implemented boundary
 
@@ -231,9 +232,9 @@ channel and the independent raw transaction authority throughout its lifetime.
 
 `nanokvm-native-ctl` accepts only `activate-boot`, `boot-ready`, `status`, `running`,
 `kvm-running`, `backend-running`, `ensure-kvm`, `ensure-hwmon`, `ensure-backend`,
-`restart-backend`, `restart-backend-safe` and `shutdown`. Ensure waits for the
-role's spawn/liveness acknowledgement (not service/hardware health). There is
-deliberately no short-lived pause/resume command: exiting
+`restart-backend`, `restart-backend-safe`, `retry-app-retirement` and `shutdown`.
+Ensure waits for the role's spawn/liveness acknowledgement (not service/hardware
+health). There is deliberately no short-lived pause/resume command: exiting
 would lose the retained maintenance connection. Shutdown reports completion only
 after the proven drain/Closed state **and** positive exclusive-journal-lease
 observation after the daemon's Stopped reply. A missing endpoint is sufficient
@@ -241,6 +242,14 @@ only when ready boot enrollment plus absent/Closed/prior-boot journal and the
 exclusive lease independently prove no current managed native owner.
 A CLI deadline or lost reply reports unknown completion without killing the
 daemon. No valid production daemon invocation is used in host CLI tests.
+
+`RetryAppRetirement` addresses only a retained live terminal app owner. It
+repeats exact archival/sync/release, never installation, journal-only recovery,
+rollback, collision deletion or forced uncertainty clearing. Partial frames have
+no effect and exact replay uses the same cached-reply rule. It preserves the
+group's latched uncertainty, including owner loss while waiting for I/O repair.
+Its Ok/Running is release/admission, not service health. See
+[live-terminal retry](security-app-slot-recovery.md#explicit-live-terminal-archival-retry).
 
 Host private-directory fixtures cover real Unix socket exchange, fragmented I/O,
 serial/replay rejection, actual peer UID mismatch, foreign-client denial,

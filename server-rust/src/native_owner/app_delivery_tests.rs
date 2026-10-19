@@ -247,6 +247,98 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
 }
 
 #[test]
+fn independent_daemon_retries_only_explicit_complete_frames_and_caches_terminal_retry_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    fs::write(root.join("trial-ack-hold"), b"hold").unwrap();
+    let mut daemon = child(root, "broker_child");
+    until(|| root.join("broker-ready").exists());
+    let mut frontend = child(root, "frontend_child");
+    until(|| root.join("offer-sent").exists());
+    frontend.0.kill().unwrap();
+    assert!(!frontend.0.wait().unwrap().success());
+    until(|| {
+        fs::read(root.join("trial-authorized"))
+            .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
+    });
+    let record = fs::read(root.join("application-slot/current/state")).unwrap();
+    let transaction: [u8; 16] = record[16..32].try_into().unwrap();
+    let archive = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    fs::create_dir_all(&archive).unwrap();
+    fs::set_permissions(archive.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(archive.join("foreign"), b"retained foreign bytes").unwrap();
+    fs::remove_file(root.join("trial-ack-hold")).unwrap();
+    let mut observer = connect(root);
+    observed(&mut observer, Mode::Uncertain);
+    assert_excluded(root);
+    assert_eq!(
+        exchange(&mut observer, Operation::RetryAppRetirement).code,
+        Code::Uncertain
+    );
+    assert_eq!(
+        fs::read(archive.join("foreign")).unwrap(),
+        b"retained foreign bytes"
+    );
+    fs::remove_file(archive.join("foreign")).unwrap();
+    fs::remove_dir(&archive).unwrap();
+    drop(observer);
+    observer = connect(root);
+    observed(&mut observer, Mode::Uncertain);
+    assert_excluded(root);
+    let mut client = connect(root);
+    client.stream.set_nonblocking(false).unwrap();
+    client
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let retry = request(Operation::RetryAppRetirement, 1);
+    client.stream.write_all(&retry[..8]).unwrap();
+    for _ in 0..3 {
+        observed(&mut observer, Mode::Uncertain);
+        assert_excluded(root);
+        assert!(!archive.exists());
+    }
+    client.stream.write_all(&retry[8..]).unwrap();
+    let mut first = [0; FRAME];
+    client.stream.read_exact(&mut first).unwrap();
+    let reply = Reply::parse(&first, 1).unwrap();
+    assert_eq!(reply.code, Code::Ok);
+    assert_eq!(reply.mode, Mode::Running);
+    let inode = archive.metadata().unwrap().ino();
+    client.stream.write_all(&retry).unwrap();
+    let mut second = [0; FRAME];
+    client.stream.read_exact(&mut second).unwrap();
+    assert_eq!(
+        first, second,
+        "lost-reply replay is cached, not re-executed"
+    );
+    assert_eq!(archive.metadata().unwrap().ino(), inode);
+    assert_eq!(fs::read(archive.join("state")).unwrap(), record);
+    assert!(!root.join("application-slot/current").exists());
+    client
+        .stream
+        .write_all(&request(Operation::CancelAppInstall, 1))
+        .unwrap();
+    assert_eq!(client.stream.read(&mut [0]).unwrap(), 0);
+    drop(client);
+    observed(&mut observer, Mode::Running);
+    assert_eq!(
+        exchange(&mut observer, Operation::RetryAppRetirement).code,
+        Code::Busy
+    );
+    let reply = exchange(&mut observer, Operation::Shutdown);
+    assert_eq!(reply.code, Code::Ok);
+    if reply.mode != Mode::Stopped {
+        observed(&mut observer, Mode::Stopped);
+    }
+    until(|| daemon.0.try_wait().unwrap().is_some());
+    assert!(daemon.0.wait().unwrap().success());
+}
+
+#[test]
 fn install_endpoint_is_private_independent_and_does_not_delete_foreign_replacements() {
     let root = tempfile::tempdir().unwrap();
     let broker = broker(root.path());
@@ -498,10 +590,37 @@ fn fixed_root_delivery_child() {
         assert_eq!(snapshot.phase, app_slot::Phase::Published);
         assert!(!snapshot.archived);
         assert_eq!(
+            exchange(&mut control, Operation::RetryAppRetirement).code,
+            Code::Busy
+        );
+        let collision = Path::new("/etc/kvm/application-slot/history")
+            .join(format!("{:032x}", u128::from_be_bytes(id)));
+        fs::create_dir_all(&collision).unwrap();
+        fs::set_permissions(
+            collision.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
             exchange(&mut control, Operation::CancelAppInstall).code,
-            Code::Ok
+            Code::Uncertain
         );
         assert_eq!(fs::read("/kvmapp/identity").unwrap(), b"fixed-root old app");
+        assert_eq!(
+            exchange(&mut control, Operation::RetryAppRetirement).code,
+            Code::Uncertain
+        );
+        assert!(
+            app_slot::job_status(id).is_err(),
+            "foreign archive is not a valid status source"
+        );
+        fs::remove_dir(collision).unwrap();
+        observed(&mut control, Mode::Uncertain);
+        assert!(!app_slot::job_status(id).unwrap().unwrap().archived);
+        let reply = exchange(&mut control, Operation::RetryAppRetirement);
+        assert_eq!(reply.code, Code::Ok);
+        assert_eq!(reply.mode, Mode::Running);
         let snapshot = app_slot::job_status(id).unwrap().unwrap();
         assert_eq!(snapshot.phase, app_slot::Phase::RolledBack);
         assert!(snapshot.archived);

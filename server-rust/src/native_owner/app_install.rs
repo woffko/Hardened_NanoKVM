@@ -131,11 +131,14 @@ impl Committed {
     /// Archive the exact terminal receipt/old slot before ending the freeze.
     /// Unknown rename/sync results retain the complete owner for inspection.
     pub fn release(mut self) -> Release<Self> {
+        if self.broker.group.ownership_uncertain() {
+            return Release::Retained(self);
+        }
         let boundary = TerminalBoundary {
             transaction: self.install.transaction(),
             phase: Phase::Committed,
         };
-        if self.install.retire(&boundary).is_err() {
+        if self.install.retire(&boundary).is_err() || self.broker.group.ownership_uncertain() {
             return Release::Retained(self);
         }
         let Self { broker, install } = self;
@@ -157,11 +160,14 @@ impl RolledBack {
     }
 
     pub fn release(mut self) -> Release<Self> {
+        if self.broker.group.ownership_uncertain() {
+            return Release::Retained(self);
+        }
         let boundary = TerminalBoundary {
             transaction: self.install.transaction(),
             phase: Phase::RolledBack,
         };
-        if self.install.retire(&boundary).is_err() {
+        if self.install.retire(&boundary).is_err() || self.broker.group.ownership_uncertain() {
             return Release::Retained(self);
         }
         let Self { broker, install } = self;

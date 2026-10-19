@@ -380,8 +380,7 @@ impl Group {
         command: Command,
         transaction: Option<[u8; 16]>,
     ) -> Result<(), StartError> {
-        self.poll();
-        if self.uncertain {
+        if self.ownership_uncertain() {
             return Err(StartError::UncertainOwnership);
         }
         if self.cells[role.index()]
@@ -422,6 +421,13 @@ impl Group {
             }
         }
         status
+    }
+
+    /// Poll and preserve the latched lifetime uncertainty, not health/closure.
+    /// A terminal install retry must not clear a later owner-loss failure.
+    pub(super) fn ownership_uncertain(&mut self) -> bool {
+        self.poll();
+        self.uncertain
     }
 
     /// Moving the group closes admission before any stop. No Group/start API is

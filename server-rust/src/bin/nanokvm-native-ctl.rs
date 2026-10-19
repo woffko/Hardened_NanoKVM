@@ -34,6 +34,7 @@ fn main() -> ExitCode {
             Some("backend-running") => Some(Operation::BackendRunning),
             Some("restart-backend") => Some(Operation::RestartBackend),
             Some("restart-backend-safe") => Some(Operation::RestartBackendSafe),
+            Some("retry-app-retirement") => Some(Operation::RetryAppRetirement),
             _ => None,
         }
     } else {
@@ -41,7 +42,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -103,6 +104,7 @@ fn main() -> ExitCode {
                     Operation::EnsureHwmon => running && reply.roles[1] == 2,
                     Operation::Observe => true,
                     Operation::BackendRunning => true,
+                    Operation::RetryAppRetirement => running,
                     _ => false,
                 };
                 if complete {

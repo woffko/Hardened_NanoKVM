@@ -291,8 +291,9 @@ terminal owner. The Engine remains Uncertain and does not restart native writers
 automatically retry retirement, or roll back a canonically Committed candidate.
 The still-pinned exact owner can retry after an earlier rename/sync error; a new
 process must not fabricate that capability from a diagnostic phase alone.
-Explicit administrative failure completion and fresh-boot retirement remain
-open. Bounded retention/space accounting and safe garbage collection are also
+Live terminal archival can now be retried explicitly as described below.
+Nonterminal/owner-loss failure completion and fresh-boot retirement remain open.
+Bounded retention/space accounting and safe garbage collection are also
 required before activation: keeping evidence indefinitely is not an acceptable
 final disk-space policy.
 
@@ -324,6 +325,59 @@ phases, retaining the exact descriptor for retry; they do not simulate fresh-boo
 authority or physical power-loss/write-cache behavior. Foreign/symlinked paths,
 special/oversized/linked records and mismatched context are rejected without
 deleting evidence. These tests do not complete WP-04/C1 or target acceptance.
+
+### Explicit live-terminal archival retry
+
+Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
+protected lifecycle channel. This is the fixed `RetryAppRetirement` opcode in
+the same closed 16-byte protocol, not a new unauthenticated endpoint. It accepts
+no path, transaction selector, phase, force option, archive or executable.
+It addresses only the **current retained live** Committed/RolledBack owner;
+it does not recreate an owner after daemon death or from a journal snapshot.
+
+Retry can only repeat that owner's exact archival/sync/release operation. It
+cannot install, publish, commit, cancel, roll back or repair foreign objects.
+The operator must first inspect and resolve the actual I/O/space/path fault;
+the command itself never deletes a collision. A denied or failed retry retains
+the complete owner and exclusions. The command refuses when no install is
+retained, during a nonterminal trial or pending Commit acknowledgement, and after
+an earlier failed commit.
+Connection EOF, observation and repairing a path do not implicitly retry it.
+
+Both ordinary terminal release and retry poll the group's latched ownership
+uncertainty before archival and again before release after successful I/O.
+They do not turn later owner loss into Running simply because the earlier app
+phase was terminal.
+This is the same guard used by ordinary scope launch admission; it is not a
+health receipt or a reset of the group. PID disappearance/direct reap alone
+cannot clear it.
+
+Ok/Running from this operation means exact archival and release completed and
+ordinary supervision may proceed; it does not mean native/backend health or
+device acceptance. The action is current-owner administration, not a per-ID
+durable HTTP job API. No S02/S95/watchdog path automatically invokes it.
+The future HTTP control path needs transaction-bound authority; checking a job
+snapshot and then calling this current-owner action is not an atomic ID binding.
+An exact request replay on the same connection returns the cached result;
+that cached reply is not a fresh observation of current mode. Conflicting
+serial reuse closes the connection. The CLI reports a lost reply/deadline as
+unknown completion and does not silently reconnect/reissue the operation.
+
+Host tests cover failed and successful retry for both terminal outcomes, no
+automatic retry after a collision is removed, refusal during trial/CommitPending
+and failed commit, and a later SIGKILL of the exact childless fixture owner that
+remains Uncertain after the direct child is reaped. An independent daemon with
+an actually killed frontend checks fragmented retry, cached reply replay and
+conflicting serial rejection. The production fixed-root channel fixture covers
+rollback retirement failure/retry under real exclusions. CLI negatives reject
+extra arguments and path selectors. These are not target/runtime health tests.
+
+Fresh-boot completion still needs its own retained authority. S02 runs app gate
+before native boot activation, and native Ready enrollment alone is not app
+retirement authority. A future path must retain common update/store admission
+and a verified native lifetime/boot boundary, reject same-boot unresolved or
+ambiguous native state, and preserve exact app context/layout. Absence, a phase
+checksum, a CLI retry or PID disappearance must not stand in for that boundary.
 
 ## Early consumer integration (development branch)
 
