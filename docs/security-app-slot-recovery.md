@@ -399,7 +399,11 @@ not physical power-loss, ext4 write-cache or target acceptance.
   independent support before publishing gates, and preserve legacy rollback.
   Nonzero rcS exits alone are not gates.
 - Native/S95/watchdog/raw lifecycle coordination, first restart and runtime
-  acceptance; do not replace code used by a running shell/executable in place.
+  acceptance; current S95 KVM/hwmon source wiring has a separate fresh-boot
+  enrollment fence, not a complete transaction-level writer join. Legacy
+  bootstrap may arm a new boot but never adopt current processes. See
+  `security-native-owner.md`. Do not replace code used by a running
+  shell/executable in place.
 - Actual installation crash tests, ENOSPC/I/O failure, target mount negatives,
   legacy migration and complete device/release acceptance.
 

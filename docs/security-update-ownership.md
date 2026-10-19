@@ -545,8 +545,10 @@ production respawner admission. The broker daemon/IPC component holds a
 protected singleton/Active or Maintenance journal across native work and drain,
 refuses unresolved same-boot ownership and retains abandoned maintenance. Its
 explicit native recovery requires a new kernel boot, preserves old evidence and
-never grants raw/restore authority. It is not packaged, S95/watchdog-integrated,
-deployed, or a caller of the composed writer drain/retained raw handoff yet. A
+never grants raw/restore authority. Current native programs are packaged and
+S95 KVM/hwmon source wiring now requires fresh-boot enrollment (see
+`security-native-owner.md`). This is not deployed, does not join all writers or
+the watchdog, and does not call the composed writer drain/retained raw handoff. A
 changed boot epoch resolves only old process lifetime, never raw restore or boot-good. Its
 presence does not close the following production boundaries.
 

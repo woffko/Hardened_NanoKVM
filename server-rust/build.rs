@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{env, fs::File, io::Read, path::PathBuf};
 
 #[path = "src/update/restore_binding.rs"]
@@ -65,7 +66,26 @@ fn main() {
     let app = read_runtime(Runtime::AppRecovery, required);
     let native = restore_binding::NATIVE_RUNTIMES
         .map(|runtime| (runtime, read_runtime(Runtime::Native(runtime), required)));
+    // Carry identities, not duplicate complete consumer scripts in the helper.
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let mut boot_digests = Vec::with_capacity(128);
+    for name in ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"] {
+        let path = manifest_dir.join("../kvmapp/system/init.d").join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let mut bytes = Vec::new();
+        File::open(path)
+            .expect("open trusted boot script")
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .expect("read trusted boot script");
+        assert!(
+            !bytes.is_empty() && bytes.len() <= 1024 * 1024,
+            "invalid boot script size"
+        );
+        boot_digests.extend_from_slice(&Sha256::digest(&bytes));
+    }
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    std::fs::write(output.join("native-boot-digests"), boot_digests).expect("write boot digests");
     std::fs::write(output.join("ssh-runtime.binding"), ssh).expect("write embedded SSH runtime");
     std::fs::write(output.join("app-recovery.binding"), app).expect("write embedded app recovery");
     for (runtime, bytes) in native {
@@ -82,7 +102,6 @@ fn main() {
         return;
     }
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let lib_dir = manifest_dir.join("native/dl_lib");
     let sysroot_lib_dir = env::var_os("NANOKVM_SYSROOT_LIB")
         .map(PathBuf::from)

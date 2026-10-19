@@ -9,6 +9,7 @@ const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
 fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
+        enrollment: super::super::boot::Permit::fixture(&File::open(root).unwrap()),
         journal: journal::Store::fixture(
             &File::open(root).unwrap(),
             nix::unistd::geteuid().as_raw(),

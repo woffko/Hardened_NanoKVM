@@ -16,14 +16,10 @@ SERVER_LOG=/tmp/nanokvm-server.log
 SERVER_PID_FILE=/tmp/nanokvm-server.pid
 NANOKVM_NATIVE_LIBRARY_PATH=/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd
 NANOKVM_XTHEAD_LOADER=/lib/ld-musl-riscv64xthead.so.1
-NANOKVM_V0P7_LOADER=/lib/ld-musl-riscv64v0p7_xthead.so.1
-KVM_SYSTEM_SOURCE_DIR=/kvmapp/kvm_system
-KVM_SYSTEM_RUNTIME_DIR=/tmp/kvm_system
-KVM_SYSTEM_LOG=/tmp/kvm_system.log
-KVM_SYSTEM_PID_FILE=/tmp/kvm-system.pid
+NATIVE_CTL=/usr/libexec/nanokvm-native-ctl
+NATIVE_BROKER=/usr/libexec/nanokvm-native-broker
+NATIVE_LOG=/tmp/nanokvm-native.log
 HWMON_SOURCE=/kvmapp/hwmon/nanokvm-hwmon
-HWMON_PID_FILE=/tmp/nanokvm-hwmon.pid
-HWMON_LOG=/tmp/nanokvm-hwmon.log
 HWMON_START_DELAY_SECS=20
 RUST_HWMON_FLAG=/etc/kvm/rust_hwmon_enabled
 SYSTEM_UPDATE_WATCHDOG_PID_FILE=/tmp/system-update-watchdog.pid
@@ -157,93 +153,33 @@ server_is_running() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-find_kvm_system_pids() {
-    for proc in /proc/[0-9]*; do
-        cmdline="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
-        case "$cmdline" in
-            /lib/ld-musl-riscv64v0p7_xthead.so.1*'/tmp/kvm_system/kvm_system'*)
-                printf '%s\n' "${proc##*/}"
-                ;;
-        esac
-    done
-}
-
-kvm_system_pid_matches() {
-    pid="$1"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
-    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    case "$cmdline" in
-        /lib/ld-musl-riscv64v0p7_xthead.so.1*'/tmp/kvm_system/kvm_system'*) return 0 ;;
-    esac
-    return 1
-}
-
 kvm_system_is_running() {
-    [ -f "$KVM_SYSTEM_PID_FILE" ] || return 1
-    pid="$(cat "$KVM_SYSTEM_PID_FILE" 2>/dev/null)"
-    kvm_system_pid_matches "$pid"
+    "$NATIVE_CTL" kvm-running >/dev/null 2>&1
 }
 
-adopt_single_kvm_system_process() {
-    pids="$(find_kvm_system_pids)"
-    set -- $pids
-    [ "$#" -eq 1 ] || return 1
-    printf '%s\n' "$1" > "$KVM_SYSTEM_PID_FILE"
-    kvm_system_is_running
-}
-
-stop_kvm_system_process() {
-    pids="$(find_kvm_system_pids)"
-    for pid in $pids; do
-        kill "$pid" 2>/dev/null || true
-    done
+start_native_broker() {
+    "$NATIVE_CTL" boot-ready >/dev/null 2>&1 || {
+        runtime_log "native runtime requires a fresh enrolled boot; refusing legacy process adoption"
+        return 1
+    }
+    if "$NATIVE_CTL" status >/dev/null 2>&1; then
+        "$NATIVE_CTL" running >/dev/null 2>&1
+        return $?
+    fi
+    # The daemon's protected singleton/journal decides admission. No PID-file,
+    # socket deletion, legacy scan, or kill/relaunch fallback grants ownership.
+    nohup "$NATIVE_BROKER" --serve >>"$NATIVE_LOG" 2>&1 </dev/null &
     for _ in 1 2 3 4 5; do
-        alive=0
-        for pid in $pids; do
-            kill -0 "$pid" 2>/dev/null && alive=1
-        done
-        [ "$alive" -eq 0 ] && break
+        "$NATIVE_CTL" running >/dev/null 2>&1 && return 0
         sleep 1
     done
-    for pid in $pids; do
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-    done
-    rm -f "$KVM_SYSTEM_PID_FILE"
-    for pid in $pids; do
-        kill -0 "$pid" 2>/dev/null && return 1
-    done
-    return 0
+    runtime_log "native broker did not become available; ownership may be unresolved"
+    return 1
 }
 
 start_kvm_system_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-    [ -x "$KVM_SYSTEM_SOURCE_DIR/kvm_system" ] || {
-        runtime_log "kvm_system source is missing or not executable"
-        return 1
-    }
-    rm -rf "$KVM_SYSTEM_RUNTIME_DIR"
-    cp -r "$KVM_SYSTEM_SOURCE_DIR" "$KVM_SYSTEM_RUNTIME_DIR" || {
-        runtime_log "failed to stage kvm_system in /tmp"
-        return 1
-    }
-    : > "$KVM_SYSTEM_LOG" 2>/dev/null || KVM_SYSTEM_LOG=/dev/null
-    nohup "$NANOKVM_V0P7_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" \
-        "$KVM_SYSTEM_RUNTIME_DIR/kvm_system" >"$KVM_SYSTEM_LOG" 2>&1 &
-    launched_pid=$!
-    rm -f "$KVM_SYSTEM_PID_FILE"
-    for _ in 1 2 3 4 5; do
-        pids="$(find_kvm_system_pids)"
-        set -- $pids
-        if [ "$#" -eq 1 ]; then
-            printf '%s\n' "$1" > "$KVM_SYSTEM_PID_FILE"
-            runtime_log "started kvm_system pid $1 (launcher $launched_pid)"
-            return 0
-        fi
-        sleep 1
-    done
-    runtime_log "kvm_system process count was not one after startup: $(find_kvm_system_pids | tr '\n' ' ')"
-    stop_kvm_system_process >/dev/null 2>&1 || true
-    return 1
+    "$NATIVE_CTL" ensure-kvm >/dev/null
 }
 
 stop_server_process() {
@@ -292,16 +228,12 @@ stop_watchdog() {
 start_hwmon_shadow() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
     [ -x "$HWMON_SOURCE" ] || return 0
-    [ -f "$HWMON_PID_FILE" ] && kill -0 "$(cat "$HWMON_PID_FILE" 2>/dev/null)" 2>/dev/null && return
-
-    : > "$HWMON_LOG" 2>/dev/null || HWMON_LOG=/dev/null
     runtime_log "starting nanokvm-hwmon shadow monitor after ${HWMON_START_DELAY_SECS}s delay"
     (
         sleep "$HWMON_START_DELAY_SECS"
         /usr/libexec/nanokvm-app-recovery gate >/dev/null || exit 1
-        exec "$NANOKVM_XTHEAD_LOADER" --library-path "$NANOKVM_NATIVE_LIBRARY_PATH" "$HWMON_SOURCE"
-    ) >"$HWMON_LOG" 2>&1 &
-    echo $! > "$HWMON_PID_FILE"
+        exec "$NATIVE_CTL" ensure-hwmon
+    ) >>"$NATIVE_LOG" 2>&1 &
 }
 
 enable_rust_hwmon_state() {
@@ -309,13 +241,6 @@ enable_rust_hwmon_state() {
     mkdir -p /etc/kvm
     : > "$RUST_HWMON_FLAG" 2>/dev/null || true
     chmod 0600 "$RUST_HWMON_FLAG" 2>/dev/null || true
-}
-
-stop_hwmon_shadow() {
-    pidof nanokvm-hwmon >/dev/null 2>&1 && runtime_log "stopping nanokvm-hwmon shadow monitor"
-    stop_pid_file "$HWMON_PID_FILE"
-    killall nanokvm-hwmon 2>/dev/null || true
-    wait_process_exit nanokvm-hwmon >/dev/null 2>&1 || true
 }
 
 stop_system_update_watchdog() {
@@ -465,14 +390,10 @@ start_watchdog() {
                 continue
             fi
             if ! kvm_system_is_running; then
-                if adopt_single_kvm_system_process; then
-                    runtime_log "adopted live kvm_system pid $(cat "$KVM_SYSTEM_PID_FILE")"
-                else
-                    runtime_log "kvm_system is not running; restarting helper"
-                    stop_kvm_system_process >/dev/null 2>&1 || true
-                    if ! start_kvm_system_runtime; then
-                        runtime_log "failed to restart kvm_system helper"
-                    fi
+                # Ensure may be denied by a retained maintenance owner. Never
+                # bypass that denial by launching or killing native processes.
+                if ! start_kvm_system_runtime; then
+                    runtime_log "native KVM ensure denied or not yet running"
                 fi
             fi
 
@@ -623,16 +544,20 @@ start_system_update_watchdog() {
 }
 
 stop_runtime() {
+    "$NATIVE_CTL" boot-ready >/dev/null || return 1
     stop_system_update_watchdog
     stop_watchdog
-    stop_hwmon_shadow
+    "$NATIVE_CTL" shutdown >/dev/null || {
+        runtime_log "native closure unproven; preserving backend and runtime files"
+        return 1
+    }
     stop_server_process || reboot_after_unrecoverable_server "runtime stop"
-    stop_kvm_system_process || true
-    rm -rf /tmp/kvm_system /tmp/server 2>/dev/null
+    rm -rf /tmp/server 2>/dev/null
 }
 
 start_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
+    start_native_broker || return 1
     cleanup_server_backups
     ensure_kvm_state_files
     # The Rust backend publishes bundled update trust under configuration-writer
@@ -655,7 +580,7 @@ case "$1" in
   start)
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || exit 1
     disable_stale_autostarts
-    stop_runtime
+    stop_runtime || exit 1
 
     echo -n kvm > /boot/hostname.prefix
 
@@ -689,13 +614,13 @@ case "$1" in
    ;;
 
   stop)
-    stop_runtime
+    stop_runtime || exit 1
     echo "OK"
    ;;
 
   restart)
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || exit 1
-    stop_runtime
+    stop_runtime || exit 1
     start_runtime || exit 1
     sync
     echo "OK"

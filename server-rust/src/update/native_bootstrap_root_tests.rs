@@ -23,6 +23,7 @@ impl Fixture {
             "etc/kvm/update-operation",
             "etc/init.d",
             "kvmapp",
+            "proc",
         ] {
             fs::create_dir_all(root.path().join(parent)).unwrap();
         }
@@ -47,7 +48,7 @@ impl Fixture {
     fn command(&self, expected: &str) -> Command {
         let mut command = Command::new("/usr/bin/unshare");
         command
-            .args(["--user", "--map-root-user", "--"])
+            .args(["--user", "--map-root-user", "--mount", "--"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -129,9 +130,25 @@ fn fixed_root_child() {
         return;
     };
     let expected = std::env::var("NANOKVM_NATIVE_ROOT_EXPECTED").unwrap();
+    // The boot fence must use real procfs, not a fixture UUID in a regular file.
+    // This private mount namespace disappears with the child process.
+    nix::mount::mount(
+        Some("/proc"),
+        Path::new(&root).join("proc").as_path(),
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .unwrap();
     nix::unistd::chroot(Path::new(&root)).unwrap();
     std::env::set_current_dir("/").unwrap();
     let result = match expected.as_str() {
+        "activate" | "activate-failure" => {
+            crate::native_owner::broker::boot::activate_early().map_err(io::Error::other)
+        }
+        "ready" | "ready-failure" => crate::native_owner::broker::boot::require_ready()
+            .map(drop)
+            .map_err(io::Error::other),
         "chain" | "hold-ready" => prepare_boot_support().and_then(|support| {
             if expected == "hold-ready" {
                 checkpoint("boot-ready");
@@ -148,6 +165,8 @@ fn fixed_root_child() {
             result.unwrap();
             check_installed().unwrap();
         }
+        "activate" | "ready" => result.unwrap(),
+        "activate-failure" | "ready-failure" => assert!(result.is_err()),
         "failure" | "legacy-refusal" => assert!(result.is_err()),
         "busy" => {
             let error = result.unwrap_err();
@@ -161,6 +180,64 @@ fn fixed_root_child() {
         _ => panic!("invalid native fixture case"),
     }
     println!("native-fixed-root-fixture-ran");
+}
+
+#[test]
+fn fixed_root_live_transition_only_arms_and_cannot_activate_in_same_boot() {
+    let fixture = Fixture::new();
+    fixture.run("chain");
+    let state = fixture
+        .root
+        .path()
+        .join("etc/kvm/native-runtime-boot/state");
+    let bytes = fs::read(&state).unwrap();
+    assert_eq!(&bytes[..8], b"NKBOOT01");
+    assert_eq!(bytes[44], 2);
+    fixture.run("ready-failure");
+    fixture.run("activate-failure");
+    assert_eq!(fs::read(&state).unwrap(), bytes);
+}
+
+#[test]
+fn fixed_root_factory_activates_only_with_exact_consumer_scripts() {
+    for fault in [false, true] {
+        let fixture = Fixture::new();
+        let parent = fixture.root.path().join("etc/kvm/native-runtime-boot");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut bytes = [0; 80];
+        bytes[..8].copy_from_slice(b"NKBOOT01");
+        bytes[44] = 1;
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&bytes[..48]);
+        bytes[48..].copy_from_slice(&hash);
+        fs::write(parent.join("state"), bytes).unwrap();
+        fs::set_permissions(parent.join("state"), fs::Permissions::from_mode(0o600)).unwrap();
+        if fault {
+            fs::write(
+                fixture.root.path().join("etc/init.d/S30wifi"),
+                b"legacy script",
+            )
+            .unwrap();
+        }
+        fixture.run(if fault {
+            "activate-failure"
+        } else {
+            "activate"
+        });
+        fixture.run(if fault { "ready-failure" } else { "ready" });
+        if !fault {
+            let before = parent.join("state").metadata().unwrap().ino();
+            // Actual S02 core -> backend BootSupport on the same kernel epoch.
+            fixture.run("chain");
+            fixture.run("ready");
+            assert_eq!(parent.join("state").metadata().unwrap().ino(), before);
+        }
+        assert_eq!(
+            fs::read(parent.join("state")).unwrap()[44],
+            if fault { 1 } else { 3 }
+        );
+    }
 }
 
 #[test]

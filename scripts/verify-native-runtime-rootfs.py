@@ -6,6 +6,7 @@ Historical images without these bindings require their historical verifier.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import mmap
 from pathlib import Path
@@ -25,10 +26,22 @@ def verify(image):
     for parent in ["/", "/usr", "/usr/libexec", "/kvmapp", "/kvmapp/system",
                    "/kvmapp/system/bin", "/kvmapp/server"]:
         rootfs.metadata(image, parent, "directory")
+    for parent in ["/etc", "/etc/kvm", "/etc/kvm/native-runtime-boot"]:
+        metadata = rootfs.metadata(image, parent, "directory")
+        if parent.endswith("native-runtime-boot") and metadata[:3] != (0o700, 0, 0):
+            raise ValueError("unsafe native boot enrollment directory")
     backend = "/kvmapp/server/NanoKVM-Server"
     if rootfs.metadata(image, backend, "regular", binding.MAX_BACKEND) != (0o755, 0, 0, 1):
         raise ValueError("unsafe native authority backend metadata")
     with tempfile.TemporaryDirectory(prefix="nanokvm-native-rootfs-", dir="/tmp") as temporary:
+        state = "/etc/kvm/native-runtime-boot/state"
+        if rootfs.metadata(image, state, "regular", 80) != (0o600, 0, 0, 1):
+            raise ValueError("unsafe native boot enrollment record")
+        destination = Path(temporary) / "boot-state"
+        rootfs.debugfs(image, f"dump {state} {destination}")
+        prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+        if destination.read_bytes() != prefix + hashlib.sha256(prefix).digest():
+            raise ValueError("full image must contain exact Factory native boot enrollment")
         backend_dump = Path(temporary) / "backend"
         rootfs.debugfs(image, f"dump {backend} {backend_dump}")
         with binding.regular(backend_dump, binding.MAX_BACKEND) as source:

@@ -161,11 +161,23 @@ def main():
             helper = root / "helper"
             helper.write_text('#!/bin/sh\ntest "$1" = gate || exit 64\nexit "$GATE_RESULT"\n')
             helper.chmod(0o700)
+            native = root / "native"
+            native.write_text('#!/bin/sh\ntest "$1" = activate-boot || exit 64\nprintf native > "$NATIVE_LOG"\nexit "$NATIVE_RESULT"\n')
+            native.chmod(0o700)
             script = root / "S02apprecover"
-            script.write_text(s02.replace("/usr/libexec/nanokvm-app-recovery", str(helper)))
+            script.write_text(s02.replace("/usr/libexec/nanokvm-app-recovery", str(helper))
+                              .replace("/usr/libexec/nanokvm-native-ctl", str(native)))
             for code in [0, 75, 78]:
-                result = subprocess.run(["/bin/sh", str(script), "start"], env={"GATE_RESULT": str(code)}, timeout=5)
+                log = root / "native-log"
+                log.unlink(missing_ok=True)
+                result = subprocess.run(["/bin/sh", str(script), "start"],
+                                        env={"GATE_RESULT": str(code), "NATIVE_RESULT": "0", "NATIVE_LOG": str(log)}, timeout=5)
                 check("S02 propagates helper exit " + str(code), result.returncode == code)
+                check("S02 native enrollment only after app gate " + str(code), log.exists() == (code == 0))
+            for code in [75, 78]:
+                result = subprocess.run(["/bin/sh", str(script), "start"],
+                                        env={"GATE_RESULT": "0", "NATIVE_RESULT": str(code), "NATIVE_LOG": str(log)}, timeout=5)
+                check("S02 propagates native boot failure " + str(code), result.returncode == code)
         sources["S02apprecover"] = s02
         del sources["S96picoclaw"]  # Optional service is not auto-installed/enabled.
         for kind in ["valid", "installed-mismatch", "missing-installed", "missing-marker", "inspection-error"]:

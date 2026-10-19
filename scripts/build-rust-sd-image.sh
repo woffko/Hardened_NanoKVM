@@ -34,6 +34,7 @@ STATE_FILE="$OUT_DIR/$OUTPUT_BASENAME.backend-state"
 SYSTEM_VERSION_FILE="$OUT_DIR/$OUTPUT_BASENAME.system-version.json"
 DEBUGFS_CMDS="$OUT_DIR/$OUTPUT_BASENAME.debugfs.cmd"
 FSTAB_FILE="$OUT_DIR/$OUTPUT_BASENAME.fstab"
+NATIVE_BOOT_SEED="$OUT_DIR/$OUTPUT_BASENAME.native-boot/state"
 
 require_file() {
   if [ ! -f "$1" ]; then
@@ -63,6 +64,7 @@ for role in owner broker ctl recovery; do
 done
 
 mkdir -p "$OUT_DIR"
+python3 -B "$ROOT/scripts/native-boot-record.py" "$NATIVE_BOOT_SEED"
 
 read -r ROOTFS_START ROOTFS_SECTORS <<EOF
 $(partx -g -o NR,START,SECTORS "$BASE_IMAGE" | awk '$1 == 2 { print $2, $3; exit }')
@@ -197,7 +199,7 @@ fi
 
   # Compile-bound native programs live outside the mutable app slot. Protect
   # their bundled copies and backend authority too (the vendor image used UID1000).
-  for directory in / /usr /usr/libexec /kvmapp /kvmapp/server /kvmapp/system /kvmapp/system/bin; do
+  for directory in / /etc /etc/kvm /etc/init.d /usr /usr/libexec /kvmapp /kvmapp/server /kvmapp/system /kvmapp/system/bin; do
     printf 'sif %s mode 040755\n' "$directory"
     printf 'sif %s uid 0\n' "$directory"
     printf 'sif %s gid 0\n' "$directory"
@@ -214,6 +216,16 @@ fi
       printf 'sif %s/%s gid 0\n' "$parent" "$name"
     done
   done
+
+  printf 'mkdir /etc/kvm/native-runtime-boot\n'
+  printf 'sif /etc/kvm/native-runtime-boot mode 040700\n'
+  printf 'sif /etc/kvm/native-runtime-boot uid 0\n'
+  printf 'sif /etc/kvm/native-runtime-boot gid 0\n'
+  printf 'rm /etc/kvm/native-runtime-boot/state\n'
+  printf 'write %s /etc/kvm/native-runtime-boot/state\n' "$NATIVE_BOOT_SEED"
+  printf 'sif /etc/kvm/native-runtime-boot/state mode 0100600\n'
+  printf 'sif /etc/kvm/native-runtime-boot/state uid 0\n'
+  printf 'sif /etc/kvm/native-runtime-boot/state gid 0\n'
 
   for script in "${BOOT_INIT_SCRIPTS[@]}"; do
     script_path="$KVMAPP_DIR/system/init.d/$script"

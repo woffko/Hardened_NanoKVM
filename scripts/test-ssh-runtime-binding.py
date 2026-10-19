@@ -173,6 +173,11 @@ class BindingTests(unittest.TestCase):
                                         text=True, timeout=10)
                 self.assertEqual(result.returncode == 0, fault is None, result.stderr)
                 if fault is None:
+                    seed = target / "etc/kvm/native-runtime-boot/state"
+                    prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+                    self.assertEqual(seed.read_bytes(), prefix + hashlib.sha256(prefix).digest())
+                    self.assertEqual(seed.stat().st_mode & 0o7777, 0o600)
+                    self.assertEqual(seed.parent.stat().st_mode & 0o7777, 0o700)
                     self.assertEqual((target / "kvmapp/server/NanoKVM-Server").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/backends/NanoKVM-Server.rust").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/system/bin/nanokvm-app-recovery").read_bytes(), image())

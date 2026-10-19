@@ -18,6 +18,7 @@ type Images<'a> = [&'a [u8]; 4];
 /// lease does not stop native processes or authorize an app-slot transaction.
 pub struct BootSupport {
     _admission: ProcessLock,
+    _boot: crate::native_owner::broker::boot::Permit,
 }
 
 pub fn prepare_boot_support() -> io::Result<BootSupport> {
@@ -26,8 +27,10 @@ pub fn prepare_boot_support() -> io::Result<BootSupport> {
     let admission = ProcessLock::acquire().map_err(io::Error::other)?;
     app_bootstrap::ensure_with_admission(app, &admission)?;
     ensure_locked(native, &admission)?;
+    let boot = crate::native_owner::broker::boot::prepare().map_err(io::Error::other)?;
     Ok(BootSupport {
         _admission: admission,
+        _boot: boot,
     })
 }
 

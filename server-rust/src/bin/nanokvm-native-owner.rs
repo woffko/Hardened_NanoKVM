@@ -12,7 +12,7 @@ fn command(role: &str) -> Option<Command> {
     let (loader, program) = match role {
         "kvm-system" => (
             "/lib/ld-musl-riscv64v0p7_xthead.so.1",
-            "/tmp/kvm_system/kvm_system",
+            "/kvmapp/kvm_system/kvm_system",
         ),
         "hwmon" => (
             "/lib/ld-musl-riscv64xthead.so.1",
@@ -76,6 +76,16 @@ mod tests {
     fn roles_select_only_the_two_fixed_native_programs() {
         assert!(command("kvm-system").is_some());
         assert!(command("hwmon").is_some());
+        let kvm = command("kvm-system").unwrap();
+        assert_eq!(kvm.get_program(), "/lib/ld-musl-riscv64v0p7_xthead.so.1");
+        assert_eq!(
+            kvm.get_args().collect::<Vec<_>>(),
+            [
+                "--library-path",
+                "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",
+                "/kvmapp/kvm_system/kvm_system"
+            ]
+        );
         for role in ["", "/bin/sh", "watchdog", "../../other", "hwmon;reboot"] {
             assert!(command(role).is_none());
         }

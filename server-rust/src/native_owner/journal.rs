@@ -23,6 +23,8 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
+#[path = "boot_activation.rs"]
+pub mod boot;
 #[path = "recovery.rs"]
 pub mod recovery;
 #[path = "broker_socket.rs"]
@@ -46,6 +48,8 @@ pub enum Error {
     Reboot,
     #[error("native runtime journal directory does not exist")]
     Absent,
+    #[error("native runtime requires early enrollment on a fresh kernel boot")]
+    Inactive,
     #[error("native runtime journal I/O failed")]
     Io,
 }
@@ -133,7 +137,7 @@ impl Store {
         Self::lock_root(true)?.admit()
     }
 
-    fn lock_root(create: bool) -> Result<Self, Error> {
+    pub(super) fn lock_root(create: bool) -> Result<Self, Error> {
         if !nix::unistd::geteuid().is_root() {
             return Err(Error::Unsafe);
         }
@@ -192,7 +196,7 @@ impl Store {
         })
     }
 
-    fn admit(mut self) -> Result<Self, Error> {
+    pub(super) fn admit(mut self) -> Result<Self, Error> {
         // Any fence object blocks admission before parsing or repairing state.
         // Missing socket/PID is never authority to bypass explicit recovery.
         match rustix::fs::statat(

@@ -4,7 +4,8 @@
 
 case "$1" in
     start)
-        exec /usr/libexec/nanokvm-app-recovery gate
+        /usr/libexec/nanokvm-app-recovery gate || exit $?
+        exec /usr/libexec/nanokvm-native-ctl activate-boot
         ;;
     stop)
         exit 0

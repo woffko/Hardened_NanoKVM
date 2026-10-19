@@ -2,6 +2,7 @@
 """Exercise the actual compiled Cargo build script, without rebuilding deps."""
 
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -83,7 +84,7 @@ def main():
             output = work / name.replace(" ", "-")
             output.mkdir()
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TARGET": target,
-                   "CARGO_MANIFEST_DIR": str(executable.parent), "OUT_DIR": str(output)}
+                   "CARGO_MANIFEST_DIR": str(Path(__file__).resolve().parent.parent / "server-rust"), "OUT_DIR": str(output)}
             if linked:
                 env["CARGO_FEATURE_LINKED_LIBKVM"] = "1"
             if value is not None:
@@ -101,6 +102,10 @@ def main():
             bound_native = {role: output / ("nanokvm-native-" + role + ".binding")
                             for role in binding.NATIVE_MAGICS}
             if success:
+                scripts = Path(__file__).resolve().parent.parent / "kvmapp/system/init.d"
+                assert (output / "native-boot-digests").read_bytes() == b"".join(
+                    hashlib.sha256((scripts / name).read_bytes()).digest()
+                    for name in ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"]), name
                 assert bound.read_bytes() == (valid if value is not None else b""), name
                 assert bound_app.read_bytes() == (valid_app if app_value is not None else b""), name
                 for role, path in bound_native.items():
@@ -109,7 +114,37 @@ def main():
                 assert not bound.exists(), name
                 assert not bound_app.exists(), name
                 assert not any(path.exists() for path in bound_native.values()), name
+                assert not (output / "native-boot-digests").exists(), name
             print("PASS", name)
+        # Real build.rs must fail before publishing ANY frame if a source boot
+        # identity is unavailable. Host-only success must not mask this gate.
+        trusted = Path(__file__).resolve().parent.parent / "kvmapp/system/init.d"
+        names = ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"]
+        for name in names:
+            for fault in ["missing", "empty", "oversized"]:
+                source_root = work / (name + "-" + fault)
+                manifest = source_root / "server-rust"
+                manifest.mkdir(parents=True)
+                scripts = source_root / "kvmapp/system/init.d"
+                scripts.mkdir(parents=True)
+                for member in names:
+                    (scripts / member).write_bytes((trusted / member).read_bytes())
+                if fault == "missing": (scripts / name).unlink()
+                elif fault == "empty": (scripts / name).write_bytes(b"")
+                else: (scripts / name).write_bytes(bytes(1024 * 1024 + 1))
+                output = source_root / "out"
+                output.mkdir()
+                env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TARGET": "riscv64gc-unknown-linux-musl",
+                       "CARGO_FEATURE_LINKED_LIBKVM": "1", "CARGO_MANIFEST_DIR": str(manifest), "OUT_DIR": str(output),
+                       "NANOKVM_SSH_RUNTIME_BINDING": str(inputs["valid"]),
+                       "NANOKVM_APP_RECOVERY_BINDING": str(inputs["app"])}
+                env.update({"NANOKVM_NATIVE_" + role.upper() + "_BINDING": str(path)
+                            for role, path in native_inputs.items()})
+                result = subprocess.run([str(executable)], env=env, cwd=work,
+                                        capture_output=True, text=True, timeout=10)
+                assert result.returncode != 0, (name, fault)
+                assert list(output.iterdir()) == [], (name, fault, "partial binding output")
+                print("PASS boot identity", name, fault)
 
 
 if __name__ == "__main__":

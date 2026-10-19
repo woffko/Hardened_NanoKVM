@@ -12,6 +12,7 @@ const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
 fn acquire(root: &Path) -> Result<Broker, JournalError> {
     Ok(Broker {
         group: Group::default(),
+        enrollment: boot::Permit::fixture(&File::open(root).unwrap()),
         journal: journal::Store::fixture(
             &File::open(root).unwrap(),
             nix::unistd::geteuid().as_raw(),
@@ -51,6 +52,36 @@ fn collision(root: &Path) {
     let path = root.join("native-runtime-owner/.state.next");
     fs::write(&path, b"synthetic publication collision").unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn boot_enrollment_is_retained_across_native_maintenance_resume_and_final_drain() {
+    use rustix::fs::{FlockOperation, flock};
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = acquire(root.path()).unwrap();
+    let contender = File::open(root.path().join("native-runtime-boot")).unwrap();
+    let blocked = || {
+        assert_eq!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        )
+    };
+    blocked();
+    start(&mut broker, root.path(), "normal").unwrap();
+    ready(&mut broker);
+    let mut drain = broker.begin_maintenance();
+    until(|| matches!(drain.poll(), Ok(DrainStatus::Drained)));
+    blocked();
+    let Resume::Running(broker) = drain.resume() else {
+        panic!("proven drain must resume");
+    };
+    blocked();
+    let mut drain = broker.begin_drain();
+    until(|| matches!(drain.poll(), Ok(DrainStatus::Drained)));
+    blocked();
+    drop(drain);
+    flock(&contender, FlockOperation::NonBlockingLockExclusive).unwrap();
+    flock(&contender, FlockOperation::Unlock).unwrap();
 }
 
 #[test]

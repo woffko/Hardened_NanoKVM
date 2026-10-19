@@ -1,11 +1,12 @@
-# Native process owner: kernel scope, integration pending
+# Native process owner: init wiring, acceptance pending
 
 `nanokvm-native-owner` is a separate single-threaded executable, not a subreaper
 inside the asynchronous backend. It provides one fresh process-tree lifetime.
 All four static native programs are now compile-bound and packaged, with
-independent rootfs copies. They are **not launched by S95, deployed, or used for
-production capture yet**. Existing native services and watchdogs therefore
-remain unquiesced. Packaging alone is not lifecycle integration.
+independent rootfs copies. The current S95 source launches KVM/hwmon only through
+the broker after fresh-boot enrollment. This wiring is **not deployed or accepted
+on hardware**. Backend/watchdog/network-writer joining and retained installation
+maintenance remain open; this is not production snapshot/capture acceptance.
 
 ## Implemented boundary
 
@@ -70,11 +71,11 @@ are not yet accepted from these fixtures.
 owner processes. It never installs a subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
 only `/usr/libexec/nanokvm-native-owner --scope <fixed-role>`. The controller
-is compiled and used by the broker component, but has **no S95 switch yet**.
+is compiled and used by the broker component and current S95 source.
 Startup now bootstraps the four independent native files from compile-bound
 backend bytes before publishing consumer scripts. This does not establish
 ownership of live legacy processes; a mutable app copy is not an executable-path
-fallback. Native service activation and live-legacy transition are still gated.
+fallback. A live legacy transition arms a reboot rather than adopting processes.
 
 `begin_drain` moves the complete launch capability into a non-cloneable `Drain`
 before sending Stop to every cell. While retained, no `Group::start` capability
@@ -104,8 +105,8 @@ unusual clone exit signals, durable crash recovery and vendor runtime remain ope
 
 `native_owner::broker::Broker` combines the sibling group with a protected
 singleton journal. The standalone `nanokvm-native-broker --serve` now owns this
-component through a fixed local protocol. These executables are packaged but
-not connected to S95/watchdogs yet; this is not a replacement for the separate raw
+component through a fixed local protocol. Current S95 connects its two native
+roles to it; this is not a replacement for the separate raw
 restore ticket or proof that existing production services are quiescent.
 
 The fixed store is `/etc/kvm/native-runtime-owner`: root-owned mode 0700 on the
@@ -203,10 +204,15 @@ on invalid/lost replies. Reconnecting is not permission to replay an operation
 whose outcome is unknown. A future maintenance transaction must retain this
 channel and the independent raw transaction authority throughout its lifetime.
 
-`nanokvm-native-ctl` accepts only `status`, `ensure-kvm`, `ensure-hwmon` and
-`shutdown`. There is deliberately no short-lived pause/resume command: exiting
+`nanokvm-native-ctl` accepts only `activate-boot`, `boot-ready`, `status`, `running`,
+`kvm-running`, `ensure-kvm`, `ensure-hwmon` and `shutdown`. Ensure waits for the
+role's spawn/liveness acknowledgement (not service/hardware health). There is
+deliberately no short-lived pause/resume command: exiting
 would lose the retained maintenance connection. Shutdown reports completion only
-after the proven drain/Closed state; the daemon may exit after flushing Stopped.
+after the proven drain/Closed state **and** positive exclusive-journal-lease
+observation after the daemon's Stopped reply. A missing endpoint is sufficient
+only when ready boot enrollment plus absent/Closed/prior-boot journal and the
+exclusive lease independently prove no current managed native owner.
 A CLI deadline or lost reply reports unknown completion without killing the
 daemon. No valid production daemon invocation is used in host CLI tests.
 
@@ -216,6 +222,61 @@ maintenance EOF and durable reopening refusal, and safe endpoint cleanup.
 A separate real subreaper fixture holds journal/listener/client descriptors while
 launching and draining a daemonized tree to check descriptor isolation. These
 tests do not execute production native roles or establish target runtime health.
+
+## Fresh-boot init enrollment
+
+The separate protected `/etc/kvm/native-runtime-boot` directory is root-owned
+0700 on the rootfs. Its single-link root:root 0600 `state` is 80 bytes:
+`NKBOOT01`, 36-byte epoch (all zero only for Factory), phase at byte44, three
+zero reserved bytes and SHA-256 of the first48 bytes. The checksum detects
+corruption; the protected producer/location is the authority, not this hash.
+Unknown/unsafe records are preserved and rejected, not reset or upgraded.
+
+| Entry state | Authorized transition |
+| --- | --- |
+| Factory, seeded only by offline full-image producer | Early S02 may publish Ready(current epoch) |
+| Absent on a legacy install | Compile-bound backend bootstrap may publish Armed(current epoch), never Factory/Ready |
+| Armed(current epoch) | No activation; reboot required even after manually rerunning S02 |
+| Armed/Ready from an earlier epoch | Early S02 may publish Ready(current epoch) |
+| Ready(current epoch) | Read-only current-backend restart; no legacy adoption |
+
+Factory is **not** a mandatory predecessor for a legacy installation: the
+intentional compatibility path is absent -> Armed -> new kernel boot -> Ready.
+Only an offline image producer can grant immediate first-boot activation with
+Factory. The app archive contains neither that record nor its directory.
+
+S02 first runs the independent app recovery gate. Native activation then checks
+all four installed critical consumer scripts against compile-bound SHA-256
+digests with protected same-rootfs parents/regular single-link root-owned0755
+files. Digests avoid embedding a second complete script copy in helpers. Main
+arms **before** publishing scripts, retaining its exclusive boot guard through
+publication; a partial repair cannot activate legacy processes in that same boot.
+Already Ready main startup takes a shared guard after checking exact scripts.
+The broker retains a shared guard through running, drain, maintenance and resume,
+so a live broker prevents re-arming. Native journal Active/Maintenance/recovery
+still independently blocks startup: Ready never clears or overrides it.
+
+State publication uses fresh exclusive random hidden names, file sync, rename
+and directory sync. Hidden orphans are retained evidence and never selected.
+An interrupted arm cannot certify readiness; retry only arms the current epoch.
+No boot-ID, path or environment override exists in production.
+
+Current S95 removes KVM PID scanning/adoption/staging and hwmon PID/killall
+fallbacks. It uses a fixed standalone broker, fixed ctl ensures, and verified
+shutdown before backend stop or runtime cleanup. Watchdog retries can request
+Ensure but cannot bypass maintenance or start a replacement broker. The KVM
+role runs the foreground vendor program directly from `/kvmapp/kvm_system` with
+the same v0p7 loader/library path. That pathname/ABI and vendor-kernel behavior
+still require target acceptance.
+
+This is deliberately **not** all-writer quiescence: backend restart/watchdog,
+delayed hwmon request shells, STA/ethernet/AP state producers and trusted update
+issuer still need a retained transaction-level join. In particular the current
+watchdog starts backend/update descendants, so wrapping it in a native subreaper
+would kill the update during shutdown. Do not do so or claim C1 closed. Directed
+native executable upgrades, app journaled swap/health/rollback and complete
+authenticated raw/early restore remain mandatory. DEVELOPMENT raw barrier must
+not ship; no accepted image/release is produced by these host fixtures.
 
 ## Explicit native journal recovery
 

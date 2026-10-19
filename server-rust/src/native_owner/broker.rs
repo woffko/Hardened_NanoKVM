@@ -1,10 +1,11 @@
 //! Retained native-service admission plus durable same-boot crash detection.
-//! Local lifecycle transport exists; S95/raw-update/early-restore integration does not.
+//! S95 native roles are wired; transaction/raw/early-restore joining remains open.
 
 use super::controller::{self, DrainStatus, Group, Role, StartError, Status};
 #[path = "journal.rs"]
 mod journal;
 pub use journal::Error as JournalError;
+pub use journal::boot;
 pub use journal::recovery;
 #[path = "ipc.rs"]
 pub mod ipc;
@@ -16,18 +17,34 @@ pub enum StartFailure {
 }
 
 /// The singleton lease stays alive through all child scopes and maintenance.
-/// The trusted lifecycle daemon retains this object; integration is still gated.
+/// The trusted lifecycle daemon retains this object through init/native work.
 pub struct Broker {
     group: Group,
     journal: journal::Store,
+    enrollment: boot::Permit,
 }
 
 impl Broker {
     pub fn acquire() -> Result<Self, JournalError> {
+        let enrollment = boot::require_ready()?;
         Ok(Self {
             group: Group::default(),
             journal: journal::Store::open()?,
+            enrollment,
         })
+    }
+
+    /// Positive closed-journal + exclusive-lease proof, never a PID/socket guess.
+    pub fn verify_stopped() -> Result<(), JournalError> {
+        let _enrollment = boot::require_ready()?;
+        match journal::Store::lock_root(false) {
+            Ok(store) => {
+                let _closed = store.admit()?;
+                Ok(())
+            }
+            Err(JournalError::Absent) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Informational native ownership observation, NOT proof of restored state,
@@ -62,6 +79,7 @@ impl Broker {
             group: self.group.begin_drain(),
             journal: self.journal,
             maintenance: false,
+            enrollment: self.enrollment,
         }
     }
 
@@ -80,6 +98,7 @@ pub struct RetainedDrain {
     group: controller::Drain,
     journal: journal::Store,
     maintenance: bool,
+    enrollment: boot::Permit,
 }
 
 /// Ownership transition, not an error carrying a discarded cleanup handle.
@@ -113,11 +132,13 @@ impl RetainedDrain {
             Ok(group) => Resume::Running(Broker {
                 group,
                 journal: self.journal,
+                enrollment: self.enrollment,
             }),
             Err(group) => Resume::Retained(Self {
                 group,
                 journal: self.journal,
                 maintenance: self.maintenance,
+                enrollment: self.enrollment,
             }),
         }
     }
