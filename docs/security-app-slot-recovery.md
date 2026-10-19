@@ -1,6 +1,6 @@
 # Independent app-slot recovery component
 
-This describes source/host-tested preparation, rollback and early consumer gates,
+This describes source/host-tested preparation, native-closed publication, rollback and early consumer gates,
 not an activated journaled installer or a completed WP-04/C1 fix. The actual app
 API still uses its legacy slot swap. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
@@ -127,8 +127,9 @@ must call `accept_prepared` with its validated lease: this reopens only the fixe
 canonical journal, requires the same transaction ID, phase `prepared` and exact
 old-live/new-staged/no-old-parked layout. Another ID, later phase or already-swapped
 layout is rejected without rewriting the journal. `AcceptedInstall` retains both
-the store and accepted exclusions; it is not a native Stop, slot publication or
-health capability.
+the store and accepted exclusions; it alone is not a native Stop, slot publication
+or health capability. Publication additionally requires the retained native owner
+described below.
 
 An early-rejection owner groups candidate staging before the retained handoff
 in field order, before any fallible fixed-root/store inspection. Candidate
@@ -149,6 +150,57 @@ worker, HTTP/device acceptance or a complete install lifecycle.
 Production delivery must additionally cover ambiguous queued transfer and peer
 death before acceptance together with canonical transaction state; separate
 lease queue tests alone do not complete that combined worker-delivery gate.
+
+## Native-closed publication and retained rollback (not activated)
+
+`Broker::begin_app_install` consumes an accepted install and the live broker.
+The accepted install already retains UpdateEX and both writer exclusions; this
+path must not reacquire those locks or an enrolled Configuration permit. It
+durably publishes native `Stopping` before requesting Stop from KVM, hwmon and
+backend. A failed journal publication returns both complete owners and does not
+start the drain. The retained session owns the group, journal, boot enrollment,
+app store and all three transferred exclusions. Losing the frontend is not a
+reason to release these owners or resume native work.
+
+Only this session can produce a transaction-bound closed-runtime capability,
+and only after all three scopes prove completion by receipt, direct-owner reap
+and EOF. `Stopping` remains durable after they drain: app work is still ongoing.
+Missing or uncertain receipts prevent publication and rollback-resume; even
+reaping the direct owners does not grant closure of their descendants.
+
+Publication rereads the canonical prepared receipt and exact slot layout. Before
+changing the live slot it preserves only `kvm/{ap.ssid,ap.pass,type,fps,qlty,gop,res}`,
+the exact existing restore-policy app-data subset. Each optional source must be a
+protected single-link regular same-rootfs file, at most 4096 bytes; symlinks,
+mount crossings, special objects and unsafe permissions are refused. Values are
+held in zeroizing buffers, old files/directories are synced for rollback, and new
+copies are atomically published mode 0600. Absence remains absence instead of
+silently installing a packaged default. Arbitrary old scripts, keys and trees
+are never copied. This is not a claim that unenrolled writers are quiescent.
+
+The canonical phase is then synced as `publishing`, old `/kvmapp` is parked by
+NOREPLACE rename, candidate `new` is renamed live, both parent sets are synced,
+and `published` is synced. An I/O error is not retried from a cached in-memory
+phase: the retained owner must inspect durable state. `published` is not healthy,
+committed or API success. Before any trial runtime starts, explicit rollback
+restores the old slot under the same exclusions, durably resumes native Active,
+and returns a terminal owner that still holds install admission until explicit
+release. An uncertain failure retains the whole session; Drop never resumes it.
+
+Host tests exercise all three actual controller-protocol child processes,
+delayed backend closure, missing receipt and native-journal publication failure.
+Nineteen SIGKILL boundaries cover seven data publications, both phase records,
+slot renames and directory syncs; recovery restores the recorded old inode and
+data and is repeatable. These process-death fixtures are not target power-cut or
+vendor-native acceptance. The existing standalone scope tests separately cover
+subreaper descendant closure; the new protocol stubs do not replace that proof.
+
+The production API/daemon transport, independent installer invocation, safe
+executable permissions, frozen read-only trial startup, runtime-health handshake,
+commit and retirement are still missing. Ordinary backend startup is not a
+usable trial path while writer exclusions are retained: it acquires writer/update
+admission and performs storage, helper, trust and init-script writes. Do not
+release/reacquire the exclusions to make that startup succeed.
 
 ## Early consumer integration (development branch)
 

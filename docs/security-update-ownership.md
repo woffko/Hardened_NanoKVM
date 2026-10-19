@@ -595,9 +595,13 @@ with the retained app handoff and atomically publishes a complete protected
 `prepared` receipt without touching `/kvmapp`. A receiver must bind its three
 accepted leases to that exact transaction and old-live/new-staged layout.
 The [preparation protocol](security-app-slot-recovery.md#durable-preparation-and-lease-acceptance-not-activated)
-and its real exec/fixed-root host test do not activate a broker-owned installer,
-journaled live swap, first-start health or terminal retirement. The API still
-uses the legacy swap/restart and is not accepted for deployment.
+and its real exec/fixed-root host test do not activate a broker-owned installer.
+The new [native-closed publication component](security-app-slot-recovery.md#native-closed-publication-and-retained-rollback-not-activated)
+consumes the accepted install with the broker, durably fences native startup
+before stopping all three scopes, and retains all exclusions through journaled
+publication or old-slot rollback. It does not yet implement daemon transport,
+frozen trial startup, first-start health, commit or terminal retirement. The API
+still uses the legacy swap/restart and is not accepted for deployment.
 
 The [native owner component](security-native-owner.md) supplies separate-process
 child-tree Stop/reap and sibling-controller drain machinery. Moving its launch

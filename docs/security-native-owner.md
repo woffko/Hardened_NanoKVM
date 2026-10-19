@@ -9,6 +9,13 @@ accepted on hardware**. Protected app self-restart handoff, watchdog/network-wri
 joining and retained installation maintenance remain open; this is not production
 snapshot/capture acceptance.
 
+The broker-side [app-install session](security-app-slot-recovery.md#native-closed-publication-and-retained-rollback-not-activated)
+now composes accepted app/update/writer admission with durable `Stopping` and a
+three-scope drain before slot publication. It retains that fence through explicit
+old-slot rollback; no native launch or automatic resume is exposed by the session.
+The daemon/API still do not invoke it. Independent delivery, frozen trial startup,
+health/commit/retirement and device acceptance remain required.
+
 ## Implemented boundary
 
 Before launch the owner requires an anonymous Unix socketpair, exactly one

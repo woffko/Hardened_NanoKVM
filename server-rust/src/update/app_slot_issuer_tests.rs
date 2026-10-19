@@ -68,6 +68,20 @@ fn issue(root: &Path, candidate: AppCandidate, handoff: Handoff) -> Result<Prepa
     )
 }
 
+pub(crate) async fn accepted_fixture(root: &Path) -> AcceptedInstall {
+    if !root.join("kvmapp").exists() {
+        init(root);
+    }
+    let (owner, handoff) = admission(root).await;
+    let prepared = issue(root, candidate(root), handoff).unwrap();
+    let received = crate::update::app_install_lease::exchange_fixture(
+        prepared.into_handoff(),
+        &File::open(root).unwrap(),
+    );
+    drop(owner);
+    accept_at(read_store(root, true).unwrap().unwrap(), received).unwrap()
+}
+
 fn read_store(root: &Path, exclusive: bool) -> Result<Option<Store>> {
     Store::at_root(
         File::open(root).unwrap(),
@@ -84,7 +98,7 @@ fn assert_old(root: &Path) {
     );
 }
 
-fn assert_excluded(root: &Path) {
+pub(crate) fn assert_excluded(root: &Path) {
     let parent = File::open(root).unwrap();
     for domain in [
         Domain::Update,

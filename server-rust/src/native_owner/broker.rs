@@ -11,6 +11,8 @@ mod journal;
 pub use journal::Error as JournalError;
 pub use journal::boot;
 pub use journal::recovery;
+#[path = "app_install.rs"]
+pub mod app_install;
 #[path = "ipc.rs"]
 pub mod ipc;
 

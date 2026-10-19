@@ -173,6 +173,206 @@ impl AcceptedInstall {
     pub fn transaction(&self) -> [u8; 16] {
         self.record.transaction
     }
+
+    pub(crate) fn publish(
+        &mut self,
+        closed: &crate::native_owner::broker::app_install::ClosedRuntime,
+    ) -> Result<Status> {
+        if closed.transaction() != self.record.transaction {
+            return Err(SlotError::Invalid);
+        }
+        let store = &self._store;
+        // Re-read canonical state after any earlier I/O error. An in-memory
+        // phase or successful rename return is not a durable receipt.
+        let mut record = store.record()?;
+        let layout = store.layout(&record)?;
+        if record.transaction != self.record.transaction
+            || record.phase != Phase::Prepared
+            || layout.live != Some(record.old)
+            || layout.new != Some(record.new)
+            || layout.old.is_some()
+        {
+            return Err(SlotError::Invalid);
+        }
+        preserve_app_state(store)?;
+        record.phase = Phase::Publishing;
+        store.publish(&record)?;
+        renameat_with(
+            &store.rootfs,
+            "kvmapp",
+            &store.current,
+            "old",
+            RenameFlags::NOREPLACE,
+        )?;
+        #[cfg(test)]
+        checkpoint("publish-old-parked");
+        store.sync_parents()?;
+        #[cfg(test)]
+        checkpoint("publish-old-parked-synced");
+        renameat_with(
+            &store.current,
+            "new",
+            &store.rootfs,
+            "kvmapp",
+            RenameFlags::NOREPLACE,
+        )?;
+        #[cfg(test)]
+        checkpoint("publish-new-live");
+        store.sync_parents()?;
+        #[cfg(test)]
+        checkpoint("publish-new-live-synced");
+        let layout = store.layout(&record)?;
+        if layout.live != Some(record.new) {
+            return Err(SlotError::Invalid);
+        }
+        record.phase = Phase::Published;
+        store.publish(&record)?;
+        self.record = record;
+        Ok(Status::Transaction(Phase::Published))
+    }
+
+    pub(crate) fn rollback(
+        &mut self,
+        closed: &crate::native_owner::broker::app_install::ClosedRuntime,
+    ) -> Result<Status> {
+        let actual = self._store.record()?;
+        if closed.transaction() != self.record.transaction
+            || actual.transaction != self.record.transaction
+        {
+            return Err(SlotError::Invalid);
+        }
+        let status = self._store.recover()?;
+        if status != Status::Transaction(Phase::RolledBack) {
+            return Err(SlotError::Invalid);
+        }
+        self.record = self._store.record()?;
+        Ok(status)
+    }
+}
+
+// Data only, identical to the app-state subset of restore_policy::FIXED.
+// Do not copy arbitrary config, scripts, executables, keys or init from old app.
+const APP_STATE: [&str; 7] = ["ap.ssid", "ap.pass", "type", "fps", "qlty", "gop", "res"];
+const APP_STATE_BYTES: u64 = 4096;
+
+fn preserve_app_state(store: &Store) -> Result<()> {
+    let old_app =
+        restore_fs::open_beneath(&store.rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let new = restore_fs::open_beneath(&store.current, "new", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let old = open_optional(&old_app, "kvm")?;
+    if let Some(old) = &old {
+        protected_directory(old, store.device, store.uid, false)?;
+    }
+    match rustix::fs::mkdirat(&new, "kvm", Mode::from_raw_mode(0o755)) {
+        Ok(()) => new.sync_all()?,
+        Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let target = restore_fs::open_beneath(&new, "kvm", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    protected_directory(&target, store.device, store.uid, false)?;
+    // Snapshot and validate the complete bounded allowlist BEFORE changing even
+    // candidate data. Native closure + retained writer drain cover enrolled work.
+    let mut values: [Option<zeroize::Zeroizing<Vec<u8>>>; 7] = std::array::from_fn(|_| None);
+    for (index, name) in APP_STATE.into_iter().enumerate() {
+        let Some(old) = &old else {
+            continue;
+        };
+        let pinned: File = match openat2(
+            old,
+            name,
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        ) {
+            Ok(fd) => fd.into(),
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let m = pinned.metadata()?;
+        if !m.is_file()
+            || m.nlink() != 1
+            || m.uid() != store.uid
+            || m.dev() != store.device
+            || m.mode() & 0o7022 != 0
+            || m.len() > APP_STATE_BYTES
+        {
+            return Err(SlotError::Unsafe);
+        }
+        let mut source = restore_fs::open_beneath(old, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
+        let actual = source.metadata()?;
+        if (
+            actual.dev(),
+            actual.ino(),
+            actual.len(),
+            actual.mode(),
+            actual.uid(),
+            actual.nlink(),
+        ) != (m.dev(), m.ino(), m.len(), m.mode(), m.uid(), m.nlink())
+        {
+            return Err(SlotError::Unsafe);
+        }
+        let mut value = zeroize::Zeroizing::new(Vec::with_capacity(m.len() as usize));
+        (&mut source)
+            .take(APP_STATE_BYTES + 1)
+            .read_to_end(&mut value)?;
+        if value.len() as u64 != m.len() {
+            return Err(SlotError::Invalid);
+        }
+        // Rollback keeps this same old inode, including the last native/API
+        // settings, not just the newly synced candidate copy.
+        source.sync_all()?;
+        values[index] = Some(value);
+    }
+    if let Some(old) = &old {
+        old.sync_all()?;
+    }
+    old_app.sync_all()?;
+    for (name, value) in APP_STATE.into_iter().zip(values) {
+        // A fresh signed candidate may have a default file here, but never a
+        // symlink/alias/special object. Refuse foreign bindings before rename.
+        match statat(&target, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(s)
+                if FileType::from_raw_mode(s.st_mode) == FileType::RegularFile
+                    && s.st_uid == store.uid
+                    && s.st_dev == store.device
+                    && s.st_nlink == 1
+                    && s.st_mode & 0o7022 == 0 => {}
+            Ok(_) => return Err(SlotError::Unsafe),
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(value) = value {
+            let mut nonce = [0; 16];
+            OsRng
+                .try_fill_bytes(&mut nonce)
+                .map_err(|_| SlotError::Io(io::Error::other("app state entropy unavailable")))?;
+            let temporary = format!(".app-state-{:032x}", u128::from_be_bytes(nonce));
+            let mut file: File = rustix::fs::openat(
+                &target,
+                temporary.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )?
+            .into();
+            rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600))?;
+            file.write_all(&value)?;
+            file.sync_all()?;
+            renameat(&target, temporary.as_str(), &target, name)?;
+        } else {
+            match rustix::fs::unlinkat(&target, name, AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        target.sync_all()?;
+        #[cfg(test)]
+        checkpoint(&format!("app-state-{name}"));
+    }
+    new.sync_all()?;
+    Ok(())
 }
 
 pub fn accept_prepared(admission: Accepted) -> Result<AcceptedInstall> {
@@ -844,7 +1044,11 @@ mod tests;
 
 #[cfg(test)]
 #[path = "app_slot_issuer_tests.rs"]
-mod issuer_tests;
+pub(crate) mod issuer_tests;
+
+#[cfg(test)]
+#[path = "app_slot_publication_tests.rs"]
+mod publication_tests;
 
 #[cfg(test)]
 fn checkpoint(name: &str) {

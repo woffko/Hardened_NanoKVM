@@ -49,21 +49,25 @@ fn check_free(parent: &File) {
         Domain::WriterAdmission,
         Domain::Update,
     ] {
-        // A parallel fixture can fork with a temporary CLOEXEC alias. Exported
-        // descriptions intentionally cannot be explicitly unlocked on Drop.
-        // Observe actual release; never force-unlock or hide non-Busy errors.
-        let start = std::time::Instant::now();
-        loop {
-            match ProcessLock::at_parent(parent, nix::unistd::geteuid().as_raw(), domain, false) {
-                Ok(lease) => {
-                    drop(lease);
-                    break;
-                }
-                Err(LockError::Busy) if start.elapsed() < Duration::from_secs(3) => {
-                    std::thread::sleep(Duration::from_millis(2))
-                }
-                Err(error) => panic!("lease release failed: {error}"),
+        check_released(parent, domain);
+    }
+}
+
+fn check_released(parent: &File, domain: Domain) {
+    // A parallel fixture can fork with a temporary CLOEXEC alias. Exported
+    // descriptions intentionally cannot be explicitly unlocked on Drop.
+    // Observe actual release; never force-unlock or hide non-Busy errors.
+    let start = std::time::Instant::now();
+    loop {
+        match ProcessLock::at_parent(parent, nix::unistd::geteuid().as_raw(), domain, false) {
+            Ok(lease) => {
+                drop(lease);
+                break;
             }
+            Err(LockError::Busy) if start.elapsed() < Duration::from_secs(3) => {
+                std::thread::sleep(Duration::from_millis(2))
+            }
+            Err(error) => panic!("lease release failed: {error}"),
         }
     }
 }
@@ -193,6 +197,11 @@ async fn broken_send_is_not_retried_or_allowed_to_unlock_frontend() {
     drop(receiver);
     assert!(sender.send(handoff).is_err());
     check_busy(&parent, &[Domain::Update]);
+    // Sending failed and closed the writer owners. The still-live frontend
+    // must retain UpdateEX, not WriterEX; wait for any pre-exec aliases before
+    // testing that the one-shot export cannot be repeated.
+    check_released(&parent, Domain::WriterActivity);
+    check_released(&parent, Domain::WriterAdmission);
     let writers = StateWriters::for_test_parent(parent.try_clone().unwrap())
         .drain(Duration::from_secs(1))
         .await
