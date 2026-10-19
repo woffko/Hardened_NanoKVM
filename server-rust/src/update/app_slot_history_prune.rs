@@ -1,6 +1,7 @@
 //! Exact inactive-payload retirement under the caller's retained lifetime owner.
 //! Receipts stay intact; bounded receipt expiry/cutoff remains separate work.
 use super::*;
+use crate::update::app_space::{Capacity, Footprint};
 use std::collections::BTreeSet;
 
 #[path = "app_slot_prune_tree.rs"]
@@ -434,6 +435,23 @@ fn clean(store: &Store, manifest: &Manifest, file: &File) -> Result<()> {
     Ok(())
 }
 
+/// Advisory peak journal/namespace demand, preserving the separate recovery
+/// reserve. Never count future freed payload blocks/inodes as available space.
+fn journal_capacity(capacity: Capacity, manifest_bytes: Option<u64>) -> Result<()> {
+    let mut demand = Footprint::new(capacity.unit)?;
+    if let Some(bytes) = manifest_bytes {
+        demand.path(true)?;
+        demand.file(bytes)?;
+    }
+    // Canonical + replacement cursor, expiry, and the subsequent history head.
+    for bytes in [96, 96, 160, BYTES as u64] {
+        demand.path(true)?;
+        demand.file(bytes)?;
+    }
+    demand.check(capacity)?;
+    Ok(())
+}
+
 fn execute(store: &Store, archive: &Archive, manifest: &Manifest, file: &File) -> Result<()> {
     let (payload_name, identity) = inactive(&archive.record)?;
     if manifest.nodes.last().ok_or(SlotError::Invalid)?.identity != identity {
@@ -460,6 +478,9 @@ fn execute(store: &Store, archive: &Archive, manifest: &Manifest, file: &File) -
         archive.directory.sync_all()?;
         return clean(store, manifest, file);
     }
+    // A durable manifest already consumes its blocks; only future journal work
+    // is charged here. Completed expiry cleanup above must not need free space.
+    journal_capacity(Capacity::read(&store.current)?, None)?;
     let source = open_optional(&archive.directory, payload_name)?;
     let mut quarantine = open_optional(&archive.directory, QUARANTINE)?;
     let mut cursor = match resume_cursor(store, manifest)? {
@@ -703,6 +724,10 @@ pub(super) fn finish(
         let nodes = tree::collect(&payload, archive.order.directory, store.device, store.uid)?;
         drop(payload);
         let manifest = Manifest::new(order.clone(), archive.order.clone(), nodes)?;
+        journal_capacity(
+            Capacity::read(&store.current)?,
+            Some(manifest.encoded_bytes()?),
+        )?;
         publish(
             &store.current,
             MANIFEST,

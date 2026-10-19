@@ -129,6 +129,7 @@ fn manifest_roundtrip_detects_every_corrupt_byte_and_noncanonical_path() {
     let mut manifest = Manifest::new(owner, victim.order.clone(), nodes).unwrap();
     let mut bytes = Vec::new();
     manifest.encode(&mut bytes).unwrap();
+    assert_eq!(manifest.encoded_bytes().unwrap(), bytes.len() as u64);
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&bytes).unwrap();
     file.rewind().unwrap();
@@ -262,6 +263,156 @@ fn points() -> Vec<String> {
         }
     }
     points
+}
+
+#[test]
+fn journal_budget_counts_peak_files_without_spending_recovery_reserves() {
+    let reserve = crate::update::app_space::RECOVERY_BYTES;
+    for (manifest, blocks, inodes) in [
+        (None, 9, 5),
+        (Some(560), 11, 6),
+        (Some(tree::MAX_MANIFEST), tree::MAX_MANIFEST / 4096 + 10, 6),
+    ] {
+        let bytes = reserve + blocks * 4096;
+        journal_capacity(Capacity::fixture(4096, bytes, 128 + inodes), manifest).unwrap();
+        for capacity in [
+            Capacity::fixture(4096, bytes - 1, 128 + inodes),
+            Capacity::fixture(4096, bytes, 127 + inodes),
+        ] {
+            assert!(matches!(
+                journal_capacity(capacity, manifest),
+                Err(SlotError::Io(error)) if error.raw_os_error() == Some(28)
+            ));
+        }
+    }
+    assert!(journal_capacity(Capacity::fixture(4096, u64::MAX, u64::MAX), Some(u64::MAX)).is_err());
+    assert!(journal_capacity(Capacity::fixture(0, u64::MAX, u64::MAX), None).is_err());
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn private_prune_capacity_child() {
+    let Ok(volume) = std::env::var("NANOKVM_PRUNE_SPACE_ROOT") else {
+        return;
+    };
+    let case = std::env::var("NANOKVM_PRUNE_SPACE_CASE").unwrap();
+    let options = match case.as_str() {
+        "bytes" => "mode=0700,size=8388608,nr_inodes=4096",
+        "inodes" => "mode=0700,size=67108864,nr_inodes=64",
+        _ => "mode=0700,size=67108864,nr_inodes=4096",
+    };
+    let flags = nix::mount::MsFlags::MS_NODEV
+        | nix::mount::MsFlags::MS_NOSUID
+        | nix::mount::MsFlags::MS_NOEXEC;
+    nix::mount::mount(
+        Some("tmpfs"),
+        Path::new(&volume),
+        Some("tmpfs"),
+        flags,
+        Some(options),
+    )
+    .unwrap();
+    // TMPDIR is set only in this exact child process before it starts. Fixture
+    // roots are created inside the private tmpfs, never on the host filesystem.
+    let fixture = prunable();
+    assert!(fixture.root.path().starts_with(&volume));
+    if matches!(case.as_str(), "resumed" | "expired") {
+        kill_at(
+            &fixture,
+            if case == "resumed" {
+                "prune-manifest-published"
+            } else {
+                "prune-expiry-published"
+            },
+        );
+        nix::mount::mount(
+            None::<&str>,
+            Path::new(&volume),
+            None::<&str>,
+            flags | nix::mount::MsFlags::MS_REMOUNT,
+            Some("size=8388608"),
+        )
+        .unwrap();
+    }
+    let store = fixture.store(true).unwrap();
+    let head = fs::read(fixture.root.path().join(DIRECTORY).join(HEAD)).unwrap();
+    if case == "readonly" {
+        nix::mount::mount(
+            None::<&str>,
+            Path::new(&volume),
+            None::<&str>,
+            flags | nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .unwrap();
+        assert_eq!(
+            Capacity::read(&store.current).err().unwrap().raw_os_error(),
+            Some(30)
+        );
+    } else if matches!(case.as_str(), "ample" | "expired") {
+        register(&store, &fixture.record).unwrap();
+        assert_pruned(&fixture);
+    } else {
+        let manifest = fs::read(fixture.current().join(MANIFEST)).ok();
+        assert!(matches!(
+            register(&store, &fixture.record),
+            Err(SlotError::Io(error)) if error.raw_os_error() == Some(28)
+        ));
+        assert_eq!(fs::read(fixture.current().join(MANIFEST)).ok(), manifest);
+        assert!(victim(&fixture).join("old/extra/sub/data").exists());
+        assert!(!victim(&fixture).join(QUARANTINE).exists());
+        assert!(!victim(&fixture).join(EXPIRED).exists());
+        assert_eq!(
+            fs::read(fixture.root.path().join(DIRECTORY).join(HEAD)).unwrap(),
+            head
+        );
+        if case == "resumed" {
+            // Retry reads fresh capacity; it does not treat a saved manifest
+            // or eventual payload reclamation as a space reservation.
+            nix::mount::mount(
+                None::<&str>,
+                Path::new(&volume),
+                None::<&str>,
+                flags | nix::mount::MsFlags::MS_REMOUNT,
+                Some("size=67108864"),
+            )
+            .unwrap();
+            register(&store, &fixture.record).unwrap();
+            assert_pruned(&fixture);
+        }
+    }
+    println!("private-prune-capacity-ran");
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn private_tmpfs_prune_budget_refuses_before_deletion_and_preserves_exact_retry() {
+    for case in ["bytes", "inodes", "readonly", "ample", "resumed", "expired"] {
+        let root = tempfile::tempdir().unwrap();
+        let volume = root.path().join("volume");
+        fs::create_dir(&volume).unwrap();
+        let evidence = root.path().join("outside-evidence");
+        fs::write(&evidence, b"preserve outside volume").unwrap();
+        let output = Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::app_slot::history::prune::tests::private_prune_capacity_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("TMPDIR", &volume)
+            .env("NANOKVM_PRUNE_SPACE_ROOT", &volume)
+            .env("NANOKVM_PRUNE_SPACE_CASE", case)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{case}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("private-prune-capacity-ran"));
+        assert_eq!(fs::read(evidence).unwrap(), b"preserve outside volume");
+        assert_eq!(fs::read_dir(volume).unwrap().count(), 0);
+    }
 }
 
 #[test]

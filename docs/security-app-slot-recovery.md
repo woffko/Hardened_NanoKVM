@@ -445,6 +445,16 @@ This is **not** a final receipt-retention policy: protected cutoff/anchor and
 bounded receipt expiry are still required before release, along with actual
 ENOSPC/I/O, mutable-state, native/runtime and physical power-cut acceptance.
 
+Journal creation separately checks the manifest's exact serialized length and
+peak cursor/replacement, expiry, history-head and namespace demand against
+fresh pinned-FD available blocks/inodes. This preserves the separate16MiB/
+128inode recovery margin; the up-to34MiB manifest must not spend that margin.
+No future reclaimed payload space is counted before deletion. A resumed
+unfinished prune refreshes the remaining journal budget without double-charging
+the resident manifest. Fully published expiry cleanup needs no new allocation
+and is not blocked by this admission margin. These are advisory checks, not
+reservations or a guarantee against concurrent writers or real storage failure.
+
 Host tests cover exact deletion and retained pins/receipts, CRC/schema failures,
 per-step process death/I/O recovery, unknown input/substitution, non-UTF8 names,
 hardlinks/FIFO and an actual private-namespace bind mount. Engine tests prove a

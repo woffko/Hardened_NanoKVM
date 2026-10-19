@@ -1,4 +1,5 @@
-//! Retirement archives the exact terminal directory, never deletes app trees.
+//! Retirement archives the exact current directory; older inactive payloads may
+//! be pruned separately under the same retained lifetime owner.
 //! Read-only job snapshots are diagnostics, not runtime-health or execution grants.
 use super::*;
 use crate::native_owner::broker::app_install::TerminalBoundary;

@@ -329,6 +329,19 @@ fn read_hashed<const N: usize>(input: &mut File, hash: &mut Sha256) -> Result<[u
 }
 
 impl Manifest {
+    /// Serialized journal demand only, not validation or deletion authority.
+    pub fn encoded_bytes(&self) -> Result<u64> {
+        let mut bytes = (HEADER + 32) as u64;
+        for node in &self.nodes {
+            bytes = bytes
+                .checked_add(NODE_BYTES as u64)
+                .and_then(|n| n.checked_add(node.path.as_os_str().len() as u64))
+                .filter(|n| *n <= MAX_MANIFEST)
+                .ok_or(SlotError::Invalid)?;
+        }
+        Ok(bytes)
+    }
+
     pub fn new(owner: Order, victim: Order, nodes: Vec<Node>) -> Result<Self> {
         let mut manifest = Self {
             owner,
@@ -341,6 +354,7 @@ impl Manifest {
     }
 
     fn validate(&self) -> Result<()> {
+        self.encoded_bytes()?;
         self.owner.validate(self.owner.directory.device)?;
         self.victim.validate(self.owner.directory.device)?;
         if self.owner.sequence <= self.victim.sequence
