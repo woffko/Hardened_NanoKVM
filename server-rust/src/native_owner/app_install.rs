@@ -2,7 +2,7 @@
 //! No HTTP/worker transport or arbitrary executable selector is exposed.
 
 use super::{Broker, JournalError, controller, journal};
-use crate::update::app_slot::{AcceptedInstall, SlotError, Status};
+use crate::update::app_slot::{AcceptedInstall, Phase, SlotError, Status};
 
 /// Only the fixed protected broker endpoint, never a caller-selected address.
 pub(crate) fn connect_peer() -> std::io::Result<std::os::fd::OwnedFd> {
@@ -101,17 +101,54 @@ pub enum CommitTrial {
     Retained(TrialSession),
 }
 
+pub enum Release<T> {
+    // One explicit cold-path allocation at successful terminal retirement,
+    // not in native supervision or the frozen backend's request hot path.
+    Released(Box<Broker>),
+    Retained(T),
+}
+
+/// Minted only by a joined rollback or acknowledged commit owner, not by a
+/// public status read, root peer or caller-supplied phase.
+pub(crate) struct TerminalBoundary {
+    transaction: [u8; 16],
+    phase: Phase,
+}
+impl TerminalBoundary {
+    pub(crate) fn transaction(&self) -> [u8; 16] {
+        self.transaction
+    }
+    pub(crate) fn phase(&self) -> Phase {
+        self.phase
+    }
+}
+
 pub struct Committed {
     broker: Broker,
     install: AcceptedInstall,
 }
 impl Committed {
-    /// Terminal journal/old slot remain. Retirement is a separate durable
-    /// transition; releasing this freeze does not delete rollback evidence.
-    pub fn release(self) -> Broker {
+    /// Archive the exact terminal receipt/old slot before ending the freeze.
+    /// Unknown rename/sync results retain the complete owner for inspection.
+    pub fn release(mut self) -> Release<Self> {
+        let boundary = TerminalBoundary {
+            transaction: self.install.transaction(),
+            phase: Phase::Committed,
+        };
+        if self.install.retire(&boundary).is_err() {
+            return Release::Retained(self);
+        }
         let Self { broker, install } = self;
+        let broker = Box::new(broker);
         drop(install);
-        broker
+        Release::Released(broker)
+    }
+
+    pub(super) fn observe(
+        &mut self,
+    ) -> ([Option<controller::Status>; 2], Option<controller::Status>) {
+        let roles = self.broker.poll();
+        (roles, self.broker.backend_status())
     }
 }
 impl RolledBack {
@@ -119,10 +156,25 @@ impl RolledBack {
         self.install.transaction()
     }
 
-    pub fn release(self) -> Broker {
+    pub fn release(mut self) -> Release<Self> {
+        let boundary = TerminalBoundary {
+            transaction: self.install.transaction(),
+            phase: Phase::RolledBack,
+        };
+        if self.install.retire(&boundary).is_err() {
+            return Release::Retained(self);
+        }
         let Self { broker, install } = self;
+        let broker = Box::new(broker);
         drop(install);
-        broker
+        Release::Released(broker)
+    }
+
+    pub(super) fn observe(
+        &mut self,
+    ) -> ([Option<controller::Status>; 2], Option<controller::Status>) {
+        let roles = self.broker.poll();
+        (roles, self.broker.backend_status())
     }
 }
 

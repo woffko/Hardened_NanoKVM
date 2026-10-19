@@ -15,8 +15,11 @@ three-scope drain before slot publication. It retains that fence through explici
 old-slot rollback and offers a typed backend-only frozen trial transition.
 The daemon now invokes it for a validated prepared offer on its separate
 app-install endpoint and now drives its frozen trial, commit and failure/cancel
-stop-join transitions. The ordinary API remains legacy; terminal retirement,
-daemon-to-real-backend/runtime and device acceptance remain required.
+stop-join transitions. Successful live terminal archival now preserves the
+receipt/inactive slot and permits a subsequent transaction; archival failure
+retains the owner and exclusions. The ordinary API remains legacy; terminal
+failure/fresh-boot completion, bounded retention, daemon-to-real-backend/runtime
+and device acceptance remain required.
 
 ## Implemented boundary
 
@@ -490,8 +493,12 @@ uncommitted rollback. Separate host tests cover protocol readiness/commit and
 failure closure, not actual native-service health. The Engine and independent
 daemon now drive those transitions with host protocol probes, including
 frontend/observer loss, retained failed commit and post-freeze native restart.
-Real backend/runtime integration, complete crash/I/O/retirement and device
-acceptance remain open. See
+Exact terminal archival and per-ID observation are host-tested, including
+retained release failure and sequential app transactions. Direct early app
+recovery also checks the durable same-boot native Stop fence after acquiring
+UpdateEX, so installer death cannot bypass that fence merely by releasing a lock.
+Real backend/runtime integration, complete crash/I/O/fresh-boot retirement and
+device acceptance remain open. See
 [trial policy](security-app-slot-recovery.md#broker-owned-trial-policy).
 
 Remaining work is production lifecycle and recovery integration: close

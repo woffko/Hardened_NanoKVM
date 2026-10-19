@@ -255,6 +255,8 @@ enum Owner {
 enum InstallOwner {
     Draining(app_install::Session),
     Trial(app_install::TrialSession),
+    Committed(app_install::Committed),
+    RolledBack(app_install::RolledBack),
     Refused {
         broker: Broker,
         _install: app_slot::AcceptedInstall,
@@ -526,8 +528,19 @@ impl Engine {
                             }
                             InstallStage::Rollback => match session.rollback() {
                                 app_install::Rollback::Restored(restored) => {
-                                    self.finish_install(restored.release());
-                                    return None;
+                                    match restored.release() {
+                                        app_install::Release::Released(broker) => {
+                                            self.finish_install(*broker);
+                                            return None;
+                                        }
+                                        app_install::Release::Retained(restored) => {
+                                            self.mode = Mode::Uncertain;
+                                            return Some(Install {
+                                                owner: InstallOwner::RolledBack(restored),
+                                                stage: InstallStage::Failed,
+                                            });
+                                        }
+                                    }
                                 }
                                 app_install::Rollback::Retained(retained) => {
                                     session = retained;
@@ -571,9 +584,17 @@ impl Engine {
                         app_install::TrialStatus::Starting => InstallOwner::Trial(trial),
                         app_install::TrialStatus::Ready => match trial.commit() {
                             app_install::CommitTrial::Committed(committed) => {
-                                self.backend_wanted = true;
-                                self.finish_install(committed.release());
-                                return None;
+                                match committed.release() {
+                                    app_install::Release::Released(broker) => {
+                                        self.backend_wanted = true;
+                                        self.finish_install(*broker);
+                                        return None;
+                                    }
+                                    app_install::Release::Retained(committed) => {
+                                        stage = InstallStage::Failed;
+                                        InstallOwner::Committed(committed)
+                                    }
+                                }
                             }
                             app_install::CommitTrial::Pending(trial) => {
                                 stage = InstallStage::CommitPending;
@@ -598,6 +619,20 @@ impl Engine {
                         }
                     }
                 }
+            }
+            InstallOwner::Committed(mut committed) => {
+                let (roles, backend) = committed.observe();
+                self.roles = roles.map(role_status);
+                self.backend_status = backend;
+                stage = InstallStage::Failed;
+                InstallOwner::Committed(committed)
+            }
+            InstallOwner::RolledBack(mut restored) => {
+                let (roles, backend) = restored.observe();
+                self.roles = roles.map(role_status);
+                self.backend_status = backend;
+                stage = InstallStage::Failed;
+                InstallOwner::RolledBack(restored)
             }
             InstallOwner::Refused {
                 mut broker,
@@ -721,7 +756,9 @@ impl Engine {
                     }
                 }
             }
-            owner @ InstallOwner::Refused { .. } => {
+            owner @ (InstallOwner::Refused { .. }
+            | InstallOwner::Committed(_)
+            | InstallOwner::RolledBack(_)) => {
                 self.install = Some(Install { owner, stage });
                 Code::Uncertain
             }

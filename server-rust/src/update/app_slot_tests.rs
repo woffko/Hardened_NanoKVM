@@ -77,18 +77,18 @@ fn candidate_modes_grant_only_runtime_execution_and_do_not_touch_old_live_data()
 }
 
 #[derive(Clone, Copy)]
-enum Position {
+pub(super) enum Position {
     Prepared,
     Parked,
     Published,
 }
 
-struct Fixture {
-    root: TempDir,
-    record: Record,
+pub(super) struct Fixture {
+    pub(super) root: TempDir,
+    pub(super) record: Record,
 }
 impl Fixture {
-    fn new(phase: Phase, position: Position) -> Self {
+    pub(super) fn new(phase: Phase, position: Position) -> Self {
         let root = tempdir().unwrap();
         let slot = root.path().join(DIRECTORY);
         fs::create_dir(&slot).unwrap();
@@ -128,18 +128,18 @@ impl Fixture {
         fixture
     }
 
-    fn current(&self) -> PathBuf {
+    pub(super) fn current(&self) -> PathBuf {
         self.root.path().join(DIRECTORY).join(CURRENT)
     }
 
-    fn write_record(&self) {
+    pub(super) fn write_record(&self) {
         let path = self.current().join(STATE);
         fs::write(&path, self.record.encode().unwrap()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         File::open(path).unwrap().sync_all().unwrap();
     }
 
-    fn store(&self, recover: bool) -> Result<Store> {
+    pub(super) fn store(&self, recover: bool) -> Result<Store> {
         Store::at_root(
             File::open(self.root.path()).unwrap(),
             File::open(self.root.path().join(DIRECTORY)).unwrap(),

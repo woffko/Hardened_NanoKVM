@@ -29,6 +29,12 @@ const RECORD_BYTES: usize = 512;
 const HASH_OFFSET: usize = 480;
 const HASH_DOMAIN: &[u8] = b"NanoKVM app slot journal v1\0";
 
+#[path = "app_slot_terminal.rs"]
+mod terminal;
+#[cfg(test)]
+pub(crate) use terminal::job_status_fixture;
+pub use terminal::{JobStatus, job_status};
+
 #[derive(Debug, thiserror::Error)]
 pub enum SlotError {
     #[error("application slot storage requires protected rootfs directories")]
@@ -870,17 +876,7 @@ impl Drop for StoreLock {
 }
 impl Store {
     fn open(recover: bool) -> Result<Option<Self>> {
-        if !nix::unistd::geteuid().is_root() {
-            return Err(SlotError::Unsafe);
-        }
-        let rootfs = restore_fs::open_root(Path::new("/"), true)?;
-        let device = rootfs.metadata()?.dev();
-        for path in ["/", "/etc", "/etc/kvm"] {
-            let parent = restore_fs::open_root(Path::new(path), true)?;
-            protected_directory(&parent, device, 0, false)?;
-        }
-        let parent = restore_fs::open_root(Path::new("/etc/kvm"), true)?;
-        let Some(directory) = open_optional(&parent, DIRECTORY)? else {
+        let Some((rootfs, directory)) = fixed_store_root()? else {
             return Ok(None);
         };
         Self::at_root(rootfs, directory, 0, recover)
@@ -920,25 +916,7 @@ impl Store {
     }
 
     fn record(&self) -> Result<Record> {
-        let mut file =
-            restore_fs::open_beneath(&self.current, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != self.uid
-            || metadata.dev() != self.device
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o7777 != 0o600
-            || metadata.len() != RECORD_BYTES as u64
-        {
-            return Err(SlotError::Unsafe);
-        }
-        let mut bytes = [0; RECORD_BYTES];
-        file.read_exact(&mut bytes)?;
-        let mut tail = [0];
-        if file.read(&mut tail)? != 0 {
-            return Err(SlotError::Invalid);
-        }
-        let record = Record::decode(&bytes)?;
+        let record = read_record_at(&self.current, self.device, self.uid)?;
         if record.old.device != self.device {
             return Err(SlotError::Invalid);
         }
@@ -1066,6 +1044,69 @@ impl Store {
     }
 }
 
+fn fixed_store_root() -> Result<Option<(File, File)>> {
+    if !nix::unistd::geteuid().is_root() {
+        return Err(SlotError::Unsafe);
+    }
+    let rootfs = restore_fs::open_root(Path::new("/"), true)?;
+    let device = rootfs.metadata()?.dev();
+    for path in ["/", "/etc", "/etc/kvm"] {
+        protected_directory(
+            &restore_fs::open_root(Path::new(path), true)?,
+            device,
+            0,
+            false,
+        )?;
+    }
+    let parent = restore_fs::open_root(Path::new("/etc/kvm"), true)?;
+    let Some(directory) = open_optional(&parent, DIRECTORY)? else {
+        return Ok(None);
+    };
+    protected_directory(&directory, device, 0, true)?;
+    Ok(Some((rootfs, directory)))
+}
+
+fn read_record_at(directory: &File, device: u64, uid: u32) -> Result<Record> {
+    // Reject special files before opening them for I/O, then require the same
+    // exact inode after reopening. A journal path is never a device selector.
+    let pinned = restore_fs::open_beneath(directory, STATE, OFlags::PATH)?;
+    let metadata = pinned.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.dev() != device
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() != RECORD_BYTES as u64
+    {
+        return Err(SlotError::Unsafe);
+    }
+    let mut file = restore_fs::open_beneath(directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    let reopened = file.metadata()?;
+    if (
+        reopened.dev(),
+        reopened.ino(),
+        reopened.uid(),
+        reopened.mode(),
+        reopened.nlink(),
+        reopened.len(),
+    ) != (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.uid(),
+        metadata.mode(),
+        metadata.nlink(),
+        metadata.len(),
+    ) {
+        return Err(SlotError::Unsafe);
+    }
+    let mut bytes = [0; RECORD_BYTES];
+    file.read_exact(&mut bytes)?;
+    if file.read(&mut [0])? != 0 {
+        return Err(SlotError::Invalid);
+    }
+    Record::decode(&bytes)
+}
+
 struct Layout {
     live: Option<Identity>,
     new: Option<Identity>,
@@ -1115,6 +1156,10 @@ pub fn recover() -> Result<Status> {
             SlotError::Io(io::Error::other("update admission unavailable"))
         }
     })?;
+    // Installer death releases UpdateEX, but independent runtime owners may
+    // still be alive. The durable same-boot Stop fence, not lock availability,
+    // decides whether an early recovery may touch the live slot.
+    crate::native_owner::broker::check_update_admission().map_err(|_| SlotError::Busy)?;
     let Some(store) = Store::open(true)? else {
         return Ok(Status::NoTransaction);
     };

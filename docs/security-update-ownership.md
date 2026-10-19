@@ -96,10 +96,11 @@ state. Root peer identity is not executable attestation. The ID is not a secret,
 signature, health acknowledgement or a fresh installation receipt. The composed
 daemon now additionally requires the archive-derived canonical prepared receipt
 and owns native-closed publication, frozen trial/commit and stop-join/rollback.
-New-process durable status, real backend/runtime acceptance, retirement and
-helper-version migration are still needed before replacing the current app
-path. Never release UpdateEX and then
-reacquire it around backend restart.
+Per-ID canonical observations and live terminal archival now exist, but a durable
+API job lifecycle, real backend/runtime acceptance, administrative/fresh-boot
+failure completion, bounded history retention and helper-version migration are
+still needed before replacing the current app path. Never release UpdateEX and
+then reacquire it around backend restart.
 
 Installation must remain owned outside the serving backend scope, not as a
 descendant of that backend. The independent broker now owns the app session
@@ -607,8 +608,13 @@ before stopping all three scopes, and retains all exclusions through journaled
 publication or old-slot rollback. Queued frontend death, canonical acceptance,
 publication and explicit rollback are tested in independent host processes. It
 also drives the typed trial policy through Ready/commit or failure/cancel
-stop-join/rollback. It does not yet implement durable API job status or terminal
-retirement. The typed
+stop-join/rollback. Live terminal owners now archive the exact receipt/inactive
+slot before releasing admission, with retained ownership on rename/sync failure.
+A fixed-root per-transaction read remains available under EX; it is diagnostics,
+not an HTTP success or runtime-health receipt. Administrative/fresh-boot failure
+completion, bounded history retention and the durable API job lifecycle remain
+open. See [terminal archival](security-app-slot-recovery.md#terminal-archival-and-per-transaction-observation).
+The typed
 [broker trial policy](security-app-slot-recovery.md#broker-owned-trial-policy)
 retains ownership through backend trial, explicit stop/join and canonical
 commit/rollback checks. The

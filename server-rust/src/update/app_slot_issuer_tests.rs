@@ -128,6 +128,19 @@ pub(crate) fn assert_excluded(root: &Path) {
     }
 }
 
+#[cfg(feature = "app-bootstrap-bound-test-fixture")]
+pub(crate) fn fixed_root_recovery_fixture(root: &Path) {
+    let fixture = super::tests::Fixture::new(Phase::Published, super::tests::Position::Published);
+    // Only the caller's fresh disposable native-root fixture is populated.
+    fs::remove_dir(root.join("kvmapp")).unwrap();
+    fs::rename(fixture.root.path().join("kvmapp"), root.join("kvmapp")).unwrap();
+    fs::rename(
+        fixture.root.path().join(DIRECTORY),
+        root.join("etc/kvm").join(DIRECTORY),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn actual_private_extraction_issues_exact_prepared_record_without_live_swap() {
     let root = tempfile::tempdir().unwrap();

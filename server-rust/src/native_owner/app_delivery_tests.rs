@@ -196,10 +196,9 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
         fs::read(root.join("trial-authorized"))
             .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
     });
-    assert_eq!(
-        fs::read(root.join("application-slot/current/state")).unwrap()[8],
-        app_slot::Phase::Committed as u8
-    );
+    let record = fs::read(root.join("application-slot/current/state")).unwrap();
+    let transaction: [u8; 16] = record[16..32].try_into().unwrap();
+    assert_eq!(record[8], app_slot::Phase::Committed as u8);
     assert_eq!(
         exchange(&mut control, Operation::Observe).mode,
         Mode::Installing
@@ -223,7 +222,17 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
     assert_ne!(fs::read(root.join("hwmon")).unwrap(), native[1]);
     assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
     assert_eq!(fs::read(root.join("kvmapp/version")).unwrap(), b"2.0.43\n");
-    assert!(root.join("application-slot/current/old").exists());
+    let history = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    assert_eq!(history.join("old").metadata().unwrap().ino(), old);
+    assert_eq!(fs::read(history.join("state")).unwrap(), record);
+    assert!(!root.join("application-slot/current").exists());
+    let status = app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, app_slot::Phase::Committed);
+    assert!(status.archived);
     assert_eq!(
         exchange(&mut control, Operation::CancelAppInstall).code,
         Code::Busy
@@ -484,11 +493,18 @@ fn fixed_root_delivery_child() {
         let record = fs::read("/etc/kvm/application-slot/current/state").unwrap();
         assert_eq!(record[16..32], id);
         assert!(matches!(app_slot::status(), Err(app_slot::SlotError::Busy)));
+        let snapshot = app_slot::job_status(id).unwrap().unwrap();
+        assert_eq!(snapshot.transaction, id);
+        assert_eq!(snapshot.phase, app_slot::Phase::Published);
+        assert!(!snapshot.archived);
         assert_eq!(
             exchange(&mut control, Operation::CancelAppInstall).code,
             Code::Ok
         );
         assert_eq!(fs::read("/kvmapp/identity").unwrap(), b"fixed-root old app");
+        let snapshot = app_slot::job_status(id).unwrap().unwrap();
+        assert_eq!(snapshot.phase, app_slot::Phase::RolledBack);
+        assert!(snapshot.archived);
         until(|| {
             let reply = exchange(&mut control, Operation::Shutdown);
             assert!(matches!(reply.code, Code::Ok | Code::Busy));

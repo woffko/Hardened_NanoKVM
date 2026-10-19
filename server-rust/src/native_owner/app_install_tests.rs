@@ -50,6 +50,13 @@ fn native_phase(root: &Path) -> u8 {
     fs::read(root.join("native-runtime-owner/state")).unwrap()[44]
 }
 
+fn released<T>(release: Release<T>) -> Broker {
+    match release {
+        Release::Released(broker) => *broker,
+        Release::Retained(_) => panic!("terminal retirement failed"),
+    }
+}
+
 fn start_roles(broker: &mut Broker, root: &Path, missing: bool) {
     for (role, name) in [
         (Role::KvmSystem, "kvm"),
@@ -300,7 +307,34 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
         root.path().join("application-slot/current/old").exists(),
         "commit must not erase rollback evidence"
     );
-    let mut broker = committed.unwrap().release();
+    let committed = committed.unwrap();
+    let transaction = committed.install.transaction();
+    let collision = root
+        .path()
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    fs::create_dir_all(&collision).unwrap();
+    fs::set_permissions(
+        collision.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(collision.join("foreign"), b"retain").unwrap();
+    let Release::Retained(committed) = committed.release() else {
+        panic!("foreign archive was overwritten")
+    };
+    excluded(root.path());
+    assert_eq!(fs::read(collision.join("foreign")).unwrap(), b"retain");
+    fs::remove_file(collision.join("foreign")).unwrap();
+    fs::remove_dir(&collision).unwrap();
+    let mut broker = released(committed.release());
+    assert!(
+        crate::update::app_slot::job_status_fixture(root.path(), transaction)
+            .unwrap()
+            .unwrap()
+            .archived
+    );
     drop(
         ProcessLock::from_parent(
             &File::open(root.path()).unwrap(),
@@ -359,7 +393,23 @@ async fn failed_trial_must_stop_and_join_before_old_slot_rollback() {
         fs::read(root.path().join("kvmapp/identity")).unwrap(),
         b"old unchanged"
     );
-    drop(restored.release());
+    let collision = root.path().join("application-slot/history").join(format!(
+        "{:032x}",
+        u128::from_be_bytes(restored.transaction())
+    ));
+    fs::create_dir_all(&collision).unwrap();
+    fs::set_permissions(
+        collision.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+    let Release::Retained(restored) = restored.release() else {
+        panic!("foreign archive was overwritten")
+    };
+    excluded(root.path());
+    fs::remove_dir(collision).unwrap();
+    drop(released(restored.release()));
 }
 
 #[tokio::test]
@@ -568,7 +618,7 @@ async fn all_three_scopes_must_join_before_publication_and_rollback_releases_no_
     };
     assert_eq!(restored.transaction(), id);
     excluded(root.path());
-    let mut broker = restored.release();
+    let mut broker = released(restored.release());
     assert_eq!(
         root.path().join("kvmapp").metadata().unwrap().ino(),
         old_inode

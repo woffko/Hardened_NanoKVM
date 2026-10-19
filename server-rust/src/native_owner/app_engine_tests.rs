@@ -26,8 +26,11 @@ async fn accept(engine: &mut Engine, root: &Path) -> (u64, [u8; 16]) {
     (old, transaction)
 }
 
-fn phase(root: &Path) -> u8 {
-    fs::read(root.join("application-slot/current/state")).unwrap()[8]
+fn phase(root: &Path, transaction: [u8; 16]) -> u8 {
+    app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap()
+        .phase as u8
 }
 
 fn shutdown(engine: &mut Engine) {
@@ -61,7 +64,7 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
         engine.install.as_ref().unwrap().owner,
         InstallOwner::Trial(_)
     ));
-    assert_eq!(phase(root), app_slot::Phase::Published as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
     assert_excluded(root);
     for op in [
         Operation::EnsureKvm,
@@ -81,7 +84,7 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
         fs::read(root.join("trial-authorized"))
             .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
     });
-    assert_eq!(phase(root), app_slot::Phase::Committed as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
     assert_eq!(engine.mode, Mode::Installing);
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::CommitPending);
     assert_eq!(
@@ -120,7 +123,14 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
         engine.request(2, Operation::CancelAppInstall).code,
         Code::Busy
     );
-    assert_eq!(phase(root), app_slot::Phase::Committed as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+    assert!(
+        app_slot::job_status_fixture(root, transaction)
+            .unwrap()
+            .unwrap()
+            .archived
+    );
+    assert!(!root.join("application-slot/current").exists());
     drop(
         crate::update::operation_lock::ProcessLock::from_parent(
             &File::open(root).unwrap(),
@@ -132,6 +142,187 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
 }
 
 #[tokio::test]
+async fn two_successive_installs_keep_independent_durable_job_results_and_inactive_slots() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut engine = engine(root);
+    start_all(&mut engine);
+    let mut previous = None;
+    for _ in 0..2 {
+        let (old, transaction) = accept(&mut engine, root).await;
+        until(|| {
+            engine.tick();
+            engine.install.is_none()
+                && engine.mode == Mode::Running
+                && engine.roles == [2; 2]
+                && engine.backend_status == Some(Status::Running)
+        });
+        let status = app_slot::job_status_fixture(root, transaction)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, app_slot::Phase::Committed);
+        assert!(status.archived);
+        let archived = root
+            .join("application-slot/history")
+            .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+        assert_eq!(archived.join("old").metadata().unwrap().ino(), old);
+        assert!(!root.join("application-slot/current").exists());
+        if let Some(prior) = previous {
+            assert_ne!(prior, transaction);
+            let earlier = app_slot::job_status_fixture(root, prior).unwrap().unwrap();
+            assert!(earlier.archived);
+            assert_eq!(earlier.phase, app_slot::Phase::Committed);
+        }
+        previous = Some(transaction);
+    }
+    shutdown(&mut engine);
+}
+
+#[tokio::test]
+async fn rollback_retirement_collision_retains_engine_exclusions_and_never_restarts_old_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    fs::write(root.join("trial-ready-fail"), b"fail").unwrap();
+    fs::write(root.join("trial-stop-hold"), b"hold").unwrap();
+    let mut engine = engine(root);
+    let (old, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        root.join("trial-stopping").exists()
+    });
+    let collision = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    fs::create_dir_all(&collision).unwrap();
+    fs::set_permissions(
+        collision.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(collision.join("foreign"), b"retain foreign archive").unwrap();
+    fs::remove_file(root.join("trial-stop-hold")).unwrap();
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Uncertain
+    });
+    assert!(matches!(
+        engine.install.as_ref().unwrap().owner,
+        InstallOwner::RolledBack(_)
+    ));
+    assert_eq!(
+        fs::read(root.join("application-slot/current/state")).unwrap()[8],
+        app_slot::Phase::RolledBack as u8
+    );
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    for _ in 0..3 {
+        engine.tick();
+        assert_eq!(engine.mode, Mode::Uncertain);
+        assert_excluded(root);
+        assert_eq!(
+            engine.request(2, Operation::EnsureBackend).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            engine.request(2, Operation::CancelAppInstall).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            fs::read(collision.join("foreign")).unwrap(),
+            b"retain foreign archive"
+        );
+        assert!(!root.join("backend").exists());
+    }
+    // This path has proven/reaped every probe before restoring the old slot.
+    drop(engine);
+}
+
+#[tokio::test]
+async fn committed_retirement_collision_keeps_terminal_owner_without_retry_revert_or_native_restart()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    fs::write(root.join("trial-ack-hold"), b"hold").unwrap();
+    fs::write(root.join("trial-allow-controller-loss"), b"fixture cleanup").unwrap();
+    let mut engine = engine(root);
+    let (old, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        root.join("trial-authorized").exists()
+    });
+    let pid: i32 = fs::read_to_string(root.join("trial-owner-started"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let collision = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)));
+    fs::create_dir_all(&collision).unwrap();
+    fs::set_permissions(
+        collision.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(collision.join("foreign"), b"retain foreign archive").unwrap();
+    fs::remove_file(root.join("trial-ack-hold")).unwrap();
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Uncertain
+    });
+    assert!(matches!(
+        engine.install.as_ref().unwrap().owner,
+        InstallOwner::Committed(_)
+    ));
+    for _ in 0..3 {
+        engine.tick();
+        assert_eq!(engine.mode, Mode::Uncertain);
+        assert_excluded(root);
+        assert_eq!(
+            engine.request(2, Operation::EnsureKvm).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            engine.request(2, Operation::BackendRunning).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            engine.request(2, Operation::CancelAppInstall).code,
+            Code::Uncertain
+        );
+        assert_eq!(
+            fs::read(root.join("application-slot/current/state")).unwrap()[8],
+            app_slot::Phase::Committed as u8
+        );
+        assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
+        assert_eq!(
+            fs::read(collision.join("foreign")).unwrap(),
+            b"retain foreign archive"
+        );
+        assert!(!root.join("trial-stopping").exists());
+        assert!(!root.join("kvm").exists());
+        assert!(!root.join("hwmon").exists());
+    }
+    // Explicitly forfeit this childless probe, then reap exactly its PID. Its
+    // EOF cleanup is not closure authority for a production native runtime.
+    drop(engine);
+    until(|| {
+        matches!(
+            nix::sys::wait::waitpid(
+                nix::unistd::Pid::from_raw(pid),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+            )
+            .unwrap(),
+            nix::sys::wait::WaitStatus::Exited(_, 0)
+        )
+    });
+    assert_eq!(
+        fs::read(root.join("trial-controller-lost")).unwrap(),
+        b"lost after commit"
+    );
+}
+
+#[tokio::test]
 async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_restart() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
@@ -139,7 +330,7 @@ async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_re
     fs::write(root.join("trial-stop-hold"), b"hold").unwrap();
     let mut engine = engine(root);
     start_all(&mut engine);
-    let (old, _) = accept(&mut engine, root).await;
+    let (old, transaction) = accept(&mut engine, root).await;
     until(|| {
         engine.tick();
         root.join("trial-stopping").exists()
@@ -150,7 +341,7 @@ async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_re
         assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
         assert_excluded(root);
     }
-    assert_eq!(phase(root), app_slot::Phase::Published as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
     assert!(!root.join("trial-authorized").exists());
     fs::remove_file(root.join("trial-stop-hold")).unwrap();
     until(|| {
@@ -165,7 +356,14 @@ async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_re
         fs::read(root.join("kvmapp/identity")).unwrap(),
         b"old unchanged"
     );
-    assert_eq!(phase(root), app_slot::Phase::RolledBack as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
+    assert!(
+        app_slot::job_status_fixture(root, transaction)
+            .unwrap()
+            .unwrap()
+            .archived
+    );
+    assert!(!root.join("application-slot/current").exists());
     assert_eq!(engine.request(2, Operation::BackendRunning).code, Code::Ok);
     shutdown(&mut engine);
 }
@@ -178,7 +376,7 @@ async fn cancelled_trial_without_closure_receipt_never_rolls_back_or_releases_ad
     fs::write(root.join("trial-missing-receipt"), b"missing").unwrap();
     let mut engine = engine(root);
     start_all(&mut engine);
-    let (old, _) = accept(&mut engine, root).await;
+    let (old, transaction) = accept(&mut engine, root).await;
     until(|| {
         engine.tick();
         root.join("trial-owner-started").exists()
@@ -194,7 +392,7 @@ async fn cancelled_trial_without_closure_receipt_never_rolls_back_or_releases_ad
     });
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::Failed);
     assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
-    assert_eq!(phase(root), app_slot::Phase::Published as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
     assert!(!root.join("trial-authorized").exists());
     assert_excluded(root);
     assert_eq!(
@@ -215,7 +413,7 @@ async fn commit_publication_failure_retains_engine_owner_and_never_retries_or_re
     fs::write(root.join("trial-ready-hold"), b"hold").unwrap();
     fs::write(root.join("trial-allow-controller-loss"), b"fixture cleanup").unwrap();
     let mut engine = engine(root);
-    let (old, _) = accept(&mut engine, root).await;
+    let (old, transaction) = accept(&mut engine, root).await;
     until(|| {
         engine.tick();
         root.join("trial-owner-started").exists()
@@ -237,7 +435,7 @@ async fn commit_publication_failure_retains_engine_owner_and_never_retries_or_re
         InstallOwner::Trial(_)
     ));
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::Failed);
-    assert_eq!(phase(root), app_slot::Phase::Committed as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
     assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
     assert_eq!(fs::read(&next).unwrap(), b"retain collision");
     assert_eq!(
@@ -270,6 +468,6 @@ async fn commit_publication_failure_retains_engine_owner_and_never_retries_or_re
         )
     });
     assert!(root.join("trial-controller-lost").exists());
-    assert_eq!(phase(root), app_slot::Phase::Committed as u8);
+    assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
     assert_eq!(fs::read(&next).unwrap(), b"retain collision");
 }

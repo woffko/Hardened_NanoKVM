@@ -222,6 +222,29 @@ fn check_production_update_fence() {
             drop(ProcessLock::acquire().unwrap());
         }
     }
+    // UpdateEX is available after installer loss; it is not closure proof for
+    // the independently owned trial runtime in this same kernel boot.
+    let app = Path::new("/etc/kvm/application-slot/current");
+    let before = fs::read(app.join("state")).unwrap();
+    let live = fs::metadata("/kvmapp").unwrap().ino();
+    let old = fs::metadata(app.join("old")).unwrap().ino();
+    for direct in [true, false] {
+        let result = if direct {
+            crate::update::app_slot::recover()
+        } else {
+            crate::update::app_slot::boot_gate()
+        };
+        assert!(matches!(
+            result,
+            Err(crate::update::app_slot::SlotError::Busy)
+        ));
+        assert_eq!(fs::read(app.join("state")).unwrap(), before);
+        assert_eq!(fs::metadata("/kvmapp").unwrap().ino(), live);
+        assert_eq!(fs::metadata(app.join("old")).unwrap().ino(), old);
+        assert!(!app.join("new").exists());
+        assert_eq!(fs::read(directory.join("state")).unwrap(), bytes);
+        drop(ProcessLock::acquire().unwrap());
+    }
     fs::write(directory.join(".state.next"), b"foreign evidence").unwrap();
     assert!(coordinator.acquire(Kind::ApplicationOffline).is_err());
     assert_eq!(
@@ -229,11 +252,33 @@ fn check_production_update_fence() {
         b"foreign evidence"
     );
     drop(ProcessLock::acquire().unwrap());
+    assert!(matches!(
+        crate::update::app_slot::recover(),
+        Err(crate::update::app_slot::SlotError::Busy)
+    ));
+    assert_eq!(fs::read(app.join("state")).unwrap(), before);
+    // A new boot epoch may run guarded rollback. This does not retire the
+    // journal, assert runtime health, or simulate an actual power cut.
+    fs::remove_file(directory.join(".state.next")).unwrap();
+    let previous = b"00000000-0000-4000-8000-000000000001";
+    assert_ne!(&bytes[8..44], previous);
+    bytes[8..44].copy_from_slice(previous);
+    let hash = Sha256::digest(&bytes[..48]);
+    bytes[48..].copy_from_slice(&hash);
+    fs::write(directory.join("state"), bytes).unwrap();
+    assert_eq!(
+        crate::update::app_slot::recover().unwrap(),
+        crate::update::app_slot::Status::Transaction(crate::update::app_slot::Phase::RolledBack)
+    );
+    assert_eq!(fs::metadata("/kvmapp").unwrap().ino(), old);
+    assert_eq!(fs::read(directory.join("state")).unwrap(), bytes);
 }
 
 #[test]
 fn production_update_admission_checks_durable_backend_stop_after_exclusive_lock() {
-    Fixture::new().run("update-fence");
+    let fixture = Fixture::new();
+    crate::update::app_slot::issuer_tests::fixed_root_recovery_fixture(fixture.root.path());
+    fixture.run("update-fence");
 }
 
 #[test]

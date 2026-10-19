@@ -163,7 +163,14 @@ fn trial_owner_probe() {
             fs::write(root.join("trial-authorized"), commit).unwrap();
             if !trial_gate(&mut control, root, "trial-ack-hold") {
                 control.write_all(b"K").unwrap();
-                control.read_exact(&mut first).unwrap();
+                if let Err(error) = control.read_exact(&mut first) {
+                    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                    assert!(root.join("trial-allow-controller-loss").exists());
+                    // Known childless probe cleanup only, after retention
+                    // assertions. No Stop or closure receipt is fabricated.
+                    fs::write(root.join("trial-controller-lost"), b"lost after commit").unwrap();
+                    return;
+                }
                 assert_eq!(first, *b"S");
             }
         }

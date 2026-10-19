@@ -15,6 +15,11 @@ device acceptance remain open. The full remediation scope is unchanged.
 The standalone `nanokvm-app-recovery` accepts only `status`, `recover` and `gate`.
 There are no root, journal, stage, phase, force, prepare or commit arguments.
 Recovery cannot publish a new app or issue a trusted installation receipt.
+After acquiring common update admission, it also checks the durable native
+fence. A same-boot `Stopping` or ambiguous native journal refuses recovery:
+installer death releasing UpdateEX is not proof that its independent runtime
+owners and descendants have stopped. A changed boot epoch only removes that
+process-lifetime obstruction; it does not grant app health or restore authority.
 
 Production storage is fixed at `/etc/kvm/application-slot/current`. Root, `/etc`
 and `/etc/kvm` must be protected root-owned directories on the same rootfs.
@@ -87,9 +92,9 @@ records are retained but never selected as authority or reused for publication.
 
 Repeated recovery of a terminal record validates the layout and completes the
 directory durability barrier without replaying renames. `committed` denotes
-publication state only, not accepted runtime health. The first-restart/boot
-handshake, rollback policy after a new runtime failure, and actual first-start
-acceptance are still to be designed/wired and tested before the new installer
+publication state only, not accepted runtime health. The complete first-restart/
+boot composition, rollback policy and actual new-runtime health acceptance
+remain to be integrated and tested before the new installer
 can be considered complete. `no-transaction` is diagnostics, not boot-good or
 permission to execute an arbitrary app directory.
 
@@ -101,7 +106,9 @@ as the ordinary historical-absence case; it does not use orphan bytes as authori
 and does not publish/execute an app. Unknown installed helpers still refuse.
 The issuer retains its own unpublished preparation material after an ambiguous
 move/sync failure. No deletion or automatic orphan activation is implied here;
-explicit orphan disposition and terminal-transaction retirement remain required.
+explicit orphan disposition and fresh-boot terminal retirement remain required.
+Successful live commit/rollback now archives its exact terminal directory as
+described below; generic early recovery does not infer that live capability.
 
 ## Durable preparation and lease acceptance (not activated)
 
@@ -195,9 +202,10 @@ data and is repeatable. These process-death fixtures are not target power-cut or
 vendor-native acceptance. The existing standalone scope tests separately cover
 subreaper descendant closure; the new protocol stubs do not replace that proof.
 
-Production API activation, durable job status, full runtime health and terminal
-retirement remain open. The daemon now drives the typed trial/commit policy
-below in host tests. Ordinary backend startup is not a usable trial path while
+Production API activation, full runtime health, terminal failure/fresh-boot
+completion and bounded history retention remain open. The daemon now drives
+the typed trial/commit policy below in host tests. Ordinary backend startup is
+not a usable trial path while
 writer exclusions are retained: it acquires writer/update
 admission and performs storage, helper, trust and init-script writes. Do not
 release/reacquire the exclusions to make that startup succeed.
@@ -226,9 +234,10 @@ Sender death/EOF does not cancel it or release its three exclusions. It drains
 all three runtime scopes and attempts publication once. Published stays
 `Installing` and holds admission while the Engine starts the fixed frozen trial.
 Ready drives durable app/native commit and the explicit backend Commit relay;
-only its complete acknowledgement releases admission and returns ordinary
-supervision. KVM/hwmon desired-role retries resume after that release, never
-inside the freeze. `BackendRunning` is Unavailable while an install owner exists,
+its complete acknowledgement permits terminal archival. Only successful archival
+releases admission and returns ordinary supervision. KVM/hwmon desired-role
+retries resume after that release, never inside the freeze. `BackendRunning`
+is Unavailable while an install owner exists,
 even if its trial has reported Ready; it is not a full KVM health API.
 
 No ordinary launch/restart/pause/resume/shutdown replaces an install owner.
@@ -258,6 +267,64 @@ intentionally stops at Published via a test-only hold and has no executable
 native/backend runtime. Enrollment is fixture supplied: this is not production
 daemon CLI, target boot, vendor-native or device acceptance.
 
+## Terminal archival and per-transaction observation
+
+An acknowledged `Committed` or fully joined `RolledBack` owner now attempts
+terminal archival before releasing install admission. Only those typed owners
+mint the transaction/phase-bound capability; a status read or root peer cannot
+turn a journal phase into runtime-closure authority.
+
+The retained store rereads the complete canonical record, requires the expected
+terminal phase and exact old/new/live layout, and checks the pinned `current`
+directory identity. It syncs the terminal record and parents, then renames
+`current` to the fixed protected `history/<32-hex-transaction-id>` with
+`RENAME_NOREPLACE`. The archived record and directory identity are checked again,
+then the archive directory and both rename parents are synced. Newly created
+history is mode0700 independently of root's umask; unsafe existing history is
+refused, never chmod-repaired. No app tree or temporary evidence is deleted.
+Committed history retains the exact old slot; rollback history retains the new
+candidate, while `/kvmapp` remains the selected live inode.
+
+Only successful archival releases the store/update/writer exclusions and allows
+another prepared transaction. Any collision or ambiguous I/O returns the whole
+terminal owner. The Engine remains Uncertain and does not restart native writers,
+automatically retry retirement, or roll back a canonically Committed candidate.
+The still-pinned exact owner can retry after an earlier rename/sync error; a new
+process must not fabricate that capability from a diagnostic phase alone.
+Explicit administrative failure completion and fresh-boot retirement remain
+open. Bounded retention/space accounting and safe garbage collection are also
+required before activation: keeping evidence indefinitely is not an acceptable
+final disk-space policy.
+
+`app_slot::job_status(transaction)` supplies a bounded read-only observation for
+a nonzero transaction ID from the fixed protected root. It does not acquire the
+store flock, so another process can read a canonical snapshot while the installer
+owns EX. It checks exact directory ownership/modes and the same single-link,
+mode0600, 512-byte regular record. A history/current/history lookup closes the
+single archival-rename observation gap without scanning or selecting orphan
+directories. Unknown IDs return no result; unsafe/corrupt entries return an
+error without repair. Archived records are historical context, not assertions
+about today's live slot or rootfs device identity.
+
+`Committed` still means durable publication, not accepted runtime health.
+`archived` reports namespace observation, not a successful physical durability
+barrier or end-to-end install result. A record can become visible before the
+retained owner's final sync/release, including on an I/O failure. The future HTTP
+job API must compose this snapshot with the retained owner/failure lifecycle;
+it must not report success merely from either field. No HTTP endpoint or helper
+CLI selector is added by this read API.
+
+Host tests cover two successive Engine installs with distinct queryable results,
+both typed release failures and explicit retries, both retained Engine terminal
+owners on foreign archive collisions, and frontend-death commit archival.
+The real fixed-root sender/receiver fixture reads the public per-ID snapshot
+during exclusive ownership and after rollback archival. File-layer tests inject
+I/O errors and actual SIGKILL at five archival boundaries for both terminal
+phases, retaining the exact descriptor for retry; they do not simulate fresh-boot
+authority or physical power-loss/write-cache behavior. Foreign/symlinked paths,
+special/oversized/linked records and mismatched context are rejected without
+deleting evidence. These tests do not complete WP-04/C1 or target acceptance.
+
 ## Early consumer integration (development branch)
 
 `/etc/init.d/S02apprecover` invokes the independent helper after S01 mounts and
@@ -273,7 +340,12 @@ terminal committed/rolled-back state or absence returns without acquiring common
 update admission: the restart requester may still hold that admission. An
 uncommitted state enters the existing recovery path, which must acquire it.
 A concurrent consumer therefore receives Busy while an installer owns admission,
-rather than rolling that installer back. Corrupt/foreign layouts fail closed. NoTransaction preserves
+rather than rolling that installer back. If that installer dies, the additional
+same-boot native Stop fence still denies early rollback. A bound-root fixture
+with real procfs verifies both direct recovery and `gate` refuse without changing
+the app/native records or live/old inodes; a synthetic previous epoch then permits
+guarded rollback. This is not a physical reboot test.
+Corrupt/foreign layouts fail closed. NoTransaction preserves
 the pre-existing trusted legacy/factory path; it is not a new authorization,
 candidate signature, bootstrap ticket or runtime-health receipt.
 
@@ -623,10 +695,13 @@ The ownership order is:
 ```text
 Published -> frozen backend trial -> Ready -> durable app Committed
           -> durable native Active -> explicit Commit relay / K
-          -> release install freeze -> ordinary native service starts
+          -> exact terminal archival -> release install freeze
+          -> ordinary native service starts
 
 uncommitted trial -> explicit Stop -> receipt + owner reap + EOF / ECHILD
                   -> old-slot rollback under the same exclusions
+                  -> durable native Active -> exact terminal archival
+                  -> release install freeze
 ```
 
 `TrialSession` exposes no direct rollback. Stop consumes it into a drain and
@@ -640,8 +715,10 @@ Commit checks canonical transaction/context/layout again, writes and syncs app
 Committed before native resume and backend authorization, and retains all install
 exclusions until explicit completion/release. A failed or lost acknowledgement
 does not permit rolling back an already Committed app. Old-slot evidence and
-terminal journal are retained; durable retirement and the complete commit/crash/
-I/O matrix are still required. The daemon Engine now retains and drives this
+terminal journal move together into protected history before release; failed
+archival retains the complete terminal owner. Administrative/fresh-boot failure
+completion, bounded history retention and the complete commit/crash/I/O matrix
+are still required. The daemon Engine now retains and drives this
 nonblocking policy, without a handler-owned task or admission release/reacquire.
 An injected native-journal publication collision after durable app Committed
 checks that no backend Commit is sent and no Stop/rollback owner is minted from
@@ -660,7 +737,8 @@ ordinary API is not activated, and no device deployment is implied.
 
 - Activate the independently delivered native-closed installer in the API only
   after exact metadata/key/policy lifetime, durable job observability,
-  daemon-to-real-backend/native-runtime health acceptance and terminal retirement.
+  daemon-to-real-backend/native-runtime health acceptance, terminal failure/
+  fresh-boot completion and bounded history/space policy.
   Execution modes, frozen backend startup and daemon-driven broker transitions
   now have host tests; they are not target/runtime acceptance. Host-tested
   publication/rollback is not a complete lifecycle; the app API still uses its
