@@ -178,30 +178,40 @@ fn install_endpoint_is_private_independent_and_does_not_delete_foreign_replaceme
 fn stalled_or_malformed_install_offer_does_not_block_lifecycle_or_stop_backend() {
     let root = tempfile::tempdir().unwrap();
     let uid = nix::unistd::geteuid().as_raw();
-    serve(root.path(), uid, || {
-        let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
-        let mut pending = Vec::new();
-        for _ in 0..INSTALL_OFFERS {
-            pending.push(journal::socket::connect_install(&directory, uid).unwrap());
-        }
+    let mut server = Server::new(broker(root.path()), uid).unwrap();
+    server.engine.fixture = Some(root.path().to_path_buf());
+    server.idle = Duration::from_millis(200);
+    let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
+    let mut pending = Vec::new();
+    for _ in 0..INSTALL_OFFERS {
+        pending.push(journal::socket::connect_install(&directory, uid).unwrap());
+    }
+    // Queue the malformed frame BEFORE the server can expire this connection.
+    // Backend process startup under a loaded full suite may exceed the fixture's
+    // 200ms idle deadline; that expiry is correct, not a failed malformed offer.
+    rustix::net::send(
+        &pending[0],
+        b"not a lease offer",
+        rustix::net::SendFlags::NOSIGNAL,
+    )
+    .unwrap();
+    serve_prepared(server, || {
         let mut control = connect(root.path());
         assert_eq!(
             exchange(&mut control, Operation::EnsureBackend).code,
             Code::Ok
         );
         until(|| exchange(&mut control, Operation::BackendRunning).code == Code::Ok);
-        rustix::net::send(
-            &pending[0],
-            b"not a lease offer",
-            rustix::net::SendFlags::NOSIGNAL,
-        )
-        .unwrap();
         for _ in 0..4 {
             assert_eq!(
                 exchange(&mut control, Operation::Observe).mode,
                 Mode::Running
             );
         }
+        assert_eq!(
+            exchange(&mut control, Operation::BackendRunning).code,
+            Code::Ok
+        );
         assert!(!root.path().join("application-slot").exists());
         let reply = exchange(&mut control, Operation::Shutdown);
         if reply.mode != Mode::Stopped {

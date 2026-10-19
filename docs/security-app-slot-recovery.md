@@ -530,13 +530,65 @@ Real subprocess SIGKILL tests interrupt all 12 recovery record-publication and
 slot-rename boundaries and then recover twice. These are process-crash tests,
 not physical power-loss, ext4 write-cache or target acceptance.
 
+## Frozen trial startup (backend entry, not yet broker launch)
+
+The backend now has one explicit `--app-trial` entry. Before constructing Tokio
+it adopts an unnamed STREAM socket from fd0, verifies a root direct parent,
+marks its private duplicate CLOEXEC and replaces fd0 with `/dev/null`. A strict
+32-byte Begin/Ready/Commit protocol binds each event to the same nonzero
+transaction ID. This private parent capability is not a signed release receipt,
+an HTTP health check or permission to activate an arbitrary app slot.
+
+Trial startup reads existing fixed-root config, session identity, account and
+TLS state without acquiring the parent's writer locks, generating a session
+secret, seeding an account, migrating media, publishing trust/helpers/scripts
+or invoking normal storage/bootstrap initialization. Reads are bounded,
+descriptor-relative, root-owned, single-link and same-rootfs; symlinks, special
+files, writable metadata and mount crossings fail. Missing required identity
+fails instead of silently replacing it. Parser errors do not include secret
+contents. This does not establish full credential/password-hash validity or
+prove successful login on the device.
+
+All required HTTP/HTTPS/redirect/optional loopback listeners are bound before
+Ready. The backend initializes libkvm and retains a shutdown guard before that
+acknowledgement. No request-serving task starts until the exact Commit arrives.
+EOF, a malformed/mismatched acknowledgement or the 30-second commit timeout
+fails startup and drops listeners. The file/config freeze is not a promise of
+zero hardware effects: libkvm initialization may reset HDMI. Its current void
+native initialization API cannot prove a frame, HID or native-service health.
+Those checks and broker-owned trial termination remain separate requirements.
+The video guard invokes vendor deinit best-effort; this is not a bounded native
+join or a guarantee that a hung vendor call returns at the protocol deadline.
+
+Candidate extraction still ignores archive-supplied execute bits. Before
+publication, bounded pinned traversal assigns 0755 only to the fixed backend,
+kvm-system/hwmon, direct `system/bin` and `system/init.d` members, the DHCPv6
+hook and the KVM-control bridge script. Other regular files become 0600 and
+directories 0755. The private staging parent remains protected; old-live files
+are not chmodded. This preserves required execution without treating all web,
+library, module or settings data as executable. A future unprivileged consumer
+requires its separately reviewed data-access policy.
+
+Host tests exercise the actual `run(Some(startup))` HTTP and HTTPS startup in
+disposable root namespaces, with the three production exclusion inodes held.
+They observe no response before Commit, HTTP/TLS service after Commit, listener
+closure on wrong Commit/EOF and unchanged identity files. libkvm in this test is
+an explicit no-device host ABI fixture; it is not vendor-runtime acceptance.
+Separate frozen-read tests reject absent, aliased, FIFO and oversized secrets.
+The bound-root gate uses actual embedded static RV64 helper bytes as data and
+checks trial support while the app store and update/writer exclusions are held;
+it must not reacquire the busy store. None of these tests launches a trial from
+the independent broker or proves terminal commit/retirement.
+
 ## Remaining activation prerequisites
 
 - Activate the independently delivered native-closed installer in the API only
-  after exact metadata/key/policy lifetime, durable job observability, safe
-  executable permissions, frozen trial startup, health/commit and terminal
-  retirement are implemented. Host-tested publication/rollback is not a complete
-  lifecycle; the app API still uses its old swap.
+  after exact metadata/key/policy lifetime, durable job observability,
+  broker integration of the frozen trial entry, health/commit and terminal
+  retirement are implemented. Execution modes and the frozen backend entry now
+  have host tests; they are not a broker-launched trial. Host-tested
+  publication/rollback is not a complete lifecycle; the app API still uses its
+  old swap.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
 - Complete helper-version lifecycle across subsequent app updates. The pinned

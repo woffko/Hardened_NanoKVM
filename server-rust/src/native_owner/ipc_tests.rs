@@ -499,6 +499,11 @@ fn serve(root: &Path, uid: u32, f: impl FnOnce()) {
     let mut server = Server::new(broker(root), uid).unwrap();
     server.engine.fixture = Some(root.to_path_buf());
     server.idle = Duration::from_millis(200);
+    serve_prepared(server, f);
+}
+// A test may queue a specific packet before starting the server's idle clock.
+// The same cancellation/join owner is retained on normal exit and assertion unwind.
+fn serve_prepared(mut server: Server, f: impl FnOnce()) {
     let (send, recv) = std::sync::mpsc::channel();
     server.cancel = Some(recv);
     std::thread::scope(|scope| {

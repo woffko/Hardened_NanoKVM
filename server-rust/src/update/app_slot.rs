@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{self, Read, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
 };
 
@@ -494,7 +494,15 @@ fn prepare_at(
     // can become current. The bounded traversal rejects aliases/special files.
     let mut members = 0;
     let mut bytes = 0;
-    sync_candidate(&new, device, uid, 0, &mut members, &mut bytes)?;
+    sync_candidate(
+        &new,
+        device,
+        uid,
+        Path::new(""),
+        0,
+        &mut members,
+        &mut bytes,
+    )?;
     let name = format!(".prepare-{:032x}", u128::from_be_bytes(record.transaction));
     rustix::fs::mkdirat(&lock.0, name.as_str(), Mode::from_raw_mode(0o700))?;
     lock.0.sync_all()?;
@@ -557,6 +565,7 @@ fn sync_candidate(
     directory: &File,
     device: u64,
     uid: u32,
+    relative: &Path,
     depth: usize,
     members: &mut usize,
     bytes: &mut u64,
@@ -602,19 +611,54 @@ fn sync_candidate(
             return Err(SlotError::Unsafe);
         }
         if m.is_dir() {
-            sync_candidate(&child, device, uid, depth + 1, members, bytes)?;
+            let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+            sync_candidate(
+                &child,
+                device,
+                uid,
+                &relative.join(name),
+                depth + 1,
+                members,
+                bytes,
+            )?;
         } else if m.is_file() && m.nlink() == 1 {
             *bytes = bytes
                 .checked_add(m.len())
                 .filter(|n| *n <= 256 * 1024 * 1024)
                 .ok_or(SlotError::Invalid)?;
+            let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+            let path = relative.join(name);
+            // Archive extraction is deliberately0600. Grant execution only to
+            // fixed runtime code classes, never all data or tar-supplied modes.
+            let mode = if executable_member(&path) {
+                0o755
+            } else {
+                0o600
+            };
+            rustix::fs::fchmod(&child, Mode::from_raw_mode(mode))?;
             child.sync_all()?;
         } else {
             return Err(SlotError::Unsafe);
         }
     }
+    rustix::fs::fchmod(directory, Mode::from_raw_mode(0o755))?;
     directory.sync_all()?;
     Ok(())
+}
+
+fn executable_member(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some(
+            "server/NanoKVM-Server"
+                | "backends/NanoKVM-Server.rust"
+                | "backends/NanoKVM-Server.go"
+                | "kvm_system/kvm_system"
+                | "hwmon/nanokvm-hwmon"
+                | "system/network/udhcpc6.script"
+                | "picoclaw/skills/kvm-control/scripts/nanokvm-bridge.sh"
+        )
+    ) || matches!(path.parent(), Some(parent) if parent == Path::new("system/bin") || parent == Path::new("system/init.d"))
 }
 
 // The hashes retain the issuing install's exact-byte context. They do not

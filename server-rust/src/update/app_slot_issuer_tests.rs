@@ -138,6 +138,23 @@ async fn actual_private_extraction_issues_exact_prepared_record_without_live_swa
     let source = candidate.fixture_root().to_path_buf();
     let inode = source.metadata().unwrap().ino();
     let prepared = issue(root.path(), candidate, handoff).unwrap();
+    assert_eq!(
+        fs::metadata(
+            root.path()
+                .join("application-slot/current/new/server/NanoKVM-Server")
+        )
+        .unwrap()
+        .mode()
+            & 0o7777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(root.path().join("application-slot/current/new/version"))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o600
+    );
     drop(owner);
     assert_eq!(prepared.transaction(), transaction);
     assert_eq!(prepared.record.phase, Phase::Prepared);

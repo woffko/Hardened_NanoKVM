@@ -56,6 +56,29 @@ impl AppState {
             }
         }
 
+        Ok(Self::with_identity(config, writers, accounts))
+    }
+
+    /// Frozen trial never enrolls a writer or creates a default account.
+    pub fn new_trial(config: Config, startup: &crate::update::app_trial::Startup) -> Result<Self> {
+        let account = startup.read_state(&config.paths.account_file, 64 * 1024)?;
+        if let Some(bytes) = account {
+            let _ = serde_json::from_slice::<crate::auth::password::Account>(&bytes)
+                .map_err(|_| AppError::Config("invalid trial account state".into()))?;
+        } else if config.security.allow_default_admin {
+            return Err(AppError::Config(
+                "trial requires existing account identity, not default seeding".into(),
+            ));
+        }
+        let accounts = AccountStore::new(config.paths.account_file.clone());
+        Ok(Self::with_identity(
+            config,
+            Arc::new(StateWriters::default()),
+            accounts,
+        ))
+    }
+
+    fn with_identity(config: Config, writers: Arc<StateWriters>, accounts: AccountStore) -> Self {
         let sessions = SessionStore::new();
         let terminal_tickets = TerminalTicketStore::new();
         let login_limiter = LoginRateLimiter::new(
@@ -68,7 +91,7 @@ impl AppState {
         let session_lock_duration =
             normalize_session_lock_duration(config.security.access_token_duration);
 
-        Ok(Self {
+        Self {
             updates: Arc::new(UpdateCoordinator::default()),
             writers,
             firewall: Arc::new(FirewallController::default()),
@@ -80,7 +103,7 @@ impl AppState {
             terminal_enabled: Arc::new(AtomicBool::new(terminal_enabled)),
             remote_image_download_enabled: Arc::new(AtomicBool::new(remote_image_download_enabled)),
             session_lock_duration: Arc::new(AtomicU64::new(session_lock_duration)),
-        })
+        }
     }
 
     /// A cooperative boundary for the enrolled APIs/timer only. External

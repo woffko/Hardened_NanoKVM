@@ -12,7 +12,7 @@ use nanokvm_rust_server::{
     },
     state::AppState,
     system::media,
-    update::{keys::install_bundled_update_trust, state_writers::StateWriters},
+    update::{app_trial::Startup, keys::install_bundled_update_trust, state_writers::StateWriters},
 };
 use rand_core::{OsRng, RngCore};
 use std::{
@@ -49,8 +49,26 @@ const BOOT_INIT_SCRIPTS: &[&str] = &[
 const KVM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
 const BUNDLED_UPDATE_TRUST_DIR: &str = "/kvmapp/system/keys";
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let startup = match args.as_slice() {
+        [] => None,
+        [mode] if mode == "--app-trial" => Some(Startup::adopt_stdin()?),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: NanoKVM-Server [--app-trial]",
+            )
+            .into());
+        }
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(startup))
+}
+
+async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     tls::install_crypto_provider();
 
@@ -59,6 +77,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nanokvm_rust_server::update::restore_job::PinnedSshHelper::check_embedded()?;
         let _ = nanokvm_rust_server::update::app_bootstrap::embedded_recovery()?;
         nanokvm_rust_server::native_owner::embedded::check_embedded()?;
+    }
+
+    if let Some(startup) = startup {
+        let config = startup.configuration()?;
+        config.log_runtime_warnings();
+        #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
+        nanokvm_rust_server::update::app_bootstrap::check_trial_support(&startup)?;
+        return serve_config(config, Some(startup)).await;
     }
 
     nanokvm_rust_server::api::storage::secure_existing_storage()?;
@@ -91,13 +117,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     initialize_kvm();
     install_shutdown_signal_handler();
 
-    if config.proto == "https" {
-        run_https(config).await?;
-    } else {
-        run_http(config).await?;
-    }
+    serve_config(config, None).await
+}
 
-    Ok(())
+async fn serve_config(
+    config: Config,
+    startup: Option<Startup>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if config.proto == "https" {
+        run_https(config, startup).await
+    } else {
+        run_http(config, startup).await
+    }
+}
+
+struct TrialVideo;
+impl Drop for TrialVideo {
+    fn drop(&mut self) {
+        let _ = kvm::shutdown();
+    }
+}
+
+async fn authorize_trial(
+    startup: Option<Startup>,
+) -> Result<Option<TrialVideo>, Box<dyn std::error::Error>> {
+    let Some(startup) = startup else {
+        return Ok(None);
+    };
+    kvm::init()?;
+    let video = TrialVideo;
+    install_shutdown_signal_handler();
+    tokio::task::spawn_blocking(move || startup.ready_and_wait_commit()).await??;
+    Ok(Some(video))
 }
 
 fn install_runtime_update_trust(config: &Config) {
@@ -256,70 +307,92 @@ fn initialize_kvm() {
     }
 }
 
-async fn run_http(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_http(
+    config: Config,
+    startup: Option<Startup>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = config.listen_addr()?;
-    let state = AppState::new(config).await?;
+    let state = match &startup {
+        Some(startup) => AppState::new_trial(config, startup)?,
+        None => AppState::new(config).await?,
+    };
 
-    if state.config.needs_dedicated_loopback_listener() {
-        spawn_http_listener(
-            state.config.loopback_listen_addr(),
+    let loopback = if state.config.needs_dedicated_loopback_listener() {
+        Some((
+            TcpListener::bind(state.config.loopback_listen_addr()).await?,
             routes::build(state.clone()),
-            "starting dedicated loopback HTTP listener",
-        )
-        .await?;
-    }
+        ))
+    } else {
+        None
+    };
 
     let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(addr).await?;
+    let _trial_video = authorize_trial(startup).await?;
+    if let Some((listener, app)) = loopback {
+        spawn_bound_http(listener, app, "starting dedicated loopback HTTP listener");
+    }
     info!(%addr, "starting NanoKVM Rust backend");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn run_https(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_https(
+    config: Config,
+    startup: Option<Startup>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let http_addr = config.listen_addr()?;
     let https_addr = config.https_listen_addr()?;
-    let tls_config = tls::load_server_config(&config.cert.crt, &config.cert.key)?;
-    let state = AppState::new(config).await?;
+    let tls_config = match &startup {
+        Some(startup) => startup.tls_configuration(&config)?,
+        None => tls::load_server_config(&config.cert.crt, &config.cert.key)?,
+    };
+    let state = match &startup {
+        Some(startup) => AppState::new_trial(config, startup)?,
+        None => AppState::new(config).await?,
+    };
 
-    if state.config.needs_dedicated_loopback_listener() {
-        spawn_http_listener(
-            state.config.loopback_listen_addr(),
+    let loopback = if state.config.needs_dedicated_loopback_listener() {
+        Some((
+            TcpListener::bind(state.config.loopback_listen_addr()).await?,
             https_redirect_app(state.clone()),
-            "starting dedicated loopback HTTP to HTTPS redirect listener",
-        )
-        .await?;
-    }
+        ))
+    } else {
+        None
+    };
 
-    spawn_http_listener(
-        http_addr,
-        https_redirect_app(state.clone()),
-        "starting HTTP to HTTPS redirect listener",
-    )
-    .await?;
+    let http_listener = TcpListener::bind(http_addr).await?;
+    let redirect = https_redirect_app(state.clone());
 
     let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(https_addr).await?;
     let tls_listener = tls::TlsListener::new(listener, tls_config);
+    let _trial_video = authorize_trial(startup).await?;
+    if let Some((listener, app)) = loopback {
+        spawn_bound_http(
+            listener,
+            app,
+            "starting dedicated loopback HTTP to HTTPS redirect listener",
+        );
+    }
+    spawn_bound_http(
+        http_listener,
+        redirect,
+        "starting HTTP to HTTPS redirect listener",
+    );
     info!(addr = %https_addr, "starting NanoKVM Rust HTTPS backend");
     axum::serve(tls_listener, app).await?;
     Ok(())
 }
 
-async fn spawn_http_listener(
-    addr: std::net::SocketAddr,
-    app: axum::Router,
-    message: &'static str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(addr).await?;
+fn spawn_bound_http(listener: TcpListener, app: axum::Router, message: &'static str) {
     tokio::spawn(async move {
         let service = app.into_make_service_with_connect_info::<ClientAddr>();
-        info!(%addr, "{message}");
+        info!("{message}");
         if let Err(err) = axum::serve(listener, service).await {
-            warn!(%addr, error = ?err, "HTTP listener stopped");
+            warn!(error = ?err, "HTTP listener stopped");
         }
     });
-    Ok(())
 }
 
 fn https_redirect_app(state: AppState) -> axum::Router {
@@ -384,6 +457,10 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt().with_env_filter(filter).init();
 }
+
+#[cfg(all(test, feature = "sandbox-test-fixture", target_arch = "x86_64"))]
+#[path = "app_trial_startup_tests.rs"]
+mod app_trial_startup_tests;
 
 #[cfg(test)]
 mod tests {

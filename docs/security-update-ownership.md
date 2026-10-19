@@ -605,8 +605,12 @@ consumes the accepted install with the broker, durably fences native startup
 before stopping all three scopes, and retains all exclusions through journaled
 publication or old-slot rollback. Queued frontend death, canonical acceptance,
 publication and explicit rollback are tested in independent host processes. It
-does not yet implement durable API job status, frozen trial startup, first-start
-health, commit or terminal retirement. The API
+does not yet implement durable API job status, broker-owned trial launch,
+first-start health, commit or terminal retirement. A separate
+[frozen backend entry](security-app-slot-recovery.md#frozen-trial-startup-backend-entry-not-yet-broker-launch)
+now reads existing state under the retained freeze and gates request serving on
+a private parent Commit. Its host HTTP/TLS tests are not an integrated install
+or runtime-health result. The API
 still uses the legacy swap/restart and is not accepted for deployment.
 
 The [native owner component](security-native-owner.md) supplies separate-process

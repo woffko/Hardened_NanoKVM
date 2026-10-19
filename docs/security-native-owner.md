@@ -476,6 +476,16 @@ decoded state and SIGKILL at staging/publication/returned-guard boundaries.
 No helper or service is executed by these fixtures. They are not S95/legacy
 process transition, target rootfs, native quiescence or update acceptance.
 
+The backend's new frozen trial entry checks the existing app/native family and
+critical scripts without acquiring the app store or update/writer admission
+already owned by its parent. The bound-root test retains the real exclusion
+inodes, including an exclusive app-store lock, while verifying these exact
+embedded bytes. This is read-only support inspection, not a new scope launch:
+the owner still launches only its existing three normal roles. Broker-to-owner
+trial startup, native-service health, explicit trial stop/join, commit and
+rollback after trial are not yet connected. See
+[frozen startup](security-app-slot-recovery.md#frozen-trial-startup-backend-entry-not-yet-broker-launch).
+
 Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle
 pending AP attempts. Do not naively nest an independent service owner below a

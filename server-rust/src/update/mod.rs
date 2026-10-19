@@ -2,6 +2,7 @@ pub mod app_bootstrap;
 pub mod app_install_lease;
 pub mod app_slot;
 pub(crate) mod app_stage;
+pub mod app_trial;
 pub mod archive;
 pub mod keys;
 pub mod native_bootstrap;

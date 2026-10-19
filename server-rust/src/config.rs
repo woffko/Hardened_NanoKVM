@@ -215,6 +215,29 @@ impl Default for Paths {
 }
 
 impl Config {
+    pub(crate) fn read_trial(startup: &crate::update::app_trial::Startup) -> Result<Self> {
+        let mut config = match startup.read_state(Path::new(DEFAULT_CONFIG_PATH), 128 * 1024)? {
+            Some(bytes) => serde_yaml::from_slice::<Self>(&bytes)
+                .map_err(|_| AppError::Config("invalid trial configuration".into()))?,
+            None => Self::default(),
+        };
+        config.normalize_legacy_fields();
+        config.validate_media_directory()?;
+        if config.jwt.secret_key.is_empty() {
+            let bytes = startup
+                .read_state(&config.paths.session_secret_file, 4096)?
+                .ok_or_else(|| AppError::Config("trial session identity is absent".into()))?;
+            config.jwt.secret_key = std::str::from_utf8(&bytes)
+                .map_err(|_| AppError::Config("invalid trial session identity".into()))?
+                .trim()
+                .to_owned();
+            if config.jwt.secret_key.is_empty() {
+                return Err(AppError::Config("trial session identity is empty".into()));
+            }
+        }
+        Ok(config)
+    }
+
     pub fn load() -> Result<Self> {
         let writers = StateWriters::default();
         let permit = writers.configuration()?;

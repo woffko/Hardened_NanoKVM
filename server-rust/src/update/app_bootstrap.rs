@@ -102,6 +102,17 @@ pub fn check_before_legacy_install() -> io::Result<()> {
     Ok(())
 }
 
+/// Read-only trial prerequisite under a retained parent-owned installation.
+/// Unlike legacy admission this must not inspect/acquire the busy app store.
+pub fn check_trial_support(_startup: &super::app_trial::Startup) -> io::Result<()> {
+    let image = embedded_recovery()?;
+    let parent = fixed_parent(false)?;
+    let _file = existing(&parent, EXECUTABLE, image, 0)?.ok_or_else(invalid)?;
+    let root = restore_fs::open_root(Path::new("/"), true)?;
+    check_boot_scripts_at(&root, 0)?;
+    super::native_bootstrap::check_installed()
+}
+
 fn check_boot_scripts_at(root: &File, uid: u32) -> io::Result<()> {
     let parent = boot_parent_at(root, uid)?;
     for (name, bytes) in BOOT_SCRIPTS {

@@ -127,6 +127,19 @@ pub fn load_server_config(
     key_path: impl AsRef<Path>,
 ) -> Result<ServerConfig> {
     let cert_file = File::open(cert_path.as_ref())?;
+    let key_file = File::open(key_path.as_ref())?;
+    server_config_from_readers(cert_file, key_file)
+}
+
+/// Trial startup supplies pinned, bounded existing files, not mutable paths.
+pub(crate) fn server_config_from_pem(cert: &[u8], key: &[u8]) -> Result<ServerConfig> {
+    server_config_from_readers(cert, key)
+}
+
+fn server_config_from_readers(
+    cert_file: impl io::Read,
+    key_file: impl io::Read,
+) -> Result<ServerConfig> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(cert_file)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|err| AppError::Config(format!("failed to read TLS certificate: {err}")))?;
@@ -136,7 +149,6 @@ pub fn load_server_config(
         ));
     }
 
-    let key_file = File::open(key_path.as_ref())?;
     let key = PrivateKeyDer::from_pem_reader(key_file)
         .map_err(|err| AppError::Config(format!("failed to read TLS private key: {err}")))?;
 

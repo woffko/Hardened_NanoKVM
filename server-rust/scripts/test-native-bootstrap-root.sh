@@ -24,3 +24,7 @@ export NANOKVM_NATIVE_OWNER_BINDING NANOKVM_NATIVE_BROKER_BINDING NANOKVM_NATIVE
 cargo test --manifest-path "$ROOT/Cargo.toml" --locked --offline --lib \
   --features app-bootstrap-bound-test-fixture -- \
   update::native_bootstrap::root_tests:: --nocapture --test-threads=1
+cargo test --manifest-path "$ROOT/Cargo.toml" --locked --offline --lib \
+  --features app-bootstrap-bound-test-fixture,sandbox-test-fixture -- \
+  update::app_trial::tests::actual_frozen_startup_keeps_identity_and_refuses_generation_under_real_parent_exclusions \
+  --nocapture --test-threads=1

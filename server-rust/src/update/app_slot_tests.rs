@@ -10,6 +10,72 @@ use std::{
 };
 use tempfile::{TempDir, tempdir};
 
+#[test]
+fn candidate_modes_grant_only_runtime_execution_and_do_not_touch_old_live_data() {
+    let fixture = tempdir().unwrap();
+    let candidate = fixture.path().join("candidate");
+    fs::create_dir(&candidate).unwrap();
+    let old = fixture.path().join("old-live");
+    fs::write(&old, b"unchanged old data").unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o640)).unwrap();
+    let cases = [
+        ("server/NanoKVM-Server", 0o755),
+        ("backends/NanoKVM-Server.rust", 0o755),
+        ("backends/NanoKVM-Server.go", 0o755),
+        ("kvm_system/kvm_system", 0o755),
+        ("hwmon/nanokvm-hwmon", 0o755),
+        ("system/network/udhcpc6.script", 0o755),
+        ("system/bin/nanokvm-owned-command", 0o755),
+        ("system/init.d/S95nanokvm", 0o755),
+        (
+            "picoclaw/skills/kvm-control/scripts/nanokvm-bridge.sh",
+            0o755,
+        ),
+        ("system/bin/nested/unexpected", 0o600),
+        ("system/keys/update-policy.json", 0o600),
+        ("server/dl_lib/libkvm.so", 0o600),
+        ("server/web/index.html", 0o600),
+        ("system/ko/usb_f_mass_storage.ko", 0o600),
+        ("picoclaw/AGENT.md", 0o600),
+        ("version", 0o600),
+    ];
+    for (name, _) in cases {
+        let path = candidate.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"synthetic signed candidate content").unwrap();
+        // Do not trust incoming executable bits, including on data files.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let directory = File::open(&candidate).unwrap();
+    let mut members = 0;
+    let mut bytes = 0;
+    sync_candidate(
+        &directory,
+        directory.metadata().unwrap().dev(),
+        nix::unistd::geteuid().as_raw(),
+        Path::new(""),
+        0,
+        &mut members,
+        &mut bytes,
+    )
+    .unwrap();
+    for (name, mode) in cases {
+        assert_eq!(
+            fs::metadata(candidate.join(name)).unwrap().mode() & 0o7777,
+            mode,
+            "{name}"
+        );
+    }
+    for name in ["", "server", "server/web", "system", "system/init.d"] {
+        assert_eq!(
+            fs::metadata(candidate.join(name)).unwrap().mode() & 0o7777,
+            0o755
+        );
+    }
+    assert_eq!(fs::read(&old).unwrap(), b"unchanged old data");
+    assert_eq!(fs::metadata(old).unwrap().mode() & 0o7777, 0o640);
+}
+
 #[derive(Clone, Copy)]
 enum Position {
     Prepared,
