@@ -437,7 +437,7 @@ fn real_sigkill_at_each_retirement_boundary_never_loses_receipt_or_inactive_slot
                 .env("NANOKVM_APP_SLOT_TEST_STOP", point)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap();
             let stdout = child.stdout.take().unwrap();
@@ -454,7 +454,10 @@ fn real_sigkill_at_each_retirement_boundary_never_loses_receipt_or_inactive_slot
             let _ = child.kill();
             let result = child.wait().unwrap();
             reader.join().unwrap();
-            assert!(reached, "checkpoint {point} not reached");
+            assert!(
+                reached,
+                "checkpoint {point} not reached: phase={phase:?}, subsequent={subsequent}, status={result:?}"
+            );
             assert_eq!(result.signal(), Some(9));
             let snapshot = job_status_fixture(fixture.root.path(), fixture.record.transaction)
                 .unwrap()

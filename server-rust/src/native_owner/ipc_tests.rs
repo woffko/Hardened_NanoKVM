@@ -28,6 +28,7 @@ fn engine(root: &Path) -> Engine {
     e.fixture = Some(root.to_path_buf());
     e
 }
+#[track_caller]
 fn until(mut f: impl FnMut() -> bool) {
     let start = Instant::now();
     while !f() {

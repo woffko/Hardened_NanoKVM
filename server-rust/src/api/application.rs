@@ -580,6 +580,9 @@ fn prepare_app_candidate(
             "app candidate version differs from authenticated metadata".into(),
         ));
     }
+    crate::update::helper_family::check_candidate(&update_root).map_err(|_| {
+        AppError::BadRequest("app candidate helper family is incomplete or inconsistent".into())
+    })?;
     Ok(AppCandidate {
         input: crate::update::app_slot::CandidateInput {
             root: update_root,
@@ -1447,10 +1450,45 @@ mod tests {
             );
         }
     }
-    #[test]
-    #[ignore = "requires retained development app boot-delivery package fixtures"]
-    fn boot_delivery_packages_use_private_production_preflight_without_installing() {
+    fn retained_manual_app_archive(stage: &AppStage, path: &Path, expected: &str) -> AppArchive {
         use sha2::{Digest, Sha256};
+        let mut download = stage.create_archive().unwrap();
+        let mut source = fs::File::open(path).unwrap();
+        assert!(source.metadata().unwrap().len() <= MAX_UPDATE_BYTES);
+        let mut hash = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            download.append(&buffer[..count]).unwrap();
+        }
+        assert_eq!(format!("{:x}", hash.finalize()), expected);
+        download.finish_manual_import().unwrap()
+    }
+
+    fn assert_legacy_app_boot_profile(app: &Path, private_root: &Path) {
+        use sha2::{Digest, Sha256};
+        assert_eq!(read_candidate_version(app).unwrap(), "0.0.0");
+        for name in ["S02apprecover", "S30eth", "S30wifi"] {
+            assert!(!app.join("system/init.d").join(name).exists());
+        }
+        let s95 = fs::read(app.join("system/init.d/S95nanokvm")).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&s95)),
+            "8030d0f81581a417eca91e3db7e0c3d96cba197b519022d7c73c3c5caca05365"
+        );
+        assert!(!private_root.join("kvmapp").exists());
+        assert!(!private_root.join("application-slot").exists());
+        assert!(!private_root.join("etc/init.d").exists());
+        assert!(!private_root.join("usr/libexec").exists());
+    }
+
+    #[test]
+    #[ignore = "requires retained pre-native-family development app archives"]
+    fn historical_boot_delivery_packages_are_readable_but_not_full_family_candidates() {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         for side in ["a", "b"] {
             let path = project.join(format!(
@@ -1458,38 +1496,61 @@ mod tests {
             ));
             let root = tempfile::tempdir().unwrap();
             let stage = AppStage::fixture(root.path()).unwrap();
-            let mut download = stage.create_archive().unwrap();
-            let mut source = fs::File::open(path).unwrap();
-            assert!(source.metadata().unwrap().len() <= MAX_UPDATE_BYTES);
-            let mut hash = Sha256::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let count = source.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                hash.update(&buffer[..count]);
-                download.append(&buffer[..count]).unwrap();
-            }
-            assert_eq!(
-                format!("{:x}", hash.finalize()),
-                "c347842bb1fbbabd645a4feefcc5d9c50f4b38a3f798bdf8a153ffaddcafcbd0"
+            let archive = retained_manual_app_archive(
+                &stage,
+                &path,
+                "c347842bb1fbbabd645a4feefcc5d9c50f4b38a3f798bdf8a153ffaddcafcbd0",
             );
-            let archive = download.finish_manual_import().unwrap();
+            let extracted = stage.extract(archive).unwrap();
+            let app = resolve_update_root(&extracted).unwrap();
+            validate_update_root(&app).unwrap();
+            assert_legacy_app_boot_profile(&app, root.path());
+            assert!(app.join("system/bin/nanokvm-app-recovery").is_file());
+            for role in &crate::update::helper_family::ROLES[1..] {
+                assert!(!app.join("system/bin").join(role.filename()).exists());
+            }
+            // Preserve historical readability/boot-profile evidence without
+            // promoting a pre-family fixture into a current install candidate.
+            let candidate_stage = AppStage::fixture(root.path()).unwrap();
+            let archive = retained_manual_app_archive(
+                &candidate_stage,
+                &path,
+                "c347842bb1fbbabd645a4feefcc5d9c50f4b38a3f798bdf8a153ffaddcafcbd0",
+            );
+            let error =
+                prepare_app_candidate(archive, candidate_stage, &InstallAuthority::ManualImport)
+                    .err()
+                    .unwrap();
+            assert_eq!(
+                error.to_string(),
+                "bad request: app candidate helper family is incomplete or inconsistent"
+            );
+            assert_legacy_app_boot_profile(&app, root.path());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires retained current complete-family development app archives"]
+    fn current_boot_delivery_packages_use_private_production_preflight_without_installing() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for side in ["a", "b"] {
+            let path = project.join(format!(
+                "build/audit/remediation-2026-10-17/host/helper-family-candidate-valid-{side}/out/helper-family-fixture.tar.gz"
+            ));
+            let root = tempfile::tempdir().unwrap();
+            let stage = AppStage::fixture(root.path()).unwrap();
+            let archive = retained_manual_app_archive(
+                &stage,
+                &path,
+                "ab9ce7e0bf07299a09083584bac0754d8da780b82c69a75ed4ec27267dc30a3c",
+            );
             let app =
                 prepare_app_candidate(archive, stage, &InstallAuthority::ManualImport).unwrap();
             let app = &app.input.root;
-            assert_eq!(read_candidate_version(app).unwrap(), "0.0.0");
-            for name in ["S02apprecover", "S30eth", "S30wifi"] {
-                assert!(!app.join("system/init.d").join(name).exists());
+            assert_legacy_app_boot_profile(app, root.path());
+            for role in crate::update::helper_family::ROLES {
+                assert!(app.join("system/bin").join(role.filename()).is_file());
             }
-            let s95 = fs::read(app.join("system/init.d/S95nanokvm")).unwrap();
-            assert_eq!(
-                format!("{:x}", Sha256::digest(&s95)),
-                "8030d0f81581a417eca91e3db7e0c3d96cba197b519022d7c73c3c5caca05365"
-            );
-            assert!(!root.path().join("kvmapp").exists());
-            assert!(!root.path().join("etc/init.d").exists());
         }
     }
 

@@ -491,6 +491,55 @@ decoded state and SIGKILL at staging/publication/returned-guard boundaries.
 No helper or service is executed by these fixtures. They are not S95/legacy
 process transition, target rootfs, native quiescence or update acceptance.
 
+## Candidate helper-family consistency (migration prerequisite)
+
+The opaque app-candidate factory now checks all five helper bindings before it
+can return a candidate for durable issuance: app recovery, native owner, broker,
+client and native recovery. Each role needs one valid SHA-256/static-RV64 frame;
+valid duplicates and cross-role nested/overlapping frames are refused. Invalid
+literal markers are not helpers, but count against the per-role scan limit.
+Backend size, role sizes, marker count and cumulative hash work are bounded.
+The inspector uses fixed-size buffers and positional reads, not a whole-backend
+allocation or a shared-cursor seek.
+
+Both bundled Rust backend copies must be byte-identical, and each fixed
+`system/bin` helper must match the selected frame's size/digest. Required files
+are inspected with O_PATH before a nonblocking data open; same-rootfs, owner,
+single-link regular-file, safe-mode and no-alias checks apply. Required parent
+directories are checked too. A failure does not install, chmod-repair or start
+anything. This preflight happens after archive provenance/fingerprint and
+version checks and before the opaque candidate is returned, not after live
+app publication. Administrative offline import still requires the administrator's
+external checksum/provenance verification; this check does not invent a release
+signature for it.
+
+`update::helper_family::inspect` is only a read-only consistency diagnostic. Its
+FD is not an immutable-source or execution capability. The production factory
+owns fresh protected private extraction and must keep it stable; a malicious
+local root/cooperating writer is not excluded by a SHA-256 scan or file descriptor.
+The test-only image-runtime probe can compare these diagnostics to real linked
+artifact bytes, but cannot issue an install or supply candidate authority.
+
+This is **not helper-family migration**. Existing native bootstrap still refuses
+different installed bytes, and frozen trial still requires exact installed
+app/native helpers and critical scripts. The next retained-owner transition
+must keep the exact predecessor family and durable interrupted-swap evidence,
+check journal/wire compatibility, restore that family on uncommitted rollback,
+and make startup recovery settle the same transaction before normal consumers.
+App-slot rollback alone currently restores only the app tree. Do not activate
+the ordinary POST path by replacing helpers in place or weakening trial checks.
+
+The same transition must account for all four compile-bound boot scripts, not
+just the five executables: frozen trial checks both. The app-only archive
+deliberately carries historical S95 and omits S02/S30eth/S30wifi so old RC12 does
+not publish new gates before bootstrap. Those archive-profile bytes are NOT the
+target's canonical bootstrap payload. Compatible, authenticated delivery and
+durable predecessor recovery of the canonical scripts must be designed with
+helper migration; do not silently turn the legacy archive profile into an
+in-place script-upgrade source.
+
+## Frozen trial and recovery integration
+
 The backend's new frozen trial entry checks the existing app/native family and
 critical scripts without acquiring the app store or update/writer admission
 already owned by its parent. The bound-root test retains the real exclusion

@@ -263,29 +263,28 @@ async fn frozen_app_policy_read_uses_current_disk_config_and_excludes_enrolled_m
     let _next = writers.configuration().unwrap();
 }
 
-fn package(version: &[u8]) -> Vec<u8> {
+fn package(version: &[u8], damaged_helper: Option<crate::update::helper_family::Role>) -> Vec<u8> {
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut builder = tar::Builder::new(encoder);
-    for (path, bytes) in [
-        ("kvmapp/version", version),
-        (
-            "kvmapp/server/NanoKVM-Server",
-            b"synthetic non-executable backend".as_slice(),
-        ),
-        (
-            "kvmapp/system/init.d/S95nanokvm",
-            b"synthetic init".as_slice(),
-        ),
-        (
-            "kvmapp/backends/NanoKVM-Server.rust",
-            b"synthetic backend".as_slice(),
-        ),
-    ] {
+    let mut files = crate::update::helper_family::candidate_files_fixture();
+    if let Some(role) = damaged_helper {
+        let name = format!("kvmapp/system/bin/{}", role.filename());
+        let (_, bytes) = files.iter_mut().find(|(path, _)| path == &name).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+    }
+    files.push(("kvmapp/version".into(), version.to_vec()));
+    files.push((
+        "kvmapp/system/init.d/S95nanokvm".into(),
+        b"synthetic init".to_vec(),
+    ));
+    for (path, bytes) in files {
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(0o755);
         header.set_cksum();
-        builder.append_data(&mut header, path, bytes).unwrap();
+        builder
+            .append_data(&mut header, path, bytes.as_slice())
+            .unwrap();
     }
     builder.into_inner().unwrap().finish().unwrap()
 }
@@ -294,7 +293,7 @@ fn package(version: &[u8]) -> Vec<u8> {
 async fn online_candidate_version_is_bound_to_verified_metadata_before_live_mutation() {
     let fixture = SigningFixture::new();
     for version in [b"2.0.43\n".as_slice(), b"2.0.42\n"] {
-        let bytes = package(version);
+        let bytes = package(version, None);
         let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
         let signature = fixture.sign(&metadata);
         let metadata_sha256: [u8; 32] = Sha256::digest(&metadata).into();
@@ -330,7 +329,7 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
         }
     }
     // Administrative import does not invent online metadata/signature authority.
-    let bytes = package(b"2.0.42\n");
+    let bytes = package(b"2.0.42\n", None);
     let root = tempdir().unwrap();
     let stage = AppStage::fixture(root.path()).unwrap();
     let mut download = stage.create_archive().unwrap();
@@ -343,6 +342,42 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
         )
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn online_candidate_rejects_each_mismatched_helper_even_with_valid_signed_archive_metadata() {
+    let fixture = SigningFixture::new();
+    for role in crate::update::helper_family::ROLES {
+        let bytes = package(b"2.0.43\n", Some(role));
+        let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
+        let signature = fixture.sign(&metadata);
+        let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
+            .await
+            .unwrap();
+        let root = tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let mut download = stage.create_archive().unwrap();
+        download.append(&bytes).unwrap();
+        let archive = download
+            .finish_online(
+                verified.latest.size,
+                &decode_sha512(&verified.latest.sha512).unwrap(),
+            )
+            .unwrap();
+        // Archive/signature/version checks succeed. It is the independently
+        // inconsistent helper payload that must prevent candidate issuance.
+        let error =
+            prepare_app_candidate(archive, stage, &InstallAuthority::OnlineMetadata(verified))
+                .err()
+                .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "bad request: app candidate helper family is incomplete or inconsistent"
+        );
+        assert!(!root.path().join("kvmapp").exists());
+        assert!(!root.path().join("application-slot").exists());
+        assert!(!root.path().join("usr/libexec").exists());
+    }
 }
 
 #[test]
@@ -386,7 +421,7 @@ fn candidate_version_is_bounded_regular_utf8_and_semver() {
 #[tokio::test]
 async fn opaque_candidate_cannot_relabel_other_archive_bytes_as_signed() {
     let fixture = SigningFixture::new();
-    let bytes = package(b"2.0.43\n");
+    let bytes = package(b"2.0.43\n", None);
     let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
     let signature = fixture.sign(&metadata);
     let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
@@ -416,7 +451,7 @@ async fn opaque_candidate_cannot_relabel_other_archive_bytes_as_signed() {
 async fn lab_candidate_retains_exact_metadata_context_without_a_signature_claim() {
     let mut config = Config::default();
     config.security.allow_unsigned_updates = true;
-    let bytes = package(b"2.0.43\n");
+    let bytes = package(b"2.0.43\n", None);
     let mut latest = latest_for(&bytes);
     latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
     latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();

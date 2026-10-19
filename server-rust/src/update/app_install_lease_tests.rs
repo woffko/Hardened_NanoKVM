@@ -194,6 +194,11 @@ async fn broken_send_is_not_retried_or_allowed_to_unlock_frontend() {
     } = fixture().await;
     let parent = File::open(root.path()).unwrap();
     let (sender, receiver) = pair().unwrap();
+    // A concurrent fork can retain a CLOEXEC receiver alias before exec. A
+    // close alone then does not inject a broken peer; shutdown does, including
+    // through that alias. Keep one explicitly so this case is deterministic.
+    let preexec = receiver.socket.try_clone().unwrap();
+    rustix::net::shutdown(&receiver.socket, rustix::net::Shutdown::Both).unwrap();
     drop(receiver);
     assert!(sender.send(handoff).is_err());
     check_busy(&parent, &[Domain::Update]);
@@ -208,6 +213,7 @@ async fn broken_send_is_not_retried_or_allowed_to_unlock_frontend() {
         .unwrap();
     assert!(owner.prepare_install_handoff(writers).is_err());
     check_busy(&parent, &[Domain::Update]);
+    drop(preexec);
     drop(owner);
     check_free(&parent);
 }

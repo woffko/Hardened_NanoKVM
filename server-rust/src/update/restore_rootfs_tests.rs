@@ -112,6 +112,64 @@ fn exact_account_reads_require_closed_fixed_files_and_validate_cross_file_consis
 }
 
 #[test]
+fn login_open_retries_only_again_with_exact_finite_limit_and_preserves_fd() {
+    use rustix::io::Errno;
+
+    let temporary = tempfile::tempfile().unwrap();
+    let expected = temporary.metadata().unwrap().ino();
+    for transient in 0..LOGIN_OPEN_ATTEMPTS {
+        let mut calls = 0;
+        let opened: File = retry_login_open(|| {
+            calls += 1;
+            if calls <= transient {
+                Err(Errno::AGAIN)
+            } else {
+                Ok(temporary.try_clone().unwrap().into())
+            }
+        })
+        .unwrap()
+        .into();
+        assert_eq!(calls, transient + 1);
+        assert_eq!(opened.metadata().unwrap().ino(), expected);
+    }
+    let mut calls = 0;
+    assert_eq!(
+        retry_login_open(|| {
+            calls += 1;
+            Err(Errno::AGAIN)
+        })
+        .unwrap_err(),
+        Errno::AGAIN
+    );
+    assert_eq!(calls, LOGIN_OPEN_ATTEMPTS);
+    for error in [
+        Errno::ACCESS,
+        Errno::XDEV,
+        Errno::LOOP,
+        Errno::NOENT,
+        Errno::INTR,
+        Errno::IO,
+    ] {
+        for transient in [0, LOGIN_OPEN_ATTEMPTS - 1] {
+            let mut calls = 0;
+            assert_eq!(
+                retry_login_open(|| {
+                    calls += 1;
+                    Err(if calls <= transient {
+                        Errno::AGAIN
+                    } else {
+                        error
+                    })
+                })
+                .unwrap_err(),
+                error
+            );
+            assert_eq!(calls, transient + 1);
+        }
+    }
+}
+
+#[test]
 fn root_login_shell_symlinks_stay_inside_image_and_home_must_be_real_private_owner() {
     if !in_user_namespace(concat!(
         module_path!(),
@@ -127,7 +185,8 @@ fn root_login_shell_symlinks_stay_inside_image_and_home_must_be_real_private_own
     for destination in ["/bin/busybox", "../../bin/busybox"] {
         fs::remove_file(&shell).unwrap();
         symlink(destination, &shell).unwrap();
-        assert!(check_root_login_paths(&root, &tables.as_files()).is_ok());
+        let result = check_root_login_paths(&root, &tables.as_files());
+        assert!(result.is_ok(), "{destination}: {result:?}");
     }
     for destination in ["/bin/true", "/proc/self/exe", "/data/untrusted"] {
         fs::remove_file(&shell).unwrap();

@@ -21,17 +21,18 @@ use std::{
 pub(crate) fn archive() -> Vec<u8> {
     let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);
-    for (name, data) in [
-        ("kvmapp/version", b"2.0.43\n".as_slice()),
-        ("kvmapp/server/NanoKVM-Server", b"test launcher"),
-        ("kvmapp/backends/NanoKVM-Server.rust", b"test backend"),
-        ("kvmapp/system/init.d/S95nanokvm", b"test init"),
-    ] {
+    let mut files = crate::update::helper_family::candidate_files_fixture();
+    files.push(("kvmapp/version".into(), b"2.0.43\n".to_vec()));
+    files.push((
+        "kvmapp/system/init.d/S95nanokvm".into(),
+        b"test init".to_vec(),
+    ));
+    for (name, data) in files {
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(0o755);
         header.set_cksum();
-        tar.append_data(&mut header, name, data).unwrap();
+        tar.append_data(&mut header, name, data.as_slice()).unwrap();
     }
     tar.into_inner().unwrap().finish().unwrap()
 }

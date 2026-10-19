@@ -60,6 +60,40 @@ fn prepare_fixture(
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().collect();
+    // Test-only read-only inspection; no signature, install or exec authority.
+    if arguments.len() == 3 && arguments[1] == "--inspect-helper-family" {
+        let result = rustix::fs::open(
+            Path::new(&arguments[2]),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map(std::fs::File::from)
+        .map_err(std::io::Error::from)
+        .and_then(|backend| nanokvm_rust_server::update::helper_family::inspect(&backend));
+        return match result {
+            Ok(family) => {
+                println!(
+                    "helper family consistency only; not authentication or runtime acceptance"
+                );
+                for member in family.members() {
+                    let digest: String = member
+                        .sha256()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    println!("{} {} {digest}", member.role().filename(), member.size());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("backend helper family rejected");
+                ExitCode::from(78)
+            }
+        };
+    }
     if !matches!(arguments.len(), 4 | 6 | 7 | 8) {
         return ExitCode::from(64);
     }

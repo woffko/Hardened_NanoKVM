@@ -23,7 +23,10 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     marker::PhantomData,
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::fs::MetadataExt,
+    },
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -332,6 +335,24 @@ fn read_table(
     Ok(Some(bytes))
 }
 
+const LOGIN_OPEN_ATTEMPTS: usize = 8;
+
+fn retry_login_open(
+    mut open: impl FnMut() -> rustix::io::Result<OwnedFd>,
+) -> rustix::io::Result<OwnedFd> {
+    // IN_ROOT may return EAGAIN when concurrent rename prevents proving that
+    // '..' stayed confined. Repeat the SAME lookup, never relax resolution.
+    // This is a finite syscall count, not an I/O wall-clock deadline.
+    let mut attempts = 1;
+    loop {
+        let result = open();
+        if !matches!(result, Err(rustix::io::Errno::AGAIN)) || attempts == LOGIN_OPEN_ATTEMPTS {
+            return result;
+        }
+        attempts += 1;
+    }
+}
+
 fn check_root_login_paths(root: &File, restored: &AccountFiles<'_>) -> Result<(), RootfsError> {
     restore_native::validate(restored).map_err(|_| RootfsError::Accounts)?;
     let passwd = std::str::from_utf8(restored.passwd).map_err(|_| RootfsError::Accounts)?;
@@ -342,26 +363,30 @@ fn check_root_login_paths(root: &File, restored: &AccountFiles<'_>) -> Result<()
     let mut fields = row.split(':');
     let home = fields.nth(5).ok_or(RootfsError::Accounts)?;
     let shell = fields.next().ok_or(RootfsError::Accounts)?;
-    let home: File = openat2(
-        root,
-        home,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-    )
+    let home: File = retry_login_open(|| {
+        openat2(
+            root,
+            home,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+    })
     .map_err(|_| RootfsError::Accounts)?
     .into();
     let home_meta = home.metadata()?;
     if home_meta.uid() != 0 || home_meta.mode() & 0o7022 != 0 || home_meta.mode() & 0o100 == 0 {
         return Err(RootfsError::Accounts);
     }
-    let shell: File = openat2(
-        root,
-        shell,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_XDEV,
-    )
+    let shell: File = retry_login_open(|| {
+        openat2(
+            root,
+            shell,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_XDEV,
+        )
+    })
     .map_err(|_| RootfsError::Accounts)?
     .into();
     let executable = shell.metadata()?;
