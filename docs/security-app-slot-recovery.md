@@ -1,12 +1,12 @@
 # Independent app-slot recovery component
 
-This describes a source/host-tested rollback engine and early consumer gates,
+This describes source/host-tested preparation, rollback and early consumer gates,
 not an activated journaled installer or a completed WP-04/C1 fix. The actual app
 API still uses its legacy slot swap. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
 installation for an app-only bridge. S02 and individual consumer gates now invoke
-it, but the trusted producer, legacy first-bridge target acceptance, helper migration and
+it, but producer/API/broker activation, legacy first-bridge target acceptance, helper migration and
 device acceptance remain open. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
@@ -37,9 +37,15 @@ version. Reserved bytes and the whole domain-separated SHA-256 checksum are
 validated. These hashes detect corruption and retain context: they do not
 perform RSA verification or authenticate an attacker-supplied manifest.
 
-Only a future trusted producer may issue a record after authorizing the exact
-archive. That producer must retain exact metadata/signature and protected key/
-policy context where required; it does not exist in this component. Rootfs
+The new preparation issuer takes an opaque `AppCandidate` produced by the app
+API's private bounded extraction path, plus the app-only retained update/writer
+handoff. It does not accept a directory, caller-supplied import mode or digest as
+authority. The factory fingerprints the actual readonly archive descriptor,
+rechecks its size/hash against authenticated online metadata, binds the candidate
+version and records exact metadata/signature byte hashes. Manual import and
+policy-authorized unsigned-lab metadata remain distinct; neither is relabeled
+as signed. The API still uses the old swap after this shared candidate factory:
+it has **not** been connected to the new journal issuer. Rootfs
 protection, issuer provenance and the closed restore policy are mandatory.
 Neither a copied p3 record nor a valid checksum creates installation authority.
 Host tests require the new journal, temporary records and old/new code slots to
@@ -92,8 +98,57 @@ decoded, selected or promoted by recovery/bootstrap. Installing the trusted
 backend's compile-bound independent helper in that state is the same operation
 as the ordinary historical-absence case; it does not use orphan bytes as authority
 and does not publish/execute an app. Unknown installed helpers still refuse.
-The future trusted producer must explicitly handle its retained preparation
-material; no deletion or automatic orphan activation is implied here.
+The issuer retains its own unpublished preparation material after an ambiguous
+move/sync failure. No deletion or automatic orphan activation is implied here;
+explicit orphan disposition and terminal-transaction retirement remain required.
+
+## Durable preparation and lease acceptance (not activated)
+
+Preparation takes the protected store's exclusive lease and refuses any existing
+`current`, including terminal transactions and unsafe/foreign entries. It verifies
+the live old directory and the candidate's same-rootfs identities, exact stage
+binding, bounded depth/member/byte totals, ownership and modes. The recursive
+durability walk refuses symlinks, hard-linked files, special objects and mount
+crossings; it checks the entry's type before opening it and verifies the opened
+inode. Candidate files and directories are synced before publication.
+
+A fresh `.prepare-<transaction-id>` sibling receives the candidate with
+`RENAME_NOREPLACE`; source and destination directories are synced. The complete
+mode-0600 `prepared` record is published and synced there before the whole
+preparation directory becomes `current`, also with `RENAME_NOREPLACE`, followed
+by parent sync. `/kvmapp` is never renamed or written in this phase. A process
+failure before the final rename leaves only unpublished evidence; after it,
+existing recovery can select the recorded old slot. These are process-death
+claims, not proof of physical power-loss/write-cache behavior.
+
+`PreparedInstall` retains store serialization and the three close-only update/
+writer exclusions. `into_handoff` releases only store serialization. The receiver
+must call `accept_prepared` with its validated lease: this reopens only the fixed
+canonical journal, requires the same transaction ID, phase `prepared` and exact
+old-live/new-staged/no-old-parked layout. Another ID, later phase or already-swapped
+layout is rejected without rewriting the journal. `AcceptedInstall` retains both
+the store and accepted exclusions; it is not a native Stop, slot publication or
+health capability.
+
+An early-rejection owner groups candidate staging before the retained handoff
+in field order, before any fallible fixed-root/store inspection. Candidate
+cleanup therefore finishes before update/writer exclusions close, even when
+the original frontend owner has already gone. A child-process test pauses inside
+the real staging destructor and probes all three kernel exclusions before
+allowing cleanup to finish.
+
+Host tests feed real synthetic archives through the production candidate factory,
+verify signed/manual/unsigned provenance and reject different archive bytes even
+when their extracted payload would be identical. Eleven actual SIGKILL boundaries
+cover preparation/record/publication; unpublished candidate inode identity and
+old-live preservation are checked. A fresh user/mount/PID namespace with a real
+private procfs exercises the actual fixed-root issuer, an exec'd lease receiver,
+canonical acceptance, sender teardown, continued three-domain exclusion and
+ordinary recovery after receiver exit. It is not the broker-owned production
+worker, HTTP/device acceptance or a complete install lifecycle.
+Production delivery must additionally cover ambiguous queued transfer and peer
+death before acceptance together with canonical transaction state; separate
+lease queue tests alone do not complete that combined worker-delivery gate.
 
 ## Early consumer integration (development branch)
 
@@ -384,8 +439,10 @@ not physical power-loss, ext4 write-cache or target acceptance.
 
 ## Remaining activation prerequisites
 
-- Trusted journal producer with same-filesystem durable preparation/publication,
-  exact signed/manual authority and retained metadata/key/policy context.
+- Connect the host-tested preparation issuer/lease acceptance to a broker-owned
+  independent installer, exact metadata/key/policy lifetime and durable job
+  observability. Implement journaled live swap, trial health, rollback and
+  terminal retirement; the app API still uses its old swap.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
 - Complete helper-version lifecycle across subsequent app updates. The pinned

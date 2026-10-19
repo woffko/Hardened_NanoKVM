@@ -97,6 +97,26 @@ fn append_budget_is_checked_before_write_and_sealing_checks_inode_length() {
 }
 
 #[test]
+fn candidate_fingerprint_covers_whole_readonly_inode_and_rewinds_for_extraction() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let bytes = b"whole exact app archive, not just the unread suffix";
+    let mut download = stage.create_archive().unwrap();
+    download.append(bytes).unwrap();
+    let mut archive = download.finish_manual_import().unwrap();
+    archive.read_exact(&mut [0; 7]).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            archive.fingerprint().unwrap(),
+            (bytes.len() as u64, Sha512::digest(bytes).into())
+        );
+        let mut actual = Vec::new();
+        archive.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+    }
+}
+
+#[test]
 fn staging_never_reuses_or_removes_prior_crash_evidence() {
     let root = tempfile::tempdir().unwrap();
     let first = AppStage::fixture(root.path()).unwrap();

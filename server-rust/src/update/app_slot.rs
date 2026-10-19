@@ -1,10 +1,18 @@
-//! Fixed-rootfs app-slot journal recovery. The producer/bootstrap and first-start
-//! acceptance are not wired yet. Recovery only restores a recorded old slot;
+//! Fixed-rootfs app-slot preparation/recovery. The issuer is not yet connected
+//! to API/broker swap or first-start acceptance. Recovery restores a recorded old slot;
 //! neither a checksum nor an arbitrary staging directory authorizes new code.
 
-use super::{operation_lock::ProcessLock, restore_fs};
+use super::{
+    app_install_lease::{Accepted, Handoff},
+    app_stage::AppStage,
+    operation_lock::ProcessLock,
+    restore_fs,
+};
 use rand_core::{OsRng, RngCore};
-use rustix::fs::{FlockOperation, Mode, OFlags, RenameFlags, flock, renameat, renameat_with};
+use rustix::fs::{
+    AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, flock, openat2,
+    renameat, renameat_with, statat,
+};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -101,10 +109,312 @@ impl Identity {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Import {
+pub(crate) enum Import {
     Signed = 1,
     Manual = 2,
     UnsignedLab = 3,
+}
+
+// Only AppCandidate's private production factory can supply the public issuer.
+// Keeping this data private to the crate does not create a second path-based
+// install API: prepare() takes the opaque candidate, never CandidateInput.
+pub(crate) struct CandidateInput {
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) stage: AppStage,
+    pub(crate) version: String,
+    pub(crate) import: Import,
+    pub(crate) archive_sha512: [u8; 64],
+    pub(crate) metadata_sha256: [u8; 32],
+    pub(crate) signature_sha256: [u8; 32],
+}
+
+// Even a rejection before opening the fixed store must discard candidate
+// staging BEFORE releasing update/writer exclusion. Field order is deliberate.
+struct Preparation {
+    candidate: crate::api::application::AppCandidate,
+    handoff: Handoff,
+}
+
+/// A durable prepared receipt plus retained app/update/writer admission. This
+/// cannot switch the live slot or claim trial health. The independent installer
+/// must reopen and validate this exact transaction before further transitions.
+pub struct PreparedInstall {
+    store: Store,
+    record: Record,
+    handoff: Handoff,
+}
+impl PreparedInstall {
+    pub fn transaction(&self) -> [u8; 16] {
+        self.record.transaction
+    }
+
+    /// Release only the store's local serialization, retaining all transferred
+    /// kernel exclusions. This is not a commit or worker-acceptance receipt.
+    pub fn into_handoff(self) -> Handoff {
+        let Self {
+            store,
+            record: _,
+            handoff,
+        } = self;
+        drop(store);
+        handoff
+    }
+}
+
+/// The worker's accepted admission bound to the canonical prepared receipt.
+/// Root peer credentials alone do not create this capability. No health or
+/// permission to bypass native lifecycle is implied by accepting preparation.
+pub struct AcceptedInstall {
+    _store: Store,
+    record: Record,
+    _admission: Accepted,
+}
+impl AcceptedInstall {
+    pub fn transaction(&self) -> [u8; 16] {
+        self.record.transaction
+    }
+}
+
+pub fn accept_prepared(admission: Accepted) -> Result<AcceptedInstall> {
+    let store = Store::open(true)?.ok_or(SlotError::Invalid)?;
+    accept_at(store, admission)
+}
+
+fn accept_at(store: Store, admission: Accepted) -> Result<AcceptedInstall> {
+    let record = store.record()?;
+    if record.phase != Phase::Prepared || record.transaction != admission.transaction() {
+        return Err(SlotError::Invalid);
+    }
+    let layout = store.layout(&record)?;
+    if layout.live != Some(record.old) || layout.new != Some(record.new) || layout.old.is_some() {
+        return Err(SlotError::Invalid);
+    }
+    Ok(AcceptedInstall {
+        _store: store,
+        record,
+        _admission: admission,
+    })
+}
+
+/// Issue from actual extracted bytes and an app-only retained handoff. Never
+/// infer authorization from a legacy path, version string or supplied checksum.
+/// Existing current transactions (including terminal ones) are not overwritten;
+/// retirement is a separate, still required lifecycle operation.
+pub fn prepare(
+    candidate: crate::api::application::AppCandidate,
+    handoff: Handoff,
+) -> Result<PreparedInstall> {
+    let pending = Preparation { candidate, handoff };
+    if !nix::unistd::geteuid().is_root() {
+        return Err(SlotError::Unsafe);
+    }
+    let rootfs = restore_fs::open_root(Path::new("/"), true)?;
+    let device = rootfs.metadata()?.dev();
+    for path in ["/", "/etc", "/etc/kvm"] {
+        protected_directory(
+            &restore_fs::open_root(Path::new(path), true)?,
+            device,
+            0,
+            false,
+        )?;
+    }
+    let parent = restore_fs::open_root(Path::new("/etc/kvm"), true)?;
+    prepare_at(rootfs, parent, 0, pending)
+}
+
+fn prepare_at(
+    rootfs: File,
+    parent: File,
+    uid: u32,
+    pending: Preparation,
+) -> Result<PreparedInstall> {
+    let device = rootfs.metadata()?.dev();
+    protected_directory(&rootfs, device, uid, false)?;
+    protected_directory(&parent, device, uid, false)?;
+    match rustix::fs::mkdirat(&parent, DIRECTORY, Mode::from_raw_mode(0o700)) {
+        Ok(()) => parent.sync_all()?,
+        Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let directory =
+        restore_fs::open_beneath(&parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    protected_directory(&directory, device, uid, true)?;
+    flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == rustix::io::Errno::WOULDBLOCK {
+            SlotError::Busy
+        } else {
+            SlotError::Io(error.into())
+        }
+    })?;
+    let lock = StoreLock(directory);
+    // NOFOLLOW/NO_XDEV rejects dangling symlinks and mounts rather than treating
+    // them as missing. Never retire another transaction as a side effect.
+    if open_optional(&lock.0, CURRENT)?.is_some() {
+        return Err(SlotError::Busy);
+    }
+    // No fallible operation between splitting this owner and establishing the
+    // later-declared staging value, whose cleanup precedes handoff teardown.
+    let Preparation { candidate, handoff } = pending;
+    let mut input = candidate.into_slot();
+    let extraction = input.stage.extraction_path()?;
+    if input.root.strip_prefix(&extraction).is_err() || input.root == extraction {
+        return Err(SlotError::Unsafe);
+    }
+    let old = restore_fs::open_beneath(&rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let old = Identity::of(&old, device, uid)?;
+    let source_parent = input.root.parent().ok_or(SlotError::Unsafe)?;
+    let source_name = input.root.file_name().ok_or(SlotError::Unsafe)?;
+    let source_parent = restore_fs::open_root(source_parent, true)?;
+    protected_directory(&source_parent, device, uid, false)?;
+    let new: File = openat2(
+        &source_parent,
+        Path::new(source_name),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_XDEV,
+    )?
+    .into();
+    let new_identity = Identity::of(&new, device, uid)?;
+    let record = Record {
+        phase: Phase::Prepared,
+        import: input.import,
+        transaction: handoff.transaction(),
+        old,
+        new: new_identity,
+        archive_sha512: input.archive_sha512,
+        metadata_sha256: input.metadata_sha256,
+        signature_sha256: input.signature_sha256,
+        version: input.version,
+    };
+    record.validate()?;
+    // Complete the candidate's file + directory durability BEFORE any receipt
+    // can become current. The bounded traversal rejects aliases/special files.
+    let mut members = 0;
+    let mut bytes = 0;
+    sync_candidate(&new, device, uid, 0, &mut members, &mut bytes)?;
+    let name = format!(".prepare-{:032x}", u128::from_be_bytes(record.transaction));
+    rustix::fs::mkdirat(&lock.0, name.as_str(), Mode::from_raw_mode(0o700))?;
+    lock.0.sync_all()?;
+    #[cfg(test)]
+    checkpoint("issuer-directory-created");
+    let current = restore_fs::open_beneath(&lock.0, &name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    protected_directory(&current, device, uid, true)?;
+    let store = Store {
+        rootfs,
+        _lock: lock,
+        current,
+        uid,
+        device,
+    };
+    // From this point even ambiguous rename/sync failures retain all source
+    // material. No Drop cleanup is allowed to erase a possible recovery input.
+    input.stage.preserve_recovery();
+    renameat_with(
+        &source_parent,
+        Path::new(source_name),
+        &store.current,
+        "new",
+        RenameFlags::NOREPLACE,
+    )?;
+    #[cfg(test)]
+    checkpoint("issuer-candidate-moved");
+    source_parent.sync_all()?;
+    #[cfg(test)]
+    checkpoint("issuer-source-synced");
+    store.current.sync_all()?;
+    #[cfg(test)]
+    checkpoint("issuer-candidate-synced");
+    store.layout(&record)?;
+    store.publish(&record)?;
+    #[cfg(test)]
+    checkpoint("issuer-record-durable");
+    renameat_with(
+        &store._lock.0,
+        name.as_str(),
+        &store._lock.0,
+        CURRENT,
+        RenameFlags::NOREPLACE,
+    )?;
+    #[cfg(test)]
+    checkpoint("issuer-current-renamed");
+    store.sync_parents()?;
+    #[cfg(test)]
+    checkpoint("issuer-current-durable");
+    // The known empty source stage can now be discarded. This never removes
+    // the issued candidate, current receipt, old slot or another operation.
+    input.stage.discard_after_success();
+    Ok(PreparedInstall {
+        store,
+        record,
+        handoff,
+    })
+}
+
+fn sync_candidate(
+    directory: &File,
+    device: u64,
+    uid: u32,
+    depth: usize,
+    members: &mut usize,
+    bytes: &mut u64,
+) -> Result<()> {
+    if depth > 64 {
+        return Err(SlotError::Invalid);
+    }
+    protected_directory(directory, device, uid, false)?;
+    for entry in rustix::fs::Dir::read_from(directory)? {
+        let entry = entry?;
+        if matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            continue;
+        }
+        *members += 1;
+        if *members > 8192 {
+            return Err(SlotError::Invalid);
+        }
+        let named = statat(directory, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)?;
+        if !matches!(
+            FileType::from_raw_mode(named.st_mode),
+            FileType::Directory | FileType::RegularFile
+        ) {
+            // Never open a candidate device/socket/FIFO merely to reject it.
+            return Err(SlotError::Unsafe);
+        }
+        let child: File = openat2(
+            directory,
+            entry.file_name(),
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        )?
+        .into();
+        let m = child.metadata()?;
+        if m.dev() != device
+            || m.uid() != uid
+            || m.mode() & 0o7022 != 0
+            || (m.dev(), m.ino()) != (named.st_dev, named.st_ino)
+        {
+            return Err(SlotError::Unsafe);
+        }
+        if m.is_dir() {
+            sync_candidate(&child, device, uid, depth + 1, members, bytes)?;
+        } else if m.is_file() && m.nlink() == 1 {
+            *bytes = bytes
+                .checked_add(m.len())
+                .filter(|n| *n <= 256 * 1024 * 1024)
+                .ok_or(SlotError::Invalid)?;
+            child.sync_all()?;
+        } else {
+            return Err(SlotError::Unsafe);
+        }
+    }
+    directory.sync_all()?;
+    Ok(())
 }
 
 // The hashes retain the issuing install's exact-byte context. They do not
@@ -531,6 +841,10 @@ pub fn boot_gate() -> Result<Status> {
 #[cfg(test)]
 #[path = "app_slot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "app_slot_issuer_tests.rs"]
+mod issuer_tests;
 
 #[cfg(test)]
 fn checkpoint(name: &str) {

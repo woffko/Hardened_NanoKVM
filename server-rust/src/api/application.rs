@@ -100,6 +100,23 @@ enum InstallAuthority {
     ManualImport,
 }
 
+/// Opaque result of private, bounded extraction and current-policy admission.
+/// There is no pathname/import-mode constructor or deserializer. The slot
+/// issuer consumes this result, not arbitrary caller-selected directories.
+pub struct AppCandidate {
+    input: crate::update::app_slot::CandidateInput,
+}
+impl AppCandidate {
+    pub(crate) fn into_slot(self) -> crate::update::app_slot::CandidateInput {
+        self.input
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_root(&self) -> &Path {
+        &self.input.root
+    }
+}
+
 pub async fn update_status(State(state): State<AppState>) -> Result<Json<ApiResponse<Snapshot>>> {
     Ok(Json(ApiResponse::ok(state.updates.snapshot()?)))
 }
@@ -521,10 +538,35 @@ async fn save_uploaded_update(
 }
 
 fn prepare_app_candidate(
-    source: AppArchive,
-    stage: &AppStage,
+    mut source: AppArchive,
+    stage: AppStage,
     authority: &InstallAuthority,
-) -> Result<PathBuf> {
+) -> Result<AppCandidate> {
+    use crate::update::app_slot::Import;
+    use sha2::{Digest, Sha256};
+    let (size, archive_sha512) = source.fingerprint()?;
+    let (import, metadata_sha256, signature_sha256) = match authority {
+        InstallAuthority::ManualImport => (Import::Manual, [0; 32], [0; 32]),
+        InstallAuthority::OnlineMetadata(verified) => {
+            if size != verified.latest.size
+                || archive_sha512 != decode_sha512(&verified.latest.sha512)?
+            {
+                return Err(AppError::BadRequest(
+                    "app candidate differs from authenticated archive metadata".into(),
+                ));
+            }
+            let metadata = Sha256::digest(&verified.metadata).into();
+            if app_metadata_is_unsigned(&verified.latest) {
+                (Import::UnsignedLab, metadata, [0; 32])
+            } else {
+                (
+                    Import::Signed,
+                    metadata,
+                    Sha256::digest(&verified.signature).into(),
+                )
+            }
+        }
+    };
     let extract_dir = stage.extraction_path()?;
     let extracted = extract_app_tar_gz(source, &extract_dir)?;
     let update_root = resolve_update_root(&extracted)?;
@@ -536,18 +578,33 @@ fn prepare_app_candidate(
             "app candidate version differs from authenticated metadata".into(),
         ));
     }
-    Ok(update_root)
+    Ok(AppCandidate {
+        input: crate::update::app_slot::CandidateInput {
+            root: update_root,
+            stage,
+            version,
+            import,
+            archive_sha512,
+            metadata_sha256,
+            signature_sha256,
+        },
+    })
 }
 
 fn install_package(
     source: AppArchive,
-    mut stage: AppStage,
+    stage: AppStage,
     authority: InstallAuthority,
     _writers: WriterDrain,
 ) -> Result<()> {
     // Own the complete barrier, not just a handler-local borrow. Blocking work
     // can outlive its waiter and must exclude enrolled writers until it ends.
-    let update_root = prepare_app_candidate(source, &stage, &authority)?;
+    let candidate = prepare_app_candidate(source, stage, &authority)?;
+    let crate::update::app_slot::CandidateInput {
+        root: update_root,
+        mut stage,
+        ..
+    } = candidate.into_slot();
 
     // Startup attempts a fixed independent bootstrap. Recheck its exact bytes
     // and absence of any journal while this job owns app/system admission.
@@ -1031,6 +1088,17 @@ pub(crate) fn current_app_version() -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn manual_candidate_fixture(stage: AppStage, bytes: &[u8]) -> Result<AppCandidate> {
+    let mut download = stage.create_archive()?;
+    download.append(bytes)?;
+    prepare_app_candidate(
+        download.finish_manual_import()?,
+        stage,
+        &InstallAuthority::ManualImport,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -1407,8 +1475,9 @@ mod tests {
             );
             let archive = download.finish_manual_import().unwrap();
             let app =
-                prepare_app_candidate(archive, &stage, &InstallAuthority::ManualImport).unwrap();
-            assert_eq!(read_candidate_version(&app).unwrap(), "0.0.0");
+                prepare_app_candidate(archive, stage, &InstallAuthority::ManualImport).unwrap();
+            let app = &app.input.root;
+            assert_eq!(read_candidate_version(app).unwrap(), "0.0.0");
             for name in ["S02apprecover", "S30eth", "S30wifi"] {
                 assert!(!app.join("system/init.d").join(name).exists());
             }

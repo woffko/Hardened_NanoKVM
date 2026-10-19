@@ -324,5 +324,19 @@ fn prepare(socket: &OwnedFd, pid: u32, uid: u32) -> Result<(), Error> {
 }
 
 #[cfg(test)]
+pub(super) fn exchange_fixture(handoff: Handoff, parent: &File) -> Accepted {
+    let id = handoff.transaction();
+    let (sender, receiver) = pair().unwrap();
+    sender.send(handoff).unwrap();
+    receive(
+        &receiver.socket,
+        id,
+        parent,
+        nix::unistd::geteuid().as_raw(),
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
 #[path = "app_install_lease_tests.rs"]
 mod tests;

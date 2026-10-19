@@ -138,6 +138,14 @@ impl Drop for AppStage {
         // Only this operation's fresh private subtree. Never follow a replaced
         // binding, remove old staging, or touch the app slot/backup/recovery.
         if self.cleanup && self.check_binding().is_ok() {
+            #[cfg(test)]
+            if std::env::var("NANOKVM_APP_STAGE_DROP_CHECK").as_deref() == Ok("cleanup") {
+                println!("stage-cleanup-ready");
+                io::stdout().flush().unwrap();
+                let mut byte = [0];
+                io::stdin().read_exact(&mut byte).unwrap();
+                assert_eq!(byte, [1]);
+            }
             let _ = fs::remove_dir_all(&self.path);
             let _ = self.parent.sync_all();
         }
@@ -204,6 +212,38 @@ impl AppDownload {
 
 pub(crate) struct AppArchive {
     file: File,
+}
+
+impl AppArchive {
+    /// Fingerprint the same immutable descriptor that extraction will consume.
+    /// Always restore offset zero; a pathname or a caller's claimed hash is not
+    /// a candidate receipt.
+    pub fn fingerprint(&mut self) -> io::Result<(u64, [u8; 64])> {
+        let length = self.file.metadata()?.len();
+        if length == 0 || length > MAX_ARCHIVE_BYTES {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.file.rewind()?;
+        let mut hash = Sha512::new();
+        let mut seen = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = self.file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            seen = seen
+                .checked_add(count as u64)
+                .filter(|seen| *seen <= length)
+                .ok_or(io::ErrorKind::InvalidData)?;
+            hash.update(&buffer[..count]);
+        }
+        if seen != length {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.file.rewind()?;
+        Ok((length, hash.finalize().into()))
+    }
 }
 
 impl Read for AppArchive {

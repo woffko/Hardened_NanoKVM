@@ -1,5 +1,5 @@
 use super::*;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use std::process::Command;
 use tempfile::{TempDir, tempdir};
 
@@ -297,6 +297,8 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
         let bytes = package(version);
         let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
         let signature = fixture.sign(&metadata);
+        let metadata_sha256: [u8; 32] = Sha256::digest(&metadata).into();
+        let signature_sha256: [u8; 32] = Sha256::digest(&signature).into();
         let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
             .await
             .unwrap();
@@ -311,10 +313,20 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
             )
             .unwrap();
         let result =
-            prepare_app_candidate(source, &stage, &InstallAuthority::OnlineMetadata(verified));
+            prepare_app_candidate(source, stage, &InstallAuthority::OnlineMetadata(verified));
         assert_eq!(result.is_ok(), version == b"2.0.43\n");
-        if let Err(error) = result {
-            assert!(error.to_string().contains("version differs"));
+        match result {
+            Err(error) => assert!(error.to_string().contains("version differs")),
+            Ok(candidate) => {
+                let input = candidate.into_slot();
+                assert_eq!(input.import, crate::update::app_slot::Import::Signed);
+                assert_eq!(
+                    input.archive_sha512,
+                    <[u8; 64]>::from(Sha512::digest(&bytes))
+                );
+                assert_eq!(input.metadata_sha256, metadata_sha256);
+                assert_eq!(input.signature_sha256, signature_sha256);
+            }
         }
     }
     // Administrative import does not invent online metadata/signature authority.
@@ -326,7 +338,7 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
     assert!(
         prepare_app_candidate(
             download.finish_manual_import().unwrap(),
-            &stage,
+            stage,
             &InstallAuthority::ManualImport
         )
         .is_ok()
@@ -369,4 +381,69 @@ fn candidate_version_is_bounded_regular_utf8_and_semver() {
     )
     .unwrap();
     assert!(read_candidate_version(root.path()).is_err());
+}
+
+#[tokio::test]
+async fn opaque_candidate_cannot_relabel_other_archive_bytes_as_signed() {
+    let fixture = SigningFixture::new();
+    let bytes = package(b"2.0.43\n");
+    let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
+    let signature = fixture.sign(&metadata);
+    let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut changed = bytes;
+    // A gzip mtime change preserves the extracted payload, but is not the
+    // archive authorized by this exact signed metadata.
+    changed[4] ^= 1;
+    let mut download = stage.create_archive().unwrap();
+    download.append(&changed).unwrap();
+    let source = download.finish_manual_import().unwrap();
+    let error = prepare_app_candidate(source, stage, &InstallAuthority::OnlineMetadata(verified))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("differs from authenticated archive metadata")
+    );
+    assert!(!root.path().join("kvmapp").exists());
+}
+
+#[tokio::test]
+async fn lab_candidate_retains_exact_metadata_context_without_a_signature_claim() {
+    let mut config = Config::default();
+    config.security.allow_unsigned_updates = true;
+    let bytes = package(b"2.0.43\n");
+    let mut latest = latest_for(&bytes);
+    latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    let metadata = serde_json::to_vec_pretty(&latest).unwrap();
+    let expected: [u8; 32] = Sha256::digest(&metadata).into();
+    let verified = authenticate_app_metadata(metadata, Vec::new(), &config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut download = stage.create_archive().unwrap();
+    download.append(&bytes).unwrap();
+    let candidate = prepare_app_candidate(
+        download.finish_manual_import().unwrap(),
+        stage,
+        &InstallAuthority::OnlineMetadata(verified),
+    )
+    .unwrap()
+    .into_slot();
+    assert_eq!(
+        candidate.import,
+        crate::update::app_slot::Import::UnsignedLab
+    );
+    assert_eq!(candidate.metadata_sha256, expected);
+    assert_eq!(candidate.signature_sha256, [0; 32]);
+    assert_eq!(
+        candidate.archive_sha512,
+        <[u8; 64]>::from(Sha512::digest(&bytes))
+    );
 }
