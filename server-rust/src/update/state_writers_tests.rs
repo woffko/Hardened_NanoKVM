@@ -20,13 +20,14 @@ async fn partial_install_lease_export_failure_keeps_update_until_owner_ends() {
         Err(LockError::Busy)
     ));
     for domain in [Domain::WriterActivity, Domain::WriterAdmission] {
-        drop(
-            ProcessLock::at_parent(&parent, nix::unistd::geteuid().as_raw(), domain, false)
-                .unwrap(),
-        );
+        drop(released(&parent, domain));
     }
+    assert!(matches!(
+        ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()),
+        Err(LockError::Busy)
+    ));
     drop(owner);
-    drop(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+    drop(released(&parent, Domain::Update));
 }
 use std::{
     fs::{self, File},
@@ -35,6 +36,23 @@ use std::{
 };
 
 const LIMIT: Duration = Duration::from_secs(5);
+
+// Transferred descriptions release on the last FD, including short-lived
+// CLOEXEC aliases in parallel fixtures' fork-before-exec windows. Only confirmed
+// Busy is retried; a leak still times out, and no lock inode is forced/unlinked.
+fn released(parent: &File, domain: Domain) -> ProcessLock {
+    let start = std::time::Instant::now();
+    loop {
+        match ProcessLock::at_parent(parent, nix::unistd::geteuid().as_raw(), domain, false) {
+            Ok(lock) => return lock,
+            Err(LockError::Busy) => {
+                assert!(start.elapsed() < LIMIT, "fixture lease did not release");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("unexpected lock release error: {error}"),
+        }
+    }
+}
 
 #[test]
 fn synchronous_recovery_drain_retains_both_exclusions_without_a_runtime() {

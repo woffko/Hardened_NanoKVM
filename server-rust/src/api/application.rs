@@ -24,7 +24,6 @@ use crate::{
     system::command::{AllowedCommand, CommandOutput, run_allowed},
     update::{
         app_stage::{AppArchive, AppDownload, AppStage, MAX_ARCHIVE_BYTES as MAX_UPDATE_BYTES},
-        archive::extract_app_tar_gz,
         keys::verify_metadata_signature,
         operation::{Kind, Snapshot, UpdateOwner},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE},
@@ -567,8 +566,7 @@ fn prepare_app_candidate(
             }
         }
     };
-    let extract_dir = stage.extraction_path()?;
-    let extracted = extract_app_tar_gz(source, &extract_dir)?;
+    let extracted = stage.extract(source)?;
     let update_root = resolve_update_root(&extracted)?;
     let version = validate_update_root(&update_root)?;
     if let InstallAuthority::OnlineMetadata(verified) = authority
@@ -1436,7 +1434,7 @@ mod tests {
             }
             assert_eq!(format!("{:x}", actual.finalize()), hash);
             let archive = download.finish_manual_import().unwrap();
-            let extracted = extract_app_tar_gz(archive, &stage.extraction_path().unwrap()).unwrap();
+            let extracted = stage.extract(archive).unwrap();
             let app = resolve_update_root(&extracted).unwrap();
             validate_update_root(&app).unwrap();
             assert_eq!(

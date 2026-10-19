@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, btree_map::Entry},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
@@ -13,6 +13,7 @@ use std::{
 use flate2::read::GzDecoder;
 use tar::{Archive, EntryType};
 
+use super::app_space::Footprint;
 use crate::{AppError, Result, system::files::clean_relative_path};
 
 const MAX_SYNCED_ARCHIVE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -24,23 +25,39 @@ struct AppLimits {
     path: usize,
 }
 
+const APP_LIMITS: AppLimits = AppLimits {
+    bytes: 256 * 1024 * 1024,
+    members: 8192,
+    path: 4096,
+};
+
 /// The caller owns a fresh private rootfs destination and an immutable archive
 /// descriptor. GNU/ustar directories and regular files are the package format;
 /// raw iteration bounds GNU long names before tar can allocate their bodies.
 pub(crate) fn extract_app_tar_gz(src: impl Read, dest: &Path) -> Result<PathBuf> {
-    extract_app_tar_gz_limited(
-        src,
-        dest,
-        AppLimits {
-            bytes: 256 * 1024 * 1024,
-            members: 8192,
-            path: 4096,
-        },
-    )
+    extract_app_tar_gz_limited(src, dest, APP_LIMITS)
+}
+
+/// The same parser and footer/type/path/member limits as extraction, but no
+/// output writes. The caller must rewind the same immutable archive afterwards.
+pub(super) fn inspect_app_tar_gz(src: impl Read, unit: u64) -> Result<Footprint> {
+    Ok(read_app_tar_gz(src, None, APP_LIMITS, unit)?.1)
 }
 
 fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) -> Result<PathBuf> {
-    fs::create_dir(dest)?;
+    Ok(read_app_tar_gz(src, Some(dest), limits, 4096)?.0)
+}
+
+fn read_app_tar_gz(
+    src: impl Read,
+    dest: Option<&Path>,
+    limits: AppLimits,
+    unit: u64,
+) -> Result<(PathBuf, Footprint)> {
+    let mut footprint = Footprint::new(unit)?;
+    if let Some(dest) = dest {
+        fs::create_dir(dest)?;
+    }
     let gz = flate2::bufread::GzDecoder::new(BufReader::new(src));
     let mut archive = Archive::new(BoundedTar {
         reader: gz,
@@ -50,7 +67,9 @@ fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) ->
     let mut long_name = None;
     let mut members = 0;
     let mut payload = 0_u64;
-    let mut output_paths = BTreeSet::new();
+    // One bounded map, not separate duplicated path inventories. true marks a
+    // regular file; implicit parents and explicit directories are false.
+    let mut output_paths = BTreeMap::new();
     for entry in archive.entries()?.raw(true) {
         let mut entry = entry?;
         members += 1;
@@ -95,7 +114,17 @@ fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) ->
         let mut prefix = PathBuf::new();
         for component in relative.components() {
             prefix.push(component.as_os_str());
-            output_paths.insert(prefix.clone());
+            let regular = prefix == relative && kind == EntryType::Regular;
+            match output_paths.entry(prefix.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(regular);
+                    footprint.path(regular)?;
+                }
+                Entry::Occupied(entry) if *entry.get() || regular => {
+                    return Err(AppError::BadRequest("conflicting app archive paths".into()));
+                }
+                Entry::Occupied(_) => {}
+            }
             if output_paths.len() > limits.members {
                 return Err(AppError::BadRequest(
                     "too many implicit app archive paths".into(),
@@ -106,7 +135,7 @@ fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) ->
             .components()
             .next()
             .ok_or_else(|| AppError::BadRequest("empty app archive path".into()))?;
-        let top_level = dest.join(first.as_os_str());
+        let top_level = dest.unwrap_or(Path::new("")).join(first.as_os_str());
         // The published GNU packages include this top-level inventory beside
         // kvmapp. It is ordinary data, never an authorization receipt.
         if relative != Path::new("MANIFEST.txt") || kind != EntryType::Regular {
@@ -116,33 +145,42 @@ fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) ->
                 Some(_) => return Err(AppError::BadRequest("multiple app archive roots".into())),
             }
         }
-        let target = safe_join(dest, &relative)?;
         if kind == EntryType::Directory {
             if size != 0 {
                 return Err(AppError::BadRequest(
                     "app archive directory has data".into(),
                 ));
             }
-            fs::create_dir_all(&target)?;
+            if let Some(dest) = dest {
+                fs::create_dir_all(safe_join(dest, &relative)?)?;
+            }
             continue;
         }
         payload = payload
             .checked_add(size)
             .filter(|bytes| *bytes <= limits.bytes)
             .ok_or_else(|| AppError::BadRequest("app archive expands beyond its limit".into()))?;
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        reject_symlink_parent(dest, &target)?;
-        let mut out = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(target)?;
-        if io::copy(&mut entry, &mut out)? != size {
+        footprint.file(size)?;
+        let copied = if let Some(dest) = dest {
+            let target = safe_join(dest, &relative)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            reject_symlink_parent(dest, &target)?;
+            let mut out = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(target)?;
+            let copied = io::copy(&mut entry, &mut out)?;
+            out.sync_all()?;
+            copied
+        } else {
+            io::copy(&mut entry, &mut io::sink())?
+        };
+        if copied != size {
             return Err(AppError::BadRequest("truncated app archive member".into()));
         }
-        out.sync_all()?;
     }
     if long_name.is_some() {
         return Err(AppError::BadRequest("orphan app archive long name".into()));
@@ -168,7 +206,8 @@ fn extract_app_tar_gz_limited(src: impl Read, dest: &Path, limits: AppLimits) ->
             "app archive has trailing compressed data".into(),
         ));
     }
-    first_top_level.ok_or_else(|| AppError::BadRequest("empty archive".into()))
+    let root = first_top_level.ok_or_else(|| AppError::BadRequest("empty archive".into()))?;
+    Ok((root, footprint))
 }
 
 struct BoundedTar<R> {
@@ -225,10 +264,10 @@ pub(crate) fn extract_tar_gz_reader(src: impl Read, dest: &Path) -> Result<PathB
         let path = entry.path()?.into_owned();
         let target = safe_join(dest, &path)?;
 
-        if first_top_level.is_none() {
-            if let Some(first) = path.components().next() {
-                first_top_level = Some(dest.join(first.as_os_str()));
-            }
+        if first_top_level.is_none()
+            && let Some(first) = path.components().next()
+        {
+            first_top_level = Some(dest.join(first.as_os_str()));
         }
 
         match entry.header().entry_type() {
@@ -306,6 +345,62 @@ mod tests {
     fn app_rejected(bytes: &[u8]) {
         let root = tempfile::tempdir().unwrap();
         assert!(extract_app_tar_gz(bytes, &root.path().join("extract")).is_err());
+        assert!(inspect_app_tar_gz(bytes, 4096).is_err());
+    }
+
+    #[test]
+    fn app_inspection_counts_unique_paths_without_creating_any_output() {
+        let bytes = gzip(&tar(&[
+            ("MANIFEST.txt", EntryType::Regular, b"inventory"),
+            ("kvmapp", EntryType::Directory, b""),
+            ("kvmapp", EntryType::Directory, b""),
+            ("kvmapp/sub/empty", EntryType::Regular, b""),
+            ("kvmapp/sub/data", EntryType::Regular, b"data"),
+        ]));
+        let footprint = inspect_app_tar_gz(bytes.as_slice(), 4096).unwrap();
+        // extract + five unique paths (three files/two dirs), two data blocks.
+        footprint
+            .check(super::super::app_space::Capacity::fixture(
+                4096,
+                super::super::app_space::RECOVERY_BYTES + 10 * 4096,
+                128 + 6,
+            ))
+            .unwrap();
+        assert!(
+            footprint
+                .check(super::super::app_space::Capacity::fixture(
+                    4096,
+                    super::super::app_space::RECOVERY_BYTES + 10 * 4096 - 1,
+                    128 + 6,
+                ))
+                .is_err()
+        );
+        let root = tempfile::tempdir().unwrap();
+        extract_app_tar_gz(bytes.as_slice(), &root.path().join("extract")).unwrap();
+        assert_eq!(
+            fs::read(root.path().join("extract/kvmapp/sub/data")).unwrap(),
+            b"data"
+        );
+    }
+
+    #[test]
+    fn app_inspection_and_extraction_both_reject_file_directory_collisions() {
+        for entries in [
+            vec![
+                ("kvmapp/parent", EntryType::Regular, b"x".as_slice()),
+                ("kvmapp/parent/child", EntryType::Regular, b"y"),
+            ],
+            vec![
+                ("kvmapp/parent/child", EntryType::Regular, b"x".as_slice()),
+                ("kvmapp/parent", EntryType::Regular, b"y"),
+            ],
+            vec![
+                ("kvmapp/parent", EntryType::Regular, b"x".as_slice()),
+                ("kvmapp/parent", EntryType::Directory, b""),
+            ],
+        ] {
+            app_rejected(&gzip(&tar(&entries)));
+        }
     }
 
     #[test]

@@ -2,7 +2,12 @@
 //! metadata; manual imports intentionally have no built-in signature proof.
 //! This is not the durable app-slot journal or protection from malicious root.
 
-use super::{restore_fs, staged_snapshot::reopen_readonly};
+use super::{
+    app_space::Capacity,
+    archive::{extract_app_tar_gz, inspect_app_tar_gz},
+    restore_fs,
+    staged_snapshot::reopen_readonly,
+};
 use rand_core::{OsRng, RngCore};
 use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
 use sha2::{Digest, Sha512};
@@ -38,6 +43,8 @@ impl AppStage {
 
     fn at_parent(parent: File, path: &Path) -> io::Result<Self> {
         check_directory(&parent, false)?;
+        let capacity = Capacity::read(&parent)?;
+        capacity.ensure(2 * capacity.unit, 2)?;
         match mkdirat(&parent, DIRECTORY, Mode::from_raw_mode(0o700)) {
             Ok(()) => parent.sync_all()?,
             Err(rustix::io::Errno::EXIST) => {}
@@ -69,6 +76,7 @@ impl AppStage {
     }
 
     pub fn create_archive(&self) -> io::Result<AppDownload> {
+        Capacity::read(&self.directory)?.ensure(0, 1)?;
         let file: File = openat2(
             &self.directory,
             ".",
@@ -95,6 +103,28 @@ impl AppStage {
     pub fn extraction_path(&self) -> io::Result<PathBuf> {
         self.check_binding()?;
         Ok(self.path.join("extract"))
+    }
+
+    /// No caller-supplied capacity facts in production: inspect and rewind this
+    /// immutable archive, then re-read the pinned filesystem before any output.
+    pub(crate) fn extract(&self, source: AppArchive) -> crate::Result<PathBuf> {
+        self.extract_with_capacity(source, Capacity::read)
+    }
+
+    fn extract_with_capacity(
+        &self,
+        mut source: AppArchive,
+        mut capacity: impl FnMut(&File) -> io::Result<Capacity>,
+    ) -> crate::Result<PathBuf> {
+        self.check_binding()?;
+        source.file.rewind()?;
+        let initial = capacity(&self.directory)?;
+        initial.ensure(0, 0)?;
+        let footprint = inspect_app_tar_gz(&mut source, initial.unit)?;
+        source.file.rewind()?;
+        self.check_binding()?;
+        footprint.check(capacity(&self.directory)?)?;
+        extract_app_tar_gz(source, &self.extraction_path()?)
     }
 
     /// Once live slot mutation may have started, an ordinary error must not
@@ -159,11 +189,16 @@ pub(crate) struct AppDownload {
 
 impl AppDownload {
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.append_with_capacity(bytes, Capacity::read(&self.file)?)
+    }
+
+    fn append_with_capacity(&mut self, bytes: &[u8], capacity: Capacity) -> io::Result<()> {
         let length = self
             .written
             .checked_add(bytes.len() as u64)
             .filter(|length| *length <= MAX_ARCHIVE_BYTES)
             .ok_or(io::ErrorKind::InvalidData)?;
+        capacity.ensure_growth(self.written, length)?;
         self.file.write_all(bytes)?;
         self.written = length;
         Ok(())

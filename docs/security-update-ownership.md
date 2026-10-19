@@ -631,6 +631,12 @@ install freeze ends. Independent daemon/Engine protocol tests and separate host
 HTTP/TLS tests are not a daemon-to-real-backend/native-runtime health result.
 The API still uses the legacy swap/restart and is not accepted for deployment.
 
+Private staging also has [space admission](security-app-slot-recovery.md#space-admission-not-reservation-or-history-gc):
+available blocks/inodes, a journal margin, one shared no-output archive inspection
+before extraction, and a capacity recheck before writes. The settings overlay is
+budgeted separately. This is not a filesystem reservation, permission to delete
+history, all-writer closure or a substitute for ENOSPC recovery tests.
+
 The [native owner component](security-native-owner.md) supplies separate-process
 child-tree Stop/reap and sibling-controller drain machinery. Moving its launch
 capability into a retained drain closes in-process starts; receipts, owner exits

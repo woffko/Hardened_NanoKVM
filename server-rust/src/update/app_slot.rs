@@ -389,6 +389,16 @@ fn preserve_app_state(store: &Store) -> Result<()> {
         old.sync_all()?;
     }
     old_app.sync_all()?;
+    // The candidate overlay is additional allocation, not part of the signed
+    // archive footprint. Check the complete bounded snapshot before replacing
+    // any candidate data; keep recovery reserve out of this optional work.
+    let capacity = super::app_space::Capacity::read(&target)?;
+    let mut footprint = super::app_space::Footprint::new(capacity.unit)?;
+    for value in values.iter().flatten() {
+        footprint.path(true)?;
+        footprint.file(value.len() as u64)?;
+    }
+    footprint.check(capacity)?;
     for (name, value) in APP_STATE.into_iter().zip(values) {
         // A fresh signed candidate may have a default file here, but never a
         // symlink/alias/special object. Refuse foreign bindings before rename.

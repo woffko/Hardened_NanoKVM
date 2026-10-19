@@ -2,6 +2,172 @@ use super::*;
 use rustix::fs::{OFlags, fcntl_getfl};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn private_capacity_child_fixture() {
+    let Ok(root) = std::env::var("NANOKVM_SPACE_FIXTURE_ROOT") else {
+        return;
+    };
+    let case = std::env::var("NANOKVM_SPACE_FIXTURE_CASE").unwrap();
+    let options = match case.as_str() {
+        "bytes" => "mode=0700,size=8388608,nr_inodes=4096",
+        "inodes" => "mode=0700,size=67108864,nr_inodes=64",
+        _ => "mode=0700,size=67108864,nr_inodes=4096",
+    };
+    let mut flags = nix::mount::MsFlags::MS_NODEV
+        | nix::mount::MsFlags::MS_NOSUID
+        | nix::mount::MsFlags::MS_NOEXEC;
+    if case == "readonly" {
+        flags |= nix::mount::MsFlags::MS_RDONLY;
+    }
+    nix::mount::mount(
+        Some("tmpfs"),
+        Path::new(&root),
+        Some("tmpfs"),
+        flags,
+        Some(options),
+    )
+    .unwrap();
+    if case == "ample" {
+        let stage = AppStage::fixture(Path::new(&root)).unwrap();
+        let mut download = stage.create_archive().unwrap();
+        download.append(&compressed_fixture()).unwrap();
+        let archive = download.finish_manual_import().unwrap();
+        let extracted = stage.extract(archive).unwrap();
+        assert_eq!(fs::read(extracted.join("payload")).unwrap(), b"data");
+        drop(stage);
+    } else {
+        let error = match AppStage::fixture(Path::new(&root)) {
+            Ok(_) => panic!("insufficient/readonly fixture admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.raw_os_error(),
+            Some(if case == "readonly" { 30 } else { 28 })
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+    println!("private-capacity-fixture-ran");
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn kernel_private_capacity_limits_refuse_without_using_host_disk_or_old_evidence() {
+    for case in ["bytes", "inodes", "readonly", "ample"] {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("volume")).unwrap();
+        let evidence = root.path().join("outside-recovery-evidence");
+        fs::write(&evidence, b"preserve outside volume").unwrap();
+        let output = std::process::Command::new("/usr/bin/unshare")
+            .args(["--user", "--map-root-user", "--mount", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::app_stage::tests::private_capacity_child_fixture",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("NANOKVM_SPACE_FIXTURE_ROOT", root.path().join("volume"))
+            .env("NANOKVM_SPACE_FIXTURE_CASE", case)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{case}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("private-capacity-fixture-ran"));
+        assert_eq!(fs::read(evidence).unwrap(), b"preserve outside volume");
+        assert_eq!(fs::read_dir(root.path().join("volume")).unwrap().count(), 0);
+    }
+}
+
+fn compressed_fixture() -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(4);
+    header.set_mode(0o600);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "kvmapp/payload", b"data".as_slice())
+        .unwrap();
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&builder.into_inner().unwrap()).unwrap();
+    gzip.finish().unwrap()
+}
+
+#[test]
+fn refused_growth_writes_nothing_and_does_not_reclaim_old_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let evidence = root.path().join("old-recovery-evidence");
+    fs::write(&evidence, b"preserve").unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut download = stage.create_archive().unwrap();
+    let capacity = Capacity::fixture(4096, super::super::app_space::RECOVERY_BYTES, 128);
+    assert_eq!(
+        download
+            .append_with_capacity(b"new bytes", capacity)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(28)
+    );
+    assert_eq!(
+        (download.written, download.file.metadata().unwrap().len()),
+        (0, 0)
+    );
+    assert_eq!(fs::read(evidence).unwrap(), b"preserve");
+}
+
+#[test]
+fn extraction_rechecks_free_space_and_inode_budget_before_creating_output() {
+    for fault in ["bytes", "inodes", "unit", "initial", "stat-error"] {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("old-live");
+        fs::write(&live, b"keep old app").unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let mut download = stage.create_archive().unwrap();
+        download.append(&compressed_fixture()).unwrap();
+        let archive = download.finish_manual_import().unwrap();
+        let mut calls = 0;
+        let result = stage.extract_with_capacity(archive, |_| {
+            calls += 1;
+            let ample = Capacity::fixture(4096, 1024 * 1024 * 1024, 10000);
+            if calls == 1 && fault != "initial" {
+                return Ok(ample);
+            }
+            match fault {
+                "inodes" => Ok(Capacity::fixture(4096, 1024 * 1024 * 1024, 128)),
+                "unit" => Ok(Capacity::fixture(8192, 1024 * 1024 * 1024, 10000)),
+                "stat-error" => Err(io::Error::other("fixture capacity probe failed")),
+                _ => Ok(Capacity::fixture(4096, 0, 10000)),
+            }
+        });
+        assert!(result.is_err(), "{fault}");
+        assert_eq!(calls, if fault == "initial" { 1 } else { 2 });
+        assert!(!stage.extraction_path().unwrap().exists());
+        assert_eq!(fs::read(live).unwrap(), b"keep old app");
+    }
+}
+
+#[test]
+fn checked_extraction_rewinds_the_same_archive_and_preserves_format_checks() {
+    let root = tempfile::tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let bytes = compressed_fixture();
+    let mut download = stage.create_archive().unwrap();
+    download.append(&bytes).unwrap();
+    let mut archive = download.finish_manual_import().unwrap();
+    archive.read_exact(&mut [0; 7]).unwrap();
+    let extracted = stage.extract(archive).unwrap();
+    assert_eq!(fs::read(extracted.join("payload")).unwrap(), b"data");
+    let other = AppStage::fixture(root.path()).unwrap();
+    let mut corrupt = bytes;
+    let length = corrupt.len();
+    corrupt[length - 8] ^= 1;
+    let mut download = other.create_archive().unwrap();
+    download.append(&corrupt).unwrap();
+    let archive = download.finish_manual_import().unwrap();
+    assert!(other.extract(archive).is_err());
+    assert!(!other.extraction_path().unwrap().exists());
+}
+
 #[test]
 fn online_archive_is_unnamed_kernel_readonly_and_exactly_digest_bound() {
     let root = tempfile::tempdir().unwrap();

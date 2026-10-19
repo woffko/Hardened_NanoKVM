@@ -270,6 +270,44 @@ intentionally stops at Published via a test-only hold and has no executable
 native/backend runtime. Enrollment is fixture supplied: this is not production
 daemon CLI, target boot, vendor-native or device acceptance.
 
+## Space admission (not reservation or history GC)
+
+Private app staging now checks the pinned filesystem with `fstatvfs` before
+creating stage directories, an unnamed archive, and each archive append. It
+uses available blocks (`f_bavail`), not privileged free blocks, and available
+inodes. Read-only filesystems, unsupported/invalid counters, overflow and lack
+of room refuse admission. The current policy leaves 16 MiB and 128 inodes for
+journal/recovery/metadata work; these are safety margins, not a reserved extent.
+
+Online and manual offline candidate preparation share `AppStage::extract`.
+It validates the entire immutable archive without creating extraction output,
+rewinds that same descriptor, rechecks the stage binding and rereads capacity
+before extracting. Inspection/extraction share one parser and all existing
+GNU long-name, path/type/member/decoded-byte/tail/CRC limits. One bounded path
+map distinguishes files/directories and rejects duplicate files or parent/type
+collisions; it does not keep a second copy of the path inventory or archive.
+
+Space is estimated from actual members, not the maximum allowed expanded
+archive size: rounded file data, namespace/directory overhead and new inodes.
+The compressed archive has already consumed its own space and is not charged
+again. Before the trusted installer overlays its seven bounded settings files,
+it separately budgets that complete snapshot before replacing candidate data.
+No recovery/journal operation is refused merely for dipping into this admission
+margin: failed installs must still be able to use available recovery space.
+
+This check is advisory, not a guarantee against quota, fragmentation or a
+concurrent writer consuming space after the observation. ENOSPC/I/O handling,
+all-writer freeze and physical acceptance remain required. Host tests include
+synthetic boundary/counter cases and private namespace tmpfs low-block,
+low-inode, read-only and successful small-archive scenarios. They neither fill
+the host disk nor prove target ext4/power-loss acceptance.
+
+The check never deletes staging or history to manufacture a PASS. Bounded
+history retention/GC still requires its own durable policy, exact baseline/
+fallback authority, protected pruning journal and interruption handling. App
+Committed, archived status, mtime/UUID order and PID absence do not authorize
+deleting a known fallback. The ordinary app API is still legacy/unaccepted.
+
 ## Terminal archival and per-transaction observation
 
 An acknowledged `Committed` or fully joined `RolledBack` owner now attempts
