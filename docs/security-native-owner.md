@@ -12,19 +12,21 @@ snapshot/capture acceptance.
 The broker-side [app-install session](security-app-slot-recovery.md#native-closed-publication-and-retained-rollback-not-activated)
 now composes accepted app/update/writer admission with durable `Stopping` and a
 three-scope drain before slot publication. It retains that fence through explicit
-old-slot rollback; no native launch or automatic resume is exposed by the session.
+old-slot rollback and offers a typed backend-only frozen trial transition.
 The daemon now invokes it for a validated prepared offer on its separate
-app-install endpoint. The ordinary API remains legacy; frozen trial startup,
-health/commit/retirement and device acceptance remain required.
+app-install endpoint. The ordinary API remains legacy; daemon activation of
+trial/commit, retirement and device acceptance remain required.
 
 ## Implemented boundary
 
 Before launch the owner requires an anonymous Unix socketpair, exactly one
 thread, no pre-existing children, default SIGCHLD disposition, and no extra
 inherited descriptors. Its private control duplicate is CLOEXEC and child stdin
-is `/dev/null`. Production entry additionally requires root and the socket peer
-credentials of its direct parent. Only three fixed roles are accepted:
-`kvm-system`, `hwmon` and `backend`, with explicit vendor loaders/library path.
+is `/dev/null` for normal roles. Production entry additionally requires root and
+the socket peer credentials of its direct parent. Three normal fixed roles are
+accepted: `kvm-system`, `hwmon` and `backend`, with explicit vendor loaders/library
+path. The fixed `backend-trial` variant adds only `--app-trial` and a separately
+created transaction-bound startup channel after the inherited-FD audit.
 Backend executes `/kvmapp/server/NanoKVM-Server` directly; no mutable `/tmp`
 staging copy or PID-file adoption remains in the current S95 launcher.
 There is no generic shell/program/path, environment selector or fixture fallback.
@@ -480,11 +482,13 @@ The backend's new frozen trial entry checks the existing app/native family and
 critical scripts without acquiring the app store or update/writer admission
 already owned by its parent. The bound-root test retains the real exclusion
 inodes, including an exclusive app-store lock, while verifying these exact
-embedded bytes. This is read-only support inspection, not a new scope launch:
-the owner still launches only its existing three normal roles. Broker-to-owner
-trial startup, native-service health, explicit trial stop/join, commit and
-rollback after trial are not yet connected. See
-[frozen startup](security-app-slot-recovery.md#frozen-trial-startup-backend-entry-not-yet-broker-launch).
+embedded bytes. This read-only inspection is separate from the new typed broker
+trial transition and fixed owner relay. The policy keeps KVM-system/hwmon closed
+until the post-commit writer freeze ends, and requires explicit stop/join before
+uncommitted rollback. Separate host tests cover protocol readiness/commit and
+failure closure, not actual native-service health. Daemon activation, complete
+crash/I/O/retirement and device acceptance remain open. See
+[trial policy](security-app-slot-recovery.md#broker-owned-trial-policy-daemon-activation-pending).
 
 Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle

@@ -1,4 +1,6 @@
 pub mod api;
+#[path = "update/app_trial_wire.rs"]
+pub mod app_trial_wire;
 pub mod auth;
 pub mod config;
 pub mod error;

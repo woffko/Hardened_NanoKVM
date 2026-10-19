@@ -1,10 +1,15 @@
+#[path = "../../src/update/app_trial_wire.rs"]
+pub mod app_trial_wire;
 #[path = "../../src/native_owner/scope.rs"]
 mod scope;
 
 use std::{
     fs::{self, File},
     io::{Read, Write},
-    os::unix::{net::UnixStream, process::CommandExt},
+    os::{
+        fd::AsRawFd,
+        unix::{net::UnixStream, process::CommandExt},
+    },
     path::Path,
     process::{Command, ExitCode, Stdio},
     time::Duration,
@@ -17,6 +22,76 @@ fn child(mode: &str, root: &Path) -> ! {
     if mode == "fd-check" {
         let count = fs::read_dir("/proc/self/fd").unwrap().count();
         std::process::exit(if count == 4 { 0 } else { 12 });
+    }
+    if mode.starts_with("trial-") {
+        use scope::trial_wire as wire;
+        let mut startup = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
+        rustix::io::fcntl_setfd(&startup, rustix::io::FdFlags::CLOEXEC).unwrap();
+        let null = File::open("/dev/null").unwrap();
+        nix::unistd::dup2(null.as_raw_fd(), 0).unwrap();
+        drop(null);
+        startup
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        let mut begin = [0; wire::BYTES];
+        startup.read_exact(&mut begin).unwrap();
+        let transaction = wire::parse(&begin, wire::Event::Begin).unwrap();
+        fs::write(root.join("trial-begin"), begin).unwrap();
+        if mode == "trial-orphan" {
+            let mut leaf = Command::new(std::env::current_exe().unwrap())
+                .args(["child", "leaf"])
+                .arg(root)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            while !root.join("leaf.pid").exists() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // Retain the orphan until the independent scope receives Stop.
+            let _ = leaf.try_wait();
+            std::process::exit(0);
+        }
+        if mode == "trial-delayed" {
+            let start = std::time::Instant::now();
+            while !root.join("release-ready").exists() {
+                assert!(start.elapsed() < Duration::from_secs(8));
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let ready = wire::frame(
+            wire::Event::Ready,
+            if mode == "trial-wrong" {
+                [9; 16]
+            } else {
+                transaction
+            },
+        )
+        .unwrap();
+        if mode == "trial-truncated" {
+            startup.write_all(&ready[..8]).unwrap();
+            drop(startup);
+        } else if mode == "trial-eof" {
+            drop(startup);
+        } else {
+            startup.write_all(&ready).unwrap();
+            if mode != "trial-wrong" {
+                let mut commit = [0; wire::BYTES];
+                startup.read_exact(&mut commit).unwrap();
+                assert_eq!(
+                    wire::parse(&commit, wire::Event::Commit).unwrap(),
+                    transaction
+                );
+                fs::write(root.join("trial-committed"), commit).unwrap();
+            }
+        }
+        // No implicit commit/exit when the startup channel has closed.
+        for _ in 0..150 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::process::exit(18);
     }
     if mode == "zero" {
         std::process::exit(0);
@@ -183,19 +258,22 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         };
     }
-    let result = if args[1] == "scope-guarded" {
-        scope::run_guarded(command, control, || {
-            fs::write(root.join("orphan-attempt"), b"attempt").unwrap();
-            let file = File::open(root.join("update-lock")).unwrap();
-            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => {
-                    fs::write(root.join("orphan-acquired"), b"acquired").unwrap();
-                    Some(file)
-                }
-                Err(rustix::io::Errno::WOULDBLOCK) => None,
-                Err(error) => panic!("fixture lock failed: {error}"),
+    let admission = || {
+        fs::write(root.join("orphan-attempt"), b"attempt").unwrap();
+        let file = File::open(root.join("update-lock")).unwrap();
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {
+                fs::write(root.join("orphan-acquired"), b"acquired").unwrap();
+                Some(file)
             }
-        })
+            Err(rustix::io::Errno::WOULDBLOCK) => None,
+            Err(error) => panic!("fixture lock failed: {error}"),
+        }
+    };
+    let result = if args[1] == "scope-trial" {
+        scope::run_trial_guarded(command, control, admission)
+    } else if args[1] == "scope-guarded" {
+        scope::run_guarded(command, control, admission)
     } else {
         scope::run(command, control)
     };

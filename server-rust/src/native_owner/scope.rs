@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "scope_trial.rs"]
+mod trial;
+pub use crate::app_trial_wire as trial_wire;
+
 const STEP: Duration = Duration::from_millis(20);
 const GRACE: Duration = Duration::from_secs(2);
 const CHILDREN_BYTES: usize = 64 * 1024;
@@ -121,7 +125,7 @@ fn initialize(control: &UnixStream) -> Result<(), Error> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Control {
+pub(super) enum Control {
     Idle,
     Stop,
     Lost,
@@ -172,26 +176,67 @@ pub(super) fn run(command: Command, control: UnixStream) -> Result<Outcome, Erro
 /// Callback obtains fixed update exclusion after controller/leader loss.
 /// Explicit Stop has the broker's update permit and durable stopping fence.
 pub(super) fn run_guarded<G>(
+    command: Command,
+    control: UnixStream,
+    orphan_admission: impl FnMut() -> Option<G>,
+) -> Result<Outcome, Error> {
+    run_owned(command, control, orphan_admission, false)
+}
+
+pub(super) fn run_trial_guarded<G>(
+    command: Command,
+    control: UnixStream,
+    orphan_admission: impl FnMut() -> Option<G>,
+) -> Result<Outcome, Error> {
+    run_owned(command, control, orphan_admission, true)
+}
+
+fn run_owned<G>(
     mut command: Command,
     mut control: UnixStream,
     mut orphan_admission: impl FnMut() -> Option<G>,
+    is_trial: bool,
 ) -> Result<Outcome, Error> {
     initialize(&control)?;
-    if control_event(&mut control)? != Control::Idle {
+    let mut trial = if is_trial {
+        match trial::Trial::prepare(&mut control)? {
+            Some(trial) => Some(trial),
+            None => {
+                let _ = control.write_all(b"D\0");
+                return Ok(Outcome::Stopped);
+            }
+        }
+    } else {
+        if control_event(&mut control)? != Control::Idle {
+            let _ = control.write_all(b"D\0");
+            return Ok(Outcome::Stopped);
+        }
+        None
+    };
+    if let Some(trial) = &mut trial
+        && trial.control(&mut control)? != Control::Idle
+    {
         let _ = control.write_all(b"D\0");
         return Ok(Outcome::Stopped);
     }
     // The child cannot inherit a control alias, even if the original fd0 is the
     // socket. All other inherited fds were rejected above; stdio is explicit.
-    command.stdin(std::process::Stdio::null());
+    if let Some(trial) = &mut trial {
+        trial.configure(&mut command)?;
+    } else {
+        command.stdin(std::process::Stdio::null());
+    }
     let children_path = format!("/proc/self/task/{}/children", getpid().as_raw_nonzero());
     let mut buffer = vec![0_u8; CHILDREN_BYTES];
     let mut term_seen = Vec::with_capacity(CHILD_BATCH);
     let leader = command.spawn().map_err(|_| Error::Spawn)?;
+    // Command retains configured Stdio FDs after spawn. Drop its child-side
+    // startup socket alias now, otherwise backend EOF can never be observed.
+    drop(command);
     let leader_pid = Pid::from_child(&leader);
     // Child is deliberately reaped only by the single owner below, not Child::wait.
     let _leader = leader;
-    let mut failed = control.write_all(b"R").is_err();
+    let mut failed = !is_trial && control.write_all(b"R").is_err();
     let mut stop_pending = failed;
     let mut lost = failed;
     let mut orphan_guard = None;
@@ -224,6 +269,12 @@ pub(super) fn run_guarded<G>(
                 }
             }
         }
+        if leader_success.is_some() && trial.as_ref().is_some_and(|t| !t.committed()) {
+            failed = true;
+            if let Some(trial) = &mut trial {
+                trial.fail(&mut control);
+            }
+        }
         if no_children {
             let result = if failed {
                 Err(Error::Runtime)
@@ -241,8 +292,22 @@ pub(super) fn run_guarded<G>(
             let _ = control.write_all(&[b'D', code]);
             return result;
         }
+        if stopping.is_none()
+            && let Some(trial) = &mut trial
+            && trial.tick(&mut control).is_err()
+        {
+            failed = true;
+            stop_pending = true;
+            // Keep reading the live controller. The admitted broker can send
+            // explicit Stop even while orphan admission is held by that broker.
+            trial.fail(&mut control);
+        }
         if stopping.is_none() && !lost {
-            match control_event(&mut control) {
+            let event = match &mut trial {
+                Some(trial) => trial.control(&mut control),
+                None => control_event(&mut control),
+            };
+            match event {
                 Ok(Control::Stop) => {
                     stopping = Some(Instant::now());
                 }

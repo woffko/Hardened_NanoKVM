@@ -8,6 +8,8 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
 };
 
+pub use crate::app_trial_wire as trial_wire;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     KvmSystem,
@@ -30,17 +32,25 @@ impl Role {
             Self::Hwmon => "hwmon",
             Self::Backend => "backend",
         };
-        let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
-        command
-            .args(["--scope", role])
-            .env_clear()
-            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .env("HOME", "/root")
-            .env("LANG", "C")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        command
+        owner_command(role)
     }
+}
+
+pub(super) fn backend_trial_command() -> Command {
+    owner_command("backend-trial")
+}
+
+fn owner_command(role: &'static str) -> Command {
+    let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
+    command
+        .args(["--scope", role])
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("HOME", "/root")
+        .env("LANG", "C")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    command
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +87,7 @@ pub enum Status {
     Starting,
     Running,
     Stopping,
+    TrialFailed,
     Closed(Completion),
     Uncertain,
 }
@@ -100,11 +111,63 @@ struct Cell {
     stop_sent: bool,
     invalid: bool,
     guarded_eof: bool,
+    trial: Option<TrialControl>,
+}
+
+struct TrialControl {
+    transaction: [u8; 16],
+    commit: [u8; trial_wire::BYTES],
+    requested: bool,
+    written: usize,
+    committed: bool,
+    failed: bool,
+}
+
+impl TrialControl {
+    fn forward(&mut self, control: &mut UnixStream) -> io::Result<bool> {
+        if self.written < self.commit.len() {
+            match control.write(&self.commit[self.written..]) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(size) => self.written += size,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(self.written == self.commit.len())
+    }
 }
 
 impl Cell {
-    fn spawn(mut command: Command, role: Role) -> io::Result<Self> {
+    fn spawn(command: Command, role: Role) -> io::Result<Self> {
+        Self::spawn_kind(command, role, None)
+    }
+
+    fn spawn_kind(
+        mut command: Command,
+        role: Role,
+        transaction: Option<[u8; 16]>,
+    ) -> io::Result<Self> {
         let (control, owner) = UnixStream::pair()?;
+        let trial = match transaction {
+            Some(transaction) => {
+                let begin = trial_wire::frame(trial_wire::Event::Begin, transaction)?;
+                let commit = trial_wire::frame(trial_wire::Event::Commit, transaction)?;
+                (&control).write_all(&begin)?;
+                Some(TrialControl {
+                    transaction,
+                    commit,
+                    requested: false,
+                    written: 0,
+                    committed: false,
+                    failed: false,
+                })
+            }
+            None => None,
+        };
         control.set_nonblocking(true)?;
         command.stdin(Stdio::from(OwnedFd::from(owner)));
         // Allocate/configure before launching. No fallible setup may lose the
@@ -122,13 +185,44 @@ impl Cell {
             stop_sent: false,
             invalid: false,
             guarded_eof: role == Role::Backend,
+            trial,
         })
+    }
+
+    fn commit_trial(&mut self, transaction: [u8; 16]) -> io::Result<bool> {
+        if self.poll() != Status::Running {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let trial = self.trial.as_mut().ok_or(io::ErrorKind::InvalidInput)?;
+        if trial.transaction != transaction || trial.failed {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        trial.requested = true;
+        trial.forward(&mut self.control)?;
+        Ok(trial.committed)
     }
 
     fn stop(&mut self) {
         self.stop_requested = true;
         if self.stop_sent || self.eof || self.exit.is_some() {
             return;
+        }
+        if let Some(trial) = &mut self.trial
+            && trial.written > 0
+            && trial.written < trial.commit.len()
+        {
+            // Never insert S into a partially sent Commit frame. That would
+            // turn an admitted Stop into invalid control/EOF, whose orphan
+            // cleanup cannot acquire the update exclusion retained by us.
+            match trial.forward(&mut self.control) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    self.invalid = true;
+                    let _ = self.control.shutdown(Shutdown::Write);
+                    return;
+                }
+            }
         }
         match self.control.write(b"S") {
             Ok(1) => self.stop_sent = true,
@@ -153,9 +247,28 @@ impl Cell {
             self.done_prefix = false;
             self.completion = Completion::decode(byte);
             self.invalid = self.completion.is_none()
-                || (!self.ready && self.completion != Some(Completion::Stopped))
+                || (!self.ready
+                    && self.trial.is_none()
+                    && self.completion != Some(Completion::Stopped))
                 || (!self.stop_requested && self.completion == Some(Completion::Stopped));
-        } else if byte == b'R' && !self.ready {
+        } else if let Some(trial) = &mut self.trial
+            && byte == b'F'
+            && !trial.failed
+        {
+            trial.failed = true;
+        } else if byte == b'K'
+            && self.ready
+            && let Some(trial) = &mut self.trial
+            && trial.requested
+            && trial.written == trial.commit.len()
+            && !trial.committed
+            && !trial.failed
+        {
+            trial.committed = true;
+        } else if byte == b'R'
+            && !self.ready
+            && !self.trial.as_ref().is_some_and(|trial| trial.failed)
+        {
             self.ready = true;
         } else if byte == b'D' {
             self.done_prefix = true;
@@ -213,6 +326,8 @@ impl Cell {
         }
         if self.stop_requested {
             Status::Stopping
+        } else if self.trial.as_ref().is_some_and(|trial| trial.failed) {
+            Status::TrialFailed
         } else if self.ready {
             Status::Running
         } else {
@@ -248,6 +363,23 @@ impl Group {
     }
 
     pub(super) fn start_command(&mut self, role: Role, command: Command) -> Result<(), StartError> {
+        self.start_kind(role, command, None)
+    }
+
+    pub(super) fn start_trial(
+        &mut self,
+        command: Command,
+        transaction: [u8; 16],
+    ) -> Result<(), StartError> {
+        self.start_kind(Role::Backend, command, Some(transaction))
+    }
+
+    fn start_kind(
+        &mut self,
+        role: Role,
+        command: Command,
+        transaction: Option<[u8; 16]>,
+    ) -> Result<(), StartError> {
         self.poll();
         if self.uncertain {
             return Err(StartError::UncertainOwnership);
@@ -258,8 +390,21 @@ impl Group {
         {
             return Err(StartError::AlreadyOwned);
         }
-        self.cells[role.index()] = Some(Cell::spawn(command, role).map_err(StartError::Spawn)?);
+        self.cells[role.index()] = Some(
+            match transaction {
+                Some(transaction) => Cell::spawn_kind(command, role, Some(transaction)),
+                None => Cell::spawn(command, role),
+            }
+            .map_err(StartError::Spawn)?,
+        );
         Ok(())
+    }
+
+    pub(super) fn commit_trial(&mut self, transaction: [u8; 16]) -> io::Result<bool> {
+        self.cells[Role::Backend.index()]
+            .as_mut()
+            .ok_or(io::ErrorKind::NotFound)?
+            .commit_trial(transaction)
     }
 
     pub fn poll(&mut self) -> [Option<Status>; 3] {
@@ -380,6 +525,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn admitted_stop_never_interleaves_a_partial_commit_frame() {
+        for offset in [0, 1, 16, trial_wire::BYTES - 1] {
+            let transaction = [0x31; 16];
+            let commit = trial_wire::frame(trial_wire::Event::Commit, transaction).unwrap();
+            let mut cell =
+                Cell::spawn_kind(Command::new("/bin/true"), Role::Backend, Some(transaction))
+                    .unwrap();
+            let (control, mut peer) = UnixStream::pair().unwrap();
+            control.set_nonblocking(true).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            cell.control = control;
+            let trial = cell.trial.as_mut().unwrap();
+            trial.requested = true;
+            trial.written = offset;
+            cell.control.write_all(&commit[..offset]).unwrap();
+            cell.stop();
+            assert!(cell.stop_sent && !cell.invalid);
+            if offset > 0 {
+                let mut received = [0; trial_wire::BYTES];
+                peer.read_exact(&mut received).unwrap();
+                assert_eq!(received, commit);
+            }
+            let mut stop = [0];
+            peer.read_exact(&mut stop).unwrap();
+            assert_eq!(stop, *b"S");
+            cell.child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn trial_failure_is_not_closure_and_commit_ack_is_never_unsolicited() {
+        let transaction = [0x31; 16];
+        let ready = trial_wire::frame(trial_wire::Event::Ready, transaction).unwrap();
+        assert_eq!(
+            trial_wire::parse(&ready, trial_wire::Event::Ready).unwrap(),
+            transaction
+        );
+        assert!(trial_wire::parse(&ready, trial_wire::Event::Begin).is_err());
+        let mut cell =
+            Cell::spawn_kind(Command::new("/bin/true"), Role::Backend, Some(transaction)).unwrap();
+        cell.byte(b'F');
+        assert!(!cell.invalid && cell.completion.is_none());
+        assert!(cell.trial.as_ref().unwrap().failed);
+        cell.byte(b'R');
+        assert!(cell.invalid, "failure cannot become later readiness");
+        cell.child.wait().unwrap();
+        let mut cell =
+            Cell::spawn_kind(Command::new("/bin/true"), Role::Backend, Some(transaction)).unwrap();
+        cell.byte(b'R');
+        cell.byte(b'K');
+        assert!(
+            cell.invalid,
+            "no commit acknowledgement before a complete request"
+        );
+        cell.child.wait().unwrap();
+    }
+
+    #[test]
     fn production_commands_have_only_fixed_role_arguments_and_environment() {
         for (role, name) in [
             (Role::KvmSystem, "kvm-system"),
@@ -446,6 +650,7 @@ mod tests {
             stop_sent: false,
             invalid: false,
             guarded_eof: false,
+            trial: None,
         };
         peer.write_all(b"RD\x01").unwrap();
         assert_eq!(cell.poll(), Status::Running);

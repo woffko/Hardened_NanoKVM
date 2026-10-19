@@ -1,5 +1,8 @@
 #![cfg(feature = "sandbox-test-fixture")]
 
+#[path = "../src/update/app_trial_wire.rs"]
+pub mod app_trial_wire;
+
 #[path = "../src/native_owner/controller.rs"]
 mod controller;
 
@@ -353,7 +356,105 @@ fn immediate_drain_can_close_before_the_owner_announces_readiness() {
 
 #[test]
 fn production_start_has_no_arbitrary_command_selector() {
+    let trial = controller::backend_trial_command();
+    assert_eq!(trial.get_program(), "/usr/libexec/nanokvm-native-owner");
+    assert_eq!(
+        trial.get_args().collect::<Vec<_>>(),
+        ["--scope", "backend-trial"]
+    );
     // The fixed role entry remains compiled and type checked; never run it on
     // the host. All runtime fixtures above use the private parent-only seam.
     let _start: fn(&mut Group, Role) -> Result<(), StartError> = Group::start;
+}
+
+#[test]
+fn actual_trial_owner_waits_for_bound_ready_and_acknowledges_only_matching_commit() {
+    use controller::trial_wire as wire;
+    let root = tempfile::tempdir().unwrap();
+    let update = fs::File::create(root.path().join("update-lock")).unwrap();
+    rustix::fs::flock(
+        &update,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+    let mut group = Group::default();
+    let transaction = [0x31; 16];
+    group
+        .start_trial(
+            command("scope-trial", "trial-delayed", root.path()),
+            transaction,
+        )
+        .unwrap();
+    until(|| fs::read(root.path().join("trial-begin")).is_ok_and(|b| b.len() == wire::BYTES));
+    assert_eq!(
+        wire::parse(
+            &fs::read(root.path().join("trial-begin"))
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            wire::Event::Begin
+        )
+        .unwrap(),
+        transaction
+    );
+    assert_eq!(group.poll()[2], Some(Status::Starting));
+    assert!(group.commit_trial(transaction).is_err());
+    assert!(!root.path().join("trial-committed").exists());
+    fs::write(root.path().join("release-ready"), b"ready").unwrap();
+    until(|| group.poll()[2] == Some(Status::Running));
+    assert!(group.commit_trial([8; 16]).is_err());
+    assert!(!root.path().join("trial-committed").exists());
+    until(|| group.commit_trial(transaction).unwrap());
+    until(|| fs::read(root.path().join("trial-committed")).is_ok_and(|b| b.len() == wire::BYTES));
+    assert_eq!(
+        wire::parse(
+            &fs::read(root.path().join("trial-committed"))
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            wire::Event::Commit
+        )
+        .unwrap(),
+        transaction
+    );
+    // Repeated observation does not send a duplicate Commit.
+    assert!(group.commit_trial(transaction).unwrap());
+    let _joined = drain(group.begin_drain());
+    assert!(!root.path().join("orphan-acquired").exists());
+}
+
+#[test]
+fn bad_ready_and_pre_ready_leader_death_require_explicit_join_under_held_update_lock() {
+    for mode in [
+        "trial-wrong",
+        "trial-truncated",
+        "trial-eof",
+        "trial-orphan",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let update = fs::File::create(root.path().join("update-lock")).unwrap();
+        rustix::fs::flock(
+            &update,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
+        let mut group = Group::default();
+        let mut cmd = command("scope-trial", mode, root.path());
+        cmd.stderr(Stdio::inherit());
+        group.start_trial(cmd, [0x31; 16]).unwrap();
+        until(|| {
+            let status = group.poll()[2];
+            assert!(
+                !matches!(status, Some(Status::Uncertain | Status::Closed(_))),
+                "{mode}: {status:?}"
+            );
+            status == Some(Status::TrialFailed)
+        });
+        assert!(group.commit_trial([0x31; 16]).is_err());
+        assert!(!root.path().join("trial-committed").exists());
+        let mut joined = group.begin_drain();
+        until(|| joined.poll() == DrainStatus::Drained);
+        assert!(joined.all_owner_processes_reaped());
+        assert!(!root.path().join("orphan-acquired").exists());
+    }
 }

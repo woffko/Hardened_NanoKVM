@@ -174,6 +174,57 @@ impl AcceptedInstall {
         self.record.transaction
     }
 
+    fn trial_record(&self) -> Result<Record> {
+        let mut record = self._store.record()?;
+        let phase = record.phase;
+        record.phase = self.record.phase;
+        if record != self.record {
+            return Err(SlotError::Invalid);
+        }
+        record.phase = phase;
+        let layout = self._store.layout(&record)?;
+        if !matches!(phase, Phase::Published | Phase::Committed)
+            || layout.live != Some(record.new)
+            || layout.old != Some(record.old)
+            || layout.new.is_some()
+        {
+            return Err(SlotError::Invalid);
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn check_trial(
+        &self,
+        closed: &crate::native_owner::broker::app_install::ClosedRuntime,
+    ) -> Result<()> {
+        if closed.transaction() != self.transaction()
+            || self.trial_record()?.phase != Phase::Published
+        {
+            return Err(SlotError::Invalid);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit(
+        &mut self,
+        ready: &crate::native_owner::broker::app_install::TrialReady,
+    ) -> Result<Status> {
+        if ready.transaction() != self.transaction() {
+            return Err(SlotError::Invalid);
+        }
+        // Inspect canonical phase/layout before retrying an ambiguous record
+        // publication. Never turn an already Committed app into a rollback.
+        let mut record = self.trial_record()?;
+        if record.phase == Phase::Published {
+            record.phase = Phase::Committed;
+            self._store.publish(&record)?;
+        }
+        restore_fs::open_beneath(&self._store.current, STATE, OFlags::RDONLY)?.sync_all()?;
+        self._store.sync_parents()?;
+        self.record = record;
+        Ok(Status::Transaction(Phase::Committed))
+    }
+
     pub(crate) fn publish(
         &mut self,
         closed: &crate::native_owner::broker::app_install::ClosedRuntime,
@@ -664,6 +715,7 @@ fn executable_member(path: &Path) -> bool {
 // The hashes retain the issuing install's exact-byte context. They do not
 // verify RSA or grant authority on an attacker-writable filesystem. Only the
 // fixed protected rootfs store may supply a recovery record.
+#[derive(PartialEq, Eq)]
 struct Record {
     phase: Phase,
     import: Import,

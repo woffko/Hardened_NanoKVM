@@ -242,7 +242,7 @@ fn role_status(status: Option<Status>) -> u8 {
         Some(Status::Stopping) => 3,
         Some(Status::Closed(Completion::Stopped | Completion::SuccessfulExit)) => 4,
         Some(Status::Closed(_)) => 5,
-        Some(Status::Uncertain) => 6,
+        Some(Status::Uncertain | Status::TrialFailed) => 6,
     }
 }
 

@@ -1,5 +1,8 @@
 //! Fresh-process kernel owner. Not yet a device-wide maintenance/capture API.
 
+#[path = "../update/app_trial_wire.rs"]
+pub mod app_trial_wire;
+
 #[path = "../native_owner/scope.rs"]
 mod scope;
 
@@ -18,7 +21,7 @@ fn command(role: &str) -> Option<Command> {
             "/lib/ld-musl-riscv64xthead.so.1",
             "/kvmapp/hwmon/nanokvm-hwmon",
         ),
-        "backend" => (
+        "backend" | "backend-trial" => (
             "/lib/ld-musl-riscv64xthead.so.1",
             "/kvmapp/server/NanoKVM-Server",
         ),
@@ -35,6 +38,9 @@ fn command(role: &str) -> Option<Command> {
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("HOME", "/root")
         .env("LANG", "C");
+    if role == "backend-trial" {
+        command.arg("--app-trial");
+    }
     Some(command)
 }
 
@@ -44,7 +50,7 @@ fn main() -> ExitCode {
         .then(|| args[2].to_str().and_then(command))
         .flatten()
     else {
-        eprintln!("usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend}}");
+        eprintln!("usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend|backend-trial}}");
         return ExitCode::from(64);
     };
     // Only a root direct parent over its anonymous socketpair may launch a
@@ -62,7 +68,13 @@ fn main() -> ExitCode {
         return ExitCode::from(70);
     }
     command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let result = if args[2] == "backend" {
+    let result = if args[2] == "backend-trial" {
+        scope::run_trial_guarded(command, control, || {
+            nanokvm_rust_server::native_owner::broker::BackendOrphanPermit::try_acquire()
+                .ok()
+                .flatten()
+        })
+    } else if args[2] == "backend" {
         scope::run_guarded(command, control, || {
             nanokvm_rust_server::native_owner::broker::BackendOrphanPermit::try_acquire()
                 .ok()
@@ -111,6 +123,10 @@ mod tests {
             ]
         );
         assert_eq!(backend.get_envs().count(), 3);
+        let trial = command("backend-trial").unwrap();
+        assert_eq!(trial.get_program(), backend.get_program());
+        assert_eq!(trial.get_args().last().unwrap(), "--app-trial");
+        assert_eq!(trial.get_args().count(), backend.get_args().count() + 1);
         for role in ["", "/bin/sh", "watchdog", "../../other", "hwmon;reboot"] {
             assert!(command(role).is_none());
         }

@@ -95,9 +95,9 @@ This proves admission lifetime, not issuer provenance or durable installation
 state. Root peer identity is not executable attestation. The ID is not a secret,
 signature, health acknowledgement or a fresh installation receipt. The composed
 daemon now additionally requires the archive-derived canonical prepared receipt
-and owns native-closed publication/rollback. New-process status, frozen trial
-health/commit/retirement and helper-version migration still need integration
-before this can replace the current app path. Never release UpdateEX and then
+and owns native-closed publication/rollback. New-process status, daemon activation
+of the typed trial/commit policy, retirement and helper-version migration still
+need integration before this can replace the current app path. Never release UpdateEX and then
 reacquire it around backend restart.
 
 Installation must remain owned outside the serving backend scope, not as a
@@ -605,12 +605,16 @@ consumes the accepted install with the broker, durably fences native startup
 before stopping all three scopes, and retains all exclusions through journaled
 publication or old-slot rollback. Queued frontend death, canonical acceptance,
 publication and explicit rollback are tested in independent host processes. It
-does not yet implement durable API job status, broker-owned trial launch,
-first-start health, commit or terminal retirement. A separate
-[frozen backend entry](security-app-slot-recovery.md#frozen-trial-startup-backend-entry-not-yet-broker-launch)
+does not yet implement durable API job status, daemon-driven trial/commit or
+terminal retirement. The typed
+[broker trial policy](security-app-slot-recovery.md#broker-owned-trial-policy-daemon-activation-pending)
+retains ownership through backend trial, explicit stop/join and canonical
+commit/rollback checks. The
+[frozen backend entry](security-app-slot-recovery.md#frozen-backend-trial-startup)
 now reads existing state under the retained freeze and gates request serving on
-a private parent Commit. Its host HTTP/TLS tests are not an integrated install
-or runtime-health result. The API
+a private parent Commit. Native settings writers remain stopped until the
+install freeze ends. Separate host policy/HTTP/TLS tests are not an integrated
+daemon install or runtime-health result. The API
 still uses the legacy swap/restart and is not accepted for deployment.
 
 The [native owner component](security-native-owner.md) supplies separate-process
