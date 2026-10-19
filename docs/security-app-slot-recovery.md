@@ -310,6 +310,38 @@ deleting a known fallback. The ordinary app API is still legacy/unaccepted.
 
 ## Terminal archival and per-transaction observation
 
+Terminal retirement now records protected ordering and retention pins before
+moving `current` into history. A fixed 256-byte `order` receipt in the exact
+transaction directory and `application-slot/history-head` bind a monotonically
+increasing sequence, predecessor transaction/digest, full terminal-record
+digest, directory device/inode, source baseline, fallback and resulting live
+identity. Neither random UUIDs, versions, mtime nor wall time select ordering.
+
+The baseline is the source app of the first enrolled terminal transaction,
+not an assertion that it was physically tested or healthy. It is never promoted
+by `Committed`. A committed transition pins its previous live app as fallback;
+a rollback preserves the earlier fallback. These pins do not execute a retained
+app, approve a downgrade or themselves grant permission to delete any tree.
+
+Receipts are written and fsynced as anonymous files before their first link.
+Only the publisher's held FD in verified procfs is followed for that link;
+there is no caller-supplied source pathname. Fresh files have exact mode 0600.
+The per-transaction receipt is durable before the next head is published, and
+the head is durable before archival. An interrupted complete head publication
+can resume only for the same terminal context and exact directory. Missing,
+foreign, malformed, linked or unsafe receipts are retained and refused, not
+repaired. A published head cannot recreate a missing transaction receipt.
+
+Issuing a subsequent app requires the head's exact archived directory/receipt
+and the expected current live identity. An unordered pre-policy history cannot
+be silently enrolled; it stays preserved and needs an explicit migration policy.
+This is development-only state: it is not a requirement imposed on published
+legacy RC12 assets, nor acceptance of the still-legacy ordinary app API.
+
+Bounded receipt retention, payload expiry, baseline promotion policy and actual
+descriptor-relative journaled pruning are still required. History is not yet
+deleted or bounded by these ordering records; the space guard is not GC.
+
 An acknowledged `Committed` or fully joined `RolledBack` owner now attempts
 terminal archival before releasing install admission. Only those typed owners
 mint the transaction/phase-bound capability; a status read or root peer cannot

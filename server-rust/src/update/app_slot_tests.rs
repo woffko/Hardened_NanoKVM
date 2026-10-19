@@ -139,6 +139,26 @@ impl Fixture {
         File::open(path).unwrap().sync_all().unwrap();
     }
 
+    pub(super) fn advance(&mut self, phase: Phase, transaction: u8) {
+        fs::create_dir(self.current()).unwrap();
+        fs::set_permissions(self.current(), fs::Permissions::from_mode(0o700)).unwrap();
+        let live = self.root.path().join("kvmapp");
+        let new = self.current().join("new");
+        fs::create_dir(&new).unwrap();
+        fs::write(new.join("identity"), b"new").unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let device = self.root.path().metadata().unwrap().dev();
+        self.record.old = Identity::of(&File::open(&live).unwrap(), device, uid).unwrap();
+        self.record.new = Identity::of(&File::open(&new).unwrap(), device, uid).unwrap();
+        self.record.phase = phase;
+        self.record.transaction = [transaction; 16];
+        if phase == Phase::Committed {
+            fs::rename(&live, self.current().join("old")).unwrap();
+            fs::rename(new, live).unwrap();
+        }
+        self.write_record();
+    }
+
     pub(super) fn store(&self, recover: bool) -> Result<Store> {
         Store::at_root(
             File::open(self.root.path()).unwrap(),

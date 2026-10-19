@@ -29,6 +29,8 @@ const RECORD_BYTES: usize = 512;
 const HASH_OFFSET: usize = 480;
 const HASH_DOMAIN: &[u8] = b"NanoKVM app slot journal v1\0";
 
+#[path = "app_slot_history.rs"]
+mod history;
 #[path = "app_slot_recovery_intent.rs"]
 mod recovery_intent;
 #[path = "app_slot_terminal.rs"]
@@ -522,6 +524,7 @@ fn prepare_at(
     if open_optional(&lock.0, CURRENT)?.is_some() {
         return Err(SlotError::Busy);
     }
+    history::require_preparation(&lock.0, &rootfs, device, uid)?;
     // No fallible operation between splitting this owner and establishing the
     // later-declared staging value, whose cleanup precedes handoff teardown.
     let Preparation { candidate, handoff } = pending;

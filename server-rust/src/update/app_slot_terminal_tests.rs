@@ -10,9 +10,17 @@ use std::{
     time::Duration,
 };
 
-const POINTS: [&str; 5] = [
+const POINTS: [&str; 13] = [
     "retire-history-ready",
     "retire-terminal-synced",
+    "history-order-file-synced",
+    "history-order-linked",
+    "history-order-published",
+    "history-head-file-synced",
+    "history-head-linked",
+    "history-head-next-synced",
+    "history-head-renamed",
+    "history-head-published",
     "retire-current-renamed",
     "retire-history-synced",
     "retire-parent-synced",
@@ -27,6 +35,21 @@ fn fixture(phase: Phase) -> Fixture {
             Position::Prepared
         },
     )
+}
+
+fn retirement_fixture(phase: Phase, subsequent: bool) -> Fixture {
+    if !subsequent {
+        return fixture(phase);
+    }
+    let mut fixture = fixture(Phase::Committed);
+    fixture
+        .store(true)
+        .unwrap()
+        .retire(&fixture.record)
+        .unwrap();
+    fs::write(fixture.root.path().join("kvmapp/identity"), b"old").unwrap();
+    fixture.advance(phase, 7);
+    fixture
 }
 
 fn archive(fixture: &Fixture) -> PathBuf {
@@ -375,9 +398,14 @@ fn finish_pinned(fixture: &Fixture, current: File) {
 
 #[test]
 fn every_retirement_io_failure_retains_canonical_evidence_and_allows_exact_pinned_retry() {
-    for phase in [Phase::Committed, Phase::RolledBack] {
+    for (phase, subsequent) in [
+        (Phase::Committed, false),
+        (Phase::RolledBack, false),
+        (Phase::Committed, true),
+        (Phase::RolledBack, true),
+    ] {
         for point in POINTS {
-            let fixture = fixture(phase);
+            let fixture = retirement_fixture(phase, subsequent);
             let current = File::open(fixture.current()).unwrap();
             let output = command(&fixture)
                 .env("NANOKVM_APP_SLOT_TEST_FAIL", point)
@@ -396,9 +424,14 @@ fn every_retirement_io_failure_retains_canonical_evidence_and_allows_exact_pinne
 
 #[test]
 fn real_sigkill_at_each_retirement_boundary_never_loses_receipt_or_inactive_slot() {
-    for phase in [Phase::Committed, Phase::RolledBack] {
+    for (phase, subsequent) in [
+        (Phase::Committed, false),
+        (Phase::RolledBack, false),
+        (Phase::Committed, true),
+        (Phase::RolledBack, true),
+    ] {
         for point in POINTS {
-            let fixture = fixture(phase);
+            let fixture = retirement_fixture(phase, subsequent);
             let current = File::open(fixture.current()).unwrap();
             let mut child = command(&fixture)
                 .env("NANOKVM_APP_SLOT_TEST_STOP", point)

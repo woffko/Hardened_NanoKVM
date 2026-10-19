@@ -191,14 +191,16 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
 }
 
 #[tokio::test]
-async fn two_successive_installs_keep_independent_durable_job_results_and_inactive_slots() {
+async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_slots() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     let mut engine = engine(root);
     start_all(&mut engine);
     let mut previous = None;
-    for _ in 0..2 {
+    let mut baseline = None;
+    for sequence in 1_u64..=3 {
         let (old, transaction) = accept(&mut engine, root).await;
+        let baseline = *baseline.get_or_insert(old);
         until(|| {
             engine.tick();
             engine.install.is_none()
@@ -215,6 +217,22 @@ async fn two_successive_installs_keep_independent_durable_job_results_and_inacti
             .join("application-slot/history")
             .join(format!("{:032x}", u128::from_be_bytes(transaction)));
         assert_eq!(archived.join("old").metadata().unwrap().ino(), old);
+        // Inspect the actual fixed on-disk v1 receipt, not a test-provided
+        // retention decision. Baseline remains pinned across later commits.
+        let head = fs::read(root.join("application-slot/history-head")).unwrap();
+        assert_eq!(head.len(), 256);
+        assert_eq!(&head[..8], b"NKAPPH01");
+        assert_eq!(
+            u64::from_le_bytes(head[8..16].try_into().unwrap()),
+            sequence
+        );
+        assert_eq!(&head[16..32], &transaction);
+        assert_eq!(
+            u64::from_le_bytes(head[72..80].try_into().unwrap()),
+            baseline
+        );
+        assert_eq!(u64::from_le_bytes(head[88..96].try_into().unwrap()), old);
+        assert_eq!(fs::read(archived.join("order")).unwrap(), head);
         assert!(!root.join("application-slot/current").exists());
         if let Some(prior) = previous {
             assert_ne!(prior, transaction);

@@ -88,6 +88,7 @@ impl Store {
                 self.sync_parents()?;
                 #[cfg(test)]
                 retirement_checkpoint("retire-terminal-synced")?;
+                super::history::register(self, record)?;
                 if !open_optional(&self._lock.0, CURRENT)?
                     .as_ref()
                     .map(&same)
@@ -109,6 +110,7 @@ impl Store {
             (None, Some(archived)) if same(archived)? => {
                 // An earlier rename may have succeeded before fsync failed.
                 // Only this still-pinned exact directory authorizes retry.
+                super::history::register(self, record)?;
             }
             _ => return Err(SlotError::Invalid),
         }
