@@ -54,6 +54,59 @@ authorizes restore, proves success, recovers a transaction or quiesces writers.
 The local final receipt can briefly become visible before field Drop releases
 the kernel lease; competitors still fail busy during that interval.
 
+### App installer lease handoff foundation (not activated)
+
+The Rust library now provides a one-shot app-job handoff of UpdateEX plus the
+enrolled writer admission/activity EX barriers. It is not yet used by the app
+installation route and does not submit or authorize an installer, candidate,
+slot swap or restart. The legacy app swap/first-restart gate remains OPEN.
+
+`UpdateOwner::prepare_install_handoff` requires an online/offline application
+operation with real process admission and a retained WriterDrain. Before any
+descriptor can be exported, the original lock switches permanently from explicit
+unlock-on-Drop to last-open-description release. A second export is rejected.
+SCM_RIGHTS passes the same open file descriptions, so simply duplicating a normal
+lease without this change would let the old backend's destructor unlock the
+worker's lease. Failed or ambiguous sends do not revert that switch. The original
+frontend owner still holds UpdateEX until its final share disappears; the
+handoff itself retains a frontend share while it remains in the sending process.
+An unrelated concurrent fork may briefly retain a CLOEXEC alias until exec/close.
+Transferred leases conservatively remain busy through that interval; a local
+Drop or reply is not proof that the kernel admission has already been released.
+
+The transport uses one bounded 72-byte SEQPACKET frame and exactly three CLOEXEC
+descriptors over an anonymous local socketpair. Both endpoints check peer UID/
+socket type and expected creator PID, with two-second send/receive timeouts.
+The received operation ID must match the expected diagnostic ID. The receiver
+checks the exact protected `/etc/kvm` domain inodes, same rootfs, root ownership,
+mode0700, read-only descriptors and exclusive flock before accepting all three.
+No caller-supplied path, root, descriptor number or generic program is accepted.
+Receivers release activity, writer admission and finally update exclusion by
+closing only; they never explicitly unlock a description the frontend may
+still own. Queued rights also retain exclusion until received or the endpoint
+is closed. Missing/extra descriptors and truncated/wrong-context packets fail
+closed. Only the first packet is consumed; unused queued rights close with the
+endpoint. This is not durable operation anti-replay or a result acknowledgement.
+The fresh worker must redirect its original stdin socket alias before receiving
+or executing anything; adopting a duplicate alone does not close that alias or
+drop extra queued rights. The library does not mutate process-global stdio.
+
+This proves admission lifetime, not issuer provenance or durable installation
+state. Root peer identity is not executable attestation. The ID is not a secret,
+signature, health acknowledgement or a fresh installation receipt. New-process
+status/restart acceptance, independent installer activation, authenticated
+candidate receipt, journaled publication/health/retirement/rollback and helper
+version migration still need integration before this can replace the current
+app path. Never release UpdateEX and then reacquire it around backend restart.
+
+The eventual installer worker must be launched by the independent broker as a
+sibling of the serving backend scope, not as a descendant of that backend.
+Daemonizing a backend child cannot escape its subreaper. An update lease does
+not exempt a process from a scope Stop: backend shutdown would still kill a
+worker nested inside that tree. The present handoff module launches no worker;
+broker-owned delivery, stop authority, app journal/health and durable job status
+remain the next integration work rather than a backend-spawned fallback.
+
 Host fixtures use explicit cfg(test)-only constructors and synthetic private
 parents owned by the test UID. These constructors and environment-controlled
 subprocess probes are absent from shipped code. Handler fixtures live inside

@@ -177,6 +177,12 @@ pub struct WriterDrain {
 }
 
 impl WriterDrain {
+    pub(super) fn transfer_aliases(&mut self) -> Result<[std::fs::File; 2]> {
+        let admission = self._admission.transfer_alias().map_err(writer_error)?;
+        let activity = self._activity.transfer_alias().map_err(writer_error)?;
+        Ok([admission, activity])
+    }
+
     /// Move the barrier into the owned callback, then return it with the result.
     /// A discarded waiter/result cannot reopen admission while that callback is
     /// still reading policy. This does not enroll any external/native writer.

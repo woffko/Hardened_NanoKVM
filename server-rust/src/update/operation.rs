@@ -131,7 +131,8 @@ impl UpdateCoordinator {
         Ok(UpdateOwner(Arc::new(Ownership {
             coordinator: Arc::clone(self),
             id,
-            _process_lock: process_lock,
+            kind,
+            process_lock: Mutex::new(process_lock),
         })))
     }
 
@@ -163,7 +164,7 @@ impl UpdateCoordinator {
     }
 
     #[cfg(test)]
-    fn with_test_parent(parent: std::fs::File) -> Self {
+    pub(super) fn with_test_parent(parent: std::fs::File) -> Self {
         Self {
             slot: Mutex::default(),
             fixture: Some(TestAdmission::Parent(parent)),
@@ -182,8 +183,9 @@ impl UpdateCoordinator {
 struct Ownership {
     coordinator: Arc<UpdateCoordinator>,
     id: OperationId,
+    kind: Kind,
     // Dropped only with the LAST owner, after the local completion receipt.
-    _process_lock: Option<ProcessLock>,
+    process_lock: Mutex<Option<ProcessLock>>,
 }
 impl Drop for Ownership {
     fn drop(&mut self) {
@@ -226,6 +228,34 @@ impl Drop for BlockingOwnership {
     }
 }
 impl UpdateOwner {
+    /// Prepare only app-job admission transfer. This does not submit an
+    /// installer, authorize a candidate or mark the operation successful.
+    /// The returned sender ownership also retains this frontend job.
+    pub fn prepare_install_handoff(
+        &self,
+        writers: super::state_writers::WriterDrain,
+    ) -> Result<super::app_install_lease::Handoff> {
+        if !matches!(
+            self.0.kind,
+            Kind::ApplicationOnline | Kind::ApplicationOffline
+        ) {
+            return Err(AppError::Conflict(
+                "install handoff requires an application operation".into(),
+            ));
+        }
+        let mut lease = self.0.process_lock.lock().map_err(|_| poisoned())?;
+        let lease = lease.as_mut().ok_or_else(|| {
+            AppError::Internal("install handoff requires process admission".into())
+        })?;
+        let update = lease.transfer_alias().map_err(lock_error)?;
+        super::app_install_lease::Handoff::new(
+            self.0.id.0,
+            update,
+            writers,
+            UpdateOwner(Arc::clone(&self.0)),
+        )
+    }
+
     /// Runtime-owned work continues after disconnect. No abort handle is
     /// exposed. Schedule follow-up work inside this job, never by returning an
     /// owner through the HTTP reply. Not a restart journal/user cancellation API.

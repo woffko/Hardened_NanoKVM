@@ -1,4 +1,5 @@
 pub mod app_bootstrap;
+pub mod app_install_lease;
 pub mod app_slot;
 pub(crate) mod app_stage;
 pub mod archive;

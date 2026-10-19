@@ -1,4 +1,33 @@
 use super::*;
+
+#[tokio::test]
+async fn partial_install_lease_export_failure_keeps_update_until_owner_ends() {
+    use crate::update::operation::{Kind, UpdateCoordinator};
+    let root = tempfile::tempdir().unwrap();
+    let parent = std::fs::File::open(root.path()).unwrap();
+    let coordinator = Arc::new(UpdateCoordinator::with_test_parent(
+        parent.try_clone().unwrap(),
+    ));
+    let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
+    let writers = StateWriters::for_test_parent(parent.try_clone().unwrap());
+    let mut drain = writers.drain(Duration::from_secs(1)).await.unwrap();
+    // Make only the second writer export fail the real one-shot check. Update
+    // and admission export have already succeeded when activity rejects reuse.
+    drop(drain._activity.transfer_alias().unwrap());
+    assert!(owner.prepare_install_handoff(drain).is_err());
+    assert!(matches!(
+        ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()),
+        Err(LockError::Busy)
+    ));
+    for domain in [Domain::WriterActivity, Domain::WriterAdmission] {
+        drop(
+            ProcessLock::at_parent(&parent, nix::unistd::geteuid().as_raw(), domain, false)
+                .unwrap(),
+        );
+    }
+    drop(owner);
+    drop(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+}
 use std::{
     fs::{self, File},
     path::Path,

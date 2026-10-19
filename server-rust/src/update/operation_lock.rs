@@ -18,7 +18,7 @@ pub(super) enum Domain {
     Firewall,
 }
 impl Domain {
-    fn directory(self) -> &'static str {
+    pub(super) fn directory(self) -> &'static str {
         match self {
             Self::Update => DIRECTORY,
             Self::WriterAdmission => "state-writer-admission",
@@ -47,6 +47,7 @@ impl From<io::Error> for LockError {
 
 pub(crate) struct ProcessLock {
     directory: File,
+    unlock_on_drop: bool,
 }
 impl ProcessLock {
     pub fn acquire() -> Result<Self, LockError> {
@@ -107,14 +108,32 @@ impl ProcessLock {
                 LockError::Io
             }
         })?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            unlock_on_drop: true,
+        })
+    }
+
+    /// Switch to last-open-description release BEFORE exporting any alias.
+    /// Once handed off, even an ambiguous failed send must never explicitly
+    /// unlock the receiver's shared description. The original still owns EX.
+    pub(super) fn transfer_alias(&mut self) -> Result<File, LockError> {
+        if !self.unlock_on_drop {
+            return Err(LockError::Unsafe);
+        }
+        let alias = self.directory.try_clone()?;
+        rustix::io::fcntl_setfd(&alias, rustix::io::FdFlags::CLOEXEC).map_err(|_| LockError::Io)?;
+        self.unlock_on_drop = false;
+        Ok(alias)
     }
 }
 impl Drop for ProcessLock {
     fn drop(&mut self) {
         // A pre-exec child may briefly inherit the open file description.
         // Explicit unlock does not leave admission waiting for that alias.
-        let _ = flock(&self.directory, FlockOperation::Unlock);
+        if self.unlock_on_drop {
+            let _ = flock(&self.directory, FlockOperation::Unlock);
+        }
         // Deliberately no unlink/rmdir: all later contenders use this inode.
     }
 }
