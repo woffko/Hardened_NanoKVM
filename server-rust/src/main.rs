@@ -58,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         nanokvm_rust_server::update::restore_job::PinnedSshHelper::check_embedded()?;
         let _ = nanokvm_rust_server::update::app_bootstrap::embedded_recovery()?;
+        nanokvm_rust_server::native_owner::embedded::check_embedded()?;
     }
 
     nanokvm_rust_server::api::storage::secure_existing_storage()?;

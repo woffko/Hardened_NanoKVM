@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="riscv64gc-unknown-linux-musl"
 [[ $# == 0 ]] || { echo "usage: $0" >&2; exit 2; }
 unset NANOKVM_SSH_RUNTIME_BINDING NANOKVM_APP_RECOVERY_BINDING
+unset NANOKVM_NATIVE_OWNER_BINDING NANOKVM_NATIVE_BROKER_BINDING NANOKVM_NATIVE_CTL_BINDING NANOKVM_NATIVE_RECOVERY_BINDING
 export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/restore-runtime}"
 export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang}"
@@ -21,5 +22,5 @@ for NAME in nanokvm-native-owner nanokvm-native-broker nanokvm-native-ctl nanokv
   case "$HEADER" in *Class:*ELF64*Machine:*RISC-V*) ;; *) echo "$NAME is not RV64 ELF64" >&2; exit 1 ;; esac
   case "$PROGRAMS" in *INTERP*) echo "$NAME unexpectedly has an interpreter" >&2; exit 1 ;; esac
   case "$DYNAMIC" in *NEEDED*|*RPATH*|*RUNPATH*) echo "$NAME unexpectedly loads shared libraries" >&2; exit 1 ;; esac
-  echo "$NAME: static RISC-V ELF verified (not yet packaged/deployed)"
+  echo "$NAME: static RISC-V ELF verified (not deployed)"
 done

@@ -145,6 +145,8 @@ require_regular /kvmapp/server/NanoKVM-Server
 require_regular /kvmapp/backends/NanoKVM-Server.rust
 python3 "$(dirname "$0")/verify-app-recovery-rootfs.py" "$IMAGE" || \
   die "independent app recovery is missing/unsafe/mismatched; this validator is for current candidates, not historical RC12"
+python3 -B "$(dirname "$0")/verify-native-runtime-rootfs.py" "$IMAGE" || \
+  die "independent native runtime is missing/unsafe/mismatched; use the historical verifier for older images"
 require_regular /kvmapp/hwmon/nanokvm-hwmon
 require_regular /kvmapp/kvm_system/kvm_system
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem

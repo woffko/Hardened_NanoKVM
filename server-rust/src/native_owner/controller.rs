@@ -27,7 +27,7 @@ impl Role {
             Self::KvmSystem => "kvm-system",
             Self::Hwmon => "hwmon",
         };
-        let mut command = Command::new("/kvmapp/server/nanokvm-native-owner");
+        let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
         command
             .args(["--scope", role])
             .env_clear()
@@ -338,7 +338,7 @@ mod tests {
     fn production_commands_have_only_fixed_role_arguments_and_environment() {
         for (role, name) in [(Role::KvmSystem, "kvm-system"), (Role::Hwmon, "hwmon")] {
             let command = role.command();
-            assert_eq!(command.get_program(), "/kvmapp/server/nanokvm-native-owner");
+            assert_eq!(command.get_program(), "/usr/libexec/nanokvm-native-owner");
             assert_eq!(command.get_args().collect::<Vec<_>>(), ["--scope", name]);
             let env = command.get_envs().collect::<Vec<_>>();
             assert_eq!(env.len(), 3);

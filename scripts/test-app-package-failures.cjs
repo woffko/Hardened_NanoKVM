@@ -23,6 +23,8 @@ try {
     path.join(project, 'scripts/ssh-runtime-binding.py'));
   fs.symlinkSync(path.join(root, 'scripts/app-recovery-binding.py'),
     path.join(project, 'scripts/app-recovery-binding.py'));
+  fs.symlinkSync(path.join(root, 'scripts/native-runtime-binding.py'),
+    path.join(project, 'scripts/native-runtime-binding.py'));
   fs.symlinkSync(path.join(root, 'scripts/app-boot-delivery.py'),
     path.join(project, 'scripts/app-boot-delivery.py'));
   const compat = path.join(project, 'support/update-compat/rc12/S95nanokvm');
@@ -63,6 +65,17 @@ try {
   const appHeader = Buffer.from(header);
   appHeader.write('NKAPPBT1');
   const appEnvelope = Buffer.concat([appHeader, helper]);
+  const nativeMagics = { owner: 'NKNOWNR1', broker: 'NKNBRKR1', ctl: 'NKNCTL01', recovery: 'NKNREC01' };
+  const nativeHelpers = {};
+  const nativeEnvelopes = {};
+  for (const [role, magic] of Object.entries(nativeMagics)) {
+    nativeHelpers[role] = Buffer.concat([helper, Buffer.from(role)]);
+    const roleHeader = Buffer.alloc(48);
+    roleHeader.write(magic);
+    roleHeader.writeBigUInt64LE(BigInt(nativeHelpers[role].length), 8);
+    crypto.createHash('sha256').update(nativeHelpers[role]).digest().copy(roleHeader, 16);
+    nativeEnvelopes[role] = Buffer.concat([roleHeader, nativeHelpers[role]]);
+  }
   const host = fs.readFileSync('/bin/true');
   const bootNames = ['S02apprecover', 'S30eth', 'S30wifi', 'S95nanokvm'];
   const bootBytes = bootNames.map(name => fs.readFileSync(path.join(root, 'kvmapp/system/init.d', name)));
@@ -87,6 +100,9 @@ try {
       ['duplicate app recovery rejects', 'app-binding-duplicate'],
       ['SSH domain cannot replace app recovery', 'app-binding-wrong-domain'],
       ['bundled app recovery cannot replace embedded bytes', 'app-binding-bundled'],
+      ...Object.keys(nativeMagics).flatMap(role =>
+        ['missing', 'corrupt', 'duplicate', 'wrong-domain', 'bundled'].map(failure =>
+          [`native ${role} ${failure} rejects`, `native-${role}-${failure}`])),
       ['absolute CARGO_TARGET_DIR is honored', 'target-absolute'],
       ['relative CARGO_TARGET_DIR is honored', 'target-relative'],
       ['missing compile-bound boot scripts rejects', 'boot-binding-missing'],
@@ -113,9 +129,17 @@ try {
       binding = Buffer.alloc(0);
       appBinding = Buffer.from(envelope);
     }
+    const nativeBindings = Object.entries(nativeEnvelopes).map(([role, data]) => {
+      let frame = Buffer.from(data);
+      if (fault === `native-${role}-missing` || fault === `native-${role}-bundled`) frame = Buffer.alloc(0);
+      if (fault === `native-${role}-corrupt`) frame[frame.length - 1] ^= 1;
+      if (fault === `native-${role}-duplicate`) frame = Buffer.concat([frame, frame]);
+      if (fault === `native-${role}-wrong-domain`) frame.write('NKAPPBT1');
+      return frame;
+    });
     let boot = fault === 'boot-binding-missing' ? [] : bootBytes;
     if (fault === 'boot-binding-duplicate') boot = [...boot, ...boot];
-    fs.writeFileSync(backend, Buffer.concat([host, binding, appBinding, ...boot]), { mode: 0o755 });
+    fs.writeFileSync(backend, Buffer.concat([host, binding, appBinding, ...nativeBindings, ...boot]), { mode: 0o755 });
     if (fault === 'boot-compat-corrupt') fs.writeFileSync(compat, 'foreign compatibility code\n');
     const env = { ...process.env, BUILD_DIR: build, STAGE_DIR: path.join(build, 'stage'),
       OUT_DIR: out, ARTIFACT_NAME: 'fixture.tar.gz', RUST_BINARY: backend,
@@ -163,6 +187,14 @@ try {
       fs.mkdirSync(path.dirname(bundledRecovery), { recursive: true });
       fs.writeFileSync(bundledRecovery, helper);
     }
+    let bundledNative;
+    for (const role of Object.keys(nativeMagics)) {
+      if (fault === `native-${role}-bundled`) {
+        bundledNative = path.join(project, 'kvmapp/system/bin/nanokvm-native-' + role);
+        fs.mkdirSync(path.dirname(bundledNative), { recursive: true });
+        fs.writeFileSync(bundledNative, nativeHelpers[role]);
+      }
+    }
     try {
       const result = spawnSync('sh', [script], { cwd: project, env, encoding: 'utf8', timeout: 15000 });
       if (result.error) throw result.error;
@@ -179,6 +211,18 @@ try {
           assert(manifest.includes(`app_recovery_sha256: ${crypto.createHash('sha256').update(helper).digest('hex')}\n`));
           assert(manifest.includes('app_recovery_size: 120\n'));
           assert.deepEqual(fs.readFileSync(path.join(env.STAGE_DIR, 'kvmapp/system/bin/nanokvm-app-recovery')), helper);
+          for (const [role, bytes] of Object.entries(nativeHelpers)) {
+            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+            assert(manifest.includes(`native_${role}_sha256: ${digest}\n`));
+            assert(manifest.includes(`native_${role}_size: ${bytes.length}\n`));
+            const bundled = path.join(env.STAGE_DIR, 'kvmapp/system/bin/nanokvm-native-' + role);
+            assert.deepEqual(fs.readFileSync(bundled), bytes);
+            assert.equal(fs.statSync(bundled).mode & 0o7777, 0o755);
+            const archived = spawnSync('tar', ['-xOf', archive, 'kvmapp/system/bin/nanokvm-native-' + role]);
+            if (archived.error) throw archived.error;
+            assert.equal(archived.status, 0, archived.stderr.toString());
+            assert.deepEqual(archived.stdout, bytes);
+          }
           assert(manifest.includes('app_archive_boot_profile: rc12-compat-bootstrap-v1\n'));
           const listing = spawnSync('tar', ['-tzf', archive], { encoding: 'utf8' });
           if (listing.error) throw listing.error;
@@ -207,6 +251,7 @@ try {
     } finally {
       fs.rmSync(sentinel, { force: true });
       if (fault === 'app-binding-bundled') fs.rmSync(bundledRecovery);
+      if (bundledNative) fs.rmSync(bundledNative);
       if (fault === 'boot-compat-corrupt') fs.writeFileSync(compat, compatBytes);
     }
   }

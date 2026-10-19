@@ -13,6 +13,7 @@ done
 # This privileged helper must not load the application's mutable vendor dl_lib
 # before it establishes its own boundary. Never build it via linked-libkvm.
 unset NANOKVM_SSH_RUNTIME_BINDING NANOKVM_APP_RECOVERY_BINDING
+unset NANOKVM_NATIVE_OWNER_BINDING NANOKVM_NATIVE_BROKER_BINDING NANOKVM_NATIVE_CTL_BINDING NANOKVM_NATIVE_RECOVERY_BINDING
 export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/restore-runtime}"
 export CC_riscv64gc_unknown_linux_musl="${CC_riscv64gc_unknown_linux_musl:-clang}"

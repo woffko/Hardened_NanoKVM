@@ -279,6 +279,8 @@ readelf -A "$KVM_SYSTEM" 2>/dev/null | grep -Fq 'v0p7' || \
 
 python3 "$ROOT/scripts/verify-app-recovery-rootfs.py" "$IMAGE" || \
 	die "independent app recovery does not match its protected rootfs/backend binding"
+python3 -B "$ROOT/scripts/verify-native-runtime-rootfs.py" "$IMAGE" || \
+	die "independent native runtimes do not match their protected rootfs/backend bindings"
 
 KVMAPP_S95="$TMP_DIR/kvmapp-S95nanokvm"
 ETC_S95="$TMP_DIR/etc-S95nanokvm"

@@ -78,6 +78,21 @@ install -D -m 0755 "$KVMAPP_SOURCE/system/bin/nanokvm-app-recovery" \
 	--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
 	--helper "$TARGET_DIR/usr/libexec/nanokvm-app-recovery"
 
+# Generic target fixups must not change compile-bound static native programs.
+# Restore both copies from the stage, then verify the final bytes independently.
+for role in owner broker ctl recovery; do
+	helper="nanokvm-native-$role"
+	"${HOST_DIR:-}/bin/python3" -B "$ROOT/scripts/native-runtime-binding.py" "$role" verify \
+		--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
+		--helper "$KVMAPP_SOURCE/system/bin/$helper"
+	for destination in "kvmapp/system/bin/$helper" "usr/libexec/$helper"; do
+		install -D -m 0755 "$KVMAPP_SOURCE/system/bin/$helper" "$TARGET_DIR/$destination"
+		"${HOST_DIR:-}/bin/python3" -B "$ROOT/scripts/native-runtime-binding.py" "$role" verify \
+			--backend "$TARGET_DIR/kvmapp/server/NanoKVM-Server" \
+			--helper "$TARGET_DIR/$destination"
+	done
+done
+
 if [ -n "$RUNTIME_SYSTEM_VERSION" ] || [ -n "$RUNTIME_KERNEL_VERSION" ] || [ -n "$RUNTIME_SECURITY_PATCH_LEVEL" ]; then
 	case "$RUNTIME_SYSTEM_VERSION$RUNTIME_KERNEL_VERSION$RUNTIME_SECURITY_PATCH_LEVEL" in
 		*['&|\\']*)

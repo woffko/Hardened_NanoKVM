@@ -17,8 +17,16 @@ import sys
 
 MAGIC = b"NKSSHRT1"
 APP_RECOVERY_MAGIC = b"NKAPPBT1"
+NATIVE_MAGICS = {
+    "owner": b"NKNOWNR1",
+    "broker": b"NKNBRKR1",
+    "ctl": b"NKNCTL01",
+    "recovery": b"NKNREC01",
+}
+DOMAINS = (MAGIC, APP_RECOVERY_MAGIC, *NATIVE_MAGICS.values())
 HEADER = 48
 MAX_HELPER = 32 * 1024 * 1024
+MAX_NATIVE_HELPER = 8 * 1024 * 1024
 MAX_BACKEND = 128 * 1024 * 1024
 
 
@@ -61,14 +69,16 @@ def check_elf(image):
 
 
 def envelope(image, magic=MAGIC):
-    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+    if magic not in DOMAINS:
         raise ValueError("unsupported runtime binding domain")
+    if magic in NATIVE_MAGICS.values() and len(image) > MAX_NATIVE_HELPER:
+        raise ValueError("native helper exceeds its byte budget")
     check_elf(image)
     return magic + struct.pack("<Q", len(image)) + hashlib.sha256(image).digest() + image
 
 
 def locate(backend, magic=MAGIC):
-    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+    if magic not in DOMAINS:
         raise ValueError("unsupported runtime binding domain")
     found = None
     offset = 0
@@ -87,6 +97,8 @@ def locate(backend, magic=MAGIC):
         size = struct.unpack_from("<Q", backend, start + 8)[0]
         end = start + HEADER + size
         if not 64 <= size <= MAX_HELPER or end > len(backend):
+            continue
+        if magic in NATIVE_MAGICS.values() and size > MAX_NATIVE_HELPER:
             continue
         image = backend[start + HEADER:end]
         digest = backend[start + 16:start + HEADER]
@@ -113,8 +125,9 @@ def create_exclusive(path, data, mode):
 
 
 def main(magic=MAGIC, description=__doc__):
-    if magic not in (MAGIC, APP_RECOVERY_MAGIC):
+    if magic not in DOMAINS:
         raise ValueError("unsupported runtime binding domain")
+    maximum = MAX_NATIVE_HELPER if magic in NATIVE_MAGICS.values() else MAX_HELPER
     parser = argparse.ArgumentParser(description=description)
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
@@ -131,17 +144,20 @@ def main(magic=MAGIC, description=__doc__):
             command.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
-        with regular(args.helper, MAX_HELPER) as source:
-            image = source.read(MAX_HELPER + 1)
+        with regular(args.helper, maximum) as source:
+            image = source.read(maximum + 1)
         data = envelope(image, magic)
         args.directory.mkdir(parents=True, exist_ok=True)
         prefix = "" if magic == MAGIC else "app-"
+        for role, domain in NATIVE_MAGICS.items():
+            if magic == domain:
+                prefix = "native-" + role + "-"
         destination = args.directory.resolve() / (prefix + hashlib.sha256(image).hexdigest() + ".binding")
         try:
             create_exclusive(destination, data, 0o444)
         except FileExistsError:
-            with regular(destination, MAX_HELPER + HEADER) as source:
-                if source.read(MAX_HELPER + HEADER + 1) != data:
+            with regular(destination, maximum + HEADER) as source:
+                if source.read(maximum + HEADER + 1) != data:
                     raise ValueError("existing content-addressed binding differs") from None
         print(destination)
         return
@@ -151,8 +167,8 @@ def main(magic=MAGIC, description=__doc__):
     if args.command == "extract":
         create_exclusive(args.destination, image, 0o500)
     elif args.command == "verify":
-        with regular(args.helper, MAX_HELPER) as source:
-            if source.read(MAX_HELPER + 1) != image:
+        with regular(args.helper, maximum) as source:
+            if source.read(maximum + 1) != image:
                 raise ValueError("helper differs from exact embedded runtime")
     elif not args.quiet:
         print(digest.hex(), len(image))

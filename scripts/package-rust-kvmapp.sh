@@ -152,6 +152,12 @@ python3 "$ROOT_DIR/scripts/app-recovery-binding.py" extract \
   --backend "$KVMAPP_STAGE/server/NanoKVM-Server" \
   --destination "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
 chmod 0755 "$KVMAPP_STAGE/system/bin/nanokvm-app-recovery"
+for role in owner broker ctl recovery; do
+  helper="$KVMAPP_STAGE/system/bin/nanokvm-native-$role"
+  python3 -B "$ROOT_DIR/scripts/native-runtime-binding.py" "$role" extract \
+    --backend "$KVMAPP_STAGE/server/NanoKVM-Server" --destination "$helper"
+  chmod 0755 "$helper"
+done
 boot_delivery=$(python3 "$ROOT_DIR/scripts/app-boot-delivery.py" verify-inputs \
   --backend "$KVMAPP_STAGE/server/NanoKVM-Server" \
   --scripts "$KVMAPP_STAGE/system/init.d" --compat "$BOOT_COMPAT_SCRIPT" \
@@ -218,6 +224,11 @@ kvm_system_sha256=$(build_file_sha256 "$KVMAPP_STAGE/kvm_system/kvm_system")
   printf 'app_recovery: embedded-static-rv64-v1\n'
   printf 'app_recovery_sha256: %s\n' "$app_recovery_sha256"
   printf 'app_recovery_size: %s\n' "$app_recovery_size"
+  for role in owner broker ctl recovery; do
+    helper="$KVMAPP_STAGE/system/bin/nanokvm-native-$role"
+    printf 'native_%s_sha256: %s\n' "$role" "$(build_file_sha256 "$helper")"
+    printf 'native_%s_size: %s\n' "$role" "$(wc -c < "$helper" | tr -d ' ')"
+  done
   printf 'app_archive_boot_profile: %s\n' "$boot_profile"
   printf 'app_archive_s95_sha256: %s\n' "$boot_compat_sha256"
   printf 'hwmon_binary: kvmapp/hwmon/nanokvm-hwmon\n'

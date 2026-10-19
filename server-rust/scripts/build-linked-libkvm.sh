@@ -30,7 +30,7 @@ for obj in crt1.o crti.o crtbegin.o crtend.o crtn.o; do
   fi
 done
 
-# Build both static helpers before the dynamic backend. Neither has embedded
+# Build all six static helpers before the dynamic backend. None has embedded
 # bindings of its own, so this cannot recursively embed previous builds.
 METADATA="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 --locked --offline)"
 TARGET_DIR="$(printf '%s' "$METADATA" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
@@ -43,6 +43,7 @@ if [[ "$RESTORE_TARGET_DIR" == "$TARGET_DIR" ]]; then
 fi
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-restore-runtime.sh" --locked --offline
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-app-recovery.sh" --locked --offline
+CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-native-owner.sh"
 NANOKVM_SSH_RUNTIME_BINDING="$(python3 "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-ssh-sandbox" \
   --directory "$TARGET_DIR/ssh-runtime-bindings")"
@@ -51,6 +52,11 @@ NANOKVM_APP_RECOVERY_BINDING="$(python3 "$ROOT/../scripts/app-recovery-binding.p
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-app-recovery" \
   --directory "$TARGET_DIR/app-recovery-bindings")"
 export NANOKVM_APP_RECOVERY_BINDING
+NANOKVM_NATIVE_OWNER_BINDING="$(python3 -B "$ROOT/../scripts/native-runtime-binding.py" owner prepare --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-native-owner" --directory "$TARGET_DIR/native-runtime-bindings")"
+NANOKVM_NATIVE_BROKER_BINDING="$(python3 -B "$ROOT/../scripts/native-runtime-binding.py" broker prepare --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-native-broker" --directory "$TARGET_DIR/native-runtime-bindings")"
+NANOKVM_NATIVE_CTL_BINDING="$(python3 -B "$ROOT/../scripts/native-runtime-binding.py" ctl prepare --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-native-ctl" --directory "$TARGET_DIR/native-runtime-bindings")"
+NANOKVM_NATIVE_RECOVERY_BINDING="$(python3 -B "$ROOT/../scripts/native-runtime-binding.py" recovery prepare --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-native-recovery" --directory "$TARGET_DIR/native-runtime-bindings")"
+export NANOKVM_NATIVE_OWNER_BINDING NANOKVM_NATIVE_BROKER_BINDING NANOKVM_NATIVE_CTL_BINDING NANOKVM_NATIVE_RECOVERY_BINDING
 
 export NANOKVM_SYSROOT_LIB="$SYSROOT_LIB"
 export RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}"

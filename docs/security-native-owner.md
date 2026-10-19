@@ -2,8 +2,10 @@
 
 `nanokvm-native-owner` is a separate single-threaded executable, not a subreaper
 inside the asynchronous backend. It provides one fresh process-tree lifetime.
-It is **not packaged, launched by S95, deployed, or used for production capture
-yet**. Existing native services and watchdogs therefore remain unquiesced.
+All four static native programs are now compile-bound and packaged, with
+independent rootfs copies. They are **not launched by S95, deployed, or used for
+production capture yet**. Existing native services and watchdogs therefore
+remain unquiesced. Packaging alone is not lifecycle integration.
 
 ## Implemented boundary
 
@@ -67,8 +69,10 @@ are not yet accepted from these fixtures.
 `native_owner::controller::Group` now owns the two fixed native roles as sibling
 owner processes. It never installs a subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
-only `/kvmapp/server/nanokvm-native-owner --scope <fixed-role>`. The controller
-is compiled and used by the broker component, but has **no packaging/S95 switch yet**.
+only `/usr/libexec/nanokvm-native-owner --scope <fixed-role>`. The controller
+is compiled and used by the broker component, but has **no S95 switch yet**.
+Legacy app-only installs still need a protected, verified bootstrap for this
+independent path; a mutable app copy is not an executable-path fallback.
 
 `begin_drain` moves the complete launch capability into a non-cloneable `Drain`
 before sending Stop to every cell. While retained, no `Group::start` capability
@@ -98,8 +102,8 @@ unusual clone exit signals, durable crash recovery and vendor runtime remain ope
 
 `native_owner::broker::Broker` combines the sibling group with a protected
 singleton journal. The standalone `nanokvm-native-broker --serve` now owns this
-component through a fixed local protocol. Neither executable is packaged or
-connected to S95/watchdogs yet; this is not a replacement for the separate raw
+component through a fixed local protocol. These executables are packaged but
+not connected to S95/watchdogs yet; this is not a replacement for the separate raw
 restore ticket or proof that existing production services are quiescent.
 
 The fixed store is `/etc/kvm/native-runtime-owner`: root-owned mode 0700 on the
@@ -214,8 +218,8 @@ tests do not execute production native roles or establish target runtime health.
 ## Explicit native journal recovery
 
 `nanokvm-native-recovery` accepts only `status`, `prepare` and `complete`, with
-fixed protected paths and kernel boot identity. It is built but **not packaged,
-deployed or automatically called by S95**. No force/reset/path/epoch override is
+fixed protected paths and kernel boot identity. It is packaged but **not deployed
+or automatically called by S95**. No force/reset/path/epoch override is
 accepted. A live broker's flock refuses recovery; socket/PID absence does not
 replace that lease. Status does not create missing journal storage and is not
 permission to start services or write partitions.
@@ -277,11 +281,45 @@ unexpected source recreation. Boot IDs are synthetic only in private unit
 fixtures; production has no override. These tests are not physical reboot,
 power-cut, vendor-filesystem or complete product recovery acceptance.
 
+## Compile-bound native program delivery
+
 Build all four static RV64 executables with
 `server-rust/scripts/build-native-owner.sh`. The script rejects dynamic loaders,
-shared-library dependencies and wrong ELF architecture. This is not app/full
-pipeline reproducibility or target execution evidence. The ordinary package
-builder intentionally does not include these unused components yet.
+shared-library dependencies and wrong ELF architecture. The linked backend build
+first builds these in the separate static-helper target directory, then embeds
+four independently framed payloads. Each frame has a fixed eight-byte domain,
+exact length (at most 8 MiB), SHA-256 and static RV64 ELF checks:
+
+| Program | Domain |
+| --- | --- |
+| `nanokvm-native-owner` | `NKNOWNR1` |
+| `nanokvm-native-broker` | `NKNBRKR1` |
+| `nanokvm-native-ctl` | `NKNCTL01` |
+| `nanokvm-native-recovery` | `NKNREC01` |
+
+`build.rs` requires all six valid helper inputs (including the existing SSH and
+app-recovery bindings) for a linked RV64 build before writing any new binding
+output. Host and static-helper builds may omit them and get empty bindings.
+The linked backend checks the four native frames during startup. Build-input
+environment variable names are only startup diagnostics, not runtime selectors.
+This framing establishes consistency with a trusted backend, not a signature or
+authority for an arbitrary supplied backend.
+
+The packager extracts only embedded native bytes into `system/bin`, not a
+separately selected helper source, and records their sizes/digests. Buildroot
+installs root-owned mode-0755 copies in `/usr/libexec`, independently of the app
+slot. Post-build restores both bundled and independent copies after generic ELF
+fixups and verifies each against the final backend again. Both current ext-image
+validation paths use `scripts/verify-native-runtime-rootfs.py`, which checks all
+four domains, exact bytes, protected parents, root ownership, modes, single
+links, file types and bounds. The direct vendor-image patcher also installs
+these copies; its full pipeline still requires separate acceptance.
+
+Host framing/CLI, package/post-build and disposable ext4 fixtures cover missing,
+duplicate, substituted, corrupted and unsafe helper cases. These gates are not
+app/full pipeline reproducibility, signature provenance, native target execution,
+legacy bootstrap or first-restart evidence. Historical RC12 S95 bytes and the
+private app archive's compatibility boot profile remain unchanged.
 
 Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle

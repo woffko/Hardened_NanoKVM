@@ -56,6 +56,11 @@ require_file "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
 python3 "$ROOT/scripts/app-recovery-binding.py" verify \
   --backend "$KVMAPP_DIR/server/NanoKVM-Server" \
   --helper "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+for role in owner broker ctl recovery; do
+  python3 -B "$ROOT/scripts/native-runtime-binding.py" "$role" verify \
+    --backend "$KVMAPP_DIR/server/NanoKVM-Server" \
+    --helper "$KVMAPP_DIR/system/bin/nanokvm-native-$role"
+done
 
 mkdir -p "$OUT_DIR"
 
@@ -189,6 +194,26 @@ fi
   printf 'sif /usr/libexec/nanokvm-app-recovery mode 0100755\n'
   printf 'sif /usr/libexec/nanokvm-app-recovery uid 0\n'
   printf 'sif /usr/libexec/nanokvm-app-recovery gid 0\n'
+
+  # Compile-bound native programs live outside the mutable app slot. Protect
+  # their bundled copies and backend authority too (the vendor image used UID1000).
+  for directory in / /usr /usr/libexec /kvmapp /kvmapp/server /kvmapp/system /kvmapp/system/bin; do
+    printf 'sif %s mode 040755\n' "$directory"
+    printf 'sif %s uid 0\n' "$directory"
+    printf 'sif %s gid 0\n' "$directory"
+  done
+  printf 'sif /kvmapp/server/NanoKVM-Server uid 0\n'
+  printf 'sif /kvmapp/server/NanoKVM-Server gid 0\n'
+  for role in owner broker ctl recovery; do
+    name="nanokvm-native-$role"
+    printf 'rm /usr/libexec/%s\n' "$name"
+    printf 'write %s /usr/libexec/%s\n' "$KVMAPP_DIR/system/bin/$name" "$name"
+    for parent in /usr/libexec /kvmapp/system/bin; do
+      printf 'sif %s/%s mode 0100755\n' "$parent" "$name"
+      printf 'sif %s/%s uid 0\n' "$parent" "$name"
+      printf 'sif %s/%s gid 0\n' "$parent" "$name"
+    done
+  done
 
   for script in "${BOOT_INIT_SCRIPTS[@]}"; do
     script_path="$KVMAPP_DIR/system/init.d/$script"

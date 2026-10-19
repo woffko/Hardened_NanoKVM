@@ -1,6 +1,6 @@
 use super::*;
 use nix::{errno::Errno, sys::wait::waitpid, unistd::Pid};
-use std::{fs, path::Path};
+use std::{fs, os::fd::AsRawFd, path::Path};
 
 const LIMIT: Duration = Duration::from_secs(5);
 const SHORT: Duration = Duration::from_millis(300);
@@ -100,9 +100,12 @@ async fn blocked_stdin_is_inside_the_same_deadline_and_reap() {
 
 #[tokio::test]
 async fn zero_exit_without_pipe_eof_is_not_success_or_an_unbounded_wait() {
-    // Parallel tests spawn unrelated processes. Fixture aliases must never
-    // leak across their exec and falsely keep this pipe alive there.
+    // CLOEXEC prevents inheritance across exec, but unrelated parallel forks
+    // may temporarily hold a read alias until they reach exec. Check local FD
+    // closure immediately and require EPIPE within a separate finite deadline.
     let (reader, writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).unwrap();
+    let reader_path = PathBuf::from(format!("/proc/self/fd/{}", reader.as_raw_fd()));
+    let reader_identity = fs::read_link(&reader_path).unwrap();
     let alias = writer.try_clone().unwrap();
     let mut command = Command::new("/bin/true");
     command
@@ -125,8 +128,20 @@ async fn zero_exit_without_pipe_eof_is_not_success_or_an_unbounded_wait() {
     .expect("pipe EOF escaped the deadline");
     assert!(matches!(result, Err(AppError::Internal(ref text)) if text == "command timed out"));
     reaped(pid);
-    // No separately spawned reader remains holding the pipe after the result.
-    assert_eq!(nix::unistd::write(&alias, b"x"), Err(Errno::EPIPE));
+    // Capture owns the original reader; it must be closed before the result.
+    // Another parallel test may already have reused its descriptor number.
+    assert_ne!(fs::read_link(reader_path).ok(), Some(reader_identity));
+    time::timeout(LIMIT, async {
+        loop {
+            match nix::unistd::write(&alias, b"x") {
+                Err(Errno::EPIPE) => break,
+                Ok(1) => time::sleep(Duration::from_millis(5)).await,
+                other => panic!("unexpected pipe probe: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("a leaked reader kept the pipe alive after capture ended");
 }
 
 #[tokio::test]

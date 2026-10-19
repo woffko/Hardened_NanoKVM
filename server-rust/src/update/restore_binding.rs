@@ -8,6 +8,47 @@ pub const MAGIC: &[u8; 8] = b"NKSSHRT1";
 pub const APP_RECOVERY_MAGIC: &[u8; 8] = b"NKAPPBT1";
 pub const HEADER: usize = 48;
 pub const MAX_HELPER: u64 = 32 * 1024 * 1024;
+pub const MAX_NATIVE_HELPER: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeRuntime {
+    Owner,
+    Broker,
+    Client,
+    Recovery,
+}
+pub const NATIVE_RUNTIMES: [NativeRuntime; 4] = [
+    NativeRuntime::Owner,
+    NativeRuntime::Broker,
+    NativeRuntime::Client,
+    NativeRuntime::Recovery,
+];
+impl NativeRuntime {
+    pub fn magic(self) -> &'static [u8; 8] {
+        match self {
+            Self::Owner => b"NKNOWNR1",
+            Self::Broker => b"NKNBRKR1",
+            Self::Client => b"NKNCTL01",
+            Self::Recovery => b"NKNREC01",
+        }
+    }
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::Owner => "nanokvm-native-owner",
+            Self::Broker => "nanokvm-native-broker",
+            Self::Client => "nanokvm-native-ctl",
+            Self::Recovery => "nanokvm-native-recovery",
+        }
+    }
+    pub fn variable(self) -> &'static str {
+        match self {
+            Self::Owner => "NANOKVM_NATIVE_OWNER_BINDING",
+            Self::Broker => "NANOKVM_NATIVE_BROKER_BINDING",
+            Self::Client => "NANOKVM_NATIVE_CTL_BINDING",
+            Self::Recovery => "NANOKVM_NATIVE_RECOVERY_BINDING",
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct InvalidBinding;
@@ -18,19 +59,30 @@ pub struct Binding<'a> {
 }
 
 pub fn validate(bytes: &[u8]) -> Result<Binding<'_>, InvalidBinding> {
-    validate_domain(bytes, MAGIC)
+    validate_domain(bytes, MAGIC, MAX_HELPER)
 }
 
 pub fn validate_app_recovery(bytes: &[u8]) -> Result<Binding<'_>, InvalidBinding> {
-    validate_domain(bytes, APP_RECOVERY_MAGIC)
+    validate_domain(bytes, APP_RECOVERY_MAGIC, MAX_HELPER)
 }
 
-fn validate_domain<'a>(bytes: &'a [u8], magic: &[u8; 8]) -> Result<Binding<'a>, InvalidBinding> {
+pub fn validate_native(
+    bytes: &[u8],
+    runtime: NativeRuntime,
+) -> Result<Binding<'_>, InvalidBinding> {
+    validate_domain(bytes, runtime.magic(), MAX_NATIVE_HELPER)
+}
+
+fn validate_domain<'a>(
+    bytes: &'a [u8],
+    magic: &[u8; 8],
+    maximum: u64,
+) -> Result<Binding<'a>, InvalidBinding> {
     if bytes.len() < HEADER || &bytes[..8] != magic {
         return Err(InvalidBinding);
     }
     let size = u64::from_le_bytes(bytes[8..16].try_into().map_err(|_| InvalidBinding)?);
-    if !(64..=MAX_HELPER).contains(&size) || bytes.len() as u64 != HEADER as u64 + size {
+    if !(64..=maximum).contains(&size) || bytes.len() as u64 != HEADER as u64 + size {
         return Err(InvalidBinding);
     }
     let digest: [u8; 32] = bytes[16..HEADER].try_into().map_err(|_| InvalidBinding)?;
@@ -165,6 +217,67 @@ mod tests {
         app.pop();
         app[HEADER] ^= 1;
         assert!(validate_app_recovery(&app).is_err());
+    }
+
+    #[test]
+    fn native_roles_are_closed_and_domain_separated_from_all_other_helpers() {
+        let elf = image();
+        for role in NATIVE_RUNTIMES {
+            let mut native = envelope(&elf);
+            native[..8].copy_from_slice(role.magic());
+            let validated = validate_native(&native, role).unwrap();
+            assert_eq!(validated.image, elf);
+            assert_eq!(validated.digest, <[u8; 32]>::from(Sha256::digest(&elf)));
+            assert!(validate(&native).is_err());
+            assert!(validate_app_recovery(&native).is_err());
+            assert!(validate_native(&envelope(&elf), role).is_err());
+            let mut app = envelope(&elf);
+            app[..8].copy_from_slice(APP_RECOVERY_MAGIC);
+            assert!(validate_native(&app, role).is_err());
+            for other in NATIVE_RUNTIMES {
+                if other != role {
+                    assert!(validate_native(&native, other).is_err());
+                    assert_ne!(role.filename(), other.filename());
+                    assert_ne!(role.variable(), other.variable());
+                }
+            }
+            native.push(0);
+            assert!(validate_native(&native, role).is_err());
+            native.pop();
+            native[HEADER] ^= 1;
+            assert!(validate_native(&native, role).is_err());
+        }
+    }
+
+    #[test]
+    fn native_budget_is_stricter_than_the_historical_helper_budget() {
+        let mut elf = image();
+        elf.resize(MAX_NATIVE_HELPER as usize, 0);
+        for size in [MAX_NATIVE_HELPER, MAX_NATIVE_HELPER + 1] {
+            elf.resize(size as usize, 0);
+            let mut bytes = envelope(&elf);
+            assert!(validate(&bytes).is_ok());
+            for role in NATIVE_RUNTIMES {
+                bytes[..8].copy_from_slice(role.magic());
+                assert_eq!(
+                    validate_native(&bytes, role).is_ok(),
+                    size == MAX_NATIVE_HELPER
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_digest_does_not_authorize_a_dynamic_or_foreign_image() {
+        for (offset, value) in [(4, 1), (18, 62), (64, 2), (64, 3)] {
+            let mut elf = image();
+            elf[offset] = value;
+            let mut bytes = envelope(&elf);
+            for role in NATIVE_RUNTIMES {
+                bytes[..8].copy_from_slice(role.magic());
+                assert!(validate_native(&bytes, role).is_err());
+            }
+        }
     }
 
     #[test]

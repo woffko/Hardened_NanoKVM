@@ -133,7 +133,9 @@ class BindingTests(unittest.TestCase):
     def test_post_build_gate_checks_final_copied_backend(self):
         script = TOOL.parent.parent / "buildroot-external/hardened-sg2002/board/sg2002/post-build.sh"
         for fault in [None, "missing-binding", "backup-differs", "unsafe-runpath",
-                      "missing-app-binding", "app-helper-mismatch", "app-helper-missing"]:
+                      "missing-app-binding", "app-helper-mismatch", "app-helper-missing",
+                      *(role + "-" + failure for role in binding.NATIVE_MAGICS
+                        for failure in ["missing-binding", "helper-mismatch", "helper-missing"])]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="nanokvm-post-build-") as directory:
                 work = Path(directory)
                 source, target, host = work / "source", work / "target", work / "host"
@@ -151,6 +153,13 @@ class BindingTests(unittest.TestCase):
                 backend = b"synthetic backend" + (b"" if fault == "missing-binding" else binding.envelope(image()))
                 if fault != "missing-app-binding":
                     backend += binding.envelope(image(), binding.APP_RECOVERY_MAGIC)
+                native_images = {role: image() + role.encode() for role in binding.NATIVE_MAGICS}
+                for role, magic in binding.NATIVE_MAGICS.items():
+                    if fault != role + "-missing-binding":
+                        backend += binding.envelope(native_images[role], magic)
+                    if fault != role + "-helper-missing":
+                        (source / ("system/bin/nanokvm-native-" + role)).write_bytes(
+                            native_images[role] + (b"differs" if fault == role + "-helper-mismatch" else b""))
                 (source / "server/NanoKVM-Server").write_bytes(backend)
                 (source / "backends/NanoKVM-Server.rust").write_bytes(
                     backend + (b"differs" if fault == "backup-differs" else b""))
@@ -168,6 +177,11 @@ class BindingTests(unittest.TestCase):
                     self.assertEqual((target / "kvmapp/backends/NanoKVM-Server.rust").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/system/bin/nanokvm-app-recovery").read_bytes(), image())
                     self.assertEqual((target / "usr/libexec/nanokvm-app-recovery").read_bytes(), image())
+                    for role, expected in native_images.items():
+                        for parent in ["kvmapp/system/bin", "usr/libexec"]:
+                            helper = target / parent / ("nanokvm-native-" + role)
+                            self.assertEqual(helper.read_bytes(), expected)
+                            self.assertEqual(helper.stat().st_mode & 0o7777, 0o755)
 
 
 if __name__ == "__main__":

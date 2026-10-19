@@ -31,6 +31,13 @@ define HARDENED_NANOKVM_KVMAPP_INSTALL_TARGET_CMDS
 	cp -a $(@D)/. $(TARGET_DIR)/kvmapp/
 	$(INSTALL) -D -m 0755 $(@D)/system/bin/nanokvm-app-recovery \
 		$(TARGET_DIR)/usr/libexec/nanokvm-app-recovery
+	for role in owner broker ctl recovery; do \
+		$(HOST_DIR)/bin/python3 -B $(BR2_EXTERNAL_HARDENED_SG2002_PATH)/../../scripts/native-runtime-binding.py \
+			$$role verify --backend $(@D)/server/NanoKVM-Server \
+			--helper $(@D)/system/bin/nanokvm-native-$$role || exit 1; \
+		$(INSTALL) -D -m 0755 $(@D)/system/bin/nanokvm-native-$$role \
+			$(TARGET_DIR)/usr/libexec/nanokvm-native-$$role || exit 1; \
+	done
 	rm -f $(TARGET_DIR)/kvmapp/.files-list*
 	printf 'rust\n' > $(TARGET_DIR)/etc/kvm/backend
 	chmod 0644 $(TARGET_DIR)/etc/kvm/backend

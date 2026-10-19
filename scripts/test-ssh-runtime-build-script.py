@@ -14,13 +14,17 @@ SPEC.loader.exec_module(binding)
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise ValueError("usage: test-ssh-runtime-build-script.py BUILD_SCRIPT STATIC_SSH_HELPER STATIC_APP_HELPER")
-    executable, helper, app_helper = (Path(arg).resolve(strict=True) for arg in sys.argv[1:])
+    if len(sys.argv) != 5:
+        raise ValueError("usage: test-ssh-runtime-build-script.py BUILD_SCRIPT STATIC_SSH_HELPER STATIC_APP_HELPER STATIC_NATIVE_DIR")
+    executable, helper, app_helper, native_directory = (Path(arg).resolve(strict=True) for arg in sys.argv[1:])
     with binding.regular(helper, binding.MAX_HELPER) as source:
         valid = binding.envelope(source.read(binding.MAX_HELPER + 1))
     with binding.regular(app_helper, binding.MAX_HELPER) as source:
         valid_app = binding.envelope(source.read(binding.MAX_HELPER + 1), binding.APP_RECOVERY_MAGIC)
+    native_frames = {}
+    for role, magic in binding.NATIVE_MAGICS.items():
+        with binding.regular(native_directory / ("nanokvm-native-" + role), binding.MAX_NATIVE_HELPER) as source:
+            native_frames[role] = binding.envelope(source.read(binding.MAX_NATIVE_HELPER + 1), magic)
     with tempfile.TemporaryDirectory(prefix="nanokvm-build-binding-") as directory:
         work = Path(directory)
         inputs = {}
@@ -32,7 +36,12 @@ def main():
             path = work / name
             path.write_bytes(data)
             inputs[name] = path
-        for name, target, linked, value, app_value, success in [
+        native_inputs = {}
+        for role, data in native_frames.items():
+            path = work / ("native-" + role)
+            path.write_bytes(data)
+            native_inputs[role] = path
+        cases = [
             ("linked missing both", "riscv64gc-unknown-linux-musl", True, None, None, False),
             ("linked missing SSH", "riscv64gc-unknown-linux-musl", True, None, inputs["app"], False),
             ("linked missing app", "riscv64gc-unknown-linux-musl", True, inputs["valid"], None, False),
@@ -49,7 +58,28 @@ def main():
             ("linked SSH as app", "riscv64gc-unknown-linux-musl", True, inputs["valid"], inputs["valid"], False),
             ("host absent", "x86_64-unknown-linux-gnu", False, None, None, True),
             ("static helper absent", "riscv64gc-unknown-linux-musl", False, None, None, True),
-        ]:
+        ]
+        cases = [(name, target, linked, value, app_value, native_inputs if linked else {}, success)
+                 for name, target, linked, value, app_value, success in cases]
+        for role, magic in binding.NATIVE_MAGICS.items():
+            valid_native = native_frames[role]
+            faults = [("missing", None), ("relative", native_inputs[role].name),
+                      ("SSH-domain", inputs["valid"]), ("app-domain", inputs["app"])]
+            for fault, data in [("trailing", valid_native + b"x"), ("truncated", valid_native[:-1]),
+                                ("corrupt", valid_native[:16] + bytes(32) + valid_native[48:]),
+                                ("oversized", magic + (binding.MAX_NATIVE_HELPER + 1).to_bytes(8, "little") + valid_native[16:])]:
+                path = work / (role + "-" + fault)
+                path.write_bytes(data)
+                faults.append((fault, path))
+            for other, path in native_inputs.items():
+                if other != role:
+                    faults.append(("other-" + other, path))
+            for fault, path in faults:
+                values = dict(native_inputs)
+                values[role] = path
+                cases.append(("native " + role + " " + fault, "riscv64gc-unknown-linux-musl", True,
+                              inputs["valid"], inputs["app"], values, False))
+        for name, target, linked, value, app_value, native_values, success in cases:
             output = work / name.replace(" ", "-")
             output.mkdir()
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TARGET": target,
@@ -60,17 +90,25 @@ def main():
                 env["NANOKVM_SSH_RUNTIME_BINDING"] = str(value)
             if app_value is not None:
                 env["NANOKVM_APP_RECOVERY_BINDING"] = str(app_value)
+            for role, path in native_values.items():
+                if path is not None:
+                    env["NANOKVM_NATIVE_" + role.upper() + "_BINDING"] = str(path)
             result = subprocess.run([str(executable)], env=env, cwd=work, capture_output=True,
                                     text=True, timeout=10)
             assert (result.returncode == 0) == success, (name, result.stderr)
             bound = output / "ssh-runtime.binding"
             bound_app = output / "app-recovery.binding"
+            bound_native = {role: output / ("nanokvm-native-" + role + ".binding")
+                            for role in binding.NATIVE_MAGICS}
             if success:
                 assert bound.read_bytes() == (valid if value is not None else b""), name
                 assert bound_app.read_bytes() == (valid_app if app_value is not None else b""), name
+                for role, path in bound_native.items():
+                    assert path.read_bytes() == (native_frames[role] if native_values.get(role) is not None else b""), name
             else:
                 assert not bound.exists(), name
                 assert not bound_app.exists(), name
+                assert not any(path.exists() for path in bound_native.values()), name
             print("PASS", name)
 
 

@@ -7,7 +7,7 @@ pub mod operation;
 mod operation_lock;
 pub mod raw_transport;
 pub mod restore_archive;
-mod restore_binding;
+pub(crate) mod restore_binding;
 pub mod restore_capsule;
 pub mod restore_effective;
 mod restore_fs;
