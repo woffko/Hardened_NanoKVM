@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::{env, fs::File, io::Read, path::PathBuf};
 
+#[path = "src/update/boot_script_binding.rs"]
+mod boot_script_binding;
 #[path = "src/update/restore_binding.rs"]
 mod restore_binding;
 
@@ -68,23 +70,33 @@ fn main() {
         .map(|runtime| (runtime, read_runtime(Runtime::Native(runtime), required)));
     // Carry identities, not duplicate complete consumer scripts in the helper.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let mut boot_digests = Vec::with_capacity(128);
-    for name in ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"] {
+    for role in boot_script_binding::ROLES {
+        let name = role.filename();
         let path = manifest_dir.join("../kvmapp/system/init.d").join(name);
         println!("cargo:rerun-if-changed={}", path.display());
         let mut bytes = Vec::new();
         File::open(path)
             .expect("open trusted boot script")
-            .take(1024 * 1024 + 1)
+            .take(boot_script_binding::MAX_SCRIPT as u64 + 1)
             .read_to_end(&mut bytes)
             .expect("read trusted boot script");
         assert!(
-            !bytes.is_empty() && bytes.len() <= 1024 * 1024,
+            !bytes.is_empty() && bytes.len() <= boot_script_binding::MAX_SCRIPT,
             "invalid boot script size"
         );
-        boot_digests.extend_from_slice(&Sha256::digest(&bytes));
+        let digest = Sha256::digest(&bytes);
+        boot_digests.extend_from_slice(&digest);
+        let mut frame = Vec::with_capacity(boot_script_binding::HEADER + bytes.len());
+        frame.extend_from_slice(role.magic());
+        frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        frame.extend_from_slice(&digest);
+        frame.extend_from_slice(&bytes);
+        boot_script_binding::validate(&frame, role).expect("invalid framed boot script");
+        std::fs::write(output.join(format!("boot-script-{name}.binding")), frame)
+            .expect("write framed boot script");
     }
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(output.join("native-boot-digests"), boot_digests).expect("write boot digests");
     std::fs::write(output.join("ssh-runtime.binding"), ssh).expect("write embedded SSH runtime");
     std::fs::write(output.join("app-recovery.binding"), app).expect("write embedded app recovery");

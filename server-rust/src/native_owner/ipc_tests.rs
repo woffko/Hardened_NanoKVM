@@ -6,6 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
+const FIXTURE_WAIT: Duration = Duration::from_secs(6);
 #[path = "app_delivery_tests.rs"]
 mod delivery;
 #[path = "app_engine_tests.rs"]
@@ -32,7 +33,7 @@ fn engine(root: &Path) -> Engine {
 fn until(mut f: impl FnMut() -> bool) {
     let start = Instant::now();
     while !f() {
-        assert!(start.elapsed() < Duration::from_secs(6));
+        assert!(start.elapsed() < FIXTURE_WAIT);
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -681,6 +682,108 @@ fn observed(channel: &mut Channel, mode: Mode) {
     until(|| exchange(channel, Operation::Observe).mode == mode);
 }
 
+// Same bound as Channel-based fixtures, without turning a stream timeout into
+// a frame boundary. Preserve every partial read; only transient pending errors
+// are retried. EOF, other I/O errors and exhaustion remain failures.
+fn raw_reply(stream: &mut impl Read) -> io::Result<[u8; FRAME]> {
+    let start = Instant::now();
+    let mut reply = [0; FRAME];
+    let mut used = 0;
+    while used < FRAME {
+        if start.elapsed() >= FIXTURE_WAIT {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match stream.read(&mut reply[used..]) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(count) => used += count,
+            Err(error) if pending(&error) => std::thread::sleep(Duration::from_millis(5)),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(reply)
+}
+
+#[test]
+fn raw_reply_preserves_partial_frames_and_never_consumes_the_next_frame() {
+    struct Reader {
+        source: io::Cursor<Vec<u8>>,
+        call: usize,
+    }
+    impl Read for Reader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.call += 1;
+            match self.call {
+                1 => Err(io::ErrorKind::WouldBlock.into()),
+                3 => Err(io::ErrorKind::Interrupted.into()),
+                _ => {
+                    let count = out.len().min(3);
+                    self.source.read(&mut out[..count])
+                }
+            }
+        }
+    }
+    let first = request(Operation::Pause, 1);
+    let next = request(Operation::Resume, 2);
+    let mut reader = Reader {
+        source: io::Cursor::new([first, next].concat()),
+        call: 0,
+    };
+    assert_eq!(raw_reply(&mut reader).unwrap(), first);
+    assert_eq!(reader.source.position(), FRAME as u64);
+    assert_eq!(raw_reply(&mut reader).unwrap(), next);
+    assert_eq!(reader.source.position(), 2 * FRAME as u64);
+    assert_eq!(
+        raw_reply(&mut reader).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::TimedOut] {
+        struct FailedReader(io::ErrorKind, usize);
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                self.1 += 1;
+                Err(self.0.into())
+            }
+        }
+        let mut failed = FailedReader(kind, 0);
+        assert_eq!(raw_reply(&mut failed).unwrap_err().kind(), kind);
+        assert_eq!(failed.1, 1, "non-pending errors must not be retried");
+    }
+}
+
+#[test]
+fn cached_replay_does_not_reexecute_request_and_conflicting_replay_stays_invalid() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path());
+    let (server, mut peer) = UnixStream::pair().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut client = Client::new(server, 12, nix::unistd::geteuid().as_raw()).unwrap();
+    let pause = request(Operation::Pause, 1);
+    peer.write_all(&pause).unwrap();
+    assert!(!client.tick(&mut engine).unwrap());
+    assert!(engine.fixture_request_completed.is_some());
+    assert!(!client.tick(&mut engine).unwrap());
+    let first = raw_reply(&mut peer).unwrap();
+    assert_eq!(Reply::parse(&first, 1).unwrap().code, Code::Ok);
+    // This existing cfg(test) marker is set on every Engine::request return.
+    // Clearing it changes neither the journal, ownership nor the reply cache.
+    engine.fixture_request_completed = None;
+    peer.write_all(&pause).unwrap();
+    assert!(!client.tick(&mut engine).unwrap());
+    assert!(engine.fixture_request_completed.is_none());
+    assert!(!client.tick(&mut engine).unwrap());
+    assert_eq!(raw_reply(&mut peer).unwrap(), first);
+    assert!(engine.fixture_request_completed.is_none());
+    peer.write_all(&request(Operation::Resume, 1)).unwrap();
+    assert_eq!(
+        client.tick(&mut engine).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(engine.fixture_request_completed.is_none());
+    engine.disconnected(client.key);
+    assert_eq!(engine.mode, Mode::Abandoned);
+    assert_eq!(engine.request(13, Operation::EnsureKvm).code, Code::Busy);
+}
+
 #[test]
 fn real_protected_endpoint_roundtrip_pause_foreign_commands_and_shutdown() {
     let root = tempfile::tempdir().unwrap();
@@ -761,18 +864,12 @@ fn same_request_replay_returns_cached_reply_and_conflicting_replay_abandons() {
     let uid = nix::unistd::geteuid().as_raw();
     serve(root.path(), uid, || {
         let mut client = connect(root.path());
-        client.stream.set_nonblocking(false).unwrap();
-        client
-            .stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
         let pause = request(Operation::Pause, 1);
         client.stream.write_all(&pause).unwrap();
-        let mut first = [0; FRAME];
-        client.stream.read_exact(&mut first).unwrap();
+        let first = raw_reply(&mut client.stream).unwrap();
+        assert_eq!(Reply::parse(&first, 1).unwrap().code, Code::Ok);
         client.stream.write_all(&pause).unwrap();
-        let mut second = [0; FRAME];
-        client.stream.read_exact(&mut second).unwrap();
+        let second = raw_reply(&mut client.stream).unwrap();
         assert_eq!(first, second);
         client
             .stream

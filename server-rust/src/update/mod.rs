@@ -5,6 +5,8 @@ mod app_space;
 pub(crate) mod app_stage;
 pub mod app_trial;
 pub mod archive;
+pub(crate) mod boot_script_binding;
+pub mod boot_script_catalog;
 pub mod helper_family;
 pub mod keys;
 pub mod native_bootstrap;

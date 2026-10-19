@@ -50,6 +50,9 @@ const KVM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
 const BUNDLED_UPDATE_TRUST_DIR: &str = "/kvmapp/system/keys";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Retain complete framing, not only optimized references to the payload
+    // suffixes. Future catalog inspection is read-only, not install authority.
+    let _ = std::hint::black_box(nanokvm_rust_server::update::app_bootstrap::BOOT_SCRIPT_FRAMES);
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let startup = match args.as_slice() {
         [] => None,

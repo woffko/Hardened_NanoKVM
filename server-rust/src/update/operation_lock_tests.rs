@@ -30,6 +30,30 @@ fn same_inode_conflicts_and_drop_unlocks_without_removing_it() {
 }
 
 #[test]
+fn transferred_description_stays_busy_until_its_last_alias_closes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut original = acquire(temporary.path()).unwrap();
+    let receiver = original.transfer_alias().unwrap();
+    // Deterministically model an inherited pre-exec FD without a timing race
+    // or unsafe fork in this multithreaded test process. This is not evidence
+    // that a particular failed aggregate was caused by a particular child.
+    let inherited = receiver.try_clone().unwrap();
+    drop(original);
+    assert!(matches!(acquire(temporary.path()), Err(LockError::Busy)));
+    drop(receiver);
+    assert!(matches!(acquire(temporary.path()), Err(LockError::Busy)));
+    drop(inherited);
+    let next = acquire(temporary.path()).unwrap();
+    let identity = next.directory.metadata().unwrap();
+    assert_eq!(
+        identity.ino(),
+        fs::metadata(temporary.path().join(DIRECTORY))
+            .unwrap()
+            .ino()
+    );
+}
+
+#[test]
 fn unsafe_parent_or_member_is_rejected_without_repair_or_removal() {
     let uid = nix::unistd::geteuid().as_raw();
     let temporary = tempfile::tempdir().unwrap();

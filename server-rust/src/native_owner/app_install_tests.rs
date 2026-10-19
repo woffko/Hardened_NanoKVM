@@ -1,12 +1,9 @@
 use super::*;
 use crate::{
     native_owner::controller::{DrainStatus, Group, Role, Status as ScopeStatus},
-    update::{
-        app_slot::{
-            Phase,
-            issuer_tests::{accepted_fixture, assert_excluded as excluded},
-        },
-        operation_lock::ProcessLock,
+    update::app_slot::{
+        Phase,
+        issuer_tests::{accepted_fixture, assert_admission_released, assert_excluded as excluded},
     },
 };
 use std::{
@@ -35,6 +32,7 @@ fn broker(root: &Path) -> Broker {
     }
 }
 
+#[track_caller]
 fn until(mut ready: impl FnMut() -> bool) {
     let start = Instant::now();
     while !ready() {
@@ -335,13 +333,7 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
             .unwrap()
             .archived
     );
-    drop(
-        ProcessLock::from_parent(
-            &File::open(root.path()).unwrap(),
-            nix::unistd::geteuid().as_raw(),
-        )
-        .unwrap(),
-    );
+    assert_admission_released(root.path());
     // Native writers resume only in the ordinary post-freeze broker path.
     for (role, name) in [(Role::KvmSystem, "kvm"), (Role::Hwmon, "hwmon")] {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -628,8 +620,7 @@ async fn all_three_scopes_must_join_before_publication_and_rollback_releases_no_
         b"old unchanged"
     );
     assert_eq!(native_phase(root.path()), 1);
-    let parent = File::open(root.path()).unwrap();
-    until(|| ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_ok());
+    assert_admission_released(root.path());
     assert_eq!(
         broker.group.poll(),
         [Some(ScopeStatus::Closed(

@@ -129,6 +129,33 @@ pub(crate) fn assert_excluded(root: &Path) {
     }
 }
 
+#[track_caller]
+pub(crate) fn assert_admission_released(root: &Path) {
+    let parent = File::open(root).unwrap();
+    for domain in [
+        Domain::WriterActivity,
+        Domain::WriterAdmission,
+        Domain::Update,
+    ] {
+        // Transferred descriptions release on their last FD. A parallel
+        // fixture's fork can retain a CLOEXEC alias until its exec completes.
+        // Never force-unlock, retry the install, or hide non-Busy errors.
+        let start = Instant::now();
+        loop {
+            match ProcessLock::at_parent(&parent, nix::unistd::geteuid().as_raw(), domain, false) {
+                Ok(lock) => {
+                    drop(lock);
+                    break;
+                }
+                Err(LockError::Busy) if start.elapsed() < Duration::from_secs(8) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("terminal admission release failed: {error}"),
+            }
+        }
+    }
+}
+
 #[cfg(feature = "app-bootstrap-bound-test-fixture")]
 pub(crate) fn fixed_root_recovery_fixture(root: &Path) {
     let fixture = super::tests::Fixture::new(Phase::Published, super::tests::Position::Published);

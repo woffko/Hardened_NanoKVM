@@ -76,6 +76,22 @@ class BootDeliveryTests(unittest.TestCase):
     def test_compile_bound_inputs_accept_exact_bytes(self):
         self.inputs()
 
+    def test_framed_payloads_keep_exact_once_source_verification(self):
+        # Framing is opaque to this build consistency check; its consumer still
+        # needs the separate Rust catalog validation and protected provenance.
+        magics = (b"NKBSA001", b"NKBSE001", b"NKBSW001", b"NKBSK001")
+        frames = [magic + len(data).to_bytes(8, "little")
+                  + hashlib.sha256(data).digest() + data
+                  for magic, data in zip(magics, self.bytes)]
+        backend = b"synthetic framed backend, not an ELF" + b"".join(frames)
+        self.backend.write_bytes(backend)
+        self.inputs()
+        for duplicate in frames:
+            with self.subTest(duplicate_magic=duplicate[:8]):
+                self.backend.write_bytes(backend + duplicate)
+                with self.assertRaises(ValueError):
+                    self.inputs()
+
     def test_old_missing_duplicate_or_changed_backend_payload_is_rejected(self):
         original = self.backend.read_bytes()
         for payload in [b"old backend", original + self.bytes[0], original[:-1]]:

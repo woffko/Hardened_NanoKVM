@@ -35,23 +35,28 @@ const V1_PREDECESSORS: &[HelperVersion] = &[HelperVersion {
 
 // Trusted backend source bytes, never a runtime /kvmapp or manifest fallback.
 // S95 must not overwrite these independent gates from a rolled-back bundle.
+// Both views reference the SAME generated frames; there is no second payload.
+pub const BOOT_SCRIPT_FRAMES: [&[u8]; 4] = [
+    include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/boot-script-S02apprecover.binding"
+    )),
+    include_bytes!(concat!(env!("OUT_DIR"), "/boot-script-S30eth.binding")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/boot-script-S30wifi.binding")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/boot-script-S95nanokvm.binding")),
+];
+
+// Build.rs has already validated the frame and its minimum length. Stripping
+// this constant prefix preserves the existing exact startup payload API.
+const fn boot_script_payload(frame: &[u8]) -> &[u8] {
+    frame.split_at(super::boot_script_binding::HEADER).1
+}
+
 pub const BOOT_SCRIPTS: &[(&str, &[u8])] = &[
-    (
-        "S02apprecover",
-        include_bytes!("../../../kvmapp/system/init.d/S02apprecover"),
-    ),
-    (
-        "S30eth",
-        include_bytes!("../../../kvmapp/system/init.d/S30eth"),
-    ),
-    (
-        "S30wifi",
-        include_bytes!("../../../kvmapp/system/init.d/S30wifi"),
-    ),
-    (
-        "S95nanokvm",
-        include_bytes!("../../../kvmapp/system/init.d/S95nanokvm"),
-    ),
+    ("S02apprecover", boot_script_payload(BOOT_SCRIPT_FRAMES[0])),
+    ("S30eth", boot_script_payload(BOOT_SCRIPT_FRAMES[1])),
+    ("S30wifi", boot_script_payload(BOOT_SCRIPT_FRAMES[2])),
+    ("S95nanokvm", boot_script_payload(BOOT_SCRIPT_FRAMES[3])),
 ];
 
 /// Only a trusted backend build supplies these immutable bytes. No runtime

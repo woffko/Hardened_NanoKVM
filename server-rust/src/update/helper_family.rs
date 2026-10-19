@@ -110,6 +110,18 @@ impl Family {
     pub fn members(&self) -> &[Member; 5] {
         &self.members
     }
+
+    pub(super) fn contains_offset(&self, offset: u64) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.start <= offset && offset < member.end)
+    }
+
+    pub(super) fn overlaps(&self, start: u64, end: u64) -> bool {
+        self.members
+            .iter()
+            .any(|member| start < member.end && member.start < end)
+    }
 }
 
 /// Inspect a pinned regular file without moving its shared cursor. Working

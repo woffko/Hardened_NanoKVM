@@ -538,6 +538,25 @@ durable predecessor recovery of the canonical scripts must be designed with
 helper migration; do not silently turn the legacy archive profile into an
 in-place script-upgrade source.
 
+The backend build now frames the same canonical script bytes with fixed role,
+length and SHA-256 headers. `BOOT_SCRIPTS` references their payload suffixes;
+there is no second script body or mutable support directory. The backend retains
+the complete frames, while the app archive keeps its historical boot profile.
+
+`update::boot_script_catalog::inspect` is another read-only diagnostic, not an
+installer. It first checks the complete helper family, excludes frames inside
+those helper images, and requires four unique nonoverlapping top-level script
+frames. Script bodies are capped at 64 KiB, markers and cumulative hashing are
+bounded, and reads use fixed buffers without moving the shared cursor. Frame
+checks do not authenticate an outer backend or make its contents immutable.
+
+Actual linked-byte and private archive-preflight tests cover this representation;
+they do not establish a helper ABI, retained support swap or recovery capability.
+No production publisher consumes this catalog yet. The running broker's own
+compatibility must be checked as well: app update retains that process, so the
+new broker file on disk does not identify its current implementation. These
+requirements remain prerequisites to enabling the canonical update path.
+
 ## Frozen trial and recovery integration
 
 The backend's new frozen trial entry checks the existing app/native family and
