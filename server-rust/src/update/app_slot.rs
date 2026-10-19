@@ -29,6 +29,8 @@ const RECORD_BYTES: usize = 512;
 const HASH_OFFSET: usize = 480;
 const HASH_DOMAIN: &[u8] = b"NanoKVM app slot journal v1\0";
 
+#[path = "app_slot_recovery_intent.rs"]
+mod recovery_intent;
 #[path = "app_slot_terminal.rs"]
 mod terminal;
 #[cfg(test)]
@@ -504,6 +506,7 @@ fn prepare_at(
         }
     })?;
     let lock = StoreLock(directory);
+    recovery_intent::require_absent(&lock.0)?;
     // NOFOLLOW/NO_XDEV rejects dangling symlinks and mounts rather than treating
     // them as missing. Never retire another transaction as a side effect.
     if open_optional(&lock.0, CURRENT)?.is_some() {
@@ -721,7 +724,7 @@ fn executable_member(path: &Path) -> bool {
 // The hashes retain the issuing install's exact-byte context. They do not
 // verify RSA or grant authority on an attacker-writable filesystem. Only the
 // fixed protected rootfs store may supply a recovery record.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Record {
     phase: Phase,
     import: Import,
@@ -882,7 +885,24 @@ impl Store {
         Self::at_root(rootfs, directory, 0, recover)
     }
 
+    fn open_recovery(exclusive: bool) -> Result<Option<Self>> {
+        let Some((rootfs, directory)) = fixed_store_root()? else {
+            return Ok(None);
+        };
+        Self::at_root_mode(rootfs, directory, 0, exclusive, true)
+    }
+
     fn at_root(rootfs: File, directory: File, uid: u32, recover: bool) -> Result<Option<Self>> {
+        Self::at_root_mode(rootfs, directory, uid, recover, false)
+    }
+
+    fn at_root_mode(
+        rootfs: File,
+        directory: File,
+        uid: u32,
+        recover: bool,
+        recovering: bool,
+    ) -> Result<Option<Self>> {
         let device = rootfs.metadata()?.dev();
         protected_directory(&rootfs, device, uid, false)?;
         protected_directory(&directory, device, uid, true)?;
@@ -902,7 +922,18 @@ impl Store {
             }
         })?;
         let lock = StoreLock(directory);
-        let Some(current) = open_optional(&lock.0, CURRENT)? else {
+        let current = if recovering {
+            let intent = recovery_intent::load(&lock.0, device, uid)?;
+            let current = open_optional(&lock.0, CURRENT)?;
+            match intent {
+                Some(intent) => Some(intent.select(&lock.0, current, uid)?),
+                None => current,
+            }
+        } else {
+            recovery_intent::require_absent(&lock.0)?;
+            open_optional(&lock.0, CURRENT)?
+        };
+        let Some(current) = current else {
             return Ok(None);
         };
         protected_directory(&current, device, uid, true)?;
@@ -1137,7 +1168,7 @@ fn open_optional(parent: &File, name: &str) -> Result<Option<File>> {
 /// Read only the fixed protected store. Missing transaction is diagnostics, not
 /// a boot-good decision. Never create, repair, scan or delete a store here.
 pub fn status() -> Result<Status> {
-    let Some(store) = Store::open(false)? else {
+    let Some(store) = Store::open_recovery(false)? else {
         return Ok(Status::NoTransaction);
     };
     let record = store.record()?;
@@ -1145,36 +1176,114 @@ pub fn status() -> Result<Status> {
     Ok(Status::Transaction(record.phase))
 }
 
-/// Restore the recorded old slot after an interrupted, uncommitted publication.
-/// This cannot publish a new candidate or assert that any app is healthy. Only
-/// the future trusted installer may issue records; legacy markers are ignored.
-pub fn recover() -> Result<Status> {
-    let _admission = ProcessLock::acquire().map_err(|error| match error {
+fn recovery_lock_error(error: super::operation_lock::LockError) -> SlotError {
+    match error {
         super::operation_lock::LockError::Busy => SlotError::Busy,
         super::operation_lock::LockError::Unsafe => SlotError::Unsafe,
         super::operation_lock::LockError::Io => {
             SlotError::Io(io::Error::other("update admission unavailable"))
         }
-    })?;
+    }
+}
+
+/// Recover and archive only under retained update/writer/native lifetime proof.
+/// This cannot publish a new candidate or assert app health; legacy markers and
+/// missing native state do not mint a recovery capability.
+pub fn recover() -> Result<Status> {
+    let admission = ProcessLock::acquire().map_err(recovery_lock_error)?;
+    recover_locked(admission, false)
+}
+
+fn recover_locked(admission: ProcessLock, defer_terminal: bool) -> Result<Status> {
     // Installer death releases UpdateEX, but independent runtime owners may
     // still be alive. The durable same-boot Stop fence, not lock availability,
     // decides whether an early recovery may touch the live slot.
     crate::native_owner::broker::check_update_admission().map_err(|_| SlotError::Busy)?;
-    let Some(store) = Store::open(true)? else {
+    let Some(store) = Store::open_recovery(true)? else {
         return Ok(Status::NoTransaction);
     };
-    store.recover()
+    let record = store.record()?;
+    store.layout(&record)?;
+    let terminal = matches!(record.phase, Phase::Committed | Phase::RolledBack);
+    let ready = match crate::native_owner::broker::ReadyAppRecovery::acquire() {
+        Ok(ready) => ready,
+        Err(
+            crate::native_owner::broker::JournalError::Busy
+            | crate::native_owner::broker::JournalError::Unresolved
+            | crate::native_owner::broker::JournalError::Absent,
+        ) if terminal && defer_terminal => {
+            return Ok(Status::Transaction(record.phase));
+        }
+        Err(
+            crate::native_owner::broker::JournalError::Busy
+            | crate::native_owner::broker::JournalError::Unresolved
+            | crate::native_owner::broker::JournalError::Absent,
+        ) => return Err(SlotError::Busy),
+        Err(_) => return Err(SlotError::Unsafe),
+    };
+    let writers = match super::state_writers::StateWriters::default().try_drain() {
+        Ok(writers) => writers,
+        Err(crate::AppError::Conflict(_)) if terminal && defer_terminal => {
+            return Ok(Status::Transaction(record.phase));
+        }
+        Err(crate::AppError::Conflict(_)) => return Err(SlotError::Busy),
+        Err(_) => return Err(SlotError::Unsafe),
+    };
+    let intent = store.recovery_intent(&record)?;
+    #[cfg(test)]
+    checkpoint("recovery-intent-durable");
+    let native = ready
+        .fence()
+        .map_err(|_| SlotError::Io(io::Error::other("native recovery fence failed")))?;
+    // Declaration order releases app store, writer freeze, native singleton,
+    // then UpdateEX. Failed operations leave durable native Stopping behind.
+    let mut recovery = Recovery {
+        store,
+        _writers: writers,
+        native,
+        _admission: admission,
+    };
+    #[cfg(test)]
+    checkpoint("recovery-native-fenced");
+    let status = recovery.store.recover()?;
+    #[cfg(test)]
+    checkpoint("recovery-slot-terminal");
+    let record = recovery.store.record()?;
+    recovery.store.retire_recovered(&record, &recovery.native)?;
+    #[cfg(test)]
+    checkpoint("recovery-app-archived");
+    recovery
+        .native
+        .complete()
+        .map_err(|_| SlotError::Io(io::Error::other("native recovery completion failed")))?;
+    #[cfg(test)]
+    checkpoint("recovery-native-closed");
+    recovery.store.finish_recovery_intent(&intent)?;
+    Ok(status)
+}
+
+struct Recovery {
+    store: Store,
+    _writers: super::state_writers::WriterDrain,
+    native: crate::native_owner::broker::FencedAppRecovery,
+    _admission: ProcessLock,
 }
 
 /// Gate an app consumer before it opens or executes /kvmapp. A terminal layout
-/// is read-only: a restart may still own update admission. Only an interrupted
-/// nonterminal transaction enters recovery, which must acquire that admission.
+/// may be observed read-only when a restart owns update admission. Otherwise
+/// recovery/retirement requires retained update, writer and native exclusions.
 /// NoTransaction retains the trusted legacy/factory boot path; it is not a new
 /// candidate receipt, runtime health acknowledgement or authorization from p3.
 pub fn boot_gate() -> Result<Status> {
     match status()? {
-        ready @ (Status::NoTransaction
-        | Status::Transaction(Phase::Committed | Phase::RolledBack)) => Ok(ready),
+        Status::NoTransaction => Ok(Status::NoTransaction),
+        ready @ Status::Transaction(Phase::Committed | Phase::RolledBack) => {
+            match ProcessLock::acquire() {
+                Ok(admission) => recover_locked(admission, true),
+                Err(super::operation_lock::LockError::Busy) => Ok(ready),
+                Err(error) => Err(recovery_lock_error(error)),
+            }
+        }
         Status::Transaction(_) => recover(),
     }
 }
@@ -1190,6 +1299,10 @@ pub(crate) mod issuer_tests;
 #[cfg(test)]
 #[path = "app_slot_publication_tests.rs"]
 mod publication_tests;
+
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+#[path = "app_slot_recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 fn checkpoint(name: &str) {

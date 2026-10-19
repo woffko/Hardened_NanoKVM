@@ -98,6 +98,23 @@ impl StateWriters {
         self.pause()?.drain(timeout).await
     }
 
+    /// Synchronous early-recovery barrier: no runtime, wait or caller-owned
+    /// asynchronous task. Failure releases admission without claiming a drain.
+    pub(crate) fn try_drain(&self) -> Result<WriterDrain> {
+        let admission = self
+            .lock(Domain::WriterAdmission, false)
+            .map_err(writer_error)?;
+        let activity = self
+            .lock(Domain::WriterActivity, false)
+            .map_err(writer_error)?;
+        Ok(WriterDrain {
+            _activity: activity,
+            _admission: admission,
+            #[cfg(test)]
+            config_path: self.config_path.clone(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test_parent(parent: std::fs::File) -> Self {
         Self {

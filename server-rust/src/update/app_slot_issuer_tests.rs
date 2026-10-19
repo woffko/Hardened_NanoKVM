@@ -770,7 +770,10 @@ fn fixed_root_issuer_child() {
     assert_old(Path::new("/"));
     fs::write("/release-worker", b"release").unwrap();
     worker.finish();
+    crate::native_owner::broker::app_recovery_closed_fixture(&File::open("/etc/kvm").unwrap());
     assert_eq!(recover().unwrap(), Status::Transaction(Phase::RolledBack));
+    assert_eq!(status().unwrap(), Status::NoTransaction);
+    assert!(job_status(id).unwrap().unwrap().archived);
     assert_old(Path::new("/"));
 }
 

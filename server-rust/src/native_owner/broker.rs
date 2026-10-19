@@ -9,6 +9,9 @@ use crate::update::{
 #[path = "journal.rs"]
 mod journal;
 pub use journal::Error as JournalError;
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+pub(crate) use journal::app_recovery::closed_fixture as app_recovery_closed_fixture;
+pub(crate) use journal::app_recovery::{FencedAppRecovery, ReadyAppRecovery};
 pub use journal::boot;
 pub use journal::recovery;
 #[path = "app_install.rs"]

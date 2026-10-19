@@ -613,8 +613,12 @@ slot before releasing admission, with retained ownership on rename/sync failure.
 A fixed-root per-transaction read remains available under EX; it is diagnostics,
 not an HTTP success or runtime-health receipt. Explicit root live-terminal retry
 now repeats only archival/release and refuses latched ownership uncertainty.
-Nonterminal/owner-loss and fresh-boot failure completion, bounded history
-retention and the durable API job lifecycle remain open. See
+Stopped/prior-boot recovery now composes native lifetime authority with retained
+update/store/writer exclusions, durable Stopping, exact transaction/inode recovery
+intent and terminal archival before Closed. It covers selection after current
+has moved to history without fabricating a live daemon owner. Same-boot orphan
+Active/Maintenance/Stopping remains refused. Physical fresh-boot/I/O acceptance,
+bounded history retention and the durable API job lifecycle remain open. See
 [terminal archival](security-app-slot-recovery.md#terminal-archival-and-per-transaction-observation).
 The typed
 [broker trial policy](security-app-slot-recovery.md#broker-owned-trial-policy)

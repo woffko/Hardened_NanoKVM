@@ -223,10 +223,22 @@ fn boot_gate_child_fixture() {
     };
     let case = std::env::var("NANOKVM_APP_GATE_FIXTURE_CASE").unwrap();
     assert!(nix::unistd::geteuid().is_root());
-    // Only a fresh disposable root from this test's user-namespace parent.
-    // No mount, host rootfs, target hardware or production override is used.
+    // Only this fresh disposable mount namespace/root. Real procfs supplies
+    // kernel boot identity; no target hardware or production override is used.
+    fs::create_dir(Path::new(&root).join("proc")).unwrap();
+    nix::mount::mount(
+        Some("/proc"),
+        Path::new(&root).join("proc").as_path(),
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .unwrap();
     nix::unistd::chroot(Path::new(&root)).unwrap();
     std::env::set_current_dir("/").unwrap();
+    if !matches!(case.as_str(), "none" | "corrupt" | "missing-native") {
+        crate::native_owner::broker::app_recovery_closed_fixture(&File::open("/etc/kvm").unwrap());
+    }
     let admission = ProcessLock::acquire().unwrap();
     if case == "corrupt" {
         assert!(boot_gate().is_err());
@@ -240,6 +252,16 @@ fn boot_gate_child_fixture() {
         assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::Committed));
     } else if case == "rolled-back" {
         assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+    } else if case == "missing-native" {
+        let before = fs::read("/etc/kvm/application-slot/current/state").unwrap();
+        drop(admission);
+        assert!(matches!(recover(), Err(SlotError::Busy)));
+        assert!(matches!(boot_gate(), Err(SlotError::Busy)));
+        assert_eq!(
+            fs::read("/etc/kvm/application-slot/current/state").unwrap(),
+            before
+        );
+        assert!(!Path::new("/etc/kvm/application-slot/history").exists());
     } else {
         // A still-owning installer cannot be rolled back by a boot consumer.
         let before = status().unwrap();
@@ -247,8 +269,11 @@ fn boot_gate_child_fixture() {
         assert_eq!(status().unwrap(), before);
         drop(admission);
         assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+        let job = job_status([2; 16]).unwrap().unwrap();
+        assert!(job.archived);
+        assert_eq!(job.phase, Phase::RolledBack);
         let _admission = ProcessLock::acquire().unwrap();
-        assert_eq!(boot_gate().unwrap(), Status::Transaction(Phase::RolledBack));
+        assert_eq!(boot_gate().unwrap(), Status::NoTransaction);
     }
     println!("app-boot-gate-fixture-ran");
 }
@@ -264,6 +289,7 @@ fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupt
         ("parked", Phase::Publishing, Position::Parked),
         ("published", Phase::Published, Position::Published),
         ("corrupt", Phase::Prepared, Position::Prepared),
+        ("missing-native", Phase::Published, Position::Published),
     ] {
         let fixture = Fixture::new(phase, position);
         fs::create_dir_all(fixture.root.path().join("etc/kvm")).unwrap();
@@ -276,7 +302,7 @@ fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupt
             fs::write(directory.join("current/state"), b"corrupt fixture").unwrap();
         }
         let output = Command::new("/usr/bin/unshare")
-            .args(["--user", "--map-root-user", "--"])
+            .args(["--user", "--map-root-user", "--mount", "--"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -299,7 +325,11 @@ fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupt
         );
         assert_eq!(
             fs::read(fixture.root.path().join("kvmapp/identity")).unwrap(),
-            if case == "committed" { b"new" } else { b"old" }
+            if matches!(case, "committed" | "missing-native") {
+                b"new"
+            } else {
+                b"old"
+            }
         );
     }
 }

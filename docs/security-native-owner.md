@@ -506,8 +506,15 @@ Exact terminal archival and per-ID observation are host-tested, including
 retained release failure and sequential app transactions. Direct early app
 recovery also checks the durable same-boot native Stop fence after acquiring
 UpdateEX, so installer death cannot bypass that fence merely by releasing a lock.
-Real backend/runtime integration, complete crash/I/O/fresh-boot retirement and
-device acceptance remain open. See
+Stopped/prior-boot app recovery now retains its own singleton boundary: canonical
+Closed in this boot or a valid previous kernel epoch, then durable current-boot
+Stopping before app changes, exact app recovery/archival, and Closed only after
+durability. A protected transaction/inode receipt also covers current already
+archived before helper death. Missing native state and same-boot unresolved
+owners are not adopted. The lease remains held through app receipt cleanup;
+Drop never publishes Closed. This does not expose Group launch or raw authority.
+Real backend/runtime integration, complete I/O/physical fresh-boot retirement
+and device acceptance remain open. See
 [trial policy](security-app-slot-recovery.md#broker-owned-trial-policy).
 
 Remaining work is production lifecycle and recovery integration: close

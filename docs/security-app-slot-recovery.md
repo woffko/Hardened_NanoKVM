@@ -15,11 +15,14 @@ device acceptance remain open. The full remediation scope is unchanged.
 The standalone `nanokvm-app-recovery` accepts only `status`, `recover` and `gate`.
 There are no root, journal, stage, phase, force, prepare or commit arguments.
 Recovery cannot publish a new app or issue a trusted installation receipt.
-After acquiring common update admission, it also checks the durable native
-fence. A same-boot `Stopping` or ambiguous native journal refuses recovery:
-installer death releasing UpdateEX is not proof that its independent runtime
-owners and descendants have stopped. A changed boot epoch only removes that
-process-lifetime obstruction; it does not grant app health or restore authority.
+After acquiring common update admission, recovery retains the native singleton
+and requires a canonical native `Closed` in this boot or a valid record from a
+different kernel boot. Missing native state is not closure. Same-boot Active,
+Maintenance or Stopping, a live owner, and ambiguous/unsafe state refuse mutation.
+It also holds both enrolled-writer exclusions, and writes durable current-boot
+Stopping before app mutation. Installer death releasing UpdateEX is not proof
+that independent runtime descendants stopped. See the recovery boundary below;
+changed boot identity never grants app health or raw/restore authority.
 
 Production storage is fixed at `/etc/kvm/application-slot/current`. Root, `/etc`
 and `/etc/kvm` must be protected root-owned directories on the same rootfs.
@@ -98,15 +101,15 @@ remain to be integrated and tested before the new installer
 can be considered complete. `no-transaction` is diagnostics, not boot-good or
 permission to execute an arbitrary app directory.
 
-Absence means no canonical `current` transaction, even when protected unpublished
-preparation siblings remain. Such siblings are retained but never scanned,
+Absence means no canonical `current` transaction or exact recovery intent, even
+when protected unpublished preparation siblings remain. Such siblings are retained but never scanned,
 decoded, selected or promoted by recovery/bootstrap. Installing the trusted
 backend's compile-bound independent helper in that state is the same operation
 as the ordinary historical-absence case; it does not use orphan bytes as authority
 and does not publish/execute an app. Unknown installed helpers still refuse.
 The issuer retains its own unpublished preparation material after an ambiguous
 move/sync failure. No deletion or automatic orphan activation is implied here;
-explicit orphan disposition and fresh-boot terminal retirement remain required.
+explicit orphan disposition and physical fresh-boot acceptance remain required.
 Successful live commit/rollback now archives its exact terminal directory as
 described below; generic early recovery does not infer that live capability.
 
@@ -202,8 +205,8 @@ data and is repeatable. These process-death fixtures are not target power-cut or
 vendor-native acceptance. The existing standalone scope tests separately cover
 subreaper descendant closure; the new protocol stubs do not replace that proof.
 
-Production API activation, full runtime health, terminal failure/fresh-boot
-completion and bounded history retention remain open. The daemon now drives
+Production API activation, full runtime health, physical terminal-failure/
+fresh-boot acceptance and bounded history retention remain open. The daemon now drives
 the typed trial/commit policy below in host tests. Ordinary backend startup is
 not a usable trial path while
 writer exclusions are retained: it acquires writer/update
@@ -292,7 +295,8 @@ automatically retry retirement, or roll back a canonically Committed candidate.
 The still-pinned exact owner can retry after an earlier rename/sync error; a new
 process must not fabricate that capability from a diagnostic phase alone.
 Live terminal archival can now be retried explicitly as described below.
-Nonterminal/owner-loss failure completion and fresh-boot retirement remain open.
+Safe stopped/prior-boot recovery uses a separate retained boundary below; it
+does not fabricate a live daemon owner or authorize a same-boot Active orphan.
 Bounded retention/space accounting and safe garbage collection are also
 required before activation: keeping evidence indefinitely is not an acceptable
 final disk-space policy.
@@ -372,12 +376,63 @@ conflicting serial rejection. The production fixed-root channel fixture covers
 rollback retirement failure/retry under real exclusions. CLI negatives reject
 extra arguments and path selectors. These are not target/runtime health tests.
 
-Fresh-boot completion still needs its own retained authority. S02 runs app gate
+Fresh-boot completion uses its own retained authority below. S02 runs app gate
 before native boot activation, and native Ready enrollment alone is not app
-retirement authority. A future path must retain common update/store admission
-and a verified native lifetime/boot boundary, reject same-boot unresolved or
-ambiguous native state, and preserve exact app context/layout. Absence, a phase
+retirement authority. This separate path retains common update/store admission
+and a verified native lifetime/boot boundary, rejects same-boot unresolved or
+ambiguous native state, and preserves exact app context/layout. Absence, a phase
 checksum, a CLI retry or PID disappearance must not stand in for that boundary.
+
+## Stopped or prior-boot recovery and retirement
+
+`ReadyAppRecovery` retains the protected native singleton and validates the
+canonical record against real procfs kernel boot identity. Only same-boot
+Closed or a different valid epoch is admitted. Native absence, socket/PID
+absence, a free update lock, and boot Ready alone are not this capability.
+NEXT/recovery evidence, invalid storage and same-boot unresolved ownership are
+preserved and refused, not repaired. Acquisition itself is read-only.
+
+The synchronous early path retains UpdateEX, StoreEX and both WriterAdmissionEX
+and WriterActivityEX. It does not wait on a Tokio runtime or claim enrollment
+of every native/network/AP/optional writer. Before app mutation it durably
+publishes current-boot native Stopping under the retained singleton. Dropping
+the helper or any subsequent error cannot auto-publish Closed.
+
+A fixed protected `application-slot/recovery` receipt binds the initial complete
+512-byte app record and exact transaction-directory device/inode. Its 568-byte
+format has separate magic and checksum, root-owned single-link mode0600 storage
+and bounded strict reads. It is published exclusively through `.recovery.next`,
+file sync, NOREPLACE rename and parent sync before the native fence. Interrupted
+temporary publication is retained and blocks recovery; it is never promoted or
+deleted automatically. Checksums are corruption detection, not signatures.
+
+The receipt selects only that exact current directory or the fixed
+`history/<transaction>` after archival; there is no history scan/latest/force
+selector. Context changes, backwards phase changes, uncommitted-to-Committed
+changes, nonterminal history records or a different directory with identical
+record bytes refuse. New install
+preparation cannot bypass a pending recovery receipt, including when current is
+already absent. A status reader may observe its selected phase, never health.
+
+Under the retained fence, recovery restores the recorded old slot for an
+uncommitted transaction or preserves a canonical Committed candidate. It then
+archives and syncs the exact terminal directory, publishes native Closed, and
+removes/syncs only the exact recovery receipt. Store/writer/native/update guards
+remain held through cleanup. Crashes after current->history or after Closed but
+before receipt cleanup can therefore be completed without adopting another
+transaction. A crash after Stopping requires a different kernel epoch; no
+same-boot automatic retry assumes that a dead helper proves native closure.
+
+Terminal boot gates may remain read-only when a restart owns UpdateEX or no
+safe native/writer boundary is available. Unsafe/ambiguous data and any failure
+after fencing are not converted into a successful deferral. NoTransaction
+retains the legacy/factory path, not a health or execution receipt.
+
+Disposable fixed-root tests combine real SIGKILL with procfs identity and
+synthetic prior-epoch native records. These are process-death/selection tests,
+not actual reboot, power-loss, target filesystem or vendor-runtime acceptance.
+Physical cold boot, I/O/ENOSPC/mount failures, all-writer lifecycle and bounded
+history/space/GC remain mandatory before activation.
 
 ## Early consumer integration (development branch)
 
@@ -770,8 +825,9 @@ Committed before native resume and backend authorization, and retains all instal
 exclusions until explicit completion/release. A failed or lost acknowledgement
 does not permit rolling back an already Committed app. Old-slot evidence and
 terminal journal move together into protected history before release; failed
-archival retains the complete terminal owner. Administrative/fresh-boot failure
-completion, bounded history retention and the complete commit/crash/I/O matrix
+archival retains the complete terminal owner. Safe recovery/retirement now has
+a separate stopped/prior-boot boundary; bounded history retention, physical
+fresh-boot acceptance and the complete commit/crash/I/O matrix
 are still required. The daemon Engine now retains and drives this
 nonblocking policy, without a handler-owned task or admission release/reacquire.
 An injected native-journal publication collision after durable app Committed
@@ -791,8 +847,8 @@ ordinary API is not activated, and no device deployment is implied.
 
 - Activate the independently delivered native-closed installer in the API only
   after exact metadata/key/policy lifetime, durable job observability,
-  daemon-to-real-backend/native-runtime health acceptance, terminal failure/
-  fresh-boot completion and bounded history/space policy.
+  daemon-to-real-backend/native-runtime health acceptance, physical fresh-boot/
+  terminal-failure acceptance and bounded history/space policy.
   Execution modes, frozen backend startup and daemon-driven broker transitions
   now have host tests; they are not target/runtime acceptance. Host-tested
   publication/rollback is not a complete lifecycle; the app API still uses its

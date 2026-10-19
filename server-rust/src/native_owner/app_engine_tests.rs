@@ -34,11 +34,47 @@ fn phase(root: &Path, transaction: [u8; 16]) -> u8 {
 }
 
 fn shutdown(engine: &mut Engine) {
-    assert_eq!(engine.request(1, Operation::Shutdown).code, Code::Ok);
+    // A transferred lease's last CLOEXEC alias can remain in another parallel
+    // fixture's fork-before-exec window. A confirmed Busy/Running reply means
+    // Shutdown was not admitted, not unknown completion. Do not force unlock,
+    // accept uncertainty or retry an already admitted shutdown.
+    until(|| {
+        let reply = engine.request(1, Operation::Shutdown);
+        if reply.code == Code::Busy {
+            assert_eq!(reply.mode, Mode::Running);
+            assert!(engine.install.is_none());
+            return false;
+        }
+        assert_eq!(reply.code, Code::Ok);
+        true
+    });
     until(|| {
         engine.tick();
         engine.mode == Mode::Stopped
     });
+}
+
+#[test]
+fn busy_shutdown_is_not_admitted_and_can_be_reissued_after_exact_lock_release() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path());
+    let parent = std::fs::File::open(root.path()).unwrap();
+    let held = crate::update::operation_lock::ProcessLock::from_parent(
+        &parent,
+        nix::unistd::geteuid().as_raw(),
+    )
+    .unwrap();
+    let reply = engine.request(1, Operation::Shutdown);
+    assert_eq!(reply.code, Code::Busy);
+    assert_eq!(reply.mode, Mode::Running);
+    assert!(!root.path().join("native-runtime-owner/state").exists());
+    drop(held);
+    shutdown(&mut engine);
+    assert_eq!(engine.mode, Mode::Stopped);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        2
+    );
 }
 
 #[tokio::test]

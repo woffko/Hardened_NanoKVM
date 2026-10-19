@@ -23,6 +23,8 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS);
 
+#[path = "app_recovery_boundary.rs"]
+pub(super) mod app_recovery;
 #[path = "backend_policy.rs"]
 pub(super) mod backend_policy;
 #[path = "boot_activation.rs"]
@@ -422,6 +424,10 @@ impl Store {
             )
             .map_err(|_| Error::Io)?
             .into();
+            // Exclusively created inode only: restrictive inherited umask must
+            // not publish an unreadable native fence. Existing state is never
+            // chmod-repaired or selected as a temporary fallback.
+            rustix::fs::fchmod(&file, Mode::RUSR | Mode::WUSR).map_err(|_| Error::Io)?;
             #[cfg(test)]
             self.inject(Step::Created)?;
             let m = file.metadata()?;

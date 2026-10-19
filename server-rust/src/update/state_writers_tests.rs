@@ -35,6 +35,26 @@ use std::{
 };
 
 const LIMIT: Duration = Duration::from_secs(5);
+
+#[test]
+fn synchronous_recovery_drain_retains_both_exclusions_without_a_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let writers = gate(root.path());
+    let active = writers.account().unwrap();
+    assert!(matches!(writers.try_drain(), Err(AppError::Conflict(_))));
+    // Failed activity acquisition must not strand the admission exclusion.
+    drop(writers.lock(Domain::WriterAdmission, true).unwrap());
+    drop(active);
+    let drain = writers.try_drain().unwrap();
+    for domain in [Domain::WriterAdmission, Domain::WriterActivity] {
+        assert!(matches!(writers.lock(domain, true), Err(LockError::Busy)));
+    }
+    assert!(writers.configuration().is_err());
+    drop(drain);
+    drop(writers.account().unwrap());
+    drop(writers.configuration().unwrap());
+}
+
 fn gate(path: &Path) -> Arc<StateWriters> {
     Arc::new(StateWriters::for_test_parent(File::open(path).unwrap()))
 }

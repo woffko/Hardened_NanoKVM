@@ -221,6 +221,15 @@ fn check_production_update_fence() {
             // A denied admission must release the kernel guard, not leak it.
             drop(ProcessLock::acquire().unwrap());
         }
+        if phase != 2 {
+            let app = Path::new("/etc/kvm/application-slot/current/state");
+            let before = fs::read(app).unwrap();
+            assert!(matches!(
+                crate::update::app_slot::recover(),
+                Err(crate::update::app_slot::SlotError::Busy)
+            ));
+            assert_eq!(fs::read(app).unwrap(), before);
+        }
     }
     // UpdateEX is available after installer loss; it is not closure proof for
     // the independently owned trial runtime in this same kernel boot.
@@ -257,8 +266,8 @@ fn check_production_update_fence() {
         Err(crate::update::app_slot::SlotError::Busy)
     ));
     assert_eq!(fs::read(app.join("state")).unwrap(), before);
-    // A new boot epoch may run guarded rollback. This does not retire the
-    // journal, assert runtime health, or simulate an actual power cut.
+    // A synthetic prior epoch may run guarded rollback and exact archival.
+    // This does not assert runtime health or simulate an actual power cut.
     fs::remove_file(directory.join(".state.next")).unwrap();
     let previous = b"00000000-0000-4000-8000-000000000001";
     assert_ne!(&bytes[8..44], previous);
@@ -271,7 +280,38 @@ fn check_production_update_fence() {
         crate::update::app_slot::Status::Transaction(crate::update::app_slot::Phase::RolledBack)
     );
     assert_eq!(fs::metadata("/kvmapp").unwrap().ino(), old);
-    assert_eq!(fs::read(directory.join("state")).unwrap(), bytes);
+    let native = fs::read(directory.join("state")).unwrap();
+    assert_eq!(&native[8..44], &boot[..36]);
+    assert_eq!(native[44], 2);
+    assert_eq!(
+        crate::update::app_slot::status().unwrap(),
+        crate::update::app_slot::Status::NoTransaction
+    );
+    let transaction: [u8; 16] = before[16..32].try_into().unwrap();
+    let snapshot = crate::update::app_slot::job_status(transaction)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.phase, crate::update::app_slot::Phase::RolledBack);
+    assert!(snapshot.archived);
+    // Even with no current and an otherwise valid history record, a torn
+    // recovery intent cannot become NoTransaction/bootstrap permission.
+    let next = Path::new("/etc/kvm/application-slot/.recovery.next");
+    let history = Path::new("/etc/kvm/application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transaction)))
+        .join("state");
+    let archived = fs::read(&history).unwrap();
+    let native_before = fs::read(directory.join("state")).unwrap();
+    fs::write(next, b"torn recovery receipt").unwrap();
+    fs::set_permissions(next, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(crate::update::app_slot::status().is_err());
+    assert!(crate::update::app_slot::boot_gate().is_err());
+    assert!(crate::update::app_slot::recover().is_err());
+    assert!(ensure_installed().is_err());
+    assert!(app_bootstrap::ensure_installed().is_err());
+    assert!(fs::read_dir("/usr/libexec").unwrap().next().is_none());
+    assert_eq!(fs::read(next).unwrap(), b"torn recovery receipt");
+    assert_eq!(fs::read(history).unwrap(), archived);
+    assert_eq!(fs::read(directory.join("state")).unwrap(), native_before);
 }
 
 #[test]

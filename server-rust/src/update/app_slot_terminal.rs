@@ -37,6 +37,16 @@ impl AcceptedInstall {
 }
 
 impl Store {
+    pub(super) fn retire_recovered(
+        &self,
+        record: &Record,
+        _native: &crate::native_owner::broker::FencedAppRecovery,
+    ) -> Result<JobStatus> {
+        // This borrow can only come from a retained native lifetime lease with
+        // durable current-boot Stopping, not from a public status or phase.
+        self.retire(record)
+    }
+
     fn retire(&self, record: &Record) -> Result<JobStatus> {
         if !matches!(record.phase, Phase::Committed | Phase::RolledBack)
             || self.record()? != *record
