@@ -641,7 +641,12 @@ Terminal archival now also persists a fixed-size [history order and retention
 pins](security-app-slot-recovery.md#terminal-archival-and-per-transaction-observation)
 under that same retained ownership. The baseline is the first enrolled source
 identity, not a health inference; rollback does not replace the previous fallback.
-No history deletion, payload-expiry promise or bounded-GC completion follows.
+Separate [inactive payload pruning](security-app-slot-recovery.md#inactive-payload-pruning)
+now uses that retained owner, a complete manifest, quarantine and durable per-
+unlink cursor; failures retain the owner. Historical receipts remain queryable
+with explicit payload availability. Bounded receipt expiry/cutoff, user-state
+migration and runtime/physical acceptance are still required; this is not full
+GC completion or permission to activate the ordinary updater.
 
 The [native owner component](security-native-owner.md) supplies separate-process
 child-tree Stop/reap and sibling-controller drain machinery. Moving its launch

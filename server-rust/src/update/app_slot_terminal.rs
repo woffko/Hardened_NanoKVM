@@ -12,6 +12,9 @@ pub struct JobStatus {
     pub version: String,
     /// Canonical namespace observation, not proof of physical durability/health.
     pub archived: bool,
+    /// True only for an observed exact inactive payload. False requires a
+    /// validated expiry receipt, never a missing pathname or a health guess.
+    pub inactive_payload_retained: bool,
 }
 
 fn summary(record: Record, archived: bool) -> JobStatus {
@@ -20,6 +23,7 @@ fn summary(record: Record, archived: bool) -> JobStatus {
         phase: record.phase,
         version: record.version,
         archived,
+        inactive_payload_retained: true,
     }
 }
 
@@ -165,7 +169,10 @@ fn archived_job(
     {
         return Err(SlotError::Invalid);
     }
-    Ok(Some(summary(record, true)))
+    let retained = super::history::archived_payload(&archived, &record, device, uid)?;
+    let mut status = summary(record, true);
+    status.inactive_payload_retained = retained;
+    Ok(Some(status))
 }
 
 fn job_at(

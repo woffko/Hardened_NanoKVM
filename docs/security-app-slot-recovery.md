@@ -302,9 +302,10 @@ synthetic boundary/counter cases and private namespace tmpfs low-block,
 low-inode, read-only and successful small-archive scenarios. They neither fill
 the host disk nor prove target ext4/power-loss acceptance.
 
-The check never deletes staging or history to manufacture a PASS. Bounded
-history retention/GC still requires its own durable policy, exact baseline/
-fallback authority, protected pruning journal and interruption handling. App
+The check never deletes staging or history to manufacture a PASS. Separate
+inactive-payload pruning below uses retained lifetime authority and its own
+protected journal. Bounded receipt expiry/cutoff and full GC acceptance remain
+required. App
 Committed, archived status, mtime/UUID order and PID absence do not authorize
 deleting a known fallback. The ordinary app API is still legacy/unaccepted.
 
@@ -338,9 +339,9 @@ be silently enrolled; it stays preserved and needs an explicit migration policy.
 This is development-only state: it is not a requirement imposed on published
 legacy RC12 assets, nor acceptance of the still-legacy ordinary app API.
 
-Bounded receipt retention, payload expiry, baseline promotion policy and actual
-descriptor-relative journaled pruning are still required. History is not yet
-deleted or bounded by these ordering records; the space guard is not GC.
+Inactive payload expiry now has a separate journaled path below. Bounded receipt
+retention/cutoff, baseline health/promotion policy and full GC acceptance remain
+required; the order records and advisory space guard alone are not GC.
 
 An acknowledged `Committed` or fully joined `RolledBack` owner now attempts
 terminal archival before releasing install admission. Only those typed owners
@@ -354,11 +355,12 @@ directory identity. It syncs the terminal record and parents, then renames
 `RENAME_NOREPLACE`. The archived record and directory identity are checked again,
 then the archive directory and both rename parents are synced. Newly created
 history is mode0700 independently of root's umask; unsafe existing history is
-refused, never chmod-repaired. No app tree or temporary evidence is deleted.
-Committed history retains the exact old slot; rollback history retains the new
-candidate, while `/kvmapp` remains the selected live inode.
+refused, never chmod-repaired. The archival rename does not delete the current
+transaction's app trees or temporary evidence. Committed history initially
+retains the old slot and rollback history the new candidate; older unpinned
+payloads may later expire through the separate path below.
 
-Only successful archival releases the store/update/writer exclusions and allows
+Only completed pruning and successful archival release the store/update/writer exclusions and allow
 another prepared transaction. Any collision or ambiguous I/O returns the whole
 terminal owner. The Engine remains Uncertain and does not restart native writers,
 automatically retry retirement, or roll back a canonically Committed candidate.
@@ -389,16 +391,66 @@ job API must compose this snapshot with the retained owner/failure lifecycle;
 it must not report success merely from either field. No HTTP endpoint or helper
 CLI selector is added by this read API.
 
-Host tests cover two successive Engine installs with distinct queryable results,
+Host tests cover three successive Engine installs with distinct queryable results,
 both typed release failures and explicit retries, both retained Engine terminal
 owners on foreign archive collisions, and frontend-death commit archival.
 The real fixed-root sender/receiver fixture reads the public per-ID snapshot
 during exclusive ownership and after rollback archival. File-layer tests inject
-I/O errors and actual SIGKILL at five archival boundaries for both terminal
-phases, retaining the exact descriptor for retry; they do not simulate fresh-boot
+I/O errors and actual SIGKILL at thirteen archival/order boundaries for both
+terminal phases and initial/subsequent heads, retaining the exact descriptor for
+retry; they do not simulate fresh-boot
 authority or physical power-loss/write-cache behavior. Foreign/symlinked paths,
 special/oversized/linked records and mismatched context are rejected without
 deleting evidence. These tests do not complete WP-04/C1 or target acceptance.
+
+### Inactive payload pruning
+
+Before advancing the terminal head or archiving the current transaction, its
+retained native/update/store/writer owner may retire older inactive payloads.
+It follows the exact protected predecessor chain, validates every receipt and
+archive name, and preserves baseline, fallback, live and both current app
+identities. UUID order, time, phase alone and root peer identity do not authorize
+this operation. Unknown archives, extra archive-level evidence, unsupported
+types, unsafe ownership/modes, hardlinks and mount crossings refuse.
+
+The deletion unit is the **whole obsolete private app-slot payload**, not an
+arbitrary user directory. Its bounded inventory records exact paths, types,
+file sizes/modes, device/inode and parent identity. User-state ownership and
+migration must be accepted before enabling the new updater: a valid inventory
+does not prove that account/profile/workspace data was preserved elsewhere.
+The ordinary app API is still legacy/unaccepted; no device acceptance is claimed.
+
+The immutable manifest is bound to both current and victim order receipts.
+Only complete fsynced anonymous files are linked into the protected namespace.
+The payload moves with NOREPLACE to a fixed quarantine in its own archive.
+For each deterministic postorder member, a durable pending cursor precedes
+unlink; the checked parent's fsync precedes cursor advancement. Recovery
+revalidates the remaining tree and permits absence only for the one pending
+member. Missing/foreign/corrupt progress and substitutions refuse without repair.
+No recursive pathname deletion or collision overwrite is used.
+
+After the entire payload and its parent are durable, a protected expiry receipt
+is published and the current manifest/cursor are removed. The historical state
+and order receipts remain. `inactive_payload_retained=false` requires that valid
+expiry and absence of both payload/quarantine; a missing pathname alone is an
+error, not expiry. Reads during pruning may return Busy rather than a false
+availability result. Expired old inode numbers do not claim or clear a new app's
+current pins when the filesystem reuses them.
+
+Inventory limits are 8193 nodes, depth64, 4096-byte paths, 32 MiB aggregate path
+bytes and 256 MiB plus64 KiB file data. Validation streams manifests and borrows
+their paths instead of keeping duplicate full inventories. Chain validation
+currently has a128-operation safety backstop; new issuance refuses at that bound.
+This is **not** a final receipt-retention policy: protected cutoff/anchor and
+bounded receipt expiry are still required before release, along with actual
+ENOSPC/I/O, mutable-state, native/runtime and physical power-cut acceptance.
+
+Host tests cover exact deletion and retained pins/receipts, CRC/schema failures,
+per-step process death/I/O recovery, unknown input/substitution, non-UTF8 names,
+hardlinks/FIFO and an actual private-namespace bind mount. Engine tests prove a
+GC error retains the terminal owner and exclusions until an explicit retry;
+repairing the fixture fault alone does not release it. These are not physical
+reboot/write-cache or full updater acceptance results.
 
 ### Explicit live-terminal archival retry
 
@@ -409,7 +461,7 @@ no path, transaction selector, phase, force option, archive or executable.
 It addresses only the **current retained live** Committed/RolledBack owner;
 it does not recreate an owner after daemon death or from a journal snapshot.
 
-Retry can only repeat that owner's exact archival/sync/release operation. It
+Retry can only repeat that owner's exact retirement/prune/archival/sync/release operation. It
 cannot install, publish, commit, cancel, roll back or repair foreign objects.
 The operator must first inspect and resolve the actual I/O/space/path fault;
 the command itself never deletes a collision. A denied or failed retry retains
@@ -426,7 +478,7 @@ This is the same guard used by ordinary scope launch admission; it is not a
 health receipt or a reset of the group. PID disappearance/direct reap alone
 cannot clear it.
 
-Ok/Running from this operation means exact archival and release completed and
+Ok/Running from this operation means exact retirement, archival and release completed and
 ordinary supervision may proceed; it does not mean native/backend health or
 device acceptance. The action is current-owner administration, not a per-ID
 durable HTTP job API. No S02/S95/watchdog path automatically invokes it.

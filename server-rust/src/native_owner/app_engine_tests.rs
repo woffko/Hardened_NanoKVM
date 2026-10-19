@@ -239,9 +239,88 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
             let earlier = app_slot::job_status_fixture(root, prior).unwrap().unwrap();
             assert!(earlier.archived);
             assert_eq!(earlier.phase, app_slot::Phase::Committed);
+            assert_eq!(earlier.inactive_payload_retained, sequence == 2);
         }
         previous = Some(transaction);
     }
+    shutdown(&mut engine);
+}
+
+#[tokio::test]
+async fn payload_prune_failure_retains_full_terminal_owner_until_explicit_root_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut engine = engine(root);
+    start_all(&mut engine);
+    let mut transactions = Vec::new();
+    for _ in 0..2 {
+        let (_, transaction) = accept(&mut engine, root).await;
+        until(|| {
+            engine.tick();
+            engine.install.is_none()
+                && engine.mode == Mode::Running
+                && engine.roles == [2; 2]
+                && engine.backend_status == Some(Status::Running)
+        });
+        transactions.push(transaction);
+    }
+    let victim = root
+        .join("application-slot/history")
+        .join(format!("{:032x}", u128::from_be_bytes(transactions[1])));
+    let collision = victim.join("payload-expired");
+    fs::write(&collision, b"foreign expiry evidence").unwrap();
+    let (_, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Uncertain
+    });
+    assert!(matches!(
+        engine.install.as_ref().unwrap().owner,
+        InstallOwner::Committed(_)
+    ));
+    for _ in 0..3 {
+        engine.tick();
+        assert_excluded(root);
+        assert_eq!(engine.mode, Mode::Uncertain);
+        assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+        assert!(victim.join("old").exists());
+        assert_eq!(fs::read(&collision).unwrap(), b"foreign expiry evidence");
+        assert_eq!(
+            engine.request(2, Operation::EnsureKvm).code,
+            Code::Uncertain
+        );
+    }
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Uncertain
+    );
+    fs::remove_file(&collision).unwrap();
+    engine.tick();
+    assert_excluded(root);
+    assert!(engine.install.is_some());
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Ok
+    );
+    until(|| {
+        engine.tick();
+        engine.install.is_none()
+            && engine.mode == Mode::Running
+            && engine.roles == [2; 2]
+            && engine.backend_status == Some(Status::Running)
+    });
+    let status = app_slot::job_status_fixture(root, transactions[1])
+        .unwrap()
+        .unwrap();
+    assert!(status.archived && !status.inactive_payload_retained);
+    assert!(
+        app_slot::job_status_fixture(root, transactions[0])
+            .unwrap()
+            .unwrap()
+            .inactive_payload_retained
+    );
+    assert!(!victim.join("old").exists());
+    assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
     shutdown(&mut engine);
 }
 

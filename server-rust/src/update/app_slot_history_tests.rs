@@ -6,7 +6,7 @@ fn name(transaction: [u8; 16]) -> String {
     format!("{:032x}", u128::from_be_bytes(transaction))
 }
 
-fn fixture(phase: Phase) -> Fixture {
+pub(super) fn fixture(phase: Phase) -> Fixture {
     Fixture::new(
         phase,
         if phase == Phase::Committed {
@@ -23,7 +23,7 @@ fn parent(fixture: &Fixture) -> PathBuf {
 
 // File-layer composition only; actual native retirement is covered by the
 // terminal crash matrix and independent Engine tests, not inferred here.
-fn archive(fixture: &Fixture) -> Order {
+pub(super) fn archive(fixture: &Fixture) -> Order {
     let store = fixture.store(true).unwrap();
     register(&store, &fixture.record).unwrap();
     let history = parent(fixture).join("history");
@@ -97,14 +97,27 @@ fn mixed_terminal_chain_keeps_source_baseline_and_previous_committed_fallback() 
             record.encode().unwrap()
         );
         assert_eq!(fs::read(directory.join(ORDER)).unwrap().len(), BYTES);
-        assert_eq!(
-            inactive.metadata().unwrap().ino(),
-            if record.phase == Phase::Committed {
-                record.old.inode
-            } else {
-                record.new.inode
-            }
-        );
+        let expected = if record.phase == Phase::Committed {
+            record.old
+        } else {
+            record.new
+        };
+        let retained = archived_payload(
+            &File::open(&directory).unwrap(),
+            &record,
+            expected.device,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+        if retained {
+            assert_eq!(inactive.metadata().unwrap().ino(), expected.inode);
+        } else {
+            assert!(!inactive.exists());
+            assert!(directory.join("payload-expired").exists());
+        }
+        if [head.baseline, head.fallback, head.live].contains(&expected) {
+            assert!(retained);
+        }
     }
 }
 

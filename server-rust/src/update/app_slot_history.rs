@@ -1,5 +1,5 @@
-//! Protected terminal ordering and retention pins, not health or prune authority.
-//! No history scanning/adoption, code execution, baseline promotion or deletion.
+//! Protected terminal order and pins, not health or independent prune authority.
+//! Payload pruning additionally requires the caller's retained lifetime owner.
 use super::*;
 use rustix::fs::{PROC_SUPER_MAGIC, fstatfs, linkat};
 use std::os::fd::AsRawFd;
@@ -10,6 +10,9 @@ const ORDER: &str = "order";
 const BYTES: usize = 256;
 const PREFIX: usize = BYTES - 32;
 const MAGIC: &[u8; 8] = b"NKAPPH01";
+
+#[path = "app_slot_history_prune.rs"]
+mod prune;
 
 #[derive(Clone, PartialEq, Eq)]
 struct Order {
@@ -260,6 +263,7 @@ pub(super) fn require_preparation(
     }
     match load(parent, HEAD, device, uid)? {
         Some(head) => {
+            prune::check_head_capacity(&head.order)?;
             archived(&head.order, parent, device, uid)?;
             let live =
                 restore_fs::open_beneath(rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)?;
@@ -317,7 +321,7 @@ fn link_complete(parent: &File, name: &str, order: &Order, role: &str) -> Result
 }
 
 /// Called only by canonical terminal retirement while its native/update/store/
-/// writer guards are retained. Recording an order never authorizes tree removal.
+/// writer guards are retained. An order alone never authorizes tree removal.
 pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
     if store.record()? != *record {
         return Err(SlotError::Invalid);
@@ -351,6 +355,7 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
     #[cfg(test)]
     point("history-order-published")?;
     if previous.as_ref().is_some_and(|head| head.order == order) {
+        prune::require_absent(store)?;
         if !absent(parent, NEXT)? {
             return Err(SlotError::Invalid);
         }
@@ -358,6 +363,12 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
         parent.sync_all()?;
         return Ok(());
     }
+    prune::finish(
+        store,
+        &order,
+        previous.as_ref().map(|head| &head.order),
+        record,
+    )?;
     match load(parent, NEXT, store.device, store.uid)? {
         Some(next) if next.order == order => next.file.sync_all()?,
         Some(_) => return Err(SlotError::Invalid),
@@ -384,6 +395,42 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
     #[cfg(test)]
     point("history-head-published")?;
     Ok(())
+}
+
+/// Diagnostic payload availability, not health/rollback permission. Legacy
+/// archives remain readable, but cannot manufacture an expiry without ORDER.
+pub(super) fn archived_payload(
+    directory: &File,
+    record: &Record,
+    device: u64,
+    uid: u32,
+) -> Result<bool> {
+    match load(directory, ORDER, device, uid)? {
+        Some(saved) => {
+            saved.order.check_directory(directory, device, uid)?;
+            prune::retained(directory, &saved.order, record, uid)
+        }
+        None => {
+            let name = match record.phase {
+                Phase::Committed => "old",
+                Phase::RolledBack => "new",
+                _ => return Err(SlotError::Invalid),
+            };
+            if !absent(directory, "payload-expired")? || !absent(directory, ".payload-pruning")? {
+                return Err(SlotError::Invalid);
+            }
+            let payload = open_optional(directory, name)?.ok_or(SlotError::Invalid)?;
+            let expected = if record.phase == Phase::Committed {
+                record.old
+            } else {
+                record.new
+            };
+            if Identity::of(&payload, device, uid)? != expected {
+                return Err(SlotError::Invalid);
+            }
+            Ok(true)
+        }
+    }
 }
 
 #[cfg(test)]
