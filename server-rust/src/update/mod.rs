@@ -3,6 +3,7 @@ pub mod app_slot;
 pub(crate) mod app_stage;
 pub mod archive;
 pub mod keys;
+pub mod native_bootstrap;
 pub mod operation;
 mod operation_lock;
 pub mod raw_transport;

@@ -120,6 +120,11 @@ for verifier in application system_update; do
 done
 grep -Fq 'run_allowed_owned(AllowedCommand::OpenSsl, arguments, timeout, self)' \
 	"$ROOT/server-rust/src/update/trust_snapshot.rs"
+grep -Fq 'native_bootstrap::prepare_boot_support()' "$ROOT/server-rust/src/main.rs"
+grep -Fq 'install_runtime_boot_scripts(boot_support.is_some())?;' "$ROOT/server-rust/src/main.rs"
+grep -Fq 'drop(boot_support);' "$ROOT/server-rust/src/main.rs"
+grep -Fq 'super::native_bootstrap::check_installed()?;' \
+	"$ROOT/server-rust/src/update/app_bootstrap.rs"
 
 if [ -d "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib" ]; then
 	test ! -e "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib/libz.so"

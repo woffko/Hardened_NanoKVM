@@ -71,11 +71,17 @@ pub fn embedded_recovery() -> io::Result<&'static [u8]> {
 pub fn ensure_installed() -> io::Result<()> {
     let image = embedded_recovery()?;
     let admission = ProcessLock::acquire().map_err(io::Error::other)?;
+    ensure_with_admission(image, &admission)
+}
+
+// Only callers with compile-bound image bytes and the same live update lease
+// may compose app/native bootstrap without an inter-family admission gap.
+pub(super) fn ensure_with_admission(image: &[u8], admission: &ProcessLock) -> io::Result<()> {
     let status = app_slot::status().map_err(io::Error::other)?;
     let root = restore_fs::open_root(Path::new("/"), true)?;
     let _boot_parent = boot_parent_at(&root, 0)?;
     let parent = fixed_parent(status == app_slot::Status::NoTransaction)?;
-    ensure_at(&parent, image, 0, status, V1_PREDECESSORS, &admission)
+    ensure_at(&parent, image, 0, status, V1_PREDECESSORS, admission)
 }
 
 /// The caller already owns app/system update admission. Read-only prerequisite
@@ -92,6 +98,7 @@ pub fn check_before_legacy_install() -> io::Result<()> {
     parent.sync_all()?;
     let root = restore_fs::open_root(Path::new("/"), true)?;
     check_boot_scripts_at(&root, 0)?;
+    super::native_bootstrap::check_installed()?;
     Ok(())
 }
 
@@ -128,7 +135,7 @@ fn fixed_parent(create: bool) -> io::Result<File> {
     parent_at(&root, 0, create)
 }
 
-fn parent_at(root: &File, uid: u32, create: bool) -> io::Result<File> {
+pub(super) fn parent_at(root: &File, uid: u32, create: bool) -> io::Result<File> {
     let device = root.metadata()?.dev();
     protected_directory(root, uid, device)?;
     let usr = restore_fs::open_beneath(root, "usr", OFlags::RDONLY | OFlags::DIRECTORY)?;
@@ -231,7 +238,12 @@ fn finish_existing(
     Ok(())
 }
 
-fn existing(parent: &File, name: &str, image: &[u8], uid: u32) -> io::Result<Option<File>> {
+pub(super) fn existing(
+    parent: &File,
+    name: &str,
+    image: &[u8],
+    uid: u32,
+) -> io::Result<Option<File>> {
     let Some((mut file, inode)) = open_existing(parent, name, image.len(), uid)? else {
         return Ok(None);
     };
@@ -449,4 +461,4 @@ mod tests;
 
 #[cfg(all(test, feature = "app-bootstrap-bound-test-fixture"))]
 #[path = "app_bootstrap_root_tests.rs"]
-mod root_tests;
+pub(super) mod root_tests;

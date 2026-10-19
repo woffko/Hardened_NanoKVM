@@ -21,9 +21,10 @@ fn frame(runtime: NativeRuntime) -> &'static [u8] {
     std::hint::black_box(bytes)
 }
 
-pub fn check_embedded() -> io::Result<()> {
-    for runtime in restore_binding::NATIVE_RUNTIMES {
-        restore_binding::validate_native(frame(runtime), runtime).map_err(|_| {
+pub(crate) fn image(runtime: NativeRuntime) -> io::Result<&'static [u8]> {
+    restore_binding::validate_native(frame(runtime), runtime)
+        .map(|binding| binding.image)
+        .map_err(|_| {
             // Build-input names are diagnostics, never runtime env selectors.
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -33,7 +34,12 @@ pub fn check_embedded() -> io::Result<()> {
                     runtime.variable()
                 ),
             )
-        })?;
+        })
+}
+
+pub fn check_embedded() -> io::Result<()> {
+    for runtime in restore_binding::NATIVE_RUNTIMES {
+        let _ = image(runtime)?;
     }
     Ok(())
 }

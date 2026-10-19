@@ -66,18 +66,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
     config.log_runtime_warnings();
     #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
-    let independent_ready = match nanokvm_rust_server::update::app_bootstrap::ensure_installed() {
-        Ok(()) => true,
+    let boot_support = match nanokvm_rust_server::update::native_bootstrap::prepare_boot_support() {
+        Ok(support) => Some(support),
         Err(error) => {
             // Do not install new fail-closed gates before their static helper
             // exists. Preserve management for diagnosis; app install rechecks.
-            warn!(%error, "independent app recovery unavailable; app installs will refuse");
-            false
+            warn!(%error, "independent update/native support unavailable; boot publication withheld");
+            None
         }
     };
     #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
-    let independent_ready = false;
-    install_runtime_boot_scripts(independent_ready)?;
+    let boot_support: Option<nanokvm_rust_server::update::native_bootstrap::BootSupport> = None;
+    install_runtime_boot_scripts(boot_support.is_some())?;
+    drop(boot_support);
     let migration = media::prepare_and_migrate(Path::new("/data"), Path::new(media::MEDIA_ROOT))?;
     if migration.moved > 0 || migration.collisions > 0 {
         info!(

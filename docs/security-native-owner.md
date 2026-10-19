@@ -71,8 +71,10 @@ owner processes. It never installs a subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
 only `/usr/libexec/nanokvm-native-owner --scope <fixed-role>`. The controller
 is compiled and used by the broker component, but has **no S95 switch yet**.
-Legacy app-only installs still need a protected, verified bootstrap for this
-independent path; a mutable app copy is not an executable-path fallback.
+Startup now bootstraps the four independent native files from compile-bound
+backend bytes before publishing consumer scripts. This does not establish
+ownership of live legacy processes; a mutable app copy is not an executable-path
+fallback. Native service activation and live-legacy transition are still gated.
 
 `begin_drain` moves the complete launch capability into a non-cloneable `Drain`
 before sending Stop to every cell. While retained, no `Group::start` capability
@@ -320,6 +322,41 @@ duplicate, substituted, corrupted and unsafe helper cases. These gates are not
 app/full pipeline reproducibility, signature provenance, native target execution,
 legacy bootstrap or first-restart evidence. Historical RC12 S95 bytes and the
 private app archive's compatibility boot profile remain unchanged.
+
+## Fixed-root file bootstrap
+
+`update::native_bootstrap::prepare_boot_support` validates the complete app/native
+payload set before mutation, then acquires one shared update lease. App recovery
+and native bootstrap use that same admission. A non-cloneable `BootSupport`
+retains it until main finishes publishing the compile-bound consumer scripts.
+If preparation fails, main withholds those scripts while preserving management.
+
+Native canonical files must match exact embedded bytes, root UID/GID, mode 0755,
+single-link regular-file identity and the protected same-rootfs parent. Existing
+parents forbid shared writes and all special bits; symlink/mount crossings are
+rejected. Parent group ownership supplies no authority. All existing roles are
+checked before any missing role is staged. Missing files are allowed only with
+no app-slot transaction; an existing transaction allows exact full-family
+verification only. Unknown or older native binaries are never replaced. A
+directed old-native upgrade still needs retained-owner and journal compatibility
+review, not a version string or a matching runtime manifest.
+
+Missing files are written to fresh exclusive random rootfs names, chmodded and
+file-synced, then published with NOREPLACE and directory sync. Interruption may
+leave an exact subset and staged evidence. Retry validates existing members and
+finishes missing names; the complete family is rechecked before success. Staged
+evidence is not a fallback executable and is not automatically deleted. The app
+install prerequisite separately requires the complete exact family under its
+already-owned update admission; it never repairs missing support.
+
+Host tests cover every partial-family mask and journal phase, foreign late
+members, unsafe file/parent metadata, aliases and FIFO input. The explicit
+`server-rust/scripts/test-native-bootstrap-root.sh` gate runs real fixed-root
+entries in disposable namespace/chroot children with actual embedded RV64 bytes
+as data. It checks app/native prerequisite composition, busy admission, corrupt
+decoded state and SIGKILL at staging/publication/returned-guard boundaries.
+No helper or service is executed by these fixtures. They are not S95/legacy
+process transition, target rootfs, native quiescence or update acceptance.
 
 Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle

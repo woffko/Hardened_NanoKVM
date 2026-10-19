@@ -242,8 +242,12 @@ still cannot recover a missing app slot.
 ### Independent publication and app-only bridge
 
 On linked RV64 startup, after closing legacy USB storage and loading config,
-the backend attempts fixed-rootfs bootstrap under the shared app/system
-admission lock. All of `/`, `/usr` and `/usr/libexec` must be root-owned,
+the backend prepares app recovery and all four native executables under one
+shared app/system admission lock. A retained `BootSupport` guard holds admission
+through the subsequent compile-bound consumer-script publication, not merely
+through the helper rename. Missing/invalid native support withholds publication;
+it is not an app-slot success or a native-process ownership receipt.
+All of `/`, `/usr` and `/usr/libexec` must be root-owned,
 non-group/other-writable and on the same rootfs, with symlink/mount crossings
 rejected. A missing `libexec` directory may be created under the protected `/usr`;
 no existing directory or helper is chmod-repaired. Publication uses only the
@@ -339,8 +343,8 @@ select this retained-input gate.
 
 If the backend has already launched, a helper-bootstrap failure alone is logged
 without terminating it, preserving authenticated management for diagnosis.
-The target app install API independently rechecks the exact helper and critical
-consumer scripts, and requires no app-slot transaction before its first legacy
+The target app install API independently rechecks the exact app helper, complete
+native family and critical consumer scripts, and requires no app-slot transaction before its first legacy
 slot/backup mutation, while
 already owning shared update admission. This is an installation prerequisite,
 not a durable receipt or a claim that the remaining legacy swap is crash-safe.

@@ -574,6 +574,11 @@ presence does not close the following production boundaries.
   transaction authority. A callback lease alone is still not proof that every
   process it started has been reaped. Raw writer handoff, remaining configuration
   cancellation/permit joining and target service behavior remain separate gates.
+- Startup app/native helper preparation now uses one shared update admission
+  retained by `BootSupport` through critical consumer-script publication. Native
+  support is compile-bound, exact-checked and never replaced by unknown bytes;
+  a failed preparation withholds those scripts. This is file-bootstrap ownership,
+  not proof of native shutdown, legacy-process transition or a raw-writer lease.
 - Other startup writes, independent native network producers, active terminal,
   scripts, optional-app workers and other configuration writers do not yet
   acquire the shared quiescence permit. Account/Config/firewall/time/syslog/network

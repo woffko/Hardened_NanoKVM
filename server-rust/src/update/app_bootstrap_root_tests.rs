@@ -229,6 +229,10 @@ struct Probe {
     stderr: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
 }
 
+pub(in crate::update) fn run_probe(command: &mut Command, timeout: Duration) -> io::Result<Output> {
+    Probe::spawn(command, None).wait(timeout)
+}
+
 impl Probe {
     fn spawn(command: &mut Command, ready: Option<mpsc::SyncSender<()>>) -> Self {
         let child = command
