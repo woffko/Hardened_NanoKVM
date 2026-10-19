@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::{
     AppError, Result,
@@ -33,6 +33,9 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 #[derive(Clone)]
 pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
+    pub(crate) app_job_reads: Arc<Semaphore>,
+    #[cfg(test)]
+    pub(crate) app_job_test_root: Option<Arc<std::path::PathBuf>>,
     pub writers: Arc<StateWriters>,
     pub firewall: Arc<FirewallController>,
     pub config: Arc<Config>,
@@ -93,6 +96,9 @@ impl AppState {
 
         Self {
             updates: Arc::new(UpdateCoordinator::default()),
+            app_job_reads: Arc::new(Semaphore::new(4)),
+            #[cfg(test)]
+            app_job_test_root: None,
             writers,
             firewall: Arc::new(FirewallController::default()),
             config: Arc::new(config),

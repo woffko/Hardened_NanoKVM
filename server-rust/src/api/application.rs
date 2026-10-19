@@ -31,6 +31,10 @@ use crate::{
     },
 };
 
+#[path = "application_job.rs"]
+mod job;
+pub use job::status as job_status;
+
 const APP_DIR: &str = "/kvmapp";
 const BACKUP_DIR: &str = "/root/old";
 const APP_VERSION_FILE: &str = "/kvmapp/version";

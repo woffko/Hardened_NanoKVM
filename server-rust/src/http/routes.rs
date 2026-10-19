@@ -34,6 +34,10 @@ pub fn build(state: AppState) -> Router {
             get(application::update_status),
         )
         .route(
+            "/api/application/update/jobs/{transaction}",
+            get(application::job_status),
+        )
+        .route(
             "/api/application/update/offline",
             post(application::offline_update).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
         )

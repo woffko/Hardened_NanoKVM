@@ -503,6 +503,42 @@ ordinary diagnostics; these remain distinct from health and durable HTTP-job
 acceptance. Host fault and long-history tests pass; this development path is
 not deployed and has not passed target or complete updater acceptance.
 
+### Read-only transaction status (development)
+
+Authenticated `GET /api/application/update/jobs/{transaction}` reads one exact
+canonical app-slot transaction. Its ID is 32 lowercase hexadecimal characters,
+nonzero; it is not a path or an execution capability. The production reader
+uses only the fixed protected root, never a request-selected directory or a
+history scan. The endpoint does not acquire update/writer admission or mutate
+the app, and it cannot install, cancel, retry or promote a candidate.
+
+HTTP 200 / code 0 describes successful **lookup**, not successful installation:
+
+- `state: observed` carries `transactionId`, canonical `phase`, `version`,
+  `archived` and `inactivePayloadRetained`. Even `committed` is an observed record,
+  not a new assertion of runtime/device health; `archived` is namespace observation.
+- `state: busy` means a safe observation is temporarily unavailable. No partial
+  phase or success is inferred while a selected receipt is being pruned.
+- `state: unknownOrExpired` covers absent or no-longer-retained receipts. It does
+  not mean that an installation failed or never happened.
+
+Malformed IDs return 400. Four shared read permits bound accepted filesystem
+lookups across cloned server state; excess requests return 429 without waiting
+for admission. A lookup runs outside the async executor and retains its permit
+even if the HTTP waiter disappears, including before the blocking callback starts.
+The accepted work can wait in the runtime's bounded-by-these-permits blocking
+queue; this is not a claim that kernel I/O is preemptible. Corruption, unsafe
+layout, I/O, mismatched identity or a reported worker-join failure returns 503
+with a fixed error, never an inferred absence or private path. A fatal server
+abort produces no response and must not be interpreted as installation failure.
+Responses are `no-store`; the shared API security layer also adds `max-age=0`.
+
+This diagnostic route does not activate the new installer or replace the old
+in-memory `/update/status` snapshot. The still-legacy ordinary POSTs do not yet
+issue canonical job responses, and the current UI is not yet wired to this
+contract. Submission/handoff, reconnect/UI behavior, effective mutable-state
+migration and complete target acceptance remain required before release.
+
 ### Explicit live-terminal archival retry
 
 Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
