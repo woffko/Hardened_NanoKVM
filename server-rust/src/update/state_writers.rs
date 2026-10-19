@@ -1,6 +1,7 @@
 //! Cooperative writer admission/drain. Only enrolled writers are covered;
 //! currently account mutation/legacy seed, Config YAML/startup secret, firewall,
-//! time settings/sync, syslog settings and network settings/cache APIs.
+//! time settings/sync, syslog settings, network settings/cache APIs and bundled
+//! update-trust publication at Rust startup.
 //! Native services remain separate owners.
 //! NOT a coherent device snapshot, service stop, raw-writer ticket or durable crash protocol.
 
@@ -134,6 +135,8 @@ impl WriterPause<'_> {
         Ok(WriterDrain {
             _activity: activity,
             _admission: self.admission,
+            #[cfg(test)]
+            config_path: self.writers.config_path.clone(),
         })
     }
 }
@@ -169,6 +172,36 @@ impl ConfigPermit {
 pub struct WriterDrain {
     _activity: ProcessLock,
     _admission: ProcessLock,
+    #[cfg(test)]
+    config_path: Option<std::path::PathBuf>,
+}
+
+impl WriterDrain {
+    /// Move the barrier into the owned callback, then return it with the result.
+    /// A discarded waiter/result cannot reopen admission while that callback is
+    /// still reading policy. This does not enroll any external/native writer.
+    pub(crate) async fn blocking<T, F>(
+        self,
+        owner: &super::operation::UpdateOwner,
+        operation: &'static str,
+        work: F,
+    ) -> Result<(T, Self)>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> Result<T> + Send + 'static,
+    {
+        owner
+            .blocking(operation, move || {
+                let result = work(&self)?;
+                Ok((result, self))
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_config_path(&self) -> Option<&std::path::Path> {
+        self.config_path.as_deref()
+    }
 }
 
 // On discarded results, cleanup precedes release of the callback's permit.

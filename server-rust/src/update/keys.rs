@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::{AppError, Result};
+use crate::{AppError, Result, update::state_writers::StateWriters};
 
 pub const LEGACY_UPDATE_KEY_ID: &str = "hardened-system-dev";
 pub const LEGACY_TEST_UPDATE_KEY_ID: &str = "hardened-system-test";
@@ -22,7 +22,14 @@ const MAX_UPDATE_PUBLIC_KEY_BYTES: u64 = 64 * 1024;
 const MAX_BUNDLED_UPDATE_KEYS: usize = 64;
 static TRUST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn install_bundled_update_trust(bundled_root: &Path, configured_key: &Path) -> Result<usize> {
+pub fn install_bundled_update_trust(
+    writers: &StateWriters,
+    bundled_root: &Path,
+    configured_key: &Path,
+) -> Result<usize> {
+    // Enroll before reading the bundle and retain admission through policy-last
+    // publication. An app install freeze must exclude this startup writer too.
+    let _permit = writers.configuration()?;
     let bundled_metadata = match fs::symlink_metadata(bundled_root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
@@ -479,6 +486,7 @@ mod tests {
     #[test]
     fn installs_bundled_update_trust_atomically_and_idempotently() {
         let temp = tempfile::tempdir().unwrap();
+        let writers = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
         let bundled = temp.path().join("bundled");
         let runtime = temp.path().join("runtime");
         write_bundled_trust(
@@ -489,7 +497,7 @@ mod tests {
         let configured = runtime.join(LEGACY_UPDATE_PUBLIC_KEY_FILE);
 
         assert_eq!(
-            install_bundled_update_trust(&bundled, &configured).unwrap(),
+            install_bundled_update_trust(&writers, &bundled, &configured).unwrap(),
             3
         );
         assert_eq!(fs::read(&configured).unwrap(), b"legacy");
@@ -512,13 +520,13 @@ mod tests {
             0o644
         );
         assert_eq!(
-            install_bundled_update_trust(&bundled, &configured).unwrap(),
+            install_bundled_update_trust(&writers, &bundled, &configured).unwrap(),
             0
         );
 
         fs::set_permissions(&production, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            install_bundled_update_trust(&bundled, &configured).unwrap(),
+            install_bundled_update_trust(&writers, &bundled, &configured).unwrap(),
             1
         );
         assert_eq!(
@@ -530,6 +538,7 @@ mod tests {
     #[test]
     fn validates_policy_and_sources_before_installing_trust() {
         let temp = tempfile::tempdir().unwrap();
+        let writers = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
         let bundled = temp.path().join("bundled");
         let runtime = temp.path().join("runtime");
         write_bundled_trust(&bundled, b"missing-production-key\n");
@@ -537,7 +546,7 @@ mod tests {
         let configured = runtime.join(LEGACY_UPDATE_PUBLIC_KEY_FILE);
         fs::write(&configured, b"existing-legacy").unwrap();
 
-        assert!(install_bundled_update_trust(&bundled, &configured).is_err());
+        assert!(install_bundled_update_trust(&writers, &bundled, &configured).is_err());
         assert_eq!(fs::read(&configured).unwrap(), b"existing-legacy");
         assert!(!runtime.join(UPDATE_KEY_POLICY_FILE).exists());
     }
@@ -545,6 +554,7 @@ mod tests {
     #[test]
     fn rejects_symlinked_bundled_keys_without_mutating_runtime() {
         let temp = tempfile::tempdir().unwrap();
+        let writers = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
         let bundled = temp.path().join("bundled");
         let runtime = temp.path().join("runtime");
         write_bundled_trust(&bundled, b"hardened-system-prod-2026\n");
@@ -557,7 +567,7 @@ mod tests {
         fs::create_dir(&runtime).unwrap();
         let configured = runtime.join(LEGACY_UPDATE_PUBLIC_KEY_FILE);
 
-        assert!(install_bundled_update_trust(&bundled, &configured).is_err());
+        assert!(install_bundled_update_trust(&writers, &bundled, &configured).is_err());
         assert!(!configured.exists());
         assert!(!runtime.join(UPDATE_KEY_POLICY_FILE).exists());
     }
@@ -565,6 +575,7 @@ mod tests {
     #[test]
     fn atomically_replaces_destination_symlink_without_touching_referent() {
         let temp = tempfile::tempdir().unwrap();
+        let writers = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
         let bundled = temp.path().join("bundled");
         let runtime = temp.path().join("runtime");
         write_bundled_trust(&bundled, b"hardened-system-prod-2026\n");
@@ -578,7 +589,7 @@ mod tests {
         symlink(&sensitive, &destination).unwrap();
         let configured = runtime.join(LEGACY_UPDATE_PUBLIC_KEY_FILE);
 
-        install_bundled_update_trust(&bundled, &configured).unwrap();
+        install_bundled_update_trust(&writers, &bundled, &configured).unwrap();
         assert_eq!(fs::read(&sensitive).unwrap(), b"do-not-touch");
         assert!(
             fs::symlink_metadata(&destination)
@@ -587,5 +598,45 @@ mod tests {
                 .is_file()
         );
         assert_eq!(fs::read(&destination).unwrap(), b"production");
+    }
+
+    #[tokio::test]
+    async fn trust_publication_obeys_configuration_serialization_and_install_freeze() {
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let writers = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
+        // A separate instance opens the same kernel lock namespace, as another
+        // backend startup would. No in-process mutex is the safety boundary.
+        let startup = StateWriters::for_test_parent(File::open(temp.path()).unwrap());
+        let bundled = temp.path().join("bundled");
+        let runtime = temp.path().join("runtime");
+        write_bundled_trust(&bundled, b"hardened-system-prod-2026\n");
+        let configured = runtime.join(LEGACY_UPDATE_PUBLIC_KEY_FILE);
+        let permit = writers.configuration().unwrap();
+        assert!(matches!(
+            install_bundled_update_trust(&startup, &bundled, &configured),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(!runtime.exists());
+        drop(permit);
+        let freeze = writers.drain(Duration::from_secs(5)).await.unwrap();
+        assert!(matches!(
+            install_bundled_update_trust(&startup, &bundled, &configured),
+            Err(AppError::Conflict(_))
+        ));
+        // Even an absent bundle is checked only AFTER writer admission: no
+        // success result may masquerade as publication under a live freeze.
+        assert!(matches!(
+            install_bundled_update_trust(&startup, &temp.path().join("absent"), &configured),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(!runtime.exists());
+        drop(freeze);
+        assert_eq!(
+            install_bundled_update_trust(&startup, &bundled, &configured).unwrap(),
+            3
+        );
+        assert_eq!(fs::read(&configured).unwrap(), b"legacy");
+        drop(writers.drain(Duration::from_secs(5)).await.unwrap());
     }
 }

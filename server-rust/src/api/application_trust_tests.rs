@@ -211,6 +211,58 @@ async fn online_unsigned_lab_permission_is_rechecked_and_is_not_manual_import() 
     assert!(old_config.security.allow_unsigned_updates);
 }
 
+#[tokio::test]
+async fn frozen_app_policy_read_uses_current_disk_config_and_excludes_enrolled_mutation() {
+    use crate::update::{operation::UpdateCoordinator, state_writers::StateWriters};
+    use std::sync::Arc;
+    let fixture = SigningFixture::new();
+    fixture.policy("hardened-system-dev\n");
+    let stored = tempdir().unwrap();
+    let writers = StateWriters::for_test_config(
+        fs::File::open(stored.path()).unwrap(),
+        stored.path().join("server.yaml"),
+    );
+    let mut stale = fixture.config.clone();
+    stale.security.allow_unsigned_updates = true;
+    let permit = writers.configuration().unwrap();
+    stale.write(&permit).unwrap();
+    // A setting changed while the download was in progress. The final read
+    // must not reuse `stale` or acquire a conflicting ConfigPermit.
+    fixture.config.write(&permit).unwrap();
+    drop(permit);
+    let freeze = writers.drain(Duration::from_secs(5)).await.unwrap();
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+    let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+    let (current, freeze) = freeze
+        .blocking(&owner, "fixture frozen app policy", Config::read_frozen)
+        .await
+        .unwrap();
+    assert!(!current.security.allow_unsigned_updates);
+    assert_eq!(current.paths.system_update_public_key, fixture.public);
+    assert!(matches!(
+        writers.configuration(),
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(writers.account(), Err(AppError::Conflict(_))));
+    let latest = latest_for(b"synthetic public archive");
+    let metadata = serde_json::to_vec(&latest).unwrap();
+    let signature = fixture.sign(&metadata);
+    authenticate_app_metadata(metadata, signature, &current)
+        .await
+        .unwrap();
+    let mut unsigned = latest;
+    unsigned.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    unsigned.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    assert!(
+        authenticate_app_metadata(serde_json::to_vec(&unsigned).unwrap(), Vec::new(), &current)
+            .await
+            .is_err()
+    );
+    assert!(writers.configuration().is_err());
+    drop(freeze);
+    let _next = writers.configuration().unwrap();
+}
+
 fn package(version: &[u8]) -> Vec<u8> {
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut builder = tar::Builder::new(encoder);

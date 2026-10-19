@@ -24,6 +24,114 @@ async fn admission_closed(gate: &StateWriters) {
     .unwrap();
 }
 
+async fn configuration_reopened(gate: &StateWriters) {
+    time::timeout(LIMIT, async {
+        loop {
+            match gate.configuration() {
+                Ok(permit) => break drop(permit),
+                Err(AppError::Conflict(_)) => time::sleep(Duration::from_millis(2)).await,
+                Err(error) => panic!("unexpected fixture error: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_app_reply_keeps_freeze_from_policy_read_through_owned_install_work() {
+    use crate::update::operation::{Kind, UpdateCoordinator};
+    let temporary = tempfile::tempdir().unwrap();
+    let writers = gate(temporary.path());
+    let job_writers = Arc::clone(&writers);
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+    let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+    let (read_started, read_start) = oneshot::channel();
+    let (read_finish, read_wait) = mpsc::channel();
+    let (install_started, install_start) = oneshot::channel();
+    let (install_finish, install_wait) = mpsc::channel();
+    let request = task::spawn(owner.run(move |job| async move {
+        let freeze = job_writers.drain(LIMIT).await?;
+        let (value, freeze) = freeze
+            .blocking(&job, "fixture policy read", move |_| {
+                read_started.send(()).unwrap();
+                read_wait.recv_timeout(LIMIT).unwrap();
+                Ok(73_u8)
+            })
+            .await?;
+        job.blocking("fixture install work", move || {
+            // This is owned work, NOT a live app-slot swap/device gate.
+            let _freeze = freeze;
+            assert_eq!(value, 73);
+            install_started.send(()).unwrap();
+            install_wait.recv_timeout(LIMIT).unwrap();
+            Ok(())
+        })
+        .await
+    }));
+    time::timeout(LIMIT, read_start).await.unwrap().unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(writers.configuration().is_err());
+    read_finish.send(()).unwrap();
+    time::timeout(LIMIT, install_start).await.unwrap().unwrap();
+    assert!(writers.configuration().is_err());
+    assert!(coordinator.snapshot().unwrap().active.is_some());
+    install_finish.send(()).unwrap();
+    configuration_reopened(&writers).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discarded_frozen_read_waiter_retains_barrier_until_callback_result_cleanup() {
+    use crate::update::operation::{Kind, UpdateCoordinator};
+    let temporary = tempfile::tempdir().unwrap();
+    let writers = gate(temporary.path());
+    let freeze = writers.drain(LIMIT).await.unwrap();
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+    let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+    let (started, start) = oneshot::channel();
+    let (finish, wait) = mpsc::channel();
+    owner
+        .run(move |job| async move {
+            let work = freeze.blocking(&job, "fixture discarded read", move |_| {
+                started.send(()).unwrap();
+                wait.recv_timeout(LIMIT).unwrap();
+                Ok(())
+            });
+            tokio::pin!(work);
+            tokio::select! {
+                _ = start => Ok(()),
+                _ = &mut work => panic!("fixture read completed too early"),
+                _ = time::sleep(LIMIT) => panic!("fixture read did not start"),
+            }
+        })
+        .await
+        .unwrap();
+    assert!(writers.configuration().is_err());
+    assert!(coordinator.snapshot().unwrap().active.is_some());
+    finish.send(()).unwrap();
+    configuration_reopened(&writers).await;
+}
+
+#[tokio::test]
+async fn frozen_read_error_releases_barrier_without_a_success_result() {
+    use crate::update::operation::{Kind, UpdateCoordinator};
+    let temporary = tempfile::tempdir().unwrap();
+    let writers = gate(temporary.path());
+    let freeze = writers.drain(LIMIT).await.unwrap();
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+    let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+    assert!(
+        freeze
+            .blocking(&owner, "fixture failing read", |_| {
+                Err::<(), _>(AppError::Config("synthetic read failure".into()))
+            })
+            .await
+            .is_err()
+    );
+    let _permit = writers.configuration().unwrap();
+}
+
 #[tokio::test]
 async fn drain_closes_new_admission_then_waits_existing_work() {
     let temporary = tempfile::tempdir().unwrap();

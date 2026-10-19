@@ -12,7 +12,7 @@ use nanokvm_rust_server::{
     },
     state::AppState,
     system::media,
-    update::keys::install_bundled_update_trust,
+    update::{keys::install_bundled_update_trust, state_writers::StateWriters},
 };
 use rand_core::{OsRng, RngCore};
 use std::{
@@ -100,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn install_runtime_update_trust(config: &Config) {
     match install_bundled_update_trust(
+        &StateWriters::default(),
         Path::new(BUNDLED_UPDATE_TRUST_DIR),
         &config.paths.system_update_public_key,
     ) {

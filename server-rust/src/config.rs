@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::{
     AppError, Result,
     system::media::MEDIA_ROOT,
-    update::state_writers::{ConfigPermit, StateWriters},
+    update::state_writers::{ConfigPermit, StateWriters, WriterDrain},
 };
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/kvm/server.yaml";
@@ -230,6 +230,16 @@ impl Config {
     }
 
     pub fn read() -> Result<Self> {
+        Self::read_path(&config_path())
+    }
+
+    /// Read without enrolling a writer while the caller already owns the
+    /// exclusive drain. Acquiring a ConfigPermit here would self-conflict.
+    pub(crate) fn read_frozen(_writers: &WriterDrain) -> Result<Self> {
+        #[cfg(test)]
+        if let Some(path) = _writers.fixture_config_path() {
+            return Self::read_path(path);
+        }
         Self::read_path(&config_path())
     }
 

@@ -103,8 +103,14 @@ grep -Fq 'HARDENED_SG2002_BOOT_IMAGE' \
 	"$ROOT/scripts/assemble-latest-buildroot-sg2002-sd-image.sh"
 grep -Fq 'HARDENED_SG2002_LOGO_IMAGE' \
 	"$ROOT/scripts/assemble-latest-buildroot-sg2002-sd-image.sh"
-grep -Fq 'SYSTEM_UPDATE_KEY_POLICY=/etc/kvm/update-key-policy' \
-	"$ROOT/kvmapp/system/init.d/S95nanokvm"
+grep -Fq 'let _permit = writers.configuration()?;' \
+	"$ROOT/server-rust/src/update/keys.rs"
+grep -Fq 'install_runtime_update_trust(&config);' "$ROOT/server-rust/src/main.rs"
+reject_text 'install_system_update_public_key' "$ROOT/kvmapp/system/init.d/S95nanokvm"
+reject_text 'SYSTEM_UPDATE_BUNDLED_' "$ROOT/kvmapp/system/init.d/S95nanokvm"
+reject_text 'system-update-signing.pub.pem' "$ROOT/kvmapp/system/init.d/S95nanokvm"
+reject_text 'update-key-policy' "$ROOT/kvmapp/system/init.d/S95nanokvm"
+reject_text 'update-keys' "$ROOT/kvmapp/system/init.d/S95nanokvm"
 
 if [ -d "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib" ]; then
 	test ! -e "$ROOT/build/kvmapp-rust/kvmapp/server/dl_lib/libz.so"

@@ -136,10 +136,25 @@ that exact metadata version before any live slot/backup mutation. Version reads
 use NOFOLLOW/NONBLOCK and at most 129 bytes, rejecting directories, FIFOs, symlinks
 and an oversized file without blocking or loading an arbitrary large value.
 
-This is an installation-initialization authorization point, not a lock that
-freezes all local policy/config writers throughout extraction and swap. The
-existing key resolver and OpenSSL path-based verifier are retained; protected
-key/input snapshots and independent recovery provenance remain separate work.
+After download, the online job now calls the composed `AppState::drain_writers`
+boundary (30-second deadline), settling the enrolled firewall rollback owner
+before waiting for enrolled activity. Only then does it reread persisted Config
+with `Config::read_frozen` and reauthenticate the exact metadata/signature. The
+same owned `WriterDrain` survives that blocking read, reauthentication, archive
+verification, extraction and the current legacy swap. Offline import acquires
+the same barrier after upload, without inventing signed metadata authority.
+The barrier moves into the owned install callback, not the HTTP handler; a lost
+reply or discarded blocking waiter cannot reopen enrollment during its work.
+Busy/unsafe admission or a drain timeout refuses installation. No ConfigPermit
+is acquired under the exclusive drain, avoiding self-conflict.
+
+This freezes only cooperating enrolled writers. It does not stop native/S95
+services, privileged sessions, scripts, or other unenrolled startup writers.
+The barrier currently ends when the blocking install returns, before the
+delayed legacy restart: retained native lifecycle, journaled swap and first-start
+recovery are still mandatory, not provided by this prerequisite. The existing
+key resolver and OpenSSL path-based verifier are retained; protected key/input
+snapshots and independent recovery provenance remain separate work.
 There is still no durable signed app-slot receipt. The explicit lab-only
 unsigned setting, production key IDs/algorithms and manual bridge path are unchanged.
 The version-only query still uses its startup Config snapshot; it is status,
@@ -329,9 +344,20 @@ immutable startup Config snapshot are not silently refreshed by this change.
 `Config::load` also acquires the Config domain before reading YAML and checking
 or generating the persisted session secret. It uses the same kernel locks as
 runtime setters across independent backends; busy/unsafe storage fails closed,
-not through a rootless startup fallback. This does not enroll the backend's
-other startup migration/trust/script writers. Ordinary Config getters remain
-read-only and do not acquire writer admission.
+not through a rootless startup fallback. The Rust bundled-trust installer now
+also enrolls the same Config domain before reading its bundle and retains the
+permit through legacy/keyring publication and policy-last publication. Separate
+StateWriters instances share the same protected kernel lock namespace. Current
+S95 no longer copies trust files: the backend performs this step before serving
+requests, including when started outside S95. No key IDs/material/algorithm or
+legacy allowlist are changed here.
+
+The exact historical S95 in the RC12 app bridge remains unchanged and still
+performs its historical pre-backend trust copy. New locking cannot retrofit that
+old executable path. The documented USB-data isolation/reflash restrictions
+continue to apply to this first legacy transition; it is not covered by the new
+writer freeze. Other startup migration/script writers remain unenrolled.
+Ordinary Config getters remain read-only and do not acquire writer admission.
 
 TLS holds its Config permit across certificate generation or the forced
 moderate-firewall operation, YAML publication and scheduling reboot. The delayed

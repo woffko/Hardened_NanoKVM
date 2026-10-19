@@ -29,6 +29,7 @@ use crate::{
         keys::resolve_update_public_key,
         operation::{Kind, Snapshot, UpdateOwner},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE},
+        state_writers::WriterDrain,
     },
 };
 
@@ -44,6 +45,7 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const APP_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const APP_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
 const MAX_APP_VERSION_BYTES: u64 = 128;
@@ -180,8 +182,12 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                 })
                 .await?;
             let archive = download_release_asset(&verified.latest, archive, &job).await?;
-            let config = job
-                .blocking("reread app install policy", Config::read)
+            // Do not freeze settings during the network download. Settle the
+            // enrolled firewall owner and all enrolled writers BEFORE rereading
+            // policy; keep that same barrier through reauthentication and swap.
+            let writers = state.drain_writers(WRITER_DRAIN_TIMEOUT).await?;
+            let (config, writers) = writers
+                .blocking(&job, "reread app install policy", Config::read_frozen)
                 .await?;
             let verified =
                 authenticate_app_metadata(verified.metadata, verified.signature, &config).await?;
@@ -198,7 +204,12 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                             error.into()
                         }
                     })?;
-                install_package(archive, stage, InstallAuthority::OnlineMetadata(verified))
+                install_package(
+                    archive,
+                    stage,
+                    InstallAuthority::OnlineMetadata(verified),
+                    writers,
+                )
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -229,8 +240,9 @@ pub async fn offline_update(
             )
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
+            let writers = state.drain_writers(WRITER_DRAIN_TIMEOUT).await?;
             job.blocking("install offline app", move || {
-                install_package(archive, stage, InstallAuthority::ManualImport)
+                install_package(archive, stage, InstallAuthority::ManualImport, writers)
             })
             .await?;
             restart_nanokvm_after_response(job);
@@ -532,7 +544,10 @@ fn install_package(
     source: AppArchive,
     mut stage: AppStage,
     authority: InstallAuthority,
+    _writers: WriterDrain,
 ) -> Result<()> {
+    // Own the complete barrier, not just a handler-local borrow. Blocking work
+    // can outlive its waiter and must exclude enrolled writers until it ends.
     let update_root = prepare_app_candidate(source, &stage, &authority)?;
 
     // Startup attempts a fixed independent bootstrap. Recheck its exact bytes

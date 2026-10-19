@@ -34,12 +34,6 @@ SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
 SYSTEM_ROLLBACK_SCRIPT=/etc/kvm/system-update-rollback.sh
 SYSTEM_ROLLBACK_ATTEMPT_FILE=/etc/kvm/system-update-rollback-attempted
 SYSTEM_UPDATE_STAGE_DIR=/data/.hardened-kvmcache/system-update
-SYSTEM_UPDATE_PUBLIC_KEY=/etc/kvm/system-update-signing.pub.pem
-SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY=/kvmapp/system/keys/system-update-signing.pub.pem
-SYSTEM_UPDATE_KEYRING_DIR=/etc/kvm/update-keys
-SYSTEM_UPDATE_BUNDLED_KEYRING_DIR=/kvmapp/system/keys/update-keys
-SYSTEM_UPDATE_KEY_POLICY=/etc/kvm/update-key-policy
-SYSTEM_UPDATE_BUNDLED_KEY_POLICY=/kvmapp/system/keys/update-key-policy
 SENSOR_BUNDLE_DIR=/kvmapp/system/mnt-data
 SENSOR_DATA_DIR=/mnt/data
 LEGACY_NEW_APP_MARKER=/kvmapp/kvm_new_app
@@ -356,41 +350,6 @@ ensure_kvm_state_files() {
     [ -f /kvmapp/kvm/height ] || printf '1080\n' > /kvmapp/kvm/height
 }
 
-install_system_update_public_key() {
-    mkdir -p /etc/kvm
-    if [ -f "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" ] && \
-       ! cmp -s "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"; then
-        cp "$SYSTEM_UPDATE_BUNDLED_PUBLIC_KEY" "$SYSTEM_UPDATE_PUBLIC_KEY"
-        chmod 0644 "$SYSTEM_UPDATE_PUBLIC_KEY"
-    fi
-
-    if [ -d "$SYSTEM_UPDATE_BUNDLED_KEYRING_DIR" ]; then
-        mkdir -p "$SYSTEM_UPDATE_KEYRING_DIR"
-        chmod 0755 "$SYSTEM_UPDATE_KEYRING_DIR"
-        for src in "$SYSTEM_UPDATE_BUNDLED_KEYRING_DIR"/*.pub.pem; do
-            [ -f "$src" ] || continue
-            name="${src##*/}"
-            case "$name" in
-                '' | .* | *..* | *[!A-Za-z0-9._+-]*)
-                    runtime_log "ignoring unsafe update key filename: $name"
-                    continue
-                    ;;
-            esac
-            dst="$SYSTEM_UPDATE_KEYRING_DIR/$name"
-            if ! cmp -s "$src" "$dst"; then
-                cp "$src" "$dst"
-                chmod 0644 "$dst"
-            fi
-        done
-    fi
-
-    if [ -f "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" ] && \
-       ! cmp -s "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" "$SYSTEM_UPDATE_KEY_POLICY"; then
-        cp "$SYSTEM_UPDATE_BUNDLED_KEY_POLICY" "$SYSTEM_UPDATE_KEY_POLICY"
-        chmod 0644 "$SYSTEM_UPDATE_KEY_POLICY"
-    fi
-}
-
 install_boot_script() {
     name="$1"
     # These independent consumer gates are installed from compile-bound backend
@@ -676,7 +635,8 @@ start_runtime() {
     /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
     cleanup_server_backups
     ensure_kvm_state_files
-    install_system_update_public_key
+    # The Rust backend publishes bundled update trust under configuration-writer
+    # admission before serving requests. Do not bypass an app install freeze here.
     install_boot_scripts
     cleanup_legacy_app_artifacts
     cleanup_legacy_new_app_marker
