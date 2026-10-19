@@ -14,8 +14,9 @@ now composes accepted app/update/writer admission with durable `Stopping` and a
 three-scope drain before slot publication. It retains that fence through explicit
 old-slot rollback and offers a typed backend-only frozen trial transition.
 The daemon now invokes it for a validated prepared offer on its separate
-app-install endpoint. The ordinary API remains legacy; daemon activation of
-trial/commit, retirement and device acceptance remain required.
+app-install endpoint and now drives its frozen trial, commit and failure/cancel
+stop-join transitions. The ordinary API remains legacy; terminal retirement,
+daemon-to-real-backend/runtime and device acceptance remain required.
 
 ## Implemented boundary
 
@@ -486,9 +487,12 @@ embedded bytes. This read-only inspection is separate from the new typed broker
 trial transition and fixed owner relay. The policy keeps KVM-system/hwmon closed
 until the post-commit writer freeze ends, and requires explicit stop/join before
 uncommitted rollback. Separate host tests cover protocol readiness/commit and
-failure closure, not actual native-service health. Daemon activation, complete
-crash/I/O/retirement and device acceptance remain open. See
-[trial policy](security-app-slot-recovery.md#broker-owned-trial-policy-daemon-activation-pending).
+failure closure, not actual native-service health. The Engine and independent
+daemon now drive those transitions with host protocol probes, including
+frontend/observer loss, retained failed commit and post-freeze native restart.
+Real backend/runtime integration, complete crash/I/O/retirement and device
+acceptance remain open. See
+[trial policy](security-app-slot-recovery.md#broker-owned-trial-policy).
 
 Remaining work is production lifecycle and recovery integration: close
 admission to respawners, stop/join watchdog work, then stop/join native services and settle

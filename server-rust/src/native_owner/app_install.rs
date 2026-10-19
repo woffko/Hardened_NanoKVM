@@ -180,7 +180,7 @@ impl Session {
         self.start_trial_command(controller::backend_trial_command())
     }
 
-    fn start_trial_command(mut self, command: std::process::Command) -> BeginTrial {
+    pub(super) fn start_trial_command(mut self, command: std::process::Command) -> BeginTrial {
         let Ok(closed) = self.closed() else {
             return BeginTrial::Retained(self);
         };

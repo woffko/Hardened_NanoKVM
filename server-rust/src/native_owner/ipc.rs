@@ -254,6 +254,7 @@ enum Owner {
 
 enum InstallOwner {
     Draining(app_install::Session),
+    Trial(app_install::TrialSession),
     Refused {
         broker: Broker,
         _install: app_slot::AcceptedInstall,
@@ -263,6 +264,9 @@ enum InstallOwner {
 enum InstallStage {
     Draining,
     Published,
+    Trial,
+    CommitPending,
+    Rollback,
     Failed,
 }
 struct Install {
@@ -287,6 +291,8 @@ struct Engine {
     fixture: Option<std::path::PathBuf>,
     #[cfg(test)]
     fixture_request_completed: Option<Instant>,
+    #[cfg(test)]
+    fixture_hold_published: bool,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -312,6 +318,8 @@ impl Engine {
             fixture: None,
             #[cfg(test)]
             fixture_request_completed: None,
+            #[cfg(test)]
+            fixture_hold_published: false,
         }
     }
     fn command(&self, role: Role) -> std::process::Command {
@@ -322,44 +330,8 @@ impl Engine {
         role.command()
     }
     fn tick(&mut self) {
-        if let Some(install) = self.install.as_mut() {
-            match &mut install.owner {
-                InstallOwner::Draining(session) => {
-                    match session.poll() {
-                        Ok(DrainStatus::Drained) => {
-                            self.roles = [4; 2];
-                            self.backend_status = Some(Status::Closed(Completion::Stopped));
-                            if install.stage == InstallStage::Draining {
-                                // Exactly one attempt. An ambiguous I/O result is
-                                // retained, never retried as a fresh transaction.
-                                install.stage = match session.publish() {
-                                    Ok(app_slot::Status::Transaction(
-                                        app_slot::Phase::Published,
-                                    )) => InstallStage::Published,
-                                    _ => InstallStage::Failed,
-                                };
-                            }
-                        }
-                        Ok(DrainStatus::Pending) => self.roles = [3; 2],
-                        _ => {
-                            self.roles = [6; 2];
-                            install.stage = InstallStage::Failed;
-                        }
-                    }
-                }
-                InstallOwner::Refused { broker, .. } => {
-                    // Journal failure does not discard live scope owners or
-                    // admission. Poll only; never launch or fabricate Stop.
-                    self.roles = broker.poll().map(role_status);
-                    self.backend_status = broker.backend_status();
-                    install.stage = InstallStage::Failed;
-                }
-            }
-            self.mode = if install.stage == InstallStage::Failed {
-                Mode::Uncertain
-            } else {
-                Mode::Installing
-            };
+        if let Some(install) = self.install.take() {
+            self.install = self.tick_install(install);
             return;
         }
         let Some(owner) = self.owner.take() else {
@@ -492,6 +464,157 @@ impl Engine {
             }
         });
     }
+
+    fn finish_install(&mut self, broker: Broker) {
+        self.owner = Some(Owner::Running(broker));
+        self.mode = Mode::Running;
+        self.retry = [Instant::now(); 2];
+        self.backend_retry = Instant::now();
+    }
+
+    fn tick_install(&mut self, install: Install) -> Option<Install> {
+        let Install { owner, mut stage } = install;
+        self.mode = Mode::Installing;
+        let owner = match owner {
+            InstallOwner::Draining(mut session) => {
+                match session.poll() {
+                    Ok(DrainStatus::Drained) => {
+                        self.roles = [4; 2];
+                        self.backend_status = Some(Status::Closed(Completion::Stopped));
+                        match stage {
+                            InstallStage::Draining => {
+                                // Exactly one publication attempt. Unknown I/O
+                                // retains the owner, never a fresh transaction.
+                                stage = match session.publish() {
+                                    Ok(app_slot::Status::Transaction(
+                                        app_slot::Phase::Published,
+                                    )) => InstallStage::Published,
+                                    _ => InstallStage::Failed,
+                                };
+                            }
+                            InstallStage::Published => {
+                                // The fixed-root delivery-only fixture has no
+                                // executable/native runtime inside its chroot.
+                                #[cfg(test)]
+                                if self.fixture_hold_published {
+                                    return Some(Install {
+                                        owner: InstallOwner::Draining(session),
+                                        stage,
+                                    });
+                                }
+                                #[cfg(test)]
+                                let trial = match &self.fixture {
+                                    Some(root) => session
+                                        .start_trial_command(tests::trial_owner_command(root)),
+                                    None => session.start_trial(),
+                                };
+                                #[cfg(not(test))]
+                                let trial = session.start_trial();
+                                return Some(match trial {
+                                    app_install::BeginTrial::Started(trial) => Install {
+                                        owner: InstallOwner::Trial(trial),
+                                        stage: InstallStage::Trial,
+                                    },
+                                    app_install::BeginTrial::Retained(session) => {
+                                        self.mode = Mode::Uncertain;
+                                        Install {
+                                            owner: InstallOwner::Draining(session),
+                                            stage: InstallStage::Failed,
+                                        }
+                                    }
+                                });
+                            }
+                            InstallStage::Rollback => match session.rollback() {
+                                app_install::Rollback::Restored(restored) => {
+                                    self.finish_install(restored.release());
+                                    return None;
+                                }
+                                app_install::Rollback::Retained(retained) => {
+                                    session = retained;
+                                    stage = InstallStage::Failed;
+                                }
+                            },
+                            InstallStage::Failed => {}
+                            _ => stage = InstallStage::Failed,
+                        }
+                    }
+                    Ok(DrainStatus::Pending) => {
+                        self.roles = [3; 2];
+                        self.backend_status = Some(Status::Stopping);
+                    }
+                    _ => {
+                        self.roles = [6; 2];
+                        self.backend_status = Some(Status::Uncertain);
+                        stage = InstallStage::Failed;
+                    }
+                }
+                InstallOwner::Draining(session)
+            }
+            InstallOwner::Trial(mut trial) => {
+                let status = trial.poll();
+                self.roles = if status == app_install::TrialStatus::Uncertain {
+                    [6; 2]
+                } else {
+                    [4; 2]
+                };
+                self.backend_status = Some(match status {
+                    app_install::TrialStatus::Starting => Status::Starting,
+                    app_install::TrialStatus::Ready => Status::Running,
+                    app_install::TrialStatus::Failed => Status::TrialFailed,
+                    app_install::TrialStatus::Uncertain => Status::Uncertain,
+                });
+                if stage == InstallStage::Failed {
+                    // A failed/ambiguous commit is not retried by observation.
+                    InstallOwner::Trial(trial)
+                } else {
+                    match status {
+                        app_install::TrialStatus::Starting => InstallOwner::Trial(trial),
+                        app_install::TrialStatus::Ready => match trial.commit() {
+                            app_install::CommitTrial::Committed(committed) => {
+                                self.backend_wanted = true;
+                                self.finish_install(committed.release());
+                                return None;
+                            }
+                            app_install::CommitTrial::Pending(trial) => {
+                                stage = InstallStage::CommitPending;
+                                InstallOwner::Trial(trial)
+                            }
+                            app_install::CommitTrial::Retained(trial) => {
+                                stage = InstallStage::Failed;
+                                InstallOwner::Trial(trial)
+                            }
+                        },
+                        app_install::TrialStatus::Failed | app_install::TrialStatus::Uncertain => {
+                            match trial.stop() {
+                                app_install::StopTrial::Draining(session) => {
+                                    stage = InstallStage::Rollback;
+                                    InstallOwner::Draining(session)
+                                }
+                                app_install::StopTrial::Retained(trial) => {
+                                    stage = InstallStage::Failed;
+                                    InstallOwner::Trial(trial)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            InstallOwner::Refused {
+                mut broker,
+                _install,
+            } => {
+                // Journal failure cannot discard live scopes or admission.
+                self.roles = broker.poll().map(role_status);
+                self.backend_status = broker.backend_status();
+                stage = InstallStage::Failed;
+                InstallOwner::Refused { broker, _install }
+            }
+        };
+        if stage == InstallStage::Failed {
+            self.mode = Mode::Uncertain;
+        }
+        Some(Install { owner, stage })
+    }
     fn reply(&self, code: Code) -> Reply {
         Reply {
             code,
@@ -553,23 +676,51 @@ impl Engine {
         };
         let Install { owner, stage } = install;
         match owner {
-            InstallOwner::Draining(session) => match session.rollback() {
-                app_install::Rollback::Restored(restored) => {
-                    self.owner = Some(Owner::Running(restored.release()));
-                    self.mode = Mode::Running;
-                    self.retry = [Instant::now(); 2];
-                    self.backend_retry = Instant::now();
-                    self.tick();
+            InstallOwner::Draining(session) => {
+                self.install = Some(Install {
+                    owner: InstallOwner::Draining(session),
+                    stage: InstallStage::Rollback,
+                });
+                self.tick();
+                if self.mode == Mode::Uncertain {
+                    Code::Uncertain
+                } else {
                     Code::Ok
                 }
-                app_install::Rollback::Retained(session) => {
+            }
+            InstallOwner::Trial(trial) => {
+                if matches!(stage, InstallStage::CommitPending | InstallStage::Failed) {
                     self.install = Some(Install {
-                        owner: InstallOwner::Draining(session),
+                        owner: InstallOwner::Trial(trial),
                         stage,
                     });
-                    Code::Busy
+                    return if stage == InstallStage::Failed {
+                        Code::Uncertain
+                    } else {
+                        Code::Busy
+                    };
                 }
-            },
+                match trial.stop() {
+                    app_install::StopTrial::Draining(session) => {
+                        // Ok acknowledges owned cancellation, not completed
+                        // rollback. Mode remains Installing until fresh join.
+                        self.install = Some(Install {
+                            owner: InstallOwner::Draining(session),
+                            stage: InstallStage::Rollback,
+                        });
+                        self.mode = Mode::Installing;
+                        Code::Ok
+                    }
+                    app_install::StopTrial::Retained(trial) => {
+                        self.install = Some(Install {
+                            owner: InstallOwner::Trial(trial),
+                            stage: InstallStage::Failed,
+                        });
+                        self.mode = Mode::Uncertain;
+                        Code::Uncertain
+                    }
+                }
+            }
             owner @ InstallOwner::Refused { .. } => {
                 self.install = Some(Install { owner, stage });
                 Code::Uncertain
@@ -583,7 +734,10 @@ impl Engine {
             Operation::Observe => {}
             Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::BackendRunning => {
-                if self.backend_restart.is_some() || self.backend_status != Some(Status::Running) {
+                if self.install.is_some()
+                    || self.backend_restart.is_some()
+                    || self.backend_status != Some(Status::Running)
+                {
                     code = Code::Unavailable;
                 }
             }

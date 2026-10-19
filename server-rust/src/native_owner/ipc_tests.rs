@@ -8,6 +8,8 @@ use std::{
 const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
 #[path = "app_delivery_tests.rs"]
 mod delivery;
+#[path = "app_engine_tests.rs"]
+mod install_engine;
 fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
@@ -54,6 +56,135 @@ pub(super) fn owner_command(root: &Path, role: Role) -> Command {
     .stderr(Stdio::null());
     c
 }
+
+pub(super) fn trial_owner_command(root: &Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "native_owner::broker::ipc::tests::trial_owner_probe",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("NANOKVM_NATIVE_IPC_FIXTURE", root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    command
+}
+
+fn trial_gate(control: &mut UnixStream, root: &Path, marker: &str) -> bool {
+    control
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    let start = Instant::now();
+    let mut stopped = false;
+    while root.join(marker).exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(6),
+            "trial fixture gate"
+        );
+        let mut byte = [0];
+        match control.read(&mut byte) {
+            Ok(1) => {
+                assert_eq!(byte, *b"S");
+                stopped = true;
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            result => panic!("trial gate lost control: {result:?}"),
+        }
+    }
+    control
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    stopped
+}
+
+#[test]
+fn trial_owner_probe() {
+    use crate::app_trial_wire as wire;
+    let Some(root) = std::env::var_os("NANOKVM_NATIVE_IPC_FIXTURE") else {
+        return;
+    };
+    let root = Path::new(&root);
+    let mut control = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
+    control
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut begin = [0; wire::BYTES];
+    control.read_exact(&mut begin).unwrap();
+    let transaction = wire::parse(&begin, wire::Event::Begin).unwrap();
+    let record = fs::read(root.join("application-slot/current/state")).unwrap();
+    assert_eq!(record[8], app_slot::Phase::Published as u8);
+    assert_eq!(record[16..32], transaction);
+    assert_eq!(
+        fs::read(root.join("native-runtime-owner/state")).unwrap()[44],
+        4
+    );
+    // Existence must imply a complete PID for the parent fixture's cleanup.
+    let started = root.join("trial-owner-started.next");
+    fs::write(&started, std::process::id().to_string()).unwrap();
+    fs::rename(started, root.join("trial-owner-started")).unwrap();
+    let failed = root.join("trial-ready-fail").exists();
+    if !trial_gate(&mut control, root, "trial-ready-hold") {
+        control.write_all(if failed { b"F" } else { b"R" }).unwrap();
+        let mut first = [0];
+        if let Err(error) = control.read_exact(&mut first) {
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+            assert!(root.join("trial-allow-controller-loss").exists());
+            // Only the childless protocol fixture accepts deliberate cleanup
+            // this way. No native closure receipt or commit is emitted.
+            fs::write(root.join("trial-controller-lost"), b"lost without commit").unwrap();
+            return;
+        }
+        if first != *b"S" {
+            assert!(!failed);
+            let mut commit = [0; wire::BYTES];
+            commit[0] = first[0];
+            control.read_exact(&mut commit[1..]).unwrap();
+            assert_eq!(
+                wire::parse(&commit, wire::Event::Commit).unwrap(),
+                transaction
+            );
+            assert_eq!(
+                fs::read(root.join("application-slot/current/state")).unwrap()[8],
+                app_slot::Phase::Committed as u8
+            );
+            assert_eq!(
+                fs::read(root.join("native-runtime-owner/state")).unwrap()[44],
+                1
+            );
+            fs::write(root.join("trial-authorized"), commit).unwrap();
+            if !trial_gate(&mut control, root, "trial-ack-hold") {
+                control.write_all(b"K").unwrap();
+                control.read_exact(&mut first).unwrap();
+                assert_eq!(first, *b"S");
+            }
+        }
+    }
+    assert_eq!(
+        fs::read(root.join("native-runtime-owner/state")).unwrap()[44],
+        4
+    );
+    fs::write(root.join("trial-stopping"), b"stopping").unwrap();
+    until(|| !root.join("trial-stop-hold").exists());
+    if root.join("trial-missing-receipt").exists() {
+        return;
+    }
+    control
+        .write_all(if failed { b"D\x03" } else { b"D\0" })
+        .unwrap();
+    if failed {
+        std::process::exit(72);
+    }
+}
+
 #[test]
 fn owner_probe() {
     let Some(root) = std::env::var_os("NANOKVM_NATIVE_IPC_FIXTURE") else {

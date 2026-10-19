@@ -74,6 +74,7 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
     fs::write(path.join("hold-install-offer"), b"hold").unwrap();
+    fs::write(path.join("trial-ready-hold"), b"hold").unwrap();
     let mut daemon = child(path, "broker_child");
     until(|| path.join("broker-ready").exists());
     let mut control = connect(path);
@@ -130,6 +131,7 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
         exchange(&mut control, Operation::CancelAppInstall).code,
         Code::Ok
     );
+    observed(&mut control, Mode::Running);
     assert_eq!(path.join("kvmapp").metadata().unwrap().ino(), old_inode);
     assert_eq!(
         fs::read(path.join("kvmapp/identity")).unwrap(),
@@ -146,6 +148,93 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
     for name in ["control.sock", "app-install.sock"] {
         assert!(!path.join("native-runtime-owner").join(name).exists());
     }
+}
+
+#[test]
+fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_only_after_ack() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    for marker in ["hold-install-offer", "trial-ready-hold", "trial-ack-hold"] {
+        fs::write(root.join(marker), b"hold").unwrap();
+    }
+    let mut daemon = child(root, "broker_child");
+    until(|| root.join("broker-ready").exists());
+    let mut control = connect(root);
+    for op in [
+        Operation::EnsureKvm,
+        Operation::EnsureHwmon,
+        Operation::EnsureBackend,
+    ] {
+        assert_eq!(exchange(&mut control, op).code, Code::Ok);
+    }
+    until(|| exchange(&mut control, Operation::Observe).roles == [2; 2]);
+    until(|| exchange(&mut control, Operation::BackendRunning).code == Code::Ok);
+    let native = [
+        fs::read(root.join("kvm")).unwrap(),
+        fs::read(root.join("hwmon")).unwrap(),
+    ];
+    let mut frontend = child(root, "frontend_child");
+    until(|| root.join("offer-sent").exists());
+    let old = root.join("kvmapp").metadata().unwrap().ino();
+    frontend.0.kill().unwrap();
+    assert!(!frontend.0.wait().unwrap().success());
+    assert_excluded(root);
+    fs::remove_file(root.join("hold-install-offer")).unwrap();
+    observed(&mut control, Mode::Installing);
+    until(|| root.join("trial-owner-started").exists());
+    assert_eq!(exchange(&mut control, Operation::Observe).roles, [4; 2]);
+    assert_eq!(
+        exchange(&mut control, Operation::BackendRunning).code,
+        Code::Unavailable
+    );
+    assert_excluded(root);
+    // Neither sender death nor replacing the observing client cancels the job.
+    drop(control);
+    control = connect(root);
+    fs::remove_file(root.join("trial-ready-hold")).unwrap();
+    until(|| {
+        fs::read(root.join("trial-authorized"))
+            .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
+    });
+    assert_eq!(
+        fs::read(root.join("application-slot/current/state")).unwrap()[8],
+        app_slot::Phase::Committed as u8
+    );
+    assert_eq!(
+        exchange(&mut control, Operation::Observe).mode,
+        Mode::Installing
+    );
+    assert_eq!(
+        exchange(&mut control, Operation::CancelAppInstall).code,
+        Code::Busy
+    );
+    assert_eq!(
+        exchange(&mut control, Operation::BackendRunning).code,
+        Code::Unavailable
+    );
+    assert_eq!(fs::read(root.join("kvm")).unwrap(), native[0]);
+    assert_eq!(fs::read(root.join("hwmon")).unwrap(), native[1]);
+    assert_excluded(root);
+    fs::remove_file(root.join("trial-ack-hold")).unwrap();
+    observed(&mut control, Mode::Running);
+    until(|| exchange(&mut control, Operation::Observe).roles == [2; 2]);
+    until(|| exchange(&mut control, Operation::BackendRunning).code == Code::Ok);
+    assert_ne!(fs::read(root.join("kvm")).unwrap(), native[0]);
+    assert_ne!(fs::read(root.join("hwmon")).unwrap(), native[1]);
+    assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert_eq!(fs::read(root.join("kvmapp/version")).unwrap(), b"2.0.43\n");
+    assert!(root.join("application-slot/current/old").exists());
+    assert_eq!(
+        exchange(&mut control, Operation::CancelAppInstall).code,
+        Code::Busy
+    );
+    let reply = exchange(&mut control, Operation::Shutdown);
+    assert_eq!(reply.code, Code::Ok);
+    if reply.mode != Mode::Stopped {
+        observed(&mut control, Mode::Stopped);
+    }
+    until(|| daemon.0.try_wait().unwrap().is_some());
+    assert!(daemon.0.wait().unwrap().success());
 }
 
 #[test]
@@ -223,6 +312,7 @@ fn stalled_or_malformed_install_offer_does_not_block_lifecycle_or_stop_backend()
 #[test]
 fn expired_offer_slots_are_closed_and_reusable_for_a_valid_install() {
     let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("trial-ready-hold"), b"hold").unwrap();
     let uid = nix::unistd::geteuid().as_raw();
     serve(root.path(), uid, || {
         let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
@@ -262,6 +352,7 @@ fn expired_offer_slots_are_closed_and_reusable_for_a_valid_install() {
             exchange(&mut control, Operation::CancelAppInstall).code,
             Code::Ok
         );
+        observed(&mut control, Mode::Running);
         until(|| {
             let reply = exchange(&mut control, Operation::Shutdown);
             assert!(matches!(reply.code, Code::Ok | Code::Busy));
@@ -354,6 +445,9 @@ fn fixed_root_delivery_child() {
     // Only native enrollment/process execution are fixture supplied. Endpoint
     // connect, Incoming::open, prepared issuer and acceptance use fixed roots.
     let mut server = Server::new(broker(Path::new("/etc/kvm")), uid).unwrap();
+    // This fixture proves production fixed-root delivery/issuer composition,
+    // not execution of a native trial inside its deliberately minimal chroot.
+    server.engine.fixture_hold_published = true;
     let (send, recv) = std::sync::mpsc::channel();
     server.cancel = Some(recv);
     std::thread::scope(|scope| {

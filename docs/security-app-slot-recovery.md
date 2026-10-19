@@ -195,14 +195,14 @@ data and is repeatable. These process-death fixtures are not target power-cut or
 vendor-native acceptance. The existing standalone scope tests separately cover
 subreaper descendant closure; the new protocol stubs do not replace that proof.
 
-Production API activation, durable job status, daemon activation of the typed
-trial/commit policy below, full runtime health and terminal retirement remain
-open. Execution modes and frozen backend entry are host-tested. Ordinary backend
-startup is not a usable trial path while writer exclusions are retained: it acquires writer/update
+Production API activation, durable job status, full runtime health and terminal
+retirement remain open. The daemon now drives the typed trial/commit policy
+below in host tests. Ordinary backend startup is not a usable trial path while
+writer exclusions are retained: it acquires writer/update
 admission and performs storage, helper, trust and init-script writes. Do not
 release/reacquire the exclusions to make that startup succeed.
 
-## Independent daemon delivery (API/trial not activated)
+## Independent daemon delivery (API not activated)
 
 The existing independent native broker is itself the installation owner; an
 additional installer child is not spawned below the backend's subreaper. This
@@ -224,25 +224,39 @@ alone cannot supply candidate/signature authority.
 After acceptance the daemon owns Session independently of the offer socket.
 Sender death/EOF does not cancel it or release its three exclusions. It drains
 all three runtime scopes and attempts publication once. Published stays
-`Installing` and holds admission; no ordinary launch/restart/pause/resume/shutdown
-can replace this owner. The lifecycle protocol's fixed `CancelAppInstall` action
-can request pre-trial rollback. Pending or uncertain closure retains Session;
-only proven durable old-slot restoration returns ordinary runtime ownership.
-This is local root administration, not a remote unauthenticated cancellation API.
-The daemon still stops at Published: it does not yet drive the typed trial
-policy below or return an app-health/commit success response.
+`Installing` and holds admission while the Engine starts the fixed frozen trial.
+Ready drives durable app/native commit and the explicit backend Commit relay;
+only its complete acknowledgement releases admission and returns ordinary
+supervision. KVM/hwmon desired-role retries resume after that release, never
+inside the freeze. `BackendRunning` is Unavailable while an install owner exists,
+even if its trial has reported Ready; it is not a full KVM health API.
+
+No ordinary launch/restart/pause/resume/shutdown replaces an install owner.
+The fixed `CancelAppInstall` action can request precommit cancellation: Stop,
+fresh complete join, then durable rollback. Ok plus Installing acknowledges
+owned cancellation, not completed rollback; observe the later mode/state.
+CommitPending refuses cancellation. Failed/uncertain commit retains its owner
+without automatic retry; canonical Committed cannot roll back. Failure before
+commit automatically follows the same stop/join/rollback path. Missing receipts
+remain Uncertain even when the process is reaped. This is local root
+administration, not a remote unauthenticated cancellation API, durable app job
+status or an app-health success response.
 
 Host tests run broker and sender as separate exec'd processes. They kill the
 sender after queuing but before daemon acceptance, then prove retained exclusion,
-canonical publication, blocked ordinary lifecycle operations and explicit rollback.
+canonical publication, blocked ordinary lifecycle operations, explicit rollback
+or complete trial/commit and post-freeze native restart. Replacing the observing
+client during trial does not transfer or cancel the job. Readiness and Commit
+acknowledgement can be held independently to check no early release or success.
 Other tests cover malformed/stalled offers, expiry and slot reuse, invalid receipt
 before Stop, endpoint type/permissions and preserving a foreign replacement on
 Drop. These use cfg(test)-only rooted data and native protocol stubs. A second
 private user/mount/PID namespace with real procfs exercises production
 `Sender::connect_broker`, `Incoming::open`, fixed-root preparation/acceptance,
-publication and rollback without their rooted-path overrides. Native enrollment
-and process execution are fixture supplied there: this is not production-daemon
-CLI, target boot, vendor-native or device acceptance.
+publication and rollback without their rooted-path overrides. That minimal chroot
+intentionally stops at Published via a test-only hold and has no executable
+native/backend runtime. Enrollment is fixture supplied: this is not production
+daemon CLI, target boot, vendor-native or device acceptance.
 
 ## Early consumer integration (development branch)
 
@@ -557,7 +571,8 @@ EOF, a malformed/mismatched acknowledgement or the 30-second commit timeout
 fails startup and drops listeners. The file/config freeze is not a promise of
 zero hardware effects: libkvm initialization may reset HDMI. Its current void
 native initialization API cannot prove a frame, HID or native-service health.
-Actual device checks and daemon integration remain separate requirements.
+Actual device checks and daemon-to-real-backend integration remain separate
+requirements.
 The video guard invokes vendor deinit best-effort; this is not a bounded native
 join or a guarantee that a hung vendor call returns at the protocol deadline.
 
@@ -581,7 +596,7 @@ checks trial support while the app store and update/writer exclusions are held;
 it must not reacquire the busy store. These backend tests do not exercise
 daemon-driven trial/commit/retirement.
 
-## Broker-owned trial policy (daemon activation pending)
+## Broker-owned trial policy
 
 `Session::start_trial` requires canonical Published state, the exact accepted
 transaction/layout and proven closure of all prior scopes. It can launch only
@@ -626,26 +641,28 @@ Committed before native resume and backend authorization, and retains all instal
 exclusions until explicit completion/release. A failed or lost acknowledgement
 does not permit rolling back an already Committed app. Old-slot evidence and
 terminal journal are retained; durable retirement and the complete commit/crash/
-I/O matrix are still required. The nonblocking policy must be driven by the
-daemon without replacing it with a handler-owned task or releasing admission.
+I/O matrix are still required. The daemon Engine now retains and drives this
+nonblocking policy, without a handler-owned task or admission release/reacquire.
 An injected native-journal publication collision after durable app Committed
 checks that no backend Commit is sent and no Stop/rollback owner is minted from
 the ambiguous journal; all installation exclusions remain retained.
 
 Host tests separately exercise the real scope/controller with fake backend
 frames (including a setsid orphan under held UpdateEX), and the actual broker
-policy with protocol probes and real app journals/locks. These are not a single
-daemon-to-real-backend/native-runtime acceptance test. The daemon/ordinary API
-are not activated by this component, and no device deployment is implied.
+policy and Engine with protocol probes and real app journals/locks. Independent
+daemon tests include frontend death and observer disconnect through trial/commit;
+Engine tests cover failed-trial join/rollback, missing receipt and a post-app-commit
+native-journal failure that retains Uncertain without authorization or retry.
+These are not a daemon-to-real-backend/native-runtime acceptance test. The
+ordinary API is not activated, and no device deployment is implied.
 
 ## Remaining activation prerequisites
 
 - Activate the independently delivered native-closed installer in the API only
   after exact metadata/key/policy lifetime, durable job observability,
-  daemon integration of the typed trial/commit policy, runtime-health acceptance
-  and terminal retirement. Execution modes, frozen backend startup and the
-  broker ownership transitions now have host tests; they are not daemon/runtime
-  acceptance. Host-tested
+  daemon-to-real-backend/native-runtime health acceptance and terminal retirement.
+  Execution modes, frozen backend startup and daemon-driven broker transitions
+  now have host tests; they are not target/runtime acceptance. Host-tested
   publication/rollback is not a complete lifecycle; the app API still uses its
   old swap.
 - Full pipeline/target acceptance of independent rootfs installation and the
