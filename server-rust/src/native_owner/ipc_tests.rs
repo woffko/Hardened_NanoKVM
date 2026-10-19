@@ -163,6 +163,10 @@ fn trial_owner_probe() {
             fs::write(root.join("trial-authorized"), commit).unwrap();
             if !trial_gate(&mut control, root, "trial-ack-hold") {
                 control.write_all(b"K").unwrap();
+                // A committed backend may legitimately remain idle while the
+                // owner fsyncs retirement or waits for the next update. Only
+                // handshake gates have a timeout; idle is not owner loss.
+                control.set_read_timeout(None).unwrap();
                 if let Err(error) = control.read_exact(&mut first) {
                     assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
                     assert!(root.join("trial-allow-controller-loss").exists());
@@ -201,10 +205,13 @@ fn owner_probe() {
     let role = std::env::var("NANOKVM_NATIVE_IPC_ROLE").unwrap();
     fs::write(root.join(&role), std::process::id().to_string()).unwrap();
     let mut s = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    // Mirror a live native role: it stays alive until actual Stop/EOF, never
+    // fabricates a closure because unrelated test I/O kept it idle for10s.
+    s.set_read_timeout(None).unwrap();
     s.write_all(b"R").unwrap();
     let mut stop = [0];
-    let _ = s.read(&mut stop);
+    s.read_exact(&mut stop).unwrap();
+    assert_eq!(stop, *b"S");
     if role == "backend" && root.join("backend-stop-hold").exists() {
         fs::write(root.join("backend-stopping"), b"stopping").unwrap();
         until(|| !root.join("backend-stop-hold").exists());

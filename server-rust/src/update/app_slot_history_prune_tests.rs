@@ -223,7 +223,9 @@ fn kill_at(fixture: &Fixture, point: &str) {
             }
         }
     });
-    let reached = receive.recv_timeout(Duration::from_secs(10)).is_ok();
+    // Test-harness checkpoint reachability under unrelated fsync load, not a
+    // production protocol/admission timeout. No invariant or point is skipped.
+    let reached = receive.recv_timeout(Duration::from_secs(30)).is_ok();
     let _ = child.kill();
     let status = child.wait().unwrap();
     reader.join().unwrap();

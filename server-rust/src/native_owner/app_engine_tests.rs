@@ -268,8 +268,17 @@ async fn payload_prune_failure_retains_full_terminal_owner_until_explicit_root_r
         .join("application-slot/history")
         .join(format!("{:032x}", u128::from_be_bytes(transactions[1])));
     let collision = victim.join("payload-expired");
-    fs::write(&collision, b"foreign expiry evidence").unwrap();
+    // Admission now validates all history before issuing the candidate. Inject
+    // this retirement fault only after that distinct boundary has succeeded.
+    fs::remove_file(root.join("trial-owner-started")).unwrap();
+    fs::write(root.join("trial-ready-hold"), b"hold for retirement fault").unwrap();
     let (_, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        root.join("trial-owner-started").exists()
+    });
+    fs::write(&collision, b"foreign expiry evidence").unwrap();
+    fs::remove_file(root.join("trial-ready-hold")).unwrap();
     until(|| {
         engine.tick();
         engine.mode == Mode::Uncertain
@@ -406,6 +415,154 @@ async fn rollback_retirement_collision_retains_engine_exclusions_and_never_resta
         Code::Busy
     );
     shutdown(&mut engine);
+}
+
+#[test]
+fn receipt_gc_failure_retains_engine_ownership_until_explicit_root_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let fault = root.path().join("receipt-fault-once");
+    fs::write(&fault, b"one exact receipt quarantine failure").unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "native_owner::broker::ipc::tests::install_engine::receipt_gc_engine_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env("NANOKVM_RECEIPT_ENGINE_ROOT", root.path())
+        .env("NANOKVM_APP_SLOT_TEST_FAIL", "receipt-quarantined")
+        .env("NANOKVM_RECEIPT_TEST_FAIL_ONCE", &fault)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("receipt-engine-retained-and-retried")
+    );
+    assert!(!fault.exists());
+}
+
+#[tokio::test]
+async fn receipt_gc_engine_child() {
+    let Ok(root) = std::env::var("NANOKVM_RECEIPT_ENGINE_ROOT") else {
+        return;
+    };
+    let root = Path::new(&root);
+    let mut engine = engine(root);
+    start_all(&mut engine);
+    let mut transactions = Vec::with_capacity(34);
+    for sequence in 1..=34 {
+        let (_, transaction) = accept(&mut engine, root).await;
+        transactions.push(transaction);
+        if sequence < 34 {
+            receipt_engine_until(&mut engine, sequence, "retired/running", |engine| {
+                engine.install.is_none()
+                    && engine.mode == Mode::Running
+                    && engine.roles == [2; 2]
+                    && engine.backend_status == Some(Status::Running)
+            });
+        } else {
+            receipt_engine_until(&mut engine, sequence, "retained uncertainty", |engine| {
+                engine.mode == Mode::Uncertain
+            });
+        }
+    }
+    let transaction = transactions[33];
+    let current = root.join("application-slot/current");
+    assert!(current.join("receipt-manifest").exists());
+    assert!(
+        root.join("application-slot/history/.receipts-pruning")
+            .exists()
+    );
+    assert!(!root.join("receipt-fault-once").exists());
+    for _ in 0..3 {
+        engine.tick();
+        assert!(matches!(
+            engine.install.as_ref().unwrap().owner,
+            InstallOwner::Committed(_)
+        ));
+        assert_excluded(root);
+        assert_eq!(engine.mode, Mode::Uncertain);
+        assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+        assert!(matches!(
+            app_slot::job_status_fixture(root, transactions[1]),
+            Err(app_slot::SlotError::Busy)
+        ));
+        assert_eq!(
+            engine.request(2, Operation::EnsureKvm).code,
+            Code::Uncertain
+        );
+        assert!(current.join("receipt-manifest").exists());
+    }
+    assert_eq!(
+        engine.request(2, Operation::RetryAppRetirement).code,
+        Code::Ok
+    );
+    receipt_engine_until(
+        &mut engine,
+        34,
+        "explicit retry retired/running",
+        |engine| {
+            engine.install.is_none()
+                && engine.mode == Mode::Running
+                && engine.roles == [2; 2]
+                && engine.backend_status == Some(Status::Running)
+        },
+    );
+    assert!(
+        app_slot::job_status_fixture(root, transactions[1])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        app_slot::job_status_fixture(root, transactions[0])
+            .unwrap()
+            .unwrap()
+            .inactive_payload_retained
+    );
+    let latest = app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap();
+    assert!(latest.archived && latest.inactive_payload_retained);
+    assert_eq!(latest.phase, app_slot::Phase::Committed);
+    assert!(!current.exists());
+    shutdown(&mut engine);
+    println!("receipt-engine-retained-and-retried");
+}
+
+fn receipt_engine_until(
+    engine: &mut Engine,
+    sequence: u64,
+    expected: &str,
+    mut ready: impl FnMut(&Engine) -> bool,
+) {
+    // This34-install durability fixture competes with real fsync/SIGKILL
+    // matrices in the full suite. Its observation budget is not a production
+    // protocol deadline. Keep every exact state assertion and diagnose a stall
+    // with its sequence/stage, rather than a context-free6s harness panic.
+    let start = Instant::now();
+    loop {
+        engine.tick();
+        if ready(engine) {
+            return;
+        }
+        let stage = engine.install.as_ref().map(|install| match install.stage {
+            InstallStage::Draining => "draining",
+            InstallStage::Published => "published",
+            InstallStage::Trial => "trial",
+            InstallStage::CommitPending => "commit-pending",
+            InstallStage::Rollback => "rollback",
+            InstallStage::Failed => "failed",
+        });
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "sequence={sequence}, expected={expected}, mode={:?}, stage={stage:?}, roles={:?}, backend={:?}",
+            engine.mode,
+            engine.roles,
+            engine.backend_status
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[tokio::test]

@@ -1,20 +1,24 @@
 //! Exact inactive-payload retirement under the caller's retained lifetime owner.
-//! Receipts stay intact; bounded receipt expiry/cutoff remains separate work.
+//! Payload expiry and bounded receipt expiry use separate durable journals.
 use super::*;
 use crate::update::app_space::{Capacity, Footprint};
-use std::collections::BTreeSet;
 
 #[path = "app_slot_prune_tree.rs"]
 mod tree;
 use tree::Manifest;
+#[path = "app_slot_receipts.rs"]
+mod receipts;
+use receipts::chain;
+pub(super) use receipts::{
+    expire_receipts, receipt_query_guard, require_empty as require_empty_receipts,
+    require_preparation as require_receipt_preparation,
+};
 
 const MANIFEST: &str = "prune-manifest";
 const CURSOR: &str = "prune-cursor";
 const CURSOR_NEXT: &str = ".prune-cursor.next";
 const QUARANTINE: &str = ".payload-pruning";
 const EXPIRED: &str = "payload-expired";
-// Bounded validation backstop, NOT a receipt expiry/retention policy.
-const MAX_HISTORY: u64 = 128;
 
 struct Archive {
     order: Order,
@@ -28,103 +32,6 @@ fn inactive(record: &Record) -> Result<(&'static str, Identity)> {
         Phase::RolledBack => Ok(("new", record.new)),
         _ => Err(SlotError::Invalid),
     }
-}
-
-fn chain(store: &Store, head: Option<&Order>) -> Result<Vec<Archive>> {
-    let Some(head) = head else {
-        empty_history(&store._lock.0, store.device, store.uid)?;
-        return Ok(Vec::new());
-    };
-    if head.sequence > MAX_HISTORY {
-        return Err(SlotError::Invalid);
-    }
-    let history = restore_fs::open_beneath(
-        &store._lock.0,
-        "history",
-        OFlags::RDONLY | OFlags::DIRECTORY,
-    )?;
-    protected_directory(&history, store.device, store.uid, true)?;
-    let mut archives: Vec<Archive> = Vec::with_capacity(head.sequence as usize);
-    let mut names = BTreeSet::new();
-    let mut transaction = head.transaction;
-    for sequence in (1..=head.sequence).rev() {
-        let name = format!("{:032x}", u128::from_be_bytes(transaction));
-        if !names.insert(name.clone()) {
-            return Err(SlotError::Invalid);
-        }
-        let directory =
-            restore_fs::open_beneath(&history, &name, OFlags::RDONLY | OFlags::DIRECTORY)?;
-        let order = load(&directory, ORDER, store.device, store.uid)?
-            .ok_or(SlotError::Invalid)?
-            .order;
-        let record = order.check_directory(&directory, store.device, store.uid)?;
-        if order.sequence != sequence || order.transaction != transaction {
-            return Err(SlotError::Invalid);
-        }
-        if let Some(newer) = archives.last() {
-            if newer.order.predecessor != digest(&order.encode()?)
-                || newer.order.baseline != order.baseline
-                || newer.record.old != order.live
-                || (newer.record.phase == Phase::RolledBack
-                    && newer.order.fallback != order.fallback)
-            {
-                return Err(SlotError::Invalid);
-            }
-        } else if order != *head {
-            return Err(SlotError::Invalid);
-        }
-        let (payload, _) = inactive(&record)?;
-        let mut members = 0;
-        for entry in rustix::fs::Dir::read_from(&directory)? {
-            let entry = entry?;
-            let bytes = entry.file_name().to_bytes();
-            if matches!(bytes, b"." | b"..") {
-                continue;
-            }
-            members += 1;
-            if members > 5
-                || ![
-                    STATE.as_bytes(),
-                    ORDER.as_bytes(),
-                    payload.as_bytes(),
-                    QUARANTINE.as_bytes(),
-                    EXPIRED.as_bytes(),
-                ]
-                .contains(&bytes)
-            {
-                return Err(SlotError::Invalid);
-            }
-        }
-        transaction = order.previous;
-        archives.push(Archive {
-            order,
-            record,
-            directory,
-        });
-    }
-    if transaction != [0; 16] {
-        return Err(SlotError::Invalid);
-    }
-    let mut seen = 0;
-    for entry in rustix::fs::Dir::read_from(&history)? {
-        let entry = entry?;
-        let bytes = entry.file_name().to_bytes();
-        if matches!(bytes, b"." | b"..") {
-            continue;
-        }
-        seen += 1;
-        if seen > MAX_HISTORY
-            || !std::str::from_utf8(bytes)
-                .ok()
-                .is_some_and(|name| names.contains(name))
-        {
-            return Err(SlotError::Invalid);
-        }
-    }
-    if seen != head.sequence {
-        return Err(SlotError::Invalid);
-    }
-    Ok(archives)
 }
 
 fn open_file(
@@ -371,6 +278,14 @@ fn load_expiry(
     };
     let mut bytes = [0; 160];
     file.read_exact(&mut bytes)?;
+    validate_expiry(&bytes, order, record)?;
+    if file.read(&mut [0])? != 0 {
+        return Err(SlotError::Invalid);
+    }
+    Ok(Some((bytes, file)))
+}
+
+fn validate_expiry(bytes: &[u8; 160], order: &Order, record: &Record) -> Result<()> {
     let (_, identity) = inactive(record)?;
     if &bytes[..8] != b"NKAPPE01"
         || bytes[8..40] != digest(&order.encode()?)
@@ -380,11 +295,10 @@ fn load_expiry(
         || bytes[72..104] == [0; 32]
         || bytes[104..128] != [0; 24]
         || small_hash(b"NanoKVM app prune expiry v1\0", &bytes[..128]) != bytes[128..]
-        || file.read(&mut [0])? != 0
     {
         return Err(SlotError::Invalid);
     }
-    Ok(Some((bytes, file)))
+    Ok(())
 }
 
 pub(super) fn retained(directory: &File, order: &Order, record: &Record, uid: u32) -> Result<bool> {
@@ -612,13 +526,6 @@ pub(super) fn require_absent(store: &Store) -> Result<()> {
         if !absent(&store.current, name)? {
             return Err(SlotError::Busy);
         }
-    }
-    Ok(())
-}
-
-pub(super) fn check_head_capacity(order: &Order) -> Result<()> {
-    if order.sequence >= MAX_HISTORY {
-        return Err(SlotError::Busy);
     }
     Ok(())
 }

@@ -643,10 +643,14 @@ under that same retained ownership. The baseline is the first enrolled source
 identity, not a health inference; rollback does not replace the previous fallback.
 Separate [inactive payload pruning](security-app-slot-recovery.md#inactive-payload-pruning)
 now uses that retained owner, a complete manifest, quarantine and durable per-
-unlink cursor; failures retain the owner. Historical receipts remain queryable
-with explicit payload availability. Bounded receipt expiry/cutoff, user-state
-migration and runtime/physical acceptance are still required; this is not full
-GC completion or permission to activate the ordinary updater.
+unlink cursor; failures retain the owner. A separate development [bounded
+receipt path](security-app-slot-recovery.md#bounded-terminal-receipts-development)
+keeps32terminal operations plus older source/fallback pins, with an exact
+cutoff/deletion journal before current archival. Retained receipts expose
+payload availability; an absent older receipt is unknown or no longer retained,
+not an inferred failed update. Full GC validation, user-state migration and
+runtime/physical acceptance remain required; this does not activate the ordinary
+updater or close C1.
 
 The [native owner component](security-native-owner.md) supplies separate-process
 child-tree Stop/reap and sibling-controller drain machinery. Moving its launch

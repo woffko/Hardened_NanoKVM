@@ -149,6 +149,11 @@ impl Order {
             return Err(SlotError::Invalid);
         }
         let record = read_record_at(directory, device, uid)?;
+        self.check_record(&record)?;
+        Ok(record)
+    }
+
+    fn check_record(&self, record: &Record) -> Result<()> {
         if self.transaction != record.transaction
             || self.record != digest(&record.encode()?)
             || (record.phase == Phase::Committed && self.fallback != record.old)
@@ -162,7 +167,7 @@ impl Order {
         {
             return Err(SlotError::Invalid);
         }
-        Ok(record)
+        Ok(())
     }
 }
 
@@ -263,7 +268,7 @@ pub(super) fn require_preparation(
     }
     match load(parent, HEAD, device, uid)? {
         Some(head) => {
-            prune::check_head_capacity(&head.order)?;
+            prune::require_receipt_preparation(parent, &head.order, device, uid)?;
             archived(&head.order, parent, device, uid)?;
             let live =
                 restore_fs::open_beneath(rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)?;
@@ -272,7 +277,10 @@ pub(super) fn require_preparation(
             }
             Ok(())
         }
-        None => empty_history(parent, device, uid),
+        None => {
+            prune::require_empty_receipts(parent)?;
+            empty_history(parent, device, uid)
+        }
     }
 }
 
@@ -339,6 +347,7 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
             Order::next(store, record, Some(&head.order))?
         }
         None => {
+            prune::require_empty_receipts(parent)?;
             empty_history(parent, store.device, store.uid)?;
             Order::next(store, record, None)?
         }
@@ -361,7 +370,7 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
         }
         previous.ok_or(SlotError::Invalid)?.file.sync_all()?;
         parent.sync_all()?;
-        return Ok(());
+        return prune::expire_receipts(store, &order);
     }
     prune::finish(
         store,
@@ -394,7 +403,18 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
     parent.sync_all()?;
     #[cfg(test)]
     point("history-head-published")?;
-    Ok(())
+    prune::expire_receipts(store, &order)
+}
+
+/// Receipt deletion may be in progress; do not interpret partial evidence as
+/// an installed version, success, or a never-seen transaction.
+pub(super) fn receipt_query_guard(
+    parent: &File,
+    device: u64,
+    uid: u32,
+    id: [u8; 16],
+) -> Result<()> {
+    prune::receipt_query_guard(parent, device, uid, id)
 }
 
 /// Diagnostic payload availability, not health/rollback permission. Legacy

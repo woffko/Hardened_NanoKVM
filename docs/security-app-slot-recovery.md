@@ -339,9 +339,9 @@ be silently enrolled; it stays preserved and needs an explicit migration policy.
 This is development-only state: it is not a requirement imposed on published
 legacy RC12 assets, nor acceptance of the still-legacy ordinary app API.
 
-Inactive payload expiry now has a separate journaled path below. Bounded receipt
-retention/cutoff, baseline health/promotion policy and full GC acceptance remain
-required; the order records and advisory space guard alone are not GC.
+Inactive payload expiry and bounded receipt retention now have separate journaled
+development paths below. Full GC acceptance and baseline health/promotion policy
+remain required; order records and the advisory space guard alone are not GC.
 
 An acknowledged `Committed` or fully joined `RolledBack` owner now attempts
 terminal archival before releasing install admission. Only those typed owners
@@ -418,6 +418,10 @@ arbitrary user directory. Its bounded inventory records exact paths, types,
 file sizes/modes, device/inode and parent identity. User-state ownership and
 migration must be accepted before enabling the new updater: a valid inventory
 does not prove that account/profile/workspace data was preserved elsewhere.
+Default PicoClaw state lives outside the app, but its effective config/home and
+workspace are configurable. Resolve the actual selected paths: a custom workspace
+inside a replaceable app/slot tree needs explicit durable migration before swap
+or GC; default-path coverage is not proof of custom-state preservation.
 The ordinary app API is still legacy/unaccepted; no device acceptance is claimed.
 
 The immutable manifest is bound to both current and victim order receipts.
@@ -439,11 +443,10 @@ current pins when the filesystem reuses them.
 
 Inventory limits are 8193 nodes, depth64, 4096-byte paths, 32 MiB aggregate path
 bytes and 256 MiB plus64 KiB file data. Validation streams manifests and borrows
-their paths instead of keeping duplicate full inventories. Chain validation
-currently has a128-operation safety backstop; new issuance refuses at that bound.
-This is **not** a final receipt-retention policy: protected cutoff/anchor and
-bounded receipt expiry are still required before release, along with actual
-ENOSPC/I/O, mutable-state, native/runtime and physical power-cut acceptance.
+their paths instead of keeping duplicate full inventories. The separate bounded
+receipt path below replaces the permanent128-operation admission backstop.
+Actual ENOSPC/I/O, mutable-state, native/runtime and physical power-cut acceptance
+remain required; development source or host fixture success is not release acceptance.
 
 Journal creation separately checks the manifest's exact serialized length and
 peak cursor/replacement, expiry, history-head and namespace demand against
@@ -461,6 +464,44 @@ hardlinks/FIFO and an actual private-namespace bind mount. Engine tests prove a
 GC error retains the terminal owner and exclusions until an explicit retry;
 repairing the fixture fault alone does not release it. These are not physical
 reboot/write-cache or full updater acceptance results.
+
+### Bounded terminal receipts (development)
+
+The retained terminal owner keeps the latest32 ordered terminal receipts plus
+at most two older archives needed by actual baseline/fallback payloads. The
+monotonic sequence is not reset when receipts expire. The protected anchor
+binds the exact retained floor Order, publication owner and out-of-window pins;
+older predecessor records are not reconstructed, scanned for adoption or rewritten.
+The baseline is still a source identity, not a known-good health assertion.
+
+Before issuing another candidate, admission requires no current transaction,
+validates the complete bounded archive namespace and its payload/expiry states,
+and checks actual source/fallback presence. A source that is still the exact
+live root needs no invented historical archive; later commit may move it into
+an archived pin. Missing/foreign anchors or history are preserved and refused.
+
+Receipt expiry follows payload pruning and durable head publication but finishes
+before current->history archival. Its bounded immutable manifest binds current
+owner/head, prior anchor digest, target cutoff, history-directory identity and
+the exact expired victims, including state/order/expiry bytes and file inodes.
+Only already-expired unpinned archives can be selected. The remaining chain,
+payload/expiry states, pin presence and namespace are revalidated before deletion.
+Both native/update/store/writer exclusions and the exact current directory remain
+owned on failure; no API snapshot or phase grants permission to finish it.
+
+A pending cursor precedes each NOREPLACE quarantine, fixed-file unlink and empty
+directory removal. Fsync precedes progress advancement. Missing or substituted
+evidence refuses; a missing cursor cannot reconstruct authority after quarantine.
+The new anchor is published only after exact victims are durably removed, and
+manifest cleanup follows anchor durability. Space admission includes receipt
+journal/cursors/anchor without spending the separate recovery margin.
+
+Queries for victims of an active manifest return Busy, not partial state.
+After receipt expiry a missing transaction means unknown **or no longer retained**,
+never proof that an update failed or never ran. Retained/pinned records keep their
+ordinary diagnostics; these remain distinct from health and durable HTTP-job
+acceptance. Host fault and long-history tests pass; this development path is
+not deployed and has not passed target or complete updater acceptance.
 
 ### Explicit live-terminal archival retry
 

@@ -155,6 +155,7 @@ fn archived_job(
     uid: u32,
     transaction: [u8; 16],
 ) -> Result<Option<JobStatus>> {
+    super::history::receipt_query_guard(directory, device, uid, transaction)?;
     let Some(history) = open_optional(directory, HISTORY)? else {
         return Ok(None);
     };
