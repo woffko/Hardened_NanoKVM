@@ -34,6 +34,7 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
     pub(crate) app_job_reads: Arc<Semaphore>,
+    pub(crate) picoclaw_worker: Arc<crate::api::picoclaw::worker::Worker>,
     #[cfg(test)]
     pub(crate) app_job_test_root: Option<Arc<std::path::PathBuf>>,
     pub writers: Arc<StateWriters>,
@@ -97,6 +98,7 @@ impl AppState {
         Self {
             updates: Arc::new(UpdateCoordinator::default()),
             app_job_reads: Arc::new(Semaphore::new(4)),
+            picoclaw_worker: Arc::new(crate::api::picoclaw::worker::Worker::default()),
             #[cfg(test)]
             app_job_test_root: None,
             writers,

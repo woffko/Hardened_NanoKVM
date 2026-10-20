@@ -36,7 +36,7 @@ const MAX_SHORTCUT_KEYS: usize = 6;
 const MAX_KEY_CODE_LEN: usize = 64;
 const MAX_KEY_LABEL_LEN: usize = 64;
 const MAX_PASTE_BYTES: usize = 1024;
-const PASTE_KEY_DELAY: Duration = Duration::from_millis(30);
+pub(crate) const PASTE_KEY_DELAY: Duration = Duration::from_millis(30);
 
 static SHORTCUT_LOCK: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
@@ -298,22 +298,31 @@ fn paste_blocking(content: &str, language: &str) -> Result<()> {
 }
 
 pub fn type_text_blocking(content: &str, language: &str) -> Result<usize> {
+    let reports = prepare_type_text(content, language)?;
     let key_up = [0_u8; 8];
     let mut writes = 0;
-    for ch in content.chars() {
-        let Some(key) = paste_key(ch, language) else {
-            return Err(AppError::BadRequest(
-                "unsupported character in type action".to_string(),
-            ));
-        };
-
-        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
+    for key_down in reports {
         hid_ws::write_keyboard_report(&key_down)?;
         hid_ws::write_keyboard_report(&key_up)?;
         writes += 2;
         thread::sleep(PASTE_KEY_DELAY);
     }
     Ok(writes)
+}
+
+/// Validate the complete strict typing sequence before any device write.
+/// Callers own their input/aggregate limits; this preserves layout mapping.
+pub(crate) fn prepare_type_text(content: &str, language: &str) -> Result<Vec<[u8; 8]>> {
+    let mut reports = Vec::with_capacity(content.chars().count());
+    for ch in content.chars() {
+        let Some(key) = paste_key(ch, language) else {
+            return Err(AppError::BadRequest(
+                "unsupported character in type action".to_string(),
+            ));
+        };
+        reports.push([key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+    Ok(reports)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

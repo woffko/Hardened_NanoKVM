@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{
-        Path as AxumPath, Query,
+        Path as AxumPath, Query, State,
         ws::{CloseFrame as AxumCloseFrame, Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -39,9 +39,16 @@ use crate::{
     api::{hid, stream},
     auth::token::random_token,
     error::ApiResponse,
+    state::AppState,
     system::command::{self, AllowedCommand},
     ws::hid as hid_ws,
 };
+
+#[path = "picoclaw_action_plan.rs"]
+mod action_plan;
+use action_plan::{Batch as PreparedBatch, PreparedAction};
+#[path = "picoclaw_worker.rs"]
+pub(crate) mod worker;
 
 const PICOCLAW_BINARY_PATH: &str = "/usr/bin/picoclaw";
 const PICOCLAW_CACHE_DIR: &str = "/root/.picoclaw-cache";
@@ -257,6 +264,7 @@ struct Action {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ActionBatch {
+    #[serde(deserialize_with = "action_plan::deserialize_actions")]
     actions: Vec<Action>,
 }
 
@@ -668,6 +676,7 @@ pub async fn delete_session(AxumPath(_id): AxumPath<String>) -> Result<Response>
 }
 
 pub async fn screenshot(
+    State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ScreenshotQuery>,
 ) -> Result<Response> {
@@ -675,27 +684,14 @@ pub async fn screenshot(
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let release_after = match acquire_session_lock(&session_id) {
-        Ok(release_after) => release_after,
-        Err(err) => return Ok(picoclaw_error_data(err)),
-    };
-
     let wants_base64 = query.format == "base64";
-    let capture = task::spawn_blocking(move || capture_screenshot_blocking(query)).await;
-
-    if release_after {
-        release_session_lock(&session_id);
-    }
-
-    let (data, mut meta) = match capture {
-        Ok(Ok(capture)) => capture,
-        Ok(Err(err)) => return Ok(picoclaw_error_data(err)),
-        Err(err) => {
-            return Ok(picoclaw_error(
-                CODE_SCREENSHOT_FAILED,
-                format!("screenshot task failed: {err}"),
-            ));
-        }
+    let (data, mut meta) = match state
+        .picoclaw_worker
+        .screenshot(Some(session_id), query)
+        .await
+    {
+        Ok(capture) => capture,
+        Err(err) => return Ok(picoclaw_error_data(err)),
     };
 
     if wants_base64 {
@@ -706,39 +702,30 @@ pub async fn screenshot(
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], data).into_response())
 }
 
-pub async fn actions(headers: HeaderMap, body: Bytes) -> Result<Response> {
+pub async fn actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
     let session_id = match require_session_id(&headers) {
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let actions = match normalize_actions(&body) {
+    let actions = match normalize_actions(&body).and_then(PreparedBatch::prepare) {
         Ok(actions) => actions,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let release_after = match acquire_session_lock(&session_id) {
-        Ok(release_after) => release_after,
-        Err(err) => return Ok(picoclaw_error_data(err)),
-    };
-
-    let exec_session_id = session_id.clone();
-    let result =
-        task::spawn_blocking(move || execute_actions_blocking(&exec_session_id, &actions)).await;
-
-    if release_after {
-        release_session_lock(&session_id);
-    }
-
-    match result {
-        Ok(Ok(result)) => Ok(Json(ApiResponse::ok(result)).into_response()),
-        Ok(Err(err)) => Ok(picoclaw_error_data(err)),
-        Err(err) => Ok(picoclaw_error(
-            CODE_INVALID_ACTION,
-            format!("action task failed: {err}"),
-        )),
+    match state.picoclaw_worker.actions(session_id, actions).await {
+        Ok(result) => Ok(Json(ApiResponse::ok(result)).into_response()),
+        Err(err) => Ok(picoclaw_error_data(err)),
     }
 }
 
-pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
+pub async fn mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
     let req = match serde_json::from_slice::<JsonRpcRequest>(&body) {
         Ok(req) => req,
         Err(_) => {
@@ -769,7 +756,7 @@ pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
             }),
         ),
         "tools/list" => json_rpc_result(req.id, json!({ "tools": mcp_tool_definitions() })),
-        "tools/call" => mcp_tools_call(&headers, req),
+        "tools/call" => mcp_tools_call(&state, &headers, req).await,
         "ping" => json_rpc_result(req.id, json!({})),
         method => json_rpc_error(req.id, -32601, format!("method not found: {method}")),
     };
@@ -1395,14 +1382,25 @@ fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErr
         ));
     }
 
-    if let Ok(batch) = serde_json::from_slice::<ActionBatch>(raw) {
-        if !batch.actions.is_empty() {
-            return Ok(batch.actions);
-        }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(default, deserialize_with = "action_plan::deserialize_present_actions")]
+        actions: Option<Vec<Action>>,
+        #[serde(flatten)]
+        single: Action,
     }
-
-    let action = serde_json::from_slice::<Action>(raw)
+    let payload = serde_json::from_slice::<Payload>(raw)
         .map_err(|_| PicoclawErrorData::new(CODE_INVALID_ACTION, "invalid action payload"))?;
+    if let Some(actions) = payload.actions {
+        if actions.is_empty() || !payload.single.action.trim().is_empty() {
+            return Err(PicoclawErrorData::new(
+                CODE_INVALID_ACTION,
+                "invalid action batch",
+            ));
+        }
+        return Ok(actions);
+    }
+    let action = payload.single;
     if action.action.trim().is_empty() {
         return Err(PicoclawErrorData::new(
             CODE_INVALID_ACTION,
@@ -1414,13 +1412,10 @@ fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErr
 
 fn execute_actions_blocking(
     session_id: &str,
-    actions: &[Action],
+    batch: &PreparedBatch,
 ) -> std::result::Result<ActionResult, PicoclawErrorData> {
     let started_at = Instant::now();
-    if actions.is_empty() {
-        return Err(PicoclawErrorData::new(CODE_INVALID_ACTION, "empty actions"));
-    }
-
+    let (actions, result_action) = batch.parts();
     let mut total_writes = 0;
     for (idx, action) in actions.iter().enumerate() {
         if let Err(err) = ensure_session_lock(session_id) {
@@ -1437,22 +1432,21 @@ fn execute_actions_blocking(
     }
 
     Ok(ActionResult {
-        action: if actions.len() > 1 {
-            "batch".to_string()
-        } else {
-            actions[0].action.clone()
-        },
+        action: result_action.to_string(),
         duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
         hid_writes: total_writes,
         executed_actions: (actions.len() > 1).then_some(actions.len()),
     })
 }
 
-fn execute_action_blocking(action: &Action) -> std::result::Result<usize, PicoclawErrorData> {
-    match action.action.trim().to_ascii_lowercase().as_str() {
-        "click" => {
-            let (x, y) = normalized_point(action.x, action.y)?;
-            let button = mouse_button(&action.button)?;
+fn execute_action_blocking(
+    action: &PreparedAction,
+) -> std::result::Result<usize, PicoclawErrorData> {
+    match *action {
+        PreparedAction::Click {
+            point: (x, y),
+            button,
+        } => {
             let mut writes = 0;
             writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
             writes += send_mouse_move_with_button(x, y, button, 0)?;
@@ -1460,24 +1454,16 @@ fn execute_action_blocking(action: &Action) -> std::result::Result<usize, Picocl
             writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
             Ok(writes)
         }
-        "move" => {
-            let (x, y) = normalized_point(action.x, action.y)?;
-            send_mouse_move_with_button(x, y, 0x00, 0)
-        }
-        "wait" => {
-            if action.duration_ms < 0 {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "wait duration must be >= 0",
-                ));
-            }
-            thread::sleep(Duration::from_millis(action.duration_ms as u64));
+        PreparedAction::Move { point: (x, y) } => send_mouse_move_with_button(x, y, 0x00, 0),
+        PreparedAction::Wait(duration) => {
+            thread::sleep(duration);
             Ok(0)
         }
-        "drag" => {
-            let (from_x, from_y) = normalized_nested_point(action.from.as_ref())?;
-            let (to_x, to_y) = normalized_nested_point(action.to.as_ref())?;
-            let button = mouse_button(&action.button)?;
+        PreparedAction::Drag {
+            from: (from_x, from_y),
+            to: (to_x, to_y),
+            button,
+        } => {
             let mut writes = 0;
             writes += send_mouse_move_with_button(from_x, from_y, 0x00, 0)?;
             writes += send_mouse_move_with_button(from_x, from_y, button, 0)?;
@@ -1490,60 +1476,35 @@ fn execute_action_blocking(action: &Action) -> std::result::Result<usize, Picocl
             writes += send_mouse_move_with_button(to_x, to_y, 0x00, 0)?;
             Ok(writes)
         }
-        "scroll" => {
-            let (x, y) = if action.x.is_some() || action.y.is_some() {
-                normalized_point(action.x, action.y)?
-            } else {
-                (0.5, 0.5)
-            };
-            let amount = if action.amount == 0 { 1 } else { action.amount };
-            if amount < 0 {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "scroll amount must be > 0",
-                ));
-            }
-            let wheel = match action.direction.trim().to_ascii_lowercase().as_str() {
-                "" | "up" => 1,
-                "down" => -1,
-                _ => {
-                    return Err(PicoclawErrorData::new(
-                        CODE_INVALID_ACTION,
-                        "invalid scroll direction",
-                    ));
-                }
-            };
+        PreparedAction::Scroll {
+            point: (x, y),
+            amount,
+            wheel,
+        } => {
             let mut writes = 0;
             for _ in 0..amount {
-                writes += send_mouse_move_with_button(x, y, 0x00, wheel)?;
+                writes += send_mouse_move_with_button(x, y, 0x00, i32::from(wheel))?;
                 writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
                 thread::sleep(DEFAULT_SCROLL_STEP);
             }
             Ok(writes)
         }
-        "type" => {
-            if action.text.is_empty() {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "type requires text",
-                ));
+        PreparedAction::Type(ref reports) => {
+            let mut writes = 0;
+            for report in reports {
+                writes += send_keyboard_report(report)?;
+                writes += send_keyboard_report(&[0; 8])?;
+                thread::sleep(hid::PASTE_KEY_DELAY);
             }
-            hid::type_text_blocking(&action.text, "")
-                .map_err(|err| PicoclawErrorData::new(CODE_INVALID_ACTION, err.to_string()))
+            Ok(writes)
         }
-        "hotkey" => {
-            let keys = normalize_hotkey_keys(action.keys.as_ref())?;
-            let report = build_hotkey_report(&keys)?;
+        PreparedAction::Hotkey(report) => {
             let mut writes = 0;
             writes += send_keyboard_report(&report)?;
             thread::sleep(DEFAULT_CLICK_HOLD);
             writes += send_keyboard_report(&[0; 8])?;
             Ok(writes)
         }
-        _ => Err(PicoclawErrorData::new(
-            CODE_INVALID_ACTION,
-            "unknown or invalid action",
-        )),
     }
 }
 
@@ -1973,7 +1934,11 @@ fn key_code(key: &str) -> Option<u8> {
     }
 }
 
-fn mcp_tools_call(headers: &HeaderMap, req: JsonRpcRequest) -> JsonRpcResponse {
+async fn mcp_tools_call(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
     let Some(params) = req.params.as_ref() else {
         return json_rpc_error(req.id, -32602, "invalid params");
     };
@@ -1984,13 +1949,13 @@ fn mcp_tools_call(headers: &HeaderMap, req: JsonRpcRequest) -> JsonRpcResponse {
     let arguments = params.get("arguments").cloned().unwrap_or(JsonValue::Null);
 
     match name {
-        "kvm_screenshot" => mcp_screenshot(req.id, arguments),
-        "kvm_actions" => mcp_actions(headers, req.id, arguments),
+        "kvm_screenshot" => mcp_screenshot(state, req.id, arguments).await,
+        "kvm_actions" => mcp_actions(state, headers, req.id, arguments).await,
         _ => json_rpc_error(req.id, -32602, format!("unknown tool: {name}")),
     }
 }
 
-fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+async fn mcp_screenshot(state: &AppState, id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct ScreenshotArgs {
@@ -2007,7 +1972,7 @@ fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
         quality: args.quality,
     };
 
-    match capture_screenshot_blocking(query) {
+    match state.picoclaw_worker.screenshot(None, query).await {
         Ok((data, meta)) => {
             let b64 = BASE64_STANDARD.encode(data);
             json_rpc_result(
@@ -2030,10 +1995,19 @@ fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
     }
 }
 
-fn mcp_actions(headers: &HeaderMap, id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+async fn mcp_actions(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: JsonValue,
+    arguments: JsonValue,
+) -> JsonRpcResponse {
     let batch = match serde_json::from_value::<ActionBatch>(arguments) {
         Ok(batch) if !batch.actions.is_empty() => batch,
         _ => return mcp_tool_error(id, "invalid actions payload"),
+    };
+    let batch = match PreparedBatch::prepare(batch.actions) {
+        Ok(batch) => batch,
+        Err(error) => return mcp_tool_error(id, error.message),
     };
 
     let session_id = headers
@@ -2044,7 +2018,7 @@ fn mcp_actions(headers: &HeaderMap, id: JsonValue, arguments: JsonValue) -> Json
         .map(ToOwned::to_owned)
         .unwrap_or_else(session_lock_owner);
 
-    match execute_actions_blocking(&session_id, &batch.actions) {
+    match state.picoclaw_worker.actions(session_id, batch).await {
         Ok(result) => {
             let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             json_rpc_result(id, json!({ "content": [{ "type": "text", "text": text }] }))
@@ -2069,25 +2043,27 @@ fn mcp_tool_definitions() -> JsonValue {
         },
         {
             "name": "kvm_actions",
-            "description": "Send one or more HID actions (click, type, hotkey, scroll, drag, move, wait) to the downstream remote host. Use normalized [0,1] coordinates for mouse actions.",
+            "description": "Send an ordered batch of 1-64 HID actions to the downstream remote host. Use normalized [0,1] mouse coordinates. Per call: wait <=5000 ms/action, scroll <=100 ticks/action, typing <=4096 UTF-8 bytes total, scheduled delays <=30 s total. Continue long tasks in sequential bounded calls; oversized calls are rejected, never truncated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "actions": {
                         "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
                         "description": "Array of action objects. Each requires an 'action' field (click, move, type, hotkey, scroll, drag, wait).",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "action": { "type": "string" },
+                                "action": { "type": "string", "enum": ["click", "move", "type", "hotkey", "scroll", "drag", "wait"] },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
                                 "button": { "type": "string" },
-                                "text": { "type": "string" },
-                                "keys": { "type": "array", "items": { "type": "string" } },
+                                "text": { "type": "string", "description": "At most 4096 UTF-8 bytes across all type actions in this call; typing delay also consumes the aggregate scheduled-time budget." },
+                                "keys": { "type": "array", "maxItems": 14, "items": { "type": "string" } },
                                 "direction": { "type": "string" },
-                                "amount": { "type": "integer" },
-                                "duration_ms": { "type": "integer" },
+                                "amount": { "type": "integer", "minimum": 0, "maximum": 100 },
+                                "duration_ms": { "type": "integer", "minimum": 0, "maximum": 5000 },
                                 "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
                                 "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } }
                             },

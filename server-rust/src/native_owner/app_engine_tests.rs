@@ -215,13 +215,63 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
     for sequence in 1_u64..=3 {
         let (old, transaction) = accept(&mut engine, root).await;
         let baseline = *baseline.get_or_insert(old);
-        until(|| {
+        let started = Instant::now();
+        loop {
+            let tick_started = Instant::now();
             engine.tick();
-            engine.install.is_none()
+            let tick_duration = tick_started.elapsed();
+            if engine.install.is_none()
                 && engine.mode == Mode::Running
                 && engine.roles == [2; 2]
                 && engine.backend_status == Some(Status::Running)
-        });
+            {
+                break;
+            }
+            if started.elapsed() >= FIXTURE_WAIT {
+                let install = engine.install.as_ref().map(|install| {
+                    let stage = match install.stage {
+                        InstallStage::Draining => "draining",
+                        InstallStage::PreparingSupport => "preparing-support",
+                        InstallStage::SupportReady => "support-ready",
+                        InstallStage::Published => "published",
+                        InstallStage::Trial => "trial",
+                        InstallStage::CommitPending => "commit-pending",
+                        InstallStage::Rollback => "rollback",
+                        InstallStage::Failed => "failed",
+                    };
+                    let owner = match &install.owner {
+                        InstallOwner::Draining(_) => "draining",
+                        InstallOwner::Trial(_) => "trial",
+                        InstallOwner::Committed(_) => "committed",
+                        InstallOwner::RolledBack(_) => "rolled-back",
+                        InstallOwner::Refused { .. } => "refused",
+                    };
+                    (stage, owner)
+                });
+                let receipt = app_slot::job_status_fixture(root, transaction)
+                    .ok()
+                    .flatten()
+                    .map(|status| (status.phase as u8, status.archived));
+                // Successive trials reuse marker paths: bind evidence to THIS
+                // transaction, never the mere existence of a previous marker.
+                let authorized = fs::read(root.join("trial-authorized"))
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .and_then(|bytes| {
+                        crate::app_trial_wire::parse(&bytes, crate::app_trial_wire::Event::Commit)
+                            .ok()
+                    })
+                    == Some(transaction);
+                panic!(
+                    "successive install timeout: sequence={sequence}, transaction={transaction:02x?}, mode={:?}, install={install:?}, roles={:?}, backend={:?}, receipt={receipt:?}, current_authorized={authorized}, tick_duration={tick_duration:?}, elapsed={:?}",
+                    engine.mode,
+                    engine.roles,
+                    engine.backend_status,
+                    started.elapsed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let status = app_slot::job_status_fixture(root, transaction)
             .unwrap()
             .unwrap();
