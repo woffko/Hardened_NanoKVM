@@ -103,6 +103,41 @@ def check_source_files(files, root=ROOT):
             raise ValueError("input is missing, nonregular, or traverses a symlink")
 
 
+def check_copy_inputs(text, expected):
+    """Fail closed outside this Dockerfile's simple COPY dialect, not all Docker syntax."""
+    sources, pending = set(), ""
+    stage_copies = {
+        ("--from=host_tools", "/usr/local/host-tools", "/usr/local/host-tools"),
+        ("--from=sdk", "/home/$DOCKER_USER/MaixCDK", "/home/$DOCKER_USER/MaixCDK"),
+    }
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#") and line[1:].lstrip().lower().startswith("escape"):
+            raise ValueError("nondefault Dockerfile escape syntax requires review")
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        row = (pending + line).split()
+        pending = ""
+        if row[0].upper() == "ADD":
+            raise ValueError("ADD is not a reviewed context input")
+        if row[0].upper() != "COPY":
+            continue
+        if len(row) != 4:
+            raise ValueError("COPY syntax requires explicit review")
+        if row[1].startswith("--from="):
+            if tuple(row[1:]) not in stage_copies:
+                raise ValueError("unreviewed stage COPY")
+        elif row[1] in {"--chown=$DOCKER_USER", "--chmod=+x"}:
+            sources.add(row[2])
+        else:
+            raise ValueError("unreviewed COPY flags")
+    if pending or sources != expected:
+        raise ValueError("COPY inputs differ from the reviewed native inventory")
+
+
 class ContextPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -163,11 +198,24 @@ class ContextPolicyTests(unittest.TestCase):
                 check_source_files({"alias-dir/source.cpp"}, root)
 
     def test_no_broad_repository_copy(self):
-        copies = [line.split() for line in (ROOT / "docker/Dockerfile").read_text().splitlines()
-                  if line.startswith("COPY ") and "--from=" not in line]
-        sources = {row[-2] for row in copies}
-        self.assertEqual(sources, {path + "/" if (ROOT / path).is_dir() else path
-                                   for path in INPUTS if path != "docker/Dockerfile"})
+        expected = {path + "/" if (ROOT / path).is_dir() else path
+                    for path in INPUTS if path != "docker/Dockerfile"}
+        check_copy_inputs((ROOT / "docker/Dockerfile").read_text(), expected)
+
+    def test_no_dockerfile_specific_ignore_policy_override(self):
+        override = ROOT / "docker/Dockerfile.dockerignore"
+        self.assertFalse(override.exists() or override.is_symlink())
+
+    def test_copy_case_indent_continuations_add_and_unknown_forms_cannot_hide_new_inputs(self):
+        source = (ROOT / "docker/Dockerfile").read_text()
+        expected = {path + "/" if (ROOT / path).is_dir() else path
+                    for path in INPUTS if path != "docker/Dockerfile"}
+        for extra in ["copy . /leak", "  CoPy --chown=$DOCKER_USER . /leak",
+                      "COPY " + "\\" + "\n    . /leak", 'COPY [".", "/leak"]', "  add . /leak",
+                      "COPY --from=foreign / /leak", "# escape=`", "#escape=`",
+                      "# EsCaPe = `"]:
+            with self.assertRaises(ValueError):
+                check_copy_inputs(source + "\n" + extra + "\n", expected)
 
 
 def engine_check():
