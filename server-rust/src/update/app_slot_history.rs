@@ -287,6 +287,8 @@ pub(super) fn require_preparation(
 /// Publish only a fully written/fsynced anonymous inode. The only magic link
 /// followed is our own held FD in verified procfs, never a caller pathname.
 fn link_complete(parent: &File, name: &str, order: &Order, role: &str) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = super::support::diagnostics::Elapsed::start("history.link.total", None);
     let mut file: File = openat2(
         parent,
         ".",
@@ -300,7 +302,7 @@ fn link_complete(parent: &File, name: &str, order: &Order, role: &str) -> Result
     .into();
     rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600))?;
     file.write_all(&order.encode()?)?;
-    file.sync_all()?;
+    super::support::support_operation!("history.link.file-sync", None, file.sync_all())?;
     #[cfg(test)]
     point(&format!("history-{role}-file-synced"))?;
     let procfs = restore_fs::open_root(Path::new("/proc"), false)?;
@@ -322,7 +324,7 @@ fn link_complete(parent: &File, name: &str, order: &Order, role: &str) -> Result
     }
     #[cfg(test)]
     point(&format!("history-{role}-linked"))?;
-    parent.sync_all()?;
+    super::support::support_operation!("history.link.parent-sync", None, parent.sync_all())?;
     #[cfg(not(test))]
     let _ = role;
     Ok(())
@@ -331,6 +333,8 @@ fn link_complete(parent: &File, name: &str, order: &Order, role: &str) -> Result
 /// Called only by canonical terminal retirement while its native/update/store/
 /// writer guards are retained. An order alone never authorizes tree removal.
 pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = super::support::diagnostics::Elapsed::start("history.register.total", None);
     if store.record()? != *record {
         return Err(SlotError::Invalid);
     }
@@ -372,11 +376,15 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
         parent.sync_all()?;
         return prune::expire_receipts(store, &order);
     }
-    prune::finish(
-        store,
-        &order,
-        previous.as_ref().map(|head| &head.order),
-        record,
+    super::support::support_operation!(
+        "history.payload-prune",
+        None,
+        prune::finish(
+            store,
+            &order,
+            previous.as_ref().map(|head| &head.order),
+            record,
+        )
     )?;
     match load(parent, NEXT, store.device, store.uid)? {
         Some(next) if next.order == order => next.file.sync_all()?,
@@ -403,7 +411,11 @@ pub(super) fn register(store: &Store, record: &Record) -> Result<()> {
     parent.sync_all()?;
     #[cfg(test)]
     point("history-head-published")?;
-    prune::expire_receipts(store, &order)
+    super::support::support_operation!(
+        "history.receipt-expiry",
+        None,
+        prune::expire_receipts(store, &order)
+    )
 }
 
 /// Receipt deletion may be in progress; do not interpret partial evidence as

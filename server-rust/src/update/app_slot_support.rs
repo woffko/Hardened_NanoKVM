@@ -31,7 +31,7 @@ use std::{
 
 #[cfg(test)]
 #[path = "app_slot_support_diagnostics.rs"]
-mod diagnostics;
+pub(crate) mod diagnostics;
 
 // The operation is evaluated once. Production expands to the original
 // expression; only test builds measure it. No fault/progress point is added.
@@ -43,6 +43,7 @@ macro_rules! support_operation {
         $operation
     }};
 }
+pub(crate) use support_operation;
 
 const COUNT: usize = 9;
 const DIRECTORY: &str = "application-support";

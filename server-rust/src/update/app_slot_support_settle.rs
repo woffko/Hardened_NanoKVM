@@ -6,6 +6,8 @@ use rustix::fs::unlinkat;
 /// Core filesystem engine. Production callers supply either the SAME checked
 /// TerminalBoundary or the retained FencedAppRecovery through typed boundaries.
 pub(super) fn run(store: &Store) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("settlement.total", None);
     let record = store.record()?;
     if !matches!(record.phase, AppPhase::Committed | AppPhase::RolledBack) {
         return Err(SlotError::Invalid);
@@ -44,7 +46,11 @@ pub(super) fn run(store: &Store) -> Result<()> {
         publish_plan(&directories, store, &desired, Some(&plan))?;
         plan = desired;
     }
-    cleanup_members(store, &directories, &plan)
+    support_operation!(
+        "settlement.cleanup",
+        None,
+        cleanup_members(store, &directories, &plan)
+    )
 }
 
 /// Only an exact same-context phase edge may finish a known plan-next rename.
@@ -108,6 +114,8 @@ pub(super) fn settle_publication(store: &Store, directories: &Directories) -> Re
 }
 
 fn cleanup_members(store: &Store, directories: &Directories, plan: &Plan) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("cleanup.total", None);
     let record = bound_record(store, plan)?;
     let missing = match (plan.phase, record.phase) {
         (SupportPhase::CleanupOld, AppPhase::RolledBack) => Placement::OldMissing,
@@ -120,6 +128,8 @@ fn cleanup_members(store: &Store, directories: &Directories, plan: &Plan) -> Res
     }
     plan.check_layout(record.phase, &inspect_layout(directories, store, plan)?)?;
     for index in 0..COUNT {
+        #[cfg(test)]
+        let _elapsed = diagnostics::Elapsed::start("cleanup.member-total", Some(index));
         directories.check(store)?;
         if bound_record(store, plan)? != record || load_plan(directories, store, PLAN)? != *plan {
             return Err(SlotError::Invalid);
@@ -152,7 +162,11 @@ fn cleanup_members(store: &Store, directories: &Directories, plan: &Plan) -> Res
             }
         }
         // Retry of an already missing recorded inactive inode still needs sync.
-        directories.support.sync_all()?;
+        support_operation!(
+            "cleanup.member-sync",
+            Some(index),
+            directories.support.sync_all()
+        )?;
         #[cfg(test)]
         point(&format!("cleanup-member-synced-{index}"))?;
     }
@@ -164,10 +178,14 @@ fn cleanup_members(store: &Store, directories: &Directories, plan: &Plan) -> Res
     {
         return Err(SlotError::Invalid);
     }
-    directories.support.sync_all()?;
+    support_operation!(
+        "cleanup.plan-boundary-sync",
+        None,
+        directories.support.sync_all()
+    )?;
     unlinkat(&directories.support, PLAN, AtFlags::empty())?;
     point("cleanup-plan-unlinked")?;
-    directories.support.sync_all()?;
+    support_operation!("cleanup.empty-sync", None, directories.support.sync_all())?;
     point("cleanup-empty-synced")?;
     directories.check(store)?;
     if inventory(&directories.support)? != 0 || store.record()? != record {

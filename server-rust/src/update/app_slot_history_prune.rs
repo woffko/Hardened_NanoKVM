@@ -1,6 +1,7 @@
 //! Exact inactive-payload retirement under the caller's retained lifetime owner.
 //! Payload expiry and bounded receipt expiry use separate durable journals.
 use super::*;
+use crate::update::app_slot::support::support_operation;
 use crate::update::app_space::{Capacity, Footprint};
 
 #[path = "app_slot_prune_tree.rs"]
@@ -74,6 +75,9 @@ fn publish(
     role: &str,
     write: impl FnOnce(&mut File) -> Result<()>,
 ) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed =
+        crate::update::app_slot::support::diagnostics::Elapsed::start("prune.publish.total", None);
     let mut file: File = openat2(
         parent,
         ".",
@@ -87,7 +91,7 @@ fn publish(
     .into();
     rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600))?;
     write(&mut file)?;
-    file.sync_all()?;
+    support_operation!("prune.publish.file-sync", None, file.sync_all())?;
     #[cfg(test)]
     point(&format!("prune-{role}-file-synced"))?;
     let procfs = restore_fs::open_root(Path::new("/proc"), false)?;
@@ -116,7 +120,7 @@ fn publish(
     }
     #[cfg(test)]
     point(&format!("prune-{role}-linked"))?;
-    parent.sync_all()?;
+    support_operation!("prune.publish.parent-sync", None, parent.sync_all())?;
     #[cfg(not(test))]
     let _ = role;
     Ok(())
@@ -204,6 +208,11 @@ fn cursor_step(previous: Option<Cursor>, desired: Cursor, count: usize) -> Resul
 }
 
 fn save_cursor(store: &Store, manifest: &Manifest, desired: Cursor) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = crate::update::app_slot::support::diagnostics::Elapsed::start(
+        "prune.cursor.total",
+        Some(desired.index),
+    );
     let previous = load_cursor(store, CURSOR, manifest)?;
     cursor_step(
         previous.as_ref().map(|v| v.0),
@@ -226,7 +235,11 @@ fn save_cursor(store: &Store, manifest: &Manifest, desired: Cursor) -> Result<()
             },
         )?,
     }
-    store.current.sync_all()?;
+    support_operation!(
+        "prune.cursor.next-sync",
+        Some(desired.index),
+        store.current.sync_all()
+    )?;
     let actual = load_cursor(store, CURSOR, manifest)?;
     if actual.as_ref().map(|v| v.0) != previous.as_ref().map(|v| v.0) {
         return Err(SlotError::Invalid);
@@ -239,7 +252,11 @@ fn save_cursor(store: &Store, manifest: &Manifest, desired: Cursor) -> Result<()
     renameat(&store.current, CURSOR_NEXT, &store.current, CURSOR)?;
     #[cfg(test)]
     point("prune-cursor-renamed")?;
-    store.current.sync_all()?;
+    support_operation!(
+        "prune.cursor.published-sync",
+        Some(desired.index),
+        store.current.sync_all()
+    )?;
     #[cfg(test)]
     point("prune-cursor-published")?;
     Ok(())
@@ -367,6 +384,9 @@ fn journal_capacity(capacity: Capacity, manifest_bytes: Option<u64>) -> Result<(
 }
 
 fn execute(store: &Store, archive: &Archive, manifest: &Manifest, file: &File) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed =
+        crate::update::app_slot::support::diagnostics::Elapsed::start("prune.execute.total", None);
     let (payload_name, identity) = inactive(&archive.record)?;
     if manifest.nodes.last().ok_or(SlotError::Invalid)?.identity != identity {
         return Err(SlotError::Invalid);
@@ -468,12 +488,16 @@ fn execute(store: &Store, archive: &Archive, manifest: &Manifest, file: &File) -
         }
         #[cfg(test)]
         point(&format!("prune-delete-{}-pending", cursor.index))?;
-        tree::remove_node(
-            &archive.directory,
-            quarantine.as_ref(),
-            &manifest.nodes[index],
-            store.uid,
-            already_pending,
+        support_operation!(
+            "prune.remove-node",
+            Some(index),
+            tree::remove_node(
+                &archive.directory,
+                quarantine.as_ref(),
+                &manifest.nodes[index],
+                store.uid,
+                already_pending,
+            )
         )?;
         #[cfg(test)]
         point(&format!("prune-delete-{}-synced", cursor.index))?;
@@ -576,7 +600,10 @@ pub(super) fn finish(
     previous: Option<&Order>,
     record: &Record,
 ) -> Result<()> {
-    let archives = chain(store, previous)?;
+    #[cfg(test)]
+    let _elapsed =
+        crate::update::app_slot::support::diagnostics::Elapsed::start("prune.finish.total", None);
+    let archives = support_operation!("prune.receipt-chain", None, chain(store, previous))?;
     let inflight = pending(store)?;
     if let Some((manifest, _)) = &inflight
         && (manifest.owner != *order
@@ -628,7 +655,11 @@ pub(super) fn finish(
             continue;
         }
         let payload = open_optional(&archive.directory, name)?.ok_or(SlotError::Invalid)?;
-        let nodes = tree::collect(&payload, archive.order.directory, store.device, store.uid)?;
+        let nodes = support_operation!(
+            "prune.collect-tree",
+            None,
+            tree::collect(&payload, archive.order.directory, store.device, store.uid)
+        )?;
         drop(payload);
         let manifest = Manifest::new(order.clone(), archive.order.clone(), nodes)?;
         journal_capacity(

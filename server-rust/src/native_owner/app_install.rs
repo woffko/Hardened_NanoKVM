@@ -2,7 +2,9 @@
 //! No HTTP/worker transport or arbitrary executable selector is exposed.
 
 use super::{Broker, JournalError, controller, journal};
-use crate::update::app_slot::{AcceptedInstall, Phase, SlotError, Status};
+use crate::update::app_slot::{
+    AcceptedInstall, Phase, SlotError, Status, support::support_operation,
+};
 
 /// Only the fixed protected broker endpoint, never a caller-selected address.
 pub(crate) fn connect_peer() -> std::io::Result<std::os::fd::OwnedFd> {
@@ -131,19 +133,39 @@ impl Committed {
     /// Archive the exact terminal receipt/old slot before ending the freeze.
     /// Unknown rename/sync results retain the complete owner for inspection.
     pub fn release(mut self) -> Release<Self> {
-        if self.broker.group.ownership_uncertain() {
+        #[cfg(test)]
+        let _elapsed = crate::update::app_slot::support::diagnostics::Elapsed::start(
+            "native.release.total",
+            None,
+        );
+        if support_operation!(
+            "native.release.owner-before",
+            None,
+            self.broker.group.ownership_uncertain()
+        ) {
             return Release::Retained(self);
         }
         let boundary = TerminalBoundary {
             transaction: self.install.transaction(),
             phase: Phase::Committed,
         };
-        if self.install.retire(&boundary).is_err() || self.broker.group.ownership_uncertain() {
+        if support_operation!(
+            "native.release.retire",
+            None,
+            self.install.retire(&boundary)
+        )
+        .is_err()
+            || support_operation!(
+                "native.release.owner-after",
+                None,
+                self.broker.group.ownership_uncertain()
+            )
+        {
             return Release::Retained(self);
         }
         let Self { broker, install } = self;
         let broker = Box::new(broker);
-        drop(install);
+        support_operation!("native.release.drop-install", None, drop(install));
         Release::Released(broker)
     }
 
@@ -368,6 +390,11 @@ impl TrialSession {
     }
 
     pub fn commit(mut self) -> CommitTrial {
+        #[cfg(test)]
+        let _elapsed = crate::update::app_slot::support::diagnostics::Elapsed::start(
+            "native.commit.total",
+            None,
+        );
         match self.poll() {
             TrialStatus::Starting => return CommitTrial::Pending(self),
             TrialStatus::Ready => {}
@@ -375,16 +402,26 @@ impl TrialSession {
         }
         let transaction = self.install.transaction();
         let ready = TrialReady { transaction };
-        if self.install.commit(&ready).is_err() {
+        if support_operation!("native.commit.slot", None, self.install.commit(&ready)).is_err() {
             return CommitTrial::Retained(self);
         }
         if !self.native_resumed {
-            if self.journal.resume_active().is_err() {
+            if support_operation!(
+                "native.commit.journal-resume",
+                None,
+                self.journal.resume_active()
+            )
+            .is_err()
+            {
                 return CommitTrial::Retained(self);
             }
             self.native_resumed = true;
         }
-        match self.group.commit_trial(transaction) {
+        match support_operation!(
+            "native.commit.ack",
+            None,
+            self.group.commit_trial(transaction)
+        ) {
             Ok(false) => CommitTrial::Pending(self),
             Ok(true) => CommitTrial::Committed(Committed {
                 broker: Broker {

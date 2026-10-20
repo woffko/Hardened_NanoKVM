@@ -1,14 +1,14 @@
 //! Test-only elapsed-operation evidence. Never an authority or progress lease.
 use std::time::{Duration, Instant};
 
-pub(super) struct Elapsed {
+pub(crate) struct Elapsed {
     operation: &'static str,
     member: Option<usize>,
     started: Instant,
 }
 
 impl Elapsed {
-    pub(super) fn start(operation: &'static str, member: Option<usize>) -> Self {
+    pub(crate) fn start(operation: &'static str, member: Option<usize>) -> Self {
         Self {
             operation,
             member,

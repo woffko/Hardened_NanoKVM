@@ -35,6 +35,7 @@ mod history;
 mod recovery_intent;
 #[path = "app_slot_support.rs"]
 pub mod support;
+use support::support_operation;
 #[path = "app_slot_terminal.rs"]
 mod terminal;
 #[cfg(test)]
@@ -222,6 +223,8 @@ impl AcceptedInstall {
         &mut self,
         ready: &crate::native_owner::broker::app_install::TrialReady,
     ) -> Result<Status> {
+        #[cfg(test)]
+        let _elapsed = support::diagnostics::Elapsed::start("slot.commit.total", None);
         if ready.transaction() != self.transaction() {
             return Err(SlotError::Invalid);
         }
@@ -230,10 +233,14 @@ impl AcceptedInstall {
         let mut record = self.trial_record()?;
         if record.phase == Phase::Published {
             record.phase = Phase::Committed;
-            self._store.publish(&record)?;
+            support_operation!("slot.commit.publish", None, self._store.publish(&record))?;
         }
-        restore_fs::open_beneath(&self._store.current, STATE, OFlags::RDONLY)?.sync_all()?;
-        self._store.sync_parents()?;
+        support_operation!(
+            "slot.commit.state-sync",
+            None,
+            restore_fs::open_beneath(&self._store.current, STATE, OFlags::RDONLY)?.sync_all()
+        )?;
+        support_operation!("slot.commit.parents-sync", None, self._store.sync_parents())?;
         self.record = record;
         Ok(Status::Transaction(Phase::Committed))
     }
