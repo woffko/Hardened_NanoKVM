@@ -18,6 +18,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Diagnostic only: these lines are intentionally NOT watcher progress events
+// and never renew the existing publication checkpoint deadline.
+fn fixture_trace(step: &str) {
+    if std::env::var_os("NANOKVM_APP_SLOT_TEST_TRACE").is_some() {
+        eprintln!("issuer-fixture: {step}");
+    }
+}
+
 pub(crate) fn archive() -> Vec<u8> {
     let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);
@@ -42,17 +50,31 @@ async fn admission(root: &Path) -> (UpdateOwner, Handoff) {
     let coordinator = Arc::new(UpdateCoordinator::with_test_parent(
         parent.try_clone().unwrap(),
     ));
+    fixture_trace("update-admission-start");
     let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
+    fixture_trace("update-admission-done");
+    fixture_trace("writer-drain-start");
     let writers = StateWriters::for_test_parent(parent)
         .drain(Duration::from_secs(1))
         .await
         .unwrap();
+    fixture_trace("writer-drain-done");
     let handoff = owner.prepare_install_handoff(writers).unwrap();
+    fixture_trace("handoff-done");
     (owner, handoff)
 }
 
 fn candidate(root: &Path) -> AppCandidate {
-    manual_candidate_fixture(AppStage::fixture(root).unwrap(), &archive()).unwrap()
+    fixture_trace("stage-create-start");
+    let stage = AppStage::fixture(root).unwrap();
+    fixture_trace("stage-create-done");
+    fixture_trace("archive-create-start");
+    let archive = archive();
+    fixture_trace("archive-create-done");
+    fixture_trace("candidate-prepare-start");
+    let candidate = manual_candidate_fixture(stage, &archive).unwrap();
+    fixture_trace("candidate-prepare-done");
+    candidate
 }
 
 fn init(root: &Path) {
@@ -71,17 +93,27 @@ fn issue(root: &Path, candidate: AppCandidate, handoff: Handoff) -> Result<Prepa
 
 pub(crate) async fn accepted_fixture(root: &Path) -> AcceptedInstall {
     let (owner, prepared) = prepared_fixture(root).await;
+    fixture_trace("lease-exchange-start");
     let received = received_fixture(root, prepared);
+    fixture_trace("lease-exchange-done");
     drop(owner);
-    accept_fixture(root, received).unwrap()
+    fixture_trace("accept-start");
+    let accepted = accept_fixture(root, received).unwrap();
+    fixture_trace("accept-done");
+    accepted
 }
 
 pub(crate) async fn prepared_fixture(root: &Path) -> (UpdateOwner, PreparedInstall) {
+    fixture_trace("init-start");
     if !root.join("kvmapp").exists() {
         init(root);
     }
+    fixture_trace("init-done");
     let (owner, handoff) = admission(root).await;
-    let prepared = issue(root, candidate(root), handoff).unwrap();
+    let candidate = candidate(root);
+    fixture_trace("issue-start");
+    let prepared = issue(root, candidate, handoff).unwrap();
+    fixture_trace("issue-done");
     (owner, prepared)
 }
 
