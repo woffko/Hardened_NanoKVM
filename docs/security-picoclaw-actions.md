@@ -59,13 +59,38 @@ sender closes admission and lets the thread exit after outstanding work; it
 does not interrupt a blocked capture/device syscall. Explicit shutdown/drain
 and ownership-aware cancellation are still required.
 
+## Owned HID reports
+
+Each Pico action batch, manual WebSocket connection and paste/type operation now
+uses an input lease from the same report bus. Explicit reports keep last-writer
+semantics; automatic key/button cleanup is accepted only for the current owner
+of that endpoint. A delayed Pico or disconnected WebSocket cleanup cannot send
+key-up over another owner's later report. Absolute cleanup preserves the last
+attempted coordinates, rather than moving the cursor to zero.
+
+Ownership publication, device writes and their existing recovery/retry sequence
+use the same mutex. A failed normal neutral report retains the possibility that
+the preceding key/button is still down, even when the attempted report says up.
+A failed compensation remains retryable by its current owner, but not after
+another explicit writer supersedes it. Closing cached FDs does not prove that
+the target released a key. Cache close waits outside Tokio while its callers
+retain the USB gadget exclusion.
+
+The passive jiggler skips movement while either mouse endpoint may have held
+buttons and skips its second movement if another mouse writer intervened. This
+does not introduce exclusive manual/Pico control or give one input source
+priority over another. It also does not reconcile a real USB reset with target
+state or implement cancellation. The gateway no longer issues unowned global
+neutral reports; worker-owned cleanup is separate from session-lock release.
+The development DELETE response explicitly does not verify execution stop.
+
 ## Still required for H3
 
 The executor is bounded but not yet cancellable inside an action. Session
-generation, independent Stop/logout/expiry, safe ownership-aware HID release,
-and execution/queue-age deadlines remain required. The old global session/HID
-cleanup is not a new ownership guarantee. Do not treat this development step
-as a complete H3 fix.
+generation, independent Stop/logout/expiry, cancellation wired to owned HID
+cleanup, and execution/queue-age deadlines remain required. Session-lock release
+alone is not worker cancellation or a drain acknowledgement. Do not treat this
+development step as a complete H3 fix.
 
 Tokio timeout alone cannot prove that synchronous MCP code did not block. The
 late-invalid rejection test therefore also measures wall-clock time for both
@@ -75,8 +100,10 @@ five-second wait. This proves rejection latency only, not valid-call latency.
 Host tests cover plan boundaries, malformed/late-invalid actions and report
 ordering; worker bounds, canceled queued calls, shared actions/screenshot
 admission and fail-closed executor loss; and valid direct/MCP waits leaving a
-single-thread Tokio runtime responsive. These are handler/worker tests, not
-authenticated router or device tests. They do not prove device input, real
-multi-batch HID execution, in-action cancellation, revocation or manual/Pico
-handoff. H2, M10 and the remaining WP-06 gateway/token/URL and privilege
-boundaries are separate unresolved work.
+single-thread Tokio runtime responsive. Recording sinks also exercise the
+actual prepared action report executor over repeated batches, stale cleanup,
+uncertain writes, jiggler interleaving and delayed I/O ordering. These are
+handler/worker/report tests, not authenticated router or device tests. They do
+not prove device input, real multi-batch HID execution, in-action cancellation,
+revocation or manual/Pico handoff. H2, M10 and the remaining WP-06 gateway/token/
+URL and privilege boundaries are separate unresolved work.

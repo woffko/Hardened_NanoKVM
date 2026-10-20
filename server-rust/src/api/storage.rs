@@ -325,7 +325,7 @@ fn read_cdrom_flag() -> Result<bool> {
 }
 
 async fn reset_usb_gadget() -> Result<()> {
-    if let Err(err) = hid_ws::close_cached_hid_devices() {
+    if let Err(err) = hid_ws::close_cached_hid_devices().await {
         tracing::warn!(error = %err, "failed to close cached HID devices before USB gadget reset");
     }
 

@@ -23,6 +23,10 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::{AppError, Result, state::AppState, system::usb, ws::origin::validate_ws_origin};
 
+#[path = "hid_ownership.rs"]
+mod ownership;
+use ownership::{Bus, Endpoint, Lease, Report, Sink};
+
 const HID_KEYBOARD: &str = "/dev/hidg0";
 const HID_MOUSE_RELATIVE: &str = "/dev/hidg1";
 const HID_MOUSE_ABSOLUTE: &str = "/dev/hidg2";
@@ -45,7 +49,7 @@ const MOUSE_EVENT: u8 = 2;
 const JIGGLER_MODE_RELATIVE: &str = "relative";
 const JIGGLER_MODE_ABSOLUTE: &str = "absolute";
 
-static HID: LazyLock<HidDevices> = LazyLock::new(HidDevices::default);
+static HID: LazyLock<Bus<HidDevices>> = LazyLock::new(|| Bus::new(HidDevices::default()));
 static MOUSE_JIGGLER: LazyLock<Mutex<MouseJiggler>> =
     LazyLock::new(|| Mutex::new(MouseJiggler::from_config()));
 static WS_EVENTS: LazyLock<broadcast::Sender<String>> = LazyLock::new(|| {
@@ -206,20 +210,82 @@ impl HidDevices {
     }
 }
 
-pub fn write_keyboard_report(report: &[u8]) -> io::Result<()> {
-    HID.write_keyboard(report)
+impl Sink for HidDevices {
+    fn write(&mut self, report: Report) -> io::Result<()> {
+        match report {
+            Report::Keyboard(report) => self.write_keyboard(&report),
+            Report::Relative(report) => self.write_relative_mouse(&report),
+            Report::Absolute(report) => self.write_absolute_mouse(&report),
+        }
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.close_all()
+    }
 }
 
-pub fn write_relative_mouse_report(report: &[u8]) -> io::Result<()> {
-    HID.write_relative_mouse(report)
+#[derive(Clone)]
+pub(crate) struct InputOwner {
+    lease: Lease<'static, HidDevices>,
 }
 
-pub fn write_absolute_mouse_report(report: &[u8]) -> io::Result<()> {
-    HID.write_absolute_mouse(report)
+pub(crate) fn begin_input() -> io::Result<InputOwner> {
+    Ok(InputOwner {
+        lease: HID.begin()?,
+    })
 }
 
-pub fn close_cached_hid_devices() -> io::Result<()> {
-    HID.close_all()
+/// Statically dispatched action I/O; the real implementation retains a bus
+/// lease, while fixtures inject the same ownership core with a recording sink.
+pub(crate) trait HidReports {
+    fn keyboard(&self, report: &[u8; 8]) -> io::Result<usize>;
+    fn absolute(&self, report: &[u8; 6]) -> io::Result<usize>;
+    fn settle_keyboard(&self) -> io::Result<usize>;
+    fn settle_absolute(&self) -> io::Result<usize>;
+}
+
+impl HidReports for InputOwner {
+    fn keyboard(&self, report: &[u8; 8]) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write(Report::Keyboard(*report))
+    }
+    fn absolute(&self, report: &[u8; 6]) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write(Report::Absolute(*report))
+    }
+    fn settle_keyboard(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Keyboard, true)
+    }
+    fn settle_absolute(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Absolute, true)
+    }
+}
+
+impl InputOwner {
+    pub(crate) fn relative(&self, report: &[u8; 4]) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write(Report::Relative(*report))
+    }
+    fn release_keyboard(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Keyboard, false)
+    }
+    fn release_relative(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Relative, false)
+    }
+    fn release_absolute(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Absolute, false)
+    }
+    pub(crate) fn finish(&self) -> io::Result<usize> {
+        self.lease.finish()
+    }
+}
+
+pub async fn close_cached_hid_devices() -> io::Result<()> {
+    // All callers retain run_exclusive's gadget guard, so at most one cache
+    // close is queued. Never wait behind report/recovery I/O on a Tokio worker.
+    tokio::task::spawn_blocking(|| HID.close())
+        .await
+        .map_err(|error| io::Error::other(format!("HID cache close task failed: {error}")))?
 }
 
 pub fn broadcast_event(kind: &str, data: &str) {
@@ -243,11 +309,14 @@ pub async fn connect(
 }
 
 async fn handle_socket(socket: WebSocket) {
+    let Ok(owner) = begin_input() else {
+        return;
+    };
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (keyboard_tx, keyboard_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
     let (mouse_tx, mouse_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
-    let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx));
-    let mouse_worker = tokio::spawn(mouse_worker(mouse_rx));
+    let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx, owner.clone()));
+    let mouse_worker = tokio::spawn(mouse_worker(mouse_rx, owner));
     send_capture_status_snapshot(&mut ws_tx).await;
 
     let mut event_rx = WS_EVENTS.subscribe();
@@ -288,7 +357,9 @@ async fn handle_socket(socket: WebSocket) {
                     continue;
                 }
                 touch_mouse_jiggler();
-                let report = data[1..].to_vec();
+                let Ok(report) = data[1..].try_into() else {
+                    continue;
+                };
                 if keyboard_tx.send(report).await.is_err() {
                     break;
                 }
@@ -296,15 +367,19 @@ async fn handle_socket(socket: WebSocket) {
             MOUSE_EVENT => match data.len() - 1 {
                 4 => {
                     touch_mouse_jiggler();
-                    let report = data[1..].to_vec();
-                    if mouse_tx.send(report).await.is_err() {
+                    let Ok(report) = data[1..].try_into() else {
+                        continue;
+                    };
+                    if mouse_tx.send(MouseReport::Relative(report)).await.is_err() {
                         break;
                     }
                 }
                 6 => {
                     touch_mouse_jiggler();
-                    let report = data[1..].to_vec();
-                    if mouse_tx.send(report).await.is_err() {
+                    let Ok(report) = data[1..].try_into() else {
+                        continue;
+                    };
+                    if mouse_tx.send(MouseReport::Absolute(report)).await.is_err() {
                         break;
                     }
                 }
@@ -342,71 +417,56 @@ fn ws_event_message(kind: &str, data: &str) -> Option<String> {
     serde_json::to_string(&WsEnvelope { kind, data }).ok()
 }
 
-async fn keyboard_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
+async fn keyboard_worker(mut queue: mpsc::Receiver<[u8; 8]>, owner: InputOwner) {
     while let Some(report) = queue.recv().await {
-        if report.len() != 8 {
-            continue;
-        }
-
-        if !write_hid_blocking(move || HID.write_keyboard(&report)).await {
+        let writer = owner.clone();
+        if !write_hid_blocking(move || writer.keyboard(&report)).await {
             drain_hid_queue(&mut queue);
         }
     }
 
-    let _ = write_hid_blocking(|| HID.write_keyboard(&[0; 8])).await;
+    let _ = write_hid_blocking(move || owner.release_keyboard()).await;
 }
 
-async fn mouse_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
-    let mut absolute_buttons_active = false;
-    let mut absolute_release_report = [0_u8; 6];
+enum MouseReport {
+    Relative([u8; 4]),
+    Absolute([u8; 6]),
+}
 
+async fn mouse_worker(mut queue: mpsc::Receiver<MouseReport>, owner: InputOwner) {
     while let Some(report) = queue.recv().await {
-        match report.len() {
-            4 => {
-                if !write_hid_blocking(move || HID.write_relative_mouse(&report)).await {
+        let writer = owner.clone();
+        match report {
+            MouseReport::Relative(report) => {
+                if !write_hid_blocking(move || writer.relative(&report)).await {
                     drain_hid_queue(&mut queue);
-                    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
+                    let writer = owner.clone();
+                    let _ = write_hid_blocking(move || writer.release_relative()).await;
                 }
             }
-            6 => {
-                let release_report = absolute_mouse_release_report(&report);
-                let buttons_active = report.first().copied().unwrap_or_default() != 0;
-                if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
-                    absolute_release_report = release_report;
-                    absolute_buttons_active = buttons_active;
-                } else {
+            MouseReport::Absolute(report) => {
+                if !write_hid_blocking(move || writer.absolute(&report)).await {
                     drain_hid_queue(&mut queue);
-                    if absolute_buttons_active {
-                        let report = absolute_release_report;
-                        if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
-                            absolute_buttons_active = false;
-                        }
-                    } else if buttons_active {
-                        let _ =
-                            write_hid_blocking(move || HID.write_absolute_mouse(&release_report))
-                                .await;
-                    }
+                    let writer = owner.clone();
+                    let _ = write_hid_blocking(move || writer.release_absolute()).await;
                 }
             }
-            _ => {}
         }
     }
 
-    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
-    if absolute_buttons_active {
-        let report = absolute_release_report;
-        let _ = write_hid_blocking(move || HID.write_absolute_mouse(&report)).await;
-    }
+    let writer = owner.clone();
+    let _ = write_hid_blocking(move || writer.release_relative()).await;
+    let _ = write_hid_blocking(move || owner.release_absolute()).await;
 }
 
 async fn write_hid_blocking<F>(write: F) -> bool
 where
-    F: FnOnce() -> io::Result<()> + Send + 'static,
+    F: FnOnce() -> io::Result<usize> + Send + 'static,
 {
-    matches!(tokio::task::spawn_blocking(write).await, Ok(Ok(())))
+    matches!(tokio::task::spawn_blocking(write).await, Ok(Ok(_)))
 }
 
-fn drain_hid_queue(queue: &mut mpsc::Receiver<Vec<u8>>) -> usize {
+fn drain_hid_queue<T>(queue: &mut mpsc::Receiver<T>) -> usize {
     let mut dropped = 0;
     while queue.try_recv().is_ok() {
         dropped += 1;
@@ -564,14 +624,6 @@ fn write_with_timeout(file: &mut File, report: &[u8]) -> io::Result<()> {
     }
 }
 
-fn absolute_mouse_release_report(position_report: &[u8]) -> [u8; 6] {
-    let mut report = [0_u8; 6];
-    if position_report.len() >= 5 {
-        report[1..5].copy_from_slice(&position_report[1..5]);
-    }
-    report
-}
-
 pub fn mouse_jiggler_snapshot() -> Result<(bool, String)> {
     let state = MOUSE_JIGGLER
         .lock()
@@ -645,15 +697,23 @@ async fn mouse_jiggler_loop() {
 }
 
 fn move_mouse_jiggler(mode: &str) -> io::Result<()> {
-    if mode == JIGGLER_MODE_ABSOLUTE {
-        HID.write_absolute_mouse(&[0x00, 0x00, 0x3f, 0x00, 0x3f, 0x00])?;
-        thread::sleep(Duration::from_millis(100));
-        HID.write_absolute_mouse(&[0x00, 0xff, 0x3f, 0xff, 0x3f, 0x00])
+    let owner = begin_input()?;
+    let (first, second) = if mode == JIGGLER_MODE_ABSOLUTE {
+        (
+            Report::Absolute([0x00, 0x00, 0x3f, 0x00, 0x3f, 0x00]),
+            Report::Absolute([0x00, 0xff, 0x3f, 0xff, 0x3f, 0x00]),
+        )
     } else {
-        HID.write_relative_mouse(&[0x00, 0x0a, 0x0a, 0x00])?;
+        (
+            Report::Relative([0x00, 0x0a, 0x0a, 0x00]),
+            Report::Relative([0x00, 0xf6, 0xf6, 0x00]),
+        )
+    };
+    if owner.lease.passive_mouse(first, false)? != 0 {
         thread::sleep(Duration::from_millis(100));
-        HID.write_relative_mouse(&[0x00, 0xf6, 0xf6, 0x00])
+        owner.lease.passive_mouse(second, true)?;
     }
+    Ok(())
 }
 
 fn validate_jiggler_mode(mode: &str) -> Result<String> {

@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::time;
 
+use crate::ws::hid::HidReports;
 use crate::{
     AppError, Result,
     error::ApiResponse,
@@ -239,7 +240,7 @@ pub async fn reset_hid() -> Result<impl IntoResponse> {
 }
 
 async fn reset_hid_locked() -> Result<()> {
-    hid_ws::close_cached_hid_devices()?;
+    hid_ws::close_cached_hid_devices().await?;
     let output = run_allowed(
         AllowedCommand::ServiceUsbDev,
         ["restart_phy"],
@@ -282,31 +283,42 @@ fn validate_paste_request(req: &PasteReq) -> Result<()> {
 }
 
 fn paste_blocking(content: &str, language: &str) -> Result<()> {
-    let key_up = [0_u8; 8];
-    for ch in content.chars() {
-        let Some(key) = paste_key(ch, language) else {
-            tracing::debug!(char = %ch, codepoint = ch as u32, "unknown HID paste character");
-            continue;
-        };
+    let owner = hid_ws::begin_input()?;
+    let result = (|| -> Result<()> {
+        for ch in content.chars() {
+            let Some(key) = paste_key(ch, language) else {
+                tracing::debug!(char = %ch, codepoint = ch as u32, "unknown HID paste character");
+                continue;
+            };
 
-        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
-        hid_ws::write_keyboard_report(&key_down)?;
-        hid_ws::write_keyboard_report(&key_up)?;
-        thread::sleep(PASTE_KEY_DELAY);
-    }
+            let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
+            owner.keyboard(&key_down)?;
+            owner.settle_keyboard()?;
+            thread::sleep(PASTE_KEY_DELAY);
+        }
+        Ok(())
+    })();
+    let cleanup = owner.finish();
+    result?;
+    cleanup?;
     Ok(())
 }
 
 pub fn type_text_blocking(content: &str, language: &str) -> Result<usize> {
     let reports = prepare_type_text(content, language)?;
-    let key_up = [0_u8; 8];
+    let owner = hid_ws::begin_input()?;
     let mut writes = 0;
-    for key_down in reports {
-        hid_ws::write_keyboard_report(&key_down)?;
-        hid_ws::write_keyboard_report(&key_up)?;
-        writes += 2;
-        thread::sleep(PASTE_KEY_DELAY);
-    }
+    let result = (|| -> Result<()> {
+        for key_down in reports {
+            writes += owner.keyboard(&key_down)?;
+            writes += owner.settle_keyboard()?;
+            thread::sleep(PASTE_KEY_DELAY);
+        }
+        Ok(())
+    })();
+    let cleanup = owner.finish();
+    result?;
+    writes += cleanup?;
     Ok(writes)
 }
 

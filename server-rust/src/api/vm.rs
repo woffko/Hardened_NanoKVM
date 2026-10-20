@@ -584,7 +584,7 @@ async fn update_virtual_device_locked(req: UpdateVirtualDeviceReq) -> Result<boo
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.into()),
     };
-    hid_ws::close_cached_hid_devices()?;
+    hid_ws::close_cached_hid_devices().await?;
     if let Err(stop_error) = run_usbdev("stop").await {
         // stop may already have disconnected UDC before its later failure.
         // Attempt recovery even though no configuration change was made.
