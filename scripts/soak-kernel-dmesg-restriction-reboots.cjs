@@ -5,11 +5,13 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { DeviceTestFailure, reportableFailure } = require('./lib/device-test-errors.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const TARGET_IP = process.env.TARGET_IP || '';
 const CYCLES = Number(process.env.REBOOT_CYCLES || '10');
-const SSHPASS = process.env.SSHPASS || path.join(
+// SSHPASS is conventionally a password, never an executable-path override.
+const SSHPASS_BIN = process.env.SSHPASS_BIN || path.join(
   ROOT,
   'build/host-deps/sshpass/usr/bin/sshpass',
 );
@@ -28,7 +30,7 @@ const EXPECTED_SUCCESS = process.env.DEVICE_VERIFIER_SUCCESS
   || 'SUCCESS: Phase 3 dmesg restriction device gate passed';
 
 function fail(message) {
-  throw new Error(message);
+  throw new DeviceTestFailure(message);
 }
 
 function step(message) {
@@ -65,7 +67,7 @@ async function runProcess(command, args, options = {}) {
     const stderr = [];
     child.stdout.on('data', (chunk) => stdout.push(chunk));
     child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.on('error', reject);
+    child.on('error', () => reject(new DeviceTestFailure('external process could not start')));
     child.on('close', (code) => {
       const result = {
         code,
@@ -73,7 +75,7 @@ async function runProcess(command, args, options = {}) {
         stderr: Buffer.concat(stderr),
       };
       if (code !== 0 && !allowNonzero) {
-        const error = new Error(`${path.basename(command)} failed with exit code ${code}`);
+        const error = new DeviceTestFailure(`external process failed with exit code ${code}`);
         error.result = result;
         reject(error);
         return;
@@ -115,7 +117,7 @@ function sshArgs(remoteCommand) {
 
 async function ssh(password, remoteCommand, options = {}) {
   return runProcess(
-    SSHPASS,
+    SSHPASS_BIN,
     sshArgs(remoteCommand),
     { ...options, secret: password },
   );
@@ -140,7 +142,7 @@ async function readBootId(password) {
     ['cat', '/proc/sys/kernel/random/boot_id'],
   );
   const value = result.stdout.toString('utf8').trim();
-  if (!/^[0-9a-f-]{36}$/.test(value)) fail(`invalid kernel boot_id: ${value}`);
+  if (!/^[0-9a-f-]{36}$/.test(value)) fail('invalid kernel boot_id');
   return value;
 }
 
@@ -192,11 +194,11 @@ async function main() {
     fail('REBOOT_CYCLES must be an integer from 1 through 20');
   }
   if (process.argv[2] !== '--confirm-device' || process.argv[3] !== TARGET_IP) {
-    fail(`refusing reboot soak without --confirm-device ${TARGET_IP}`);
+    fail('refusing reboot soak without matching --confirm-device');
   }
-  if (!fs.existsSync(SSHPASS)) fail(`sshpass is missing: ${SSHPASS}`);
-  if (!fs.existsSync(DEVICE_SCRIPT)) fail(`device verifier is missing: ${DEVICE_SCRIPT}`);
-  if (fs.existsSync(RESULT_DIR)) fail(`refusing to reuse result directory: ${RESULT_DIR}`);
+  if (!fs.existsSync(SSHPASS_BIN)) fail('sshpass executable is missing; configure SSHPASS_BIN');
+  if (!fs.existsSync(DEVICE_SCRIPT)) fail('device verifier is missing');
+  if (fs.existsSync(RESULT_DIR)) fail('refusing to reuse result directory');
 
   const password = await readSecret();
   if (!password) fail('secret stdin was empty');
@@ -229,7 +231,7 @@ async function main() {
 main().catch((error) => {
   try {
     fs.mkdirSync(RESULT_DIR, { recursive: true, mode: 0o700 });
-    step(`FAILED: ${error.message}`);
+    step(`FAILED: ${reportableFailure(error)}`);
   } catch {}
   process.exitCode = 1;
 });
