@@ -5,6 +5,8 @@ use std::{env, fs::File, io::Read, path::PathBuf};
 mod boot_script_binding;
 #[path = "src/update/restore_binding.rs"]
 mod restore_binding;
+#[path = "src/update/support_abi.rs"]
+mod support_abi;
 
 #[derive(Clone, Copy)]
 enum Runtime {
@@ -58,6 +60,7 @@ fn read_runtime(runtime: Runtime, required: bool) -> Vec<u8> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/update/support_abi.rs");
     let target = env::var("TARGET").unwrap_or_default();
     let linked_libkvm = env::var_os("CARGO_FEATURE_LINKED_LIBKVM").is_some();
 
@@ -71,6 +74,17 @@ fn main() {
     // Carry identities, not duplicate complete consumer scripts in the helper.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    for role in support_abi::ROLES {
+        let frame = support_abi::encode(role);
+        let declaration = support_abi::decode(&frame).expect("invalid generated support ABI");
+        assert_eq!(declaration.role, role);
+        assert_eq!(declaration.epochs, support_abi::CURRENT);
+        std::fs::write(
+            output.join(format!("support-abi-{}.binding", role.filename())),
+            frame,
+        )
+        .expect("write support ABI declaration");
+    }
     let mut boot_digests = Vec::with_capacity(128);
     for role in boot_script_binding::ROLES {
         let name = role.filename();

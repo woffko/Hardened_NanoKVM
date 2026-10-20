@@ -61,6 +61,22 @@ pub(crate) fn check_update_admission() -> Result<(), JournalError> {
 }
 
 impl Broker {
+    /// This SAME executing broker's build, not a newly installed broker file.
+    /// Diagnostics only: equal epochs do not supply install/native authority.
+    pub fn support_epochs(&self) -> crate::update::support_abi::Epochs {
+        crate::update::support_abi::CURRENT
+    }
+
+    /// Read-only compatibility preflight using this executing build's constant.
+    /// Not a ClosedRuntime capability or permission to mutate support files.
+    pub fn check_support_transition(
+        &self,
+        predecessor: &crate::update::support_abi_catalog::Catalog,
+        successor: &crate::update::support_abi_catalog::Catalog,
+    ) -> Result<(), crate::update::support_abi_catalog::CompatibilityError> {
+        crate::update::support_abi_catalog::check_transition(predecessor, successor)
+    }
+
     pub fn acquire() -> Result<Self, JournalError> {
         let enrollment = boot::require_ready()?;
         Ok(Self {

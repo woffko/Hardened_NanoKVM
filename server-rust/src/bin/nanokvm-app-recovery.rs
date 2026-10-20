@@ -21,6 +21,10 @@ fn parse(args: &[OsString]) -> Option<Mode> {
 }
 
 fn main() -> ExitCode {
+    let _ = std::hint::black_box(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/support-abi-nanokvm-app-recovery.binding"
+    )));
     let args: Vec<_> = std::env::args_os().take(3).collect();
     let Some(mode) = parse(&args) else {
         eprintln!("usage: nanokvm-app-recovery status|recover|gate");

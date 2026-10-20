@@ -5,6 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 fn main() -> ExitCode {
+    let _ = std::hint::black_box(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/support-abi-nanokvm-native-ctl.binding"
+    )));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 1 {
         let result = match args[0].to_str() {

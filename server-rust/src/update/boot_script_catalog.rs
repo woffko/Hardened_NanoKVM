@@ -45,6 +45,18 @@ impl Catalog {
     pub fn members(&self) -> &[Member; 4] {
         &self.members
     }
+
+    pub(super) fn contains_region(&self, start: u64, end: u64) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.start <= start && start < end && end <= member.end)
+    }
+
+    pub(super) fn overlaps(&self, start: u64, end: u64) -> bool {
+        self.members
+            .iter()
+            .any(|member| start < member.end && member.start < end)
+    }
 }
 
 /// The complete helper family is checked first. Frames inside those images are
@@ -57,13 +69,23 @@ pub fn inspect(backend: &File) -> io::Result<Catalog> {
     }
     let size = metadata.len();
     let helpers = helper_family::inspect(backend)?;
-    let catalog = inspect_with(size, &helpers, |out, offset| {
-        backend.read_exact_at(out, offset)
-    })?;
+    let catalog = inspect_in_family(backend, size, &helpers)?;
     if backend.metadata()?.len() != size {
         return Err(invalid());
     }
     Ok(catalog)
+}
+
+// Internal scan reuse only. The enclosing inspector binds this same pinned FD,
+// size and helper family and performs its own final metadata check. Not authority.
+pub(super) fn inspect_in_family(
+    backend: &File,
+    size: u64,
+    helpers: &helper_family::Family,
+) -> io::Result<Catalog> {
+    inspect_with(size, helpers, |out, offset| {
+        backend.read_exact_at(out, offset)
+    })
 }
 
 fn inspect_with(

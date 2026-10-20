@@ -45,6 +45,10 @@ fn command(role: &str) -> Option<Command> {
 }
 
 fn main() -> ExitCode {
+    let _ = std::hint::black_box(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/support-abi-nanokvm-native-owner.binding"
+    )));
     let args: Vec<_> = std::env::args_os().collect();
     let Some(mut command) = (args.len() == 3 && args[1] == "--scope")
         .then(|| args[2].to_str().and_then(command))

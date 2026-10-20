@@ -1,5 +1,9 @@
 use std::process::ExitCode;
 fn main() -> ExitCode {
+    let _ = std::hint::black_box(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/support-abi-nanokvm-native-broker.binding"
+    )));
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(std::ffi::OsStr::new("--serve")) || args.next().is_some() {
         eprintln!("usage: nanokvm-native-broker --serve");

@@ -449,6 +449,7 @@ async fn receipt_gc_engine_child() {
     };
     let root = Path::new(&root);
     let mut engine = engine(root);
+    engine.fixture_trace_starts = true;
     start_all(&mut engine);
     let mut transactions = Vec::with_capacity(34);
     for sequence in 1..=34 {
@@ -542,7 +543,10 @@ fn receipt_engine_until(
     // with its sequence/stage, rather than a context-free6s harness panic.
     let start = Instant::now();
     loop {
+        let was_installing = engine.install.is_some();
+        let tick_started = Instant::now();
         engine.tick();
+        let tick_duration = tick_started.elapsed();
         if ready(engine) {
             return;
         }
@@ -556,10 +560,14 @@ fn receipt_engine_until(
         });
         assert!(
             start.elapsed() < Duration::from_secs(30),
-            "sequence={sequence}, expected={expected}, mode={:?}, stage={stage:?}, roles={:?}, backend={:?}",
+            "sequence={sequence}, expected={expected}, mode={:?}, stage={stage:?}, roles={:?}, backend={:?}, was_installing={was_installing}, tick_duration={tick_duration:?}, wanted={:?}, retry_remaining={:?}",
             engine.mode,
             engine.roles,
-            engine.backend_status
+            engine.backend_status,
+            engine.wanted,
+            engine
+                .retry
+                .map(|retry| retry.saturating_duration_since(Instant::now()))
         );
         std::thread::sleep(Duration::from_millis(5));
     }

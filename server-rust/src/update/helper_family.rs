@@ -86,6 +86,10 @@ pub struct Member {
 }
 
 impl Member {
+    pub(super) fn image_range(&self) -> std::ops::Range<u64> {
+        self.start + restore_binding::HEADER as u64..self.end
+    }
+
     pub fn role(&self) -> Role {
         self.role
     }

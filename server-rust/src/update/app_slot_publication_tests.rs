@@ -1,5 +1,7 @@
 use super::*;
 use crate::native_owner::broker::app_install::ClosedRuntime;
+#[path = "app_slot_publication_watch.rs"]
+mod watch;
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -7,7 +9,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::Instant,
 };
 
 fn current(root: &Path) -> PathBuf {
@@ -142,7 +144,9 @@ fn publication_crash_child() {
         .enable_time()
         .build()
         .unwrap();
+    eprintln!("publication-child: fixture-start");
     let mut install = runtime.block_on(issuer_tests::accepted_fixture(&root));
+    eprintln!("publication-child: fixture-ready");
     fs::create_dir(root.join("kvmapp/kvm")).unwrap();
     for name in APP_STATE {
         fs::write(
@@ -153,6 +157,7 @@ fn publication_crash_child() {
     }
     // Filesystem crash component only: real three-scope native closure is
     // independently exercised by broker::app_install tests.
+    eprintln!("publication-child: publish-start");
     install
         .publish(&ClosedRuntime::fixture(install.transaction()))
         .unwrap();
@@ -186,6 +191,9 @@ fn every_data_journal_and_slot_rename_crash_boundary_recovers_the_recorded_old_a
     );
     for stop in stops {
         let root = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let points = watch::points();
+        let target = points.iter().position(|point| point == &stop).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -194,29 +202,92 @@ fn every_data_journal_and_slot_rename_crash_boundary_recovers_the_recorded_old_a
             ])
             .env("NANOKVM_APP_PUBLICATION_ROOT", root.path())
             .env("NANOKVM_APP_SLOT_TEST_STOP", &stop)
+            .env("NANOKVM_APP_SLOT_TEST_TRACE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let (tx, rx) = mpsc::channel();
+        let progress = tx.clone();
+        let trace_reader = std::thread::spawn(move || {
+            // Drain continuously, but retain only bounded synthetic diagnostics.
+            let mut lines = Vec::with_capacity(256);
+            let mut dropped = 0;
+            let mut events = 0;
+            for line in BufReader::new(stderr).lines() {
+                let line = line.unwrap();
+                // Permit one excess event for explicit rejection, then stop
+                // queueing: at most 73 stderr events plus one stdout Ready.
+                if let Some(event) = watch::parse(&line, &points)
+                    && events <= points.len()
+                {
+                    let _ = progress.send(event);
+                    events += 1;
+                }
+                if lines.len() < 256 {
+                    lines.push((started.elapsed(), line));
+                } else {
+                    dropped += 1;
+                }
+            }
+            (lines, dropped)
+        });
         let reader = std::thread::spawn(move || {
+            let mut last = None;
             for line in BufReader::new(stdout).lines() {
-                if line.unwrap().trim_end().ends_with("slot-checkpoint-ready") {
-                    tx.send(()).unwrap();
+                let line = line.unwrap();
+                let ready = line.trim_end().ends_with("slot-checkpoint-ready");
+                last = Some(line);
+                if ready {
+                    let _ = tx.send(watch::Event::Ready);
                     break;
                 }
             }
+            last
         });
-        let ready = rx.recv_timeout(Duration::from_secs(15));
+        let mut observer = watch::Watch::new(target, Instant::now());
+        let ready = loop {
+            match rx.recv_timeout(observer.remaining(Instant::now())) {
+                Ok(event) => match observer.observe(event, Instant::now()) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) => {}
+                    Err(error) => break Err(error),
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => break Err(watch::Error::Timeout),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Err(watch::Error::Disconnected),
+            }
+        };
+        let wchan = ready
+            .is_err()
+            .then(|| fs::read_to_string(format!("/proc/{}/wchan", child.id())));
+        let process_state = ready.is_err().then(|| {
+            fs::read_to_string(format!("/proc/{}/status", child.id())).map(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("State:"))
+                    .map(str::to_owned)
+            })
+        });
         child.kill().unwrap();
         let output = child.wait_with_output().unwrap();
-        reader.join().unwrap();
+        let last_stdout = reader.join().unwrap();
+        let (lines, dropped) = trace_reader.join().unwrap();
+        let mut trace = String::new();
+        if ready.is_err() {
+            use std::fmt::Write as _;
+            for (elapsed, line) in lines {
+                writeln!(&mut trace, "{elapsed:?}: {line}").unwrap();
+            }
+            writeln!(&mut trace, "dropped trace lines: {dropped}").unwrap();
+        }
         assert!(
             ready.is_ok(),
-            "checkpoint {stop}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "checkpoint {stop}: wait={ready:?}, elapsed={:?}, child={}, last_stdout={last_stdout:?}, wchan={wchan:?}, state={process_state:?}; trace:\n{trace}",
+            started.elapsed(),
+            output.status,
         );
         let _admission = ProcessLock::from_parent(
             &File::open(root.path()).unwrap(),

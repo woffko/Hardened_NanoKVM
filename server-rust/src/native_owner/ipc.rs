@@ -297,6 +297,8 @@ struct Engine {
     fixture_request_completed: Option<Instant>,
     #[cfg(test)]
     fixture_hold_published: bool,
+    #[cfg(test)]
+    fixture_trace_starts: bool,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -324,6 +326,8 @@ impl Engine {
             fixture_request_completed: None,
             #[cfg(test)]
             fixture_hold_published: false,
+            #[cfg(test)]
+            fixture_trace_starts: false,
         }
     }
     fn command(&self, role: Role) -> std::process::Command {
@@ -358,8 +362,19 @@ impl Engine {
                         {
                             self.retry[index] = Instant::now() + RETRY;
                             let command = self.command(role);
+                            #[cfg(test)]
+                            let started_at = Instant::now();
+                            let result = broker.start_owned(role, command);
+                            #[cfg(test)]
+                            if self.fixture_trace_starts {
+                                eprintln!(
+                                    "fixture-native-start: role={role:?}, prior={:?}, result={result:?}, elapsed={:?}",
+                                    states[index],
+                                    started_at.elapsed()
+                                );
+                            }
                             if matches!(
-                                broker.start_owned(role, command),
+                                result,
                                 Err(StartFailure::Journal(_))
                                     | Err(StartFailure::Scope(StartError::UncertainOwnership))
                             ) {

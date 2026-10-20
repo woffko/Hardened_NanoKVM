@@ -2,6 +2,10 @@ use nanokvm_rust_server::native_owner::broker::recovery;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let _ = std::hint::black_box(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/support-abi-nanokvm-native-recovery.binding"
+    )));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let operation = if args.len() == 1 {
         args[0].to_str()

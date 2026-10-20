@@ -557,6 +557,28 @@ compatibility must be checked as well: app update retains that process, so the
 new broker file on disk does not identify its current implementation. These
 requirements remain prerequisites to enabling the canonical update path.
 
+The build also emits a separate 128-byte `support_abi` declaration for the
+backend and each of the five helpers. Roles and format/group epochs are explicit;
+reserved fields and a domain-separated SHA-256 detect inconsistent framing.
+These declarations are not signatures, executable attestations or privileges.
+The current support-transition epoch is zero: matching zero never permits an
+exchange of independently installed helpers or scripts.
+
+`support_abi_catalog` checks one declaration in each verified helper image and
+one outside helper/script frames for the backend. It uses bounded positional
+reads, rejects duplicate/cross-role/cross-boundary declarations, and preserves
+unknown group versions for explicit compatibility refusal. Checksum-valid
+unknown formats or reserved fields cannot be skipped for a later good frame.
+Only declarations wholly enclosed in a script frame are treated as opaque
+script data; a checksummed declaration crossing its edge is rejected.
+Neither a file descriptor nor a parsed catalog establishes immutable provenance.
+
+The retained broker's compatibility query uses its own compiled declaration,
+not the successor broker executable on disk or a caller-supplied live version.
+It is still only a read-only prerequisite, not a `ClosedRuntime` capability.
+The full nine-entry staging, exchange, rollback, settlement and early-recovery
+transaction remains required before enabling canonical publication.
+
 ## Frozen trial and recovery integration
 
 The backend's new frozen trial entry checks the existing app/native family and

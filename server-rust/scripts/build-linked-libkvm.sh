@@ -30,8 +30,8 @@ for obj in crt1.o crti.o crtbegin.o crtend.o crtn.o; do
   fi
 done
 
-# Build all six static helpers before the dynamic backend. None has embedded
-# bindings of its own, so this cannot recursively embed previous builds.
+# Build all six static helpers before the dynamic backend. They may carry their
+# own ABI declaration, but never embed other runtime images recursively.
 METADATA="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --no-deps --format-version 1 --locked --offline)"
 TARGET_DIR="$(printf '%s' "$METADATA" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 RESTORE_TARGET_DIR="${NANOKVM_RESTORE_TARGET_DIR:-$TARGET_DIR/restore-runtime}"

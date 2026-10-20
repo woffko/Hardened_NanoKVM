@@ -402,6 +402,8 @@ fn preserve_app_state(store: &Store) -> Result<()> {
     }
     footprint.check(capacity)?;
     for (name, value) in APP_STATE.into_iter().zip(values) {
+        #[cfg(test)]
+        checkpoint(&format!("app-state-{name}-begin"));
         // A fresh signed candidate may have a default file here, but never a
         // symlink/alias/special object. Refuse foreign bindings before rename.
         match statat(&target, name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -420,6 +422,8 @@ fn preserve_app_state(store: &Store) -> Result<()> {
             OsRng
                 .try_fill_bytes(&mut nonce)
                 .map_err(|_| SlotError::Io(io::Error::other("app state entropy unavailable")))?;
+            #[cfg(test)]
+            checkpoint(&format!("app-state-{name}-entropy-ready"));
             let temporary = format!(".app-state-{:032x}", u128::from_be_bytes(nonce));
             let mut file: File = rustix::fs::openat(
                 &target,
@@ -429,9 +433,17 @@ fn preserve_app_state(store: &Store) -> Result<()> {
             )?
             .into();
             rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600))?;
+            #[cfg(test)]
+            checkpoint(&format!("app-state-{name}-created"));
             file.write_all(&value)?;
+            #[cfg(test)]
+            checkpoint(&format!("app-state-{name}-written"));
             file.sync_all()?;
+            #[cfg(test)]
+            checkpoint(&format!("app-state-{name}-file-synced"));
             renameat(&target, temporary.as_str(), &target, name)?;
+            #[cfg(test)]
+            checkpoint(&format!("app-state-{name}-renamed"));
         } else {
             match rustix::fs::unlinkat(&target, name, AtFlags::empty()) {
                 Ok(()) | Err(rustix::io::Errno::NOENT) => {}
@@ -1319,6 +1331,9 @@ mod recovery_tests;
 
 #[cfg(test)]
 fn checkpoint(name: &str) {
+    if std::env::var_os("NANOKVM_APP_SLOT_TEST_TRACE").is_some() {
+        eprintln!("slot-checkpoint: {name}");
+    }
     if std::env::var("NANOKVM_APP_SLOT_TEST_STOP").as_deref() == Ok(name) {
         println!("slot-checkpoint-ready");
         io::stdout().flush().unwrap();
