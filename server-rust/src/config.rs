@@ -100,6 +100,21 @@ pub struct Security {
     pub allow_auth_disable: bool,
     pub allow_default_admin: bool,
     pub allowed_origins: Vec<String>,
+    pub webrtc_max_peers: usize,
+    pub webrtc_max_message_bytes: usize,
+    pub webrtc_signals_per_second: u32,
+    pub webrtc_max_ice_candidates: usize,
+}
+
+pub(crate) const WEBRTC_PEER_CEILING: usize = 8;
+
+/// Validated once at the configuration/admission boundary, never clamped.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WebRtcLimits {
+    pub peers: usize,
+    pub message_bytes: usize,
+    pub signals_per_second: u32,
+    pub ice_candidates: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +212,10 @@ impl Default for Security {
             allow_auth_disable: false,
             allow_default_admin: false,
             allowed_origins: Vec::new(),
+            webrtc_max_peers: 2,
+            webrtc_max_message_bytes: 64 * 1024,
+            webrtc_signals_per_second: 32,
+            webrtc_max_ice_candidates: 128,
         }
     }
 }
@@ -223,6 +242,7 @@ impl Config {
         };
         config.normalize_legacy_fields();
         config.validate_media_directory()?;
+        config.webrtc_limits()?;
         if config.jwt.secret_key.is_empty() {
             let bytes = startup
                 .read_state(&config.paths.session_secret_file, 4096)?
@@ -281,7 +301,25 @@ impl Config {
         };
         config.normalize_legacy_fields();
         config.validate_media_directory()?;
+        config.webrtc_limits()?;
         Ok(config)
+    }
+
+    pub(crate) fn webrtc_limits(&self) -> Result<WebRtcLimits> {
+        let security = &self.security;
+        if !(1..=WEBRTC_PEER_CEILING).contains(&security.webrtc_max_peers)
+            || !(1024..=256 * 1024).contains(&security.webrtc_max_message_bytes)
+            || !(1..=128).contains(&security.webrtc_signals_per_second)
+            || !(1..=1024).contains(&security.webrtc_max_ice_candidates)
+        {
+            return Err(AppError::Config("invalid WebRTC resource limits".into()));
+        }
+        Ok(WebRtcLimits {
+            peers: security.webrtc_max_peers,
+            message_bytes: security.webrtc_max_message_bytes,
+            signals_per_second: security.webrtc_signals_per_second,
+            ice_candidates: security.webrtc_max_ice_candidates,
+        })
     }
 
     pub(crate) fn write(&self, permit: &ConfigPermit) -> Result<()> {
@@ -526,6 +564,30 @@ fn random_tmp_suffix() -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn legacy_config_gets_bounded_webrtc_defaults_and_invalid_limits_are_not_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        fs::write(&path, "proto: http\n").unwrap();
+        let limits = Config::read_path(&path).unwrap().webrtc_limits().unwrap();
+        assert_eq!(limits.peers, 2);
+        assert_eq!(limits.message_bytes, 64 * 1024);
+        for (field, value) in [
+            ("webrtc_max_peers", 0),
+            ("webrtc_max_peers", 9),
+            ("webrtc_max_message_bytes", 1023),
+            ("webrtc_max_message_bytes", 262145),
+            ("webrtc_signals_per_second", 0),
+            ("webrtc_signals_per_second", 129),
+            ("webrtc_max_ice_candidates", 0),
+            ("webrtc_max_ice_candidates", 1025),
+        ] {
+            fs::write(&path, format!("security:\n  {field}: {value}\n")).unwrap();
+            let err = Config::read_path(&path).unwrap_err();
+            assert_eq!(err.to_string(), "config: invalid WebRTC resource limits");
+        }
+    }
 
     #[test]
     fn media_namespace_cannot_be_broadened_by_runtime_config() {

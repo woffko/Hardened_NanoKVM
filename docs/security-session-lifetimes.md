@@ -37,6 +37,7 @@ authorization remain separate boundaries.
 | MJPEG | Revocation interrupts an idle frame receive; liveness is checked before each yielded multipart chunk; completion/drop releases its client guard. | Already yielded/buffered bytes cannot be retracted. With HTTP backpressure, body cleanup can await its next poll or drop. |
 | Direct H.264 | Revocation interrupts frame receive and socket-send waiting; transport close is bounded to 250 ms and its client guard is released. | An already admitted/in-flight send can have effects before closure. This is not physical stream or slow-network acceptance. |
 | HID WebSocket | Socket/event/queue waits observe the lifetime; pending reports are discarded; the current blocking I/O is joined before owner-specific cleanup. | An already-started device operation is not preempted. Failed compensation remains uncertain, not a verified key release. |
+| WebRTC | Live signaling/RTCP/media authority, bounded admission, retained peer/producer tasks and joined normal cleanup. | Connected RTP/backpressure, physical video and complete backend shutdown remain unaccepted; see [WebRTC ownership](security-webrtc-lifetimes.md). |
 | Terminal unlock ticket | Consuming a ticket also requires its captured session to remain live. | The terminal connection itself is not yet integrated with the live lifetime. |
 
 HID retains separate bounded keyboard and mouse queues and the existing packet
@@ -58,8 +59,10 @@ preemption or complete device-reset reconciliation is claimed.
 
 ## Remaining integration and acceptance
 
-Terminal/PTY, WebRTC peer/media cleanup, Pico gateway and delegated task authority,
-pending privileged operations and app/runtime shutdown still need integration.
+Terminal/PTY, Pico gateway and delegated task authority, pending privileged
+operations and complete app/runtime shutdown still need integration. WebRTC now
+has component ownership/lifetime integration, but its remaining connected-peer,
+backpressure, process-signal and device gates are not closed.
 Durable installation jobs must follow their retained transaction stop/drain
 protocol; dropping an HTTP future is not a safe cancellation mechanism.
 

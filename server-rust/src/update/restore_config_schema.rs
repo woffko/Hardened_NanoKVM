@@ -79,6 +79,10 @@ impl Section {
                 "allow_auth_disable",
                 "allow_default_admin",
                 "allowed_origins",
+                "webrtc_max_peers",
+                "webrtc_max_message_bytes",
+                "webrtc_signals_per_second",
+                "webrtc_max_ice_candidates",
             ],
             Self::Paths => &[
                 "account_file",

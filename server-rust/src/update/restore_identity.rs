@@ -322,6 +322,7 @@ fn validate_layout(config: &Config) -> Result<()> {
     if !matches!(config.proto.as_str(), "http" | "https")
         || config.listen_addr().is_err()
         || config.https_listen_addr().is_err()
+        || config.webrtc_limits().is_err()
     {
         return Err(RestoreIdentityError::InvalidState);
     }

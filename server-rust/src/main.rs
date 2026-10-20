@@ -122,7 +122,6 @@ async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>>
     }
     install_runtime_update_trust(&config);
     initialize_kvm();
-    install_shutdown_signal_handler();
 
     serve_config(config, None).await
 }
@@ -153,7 +152,6 @@ async fn authorize_trial(
     };
     kvm::init()?;
     let video = TrialVideo;
-    install_shutdown_signal_handler();
     tokio::task::spawn_blocking(move || startup.ready_and_wait_commit()).await??;
     Ok(Some(video))
 }
@@ -170,10 +168,16 @@ fn install_runtime_update_trust(config: &Config) {
     }
 }
 
-fn install_shutdown_signal_handler() {
-    tokio::spawn(async {
+fn install_shutdown_signal_handler(state: AppState) {
+    tokio::spawn(async move {
         shutdown_signal().await;
-        warn!("shutdown signal received; deinitializing NanoKVM video backend");
+        warn!("shutdown signal received; stopping WebRTC owners");
+        if let Err(err) = state.stop_webrtc().await {
+            warn!(error = ?err, "WebRTC cleanup uncertain; skipping video deinit");
+            process::exit(1);
+        }
+        // Other transports/native owners still have their separate shutdown
+        // gates. WebRTC must never retain capture work across this deinit.
 
         match time::timeout(
             KVM_SHUTDOWN_TIMEOUT,
@@ -333,8 +337,9 @@ async fn run_http(
         None
     };
 
-    let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
+    let app = routes::build(state.clone()).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(addr).await?;
+    install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
     if let Some((listener, app)) = loopback {
         spawn_bound_http(listener, app, "starting dedicated loopback HTTP listener");
@@ -371,9 +376,10 @@ async fn run_https(
     let http_listener = TcpListener::bind(http_addr).await?;
     let redirect = https_redirect_app(state.clone());
 
-    let app = routes::build(state).into_make_service_with_connect_info::<ClientAddr>();
+    let app = routes::build(state.clone()).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(https_addr).await?;
     let tls_listener = tls::TlsListener::new(listener, tls_config);
+    install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
     if let Some((listener, app)) = loopback {
         spawn_bound_http(

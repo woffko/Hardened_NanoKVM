@@ -793,6 +793,10 @@ fn canonicalization_preserves_all_known_config_fields_except_fixed_paths_and_leg
     persisted.authentication = "disable".to_string();
     persisted.security.allow_auth_disable = true;
     persisted.security.allowed_origins = vec!["https://fixture.invalid".to_string()];
+    persisted.security.webrtc_max_peers = 3;
+    persisted.security.webrtc_max_message_bytes = 96 * 1024;
+    persisted.security.webrtc_signals_per_second = 24;
+    persisted.security.webrtc_max_ice_candidates = 96;
     persisted.logger.level = "debug".to_string();
     persisted.logger.file = "stdout".to_string();
     persisted.stun = "stun:fixture.invalid:3478".to_string();
@@ -994,13 +998,14 @@ fn https_missing_malformed_and_mismatched_keys_are_rejected() {
 fn restored_config_cannot_redirect_identity_or_weaken_signed_layout() {
     let (root, config) = fixture();
     let bytes = captured(root.path(), &config, CWD, CONFIG_PATH);
-    for kind in [0, 1, 2, 3] {
+    for kind in [0, 1, 2, 3, 4] {
         let mut canonical = checked(&bytes).unwrap();
         let mut changed: Config = serde_yaml::from_slice(&member(&mut canonical, CONFIG)).unwrap();
         match kind {
             0 => changed.paths.account_file = PathBuf::from("/data/media/account"),
             1 => changed.paths.system_update_public_key = PathBuf::from("/data/key"),
             2 => changed.paths.image_directory = PathBuf::from("/"),
+            4 => changed.security.webrtc_max_peers = 0,
             _ => changed.jwt.secret_key = "synthetic replaced secret".to_string(),
         }
         assert!(

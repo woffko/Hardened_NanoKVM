@@ -35,6 +35,7 @@ pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
     pub(crate) app_job_reads: Arc<Semaphore>,
     pub(crate) picoclaw_worker: Arc<crate::api::picoclaw::worker::Worker>,
+    pub(crate) webrtc: Arc<crate::api::webrtc_stream::WebRtcManager>,
     #[cfg(test)]
     pub(crate) app_job_test_root: Option<Arc<std::path::PathBuf>>,
     pub writers: Arc<StateWriters>,
@@ -51,6 +52,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
+        config.webrtc_limits()?;
         let writers = Arc::new(StateWriters::default());
         let accounts = AccountStore::new(config.paths.account_file.clone());
         if config.security.allow_default_admin {
@@ -60,7 +62,7 @@ impl AppState {
             }
         }
 
-        Ok(Self::with_identity(config, writers, accounts))
+        Self::with_identity(config, writers, accounts)
     }
 
     /// Frozen trial never enrolls a writer or creates a default account.
@@ -75,14 +77,15 @@ impl AppState {
             ));
         }
         let accounts = AccountStore::new(config.paths.account_file.clone());
-        Ok(Self::with_identity(
-            config,
-            Arc::new(StateWriters::default()),
-            accounts,
-        ))
+        Self::with_identity(config, Arc::new(StateWriters::default()), accounts)
     }
 
-    fn with_identity(config: Config, writers: Arc<StateWriters>, accounts: AccountStore) -> Self {
+    fn with_identity(
+        config: Config,
+        writers: Arc<StateWriters>,
+        accounts: AccountStore,
+    ) -> Result<Self> {
+        let webrtc = crate::api::webrtc_stream::WebRtcManager::new(config.webrtc_limits()?);
         let sessions = SessionStore::new();
         let terminal_tickets = TerminalTicketStore::new();
         let login_limiter = LoginRateLimiter::new(
@@ -95,10 +98,11 @@ impl AppState {
         let session_lock_duration =
             normalize_session_lock_duration(config.security.access_token_duration);
 
-        Self {
+        Ok(Self {
             updates: Arc::new(UpdateCoordinator::default()),
             app_job_reads: Arc::new(Semaphore::new(4)),
             picoclaw_worker: Arc::new(crate::api::picoclaw::worker::Worker::default()),
+            webrtc: Arc::new(webrtc),
             #[cfg(test)]
             app_job_test_root: None,
             writers,
@@ -111,7 +115,7 @@ impl AppState {
             terminal_enabled: Arc::new(AtomicBool::new(terminal_enabled)),
             remote_image_download_enabled: Arc::new(AtomicBool::new(remote_image_download_enabled)),
             session_lock_duration: Arc::new(AtomicU64::new(session_lock_duration)),
-        }
+        })
     }
 
     /// A cooperative boundary for the enrolled APIs/timer only. External
@@ -125,6 +129,12 @@ impl AppState {
         pause
             .drain(deadline.saturating_duration_since(tokio::time::Instant::now()))
             .await
+    }
+
+    /// Only WebRTC owners are drained here. This is not the complete backend,
+    /// capture/native, privileged-job or delegated-task shutdown boundary.
+    pub async fn stop_webrtc(&self) -> Result<()> {
+        self.webrtc.stop_and_join().await
     }
 
     pub fn set_terminal_enabled(&self, enabled: bool) {
