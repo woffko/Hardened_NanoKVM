@@ -27,7 +27,16 @@ RUN cd ~ \
     && . ./bin/activate \
     && pip install -U -r requirements.txt 
 
-COPY --chown=$DOCKER_USER . /home/$DOCKER_USER/NanoKVM
+# Keep the image inputs explicit as well as filtering the transmitted context.
+# Never COPY the repository root: it also contains local build and lab state.
+COPY --chown=$DOCKER_USER support/sg2002/build /home/$DOCKER_USER/NanoKVM/support/sg2002/build
+COPY --chown=$DOCKER_USER support/sg2002/additional/kvm/ /home/$DOCKER_USER/NanoKVM/support/sg2002/additional/kvm/
+COPY --chown=$DOCKER_USER support/sg2002/additional/kvm_mmf/ /home/$DOCKER_USER/NanoKVM/support/sg2002/additional/kvm_mmf/
+COPY --chown=$DOCKER_USER support/sg2002/additional/vision/ /home/$DOCKER_USER/NanoKVM/support/sg2002/additional/vision/
+COPY --chown=$DOCKER_USER support/sg2002/additional/peripheral/port/maixcam/maix_i2c.cpp /home/$DOCKER_USER/NanoKVM/support/sg2002/additional/peripheral/port/maixcam/maix_i2c.cpp
+COPY --chown=$DOCKER_USER support/sg2002/additional/sophgo-middleware/v2/sample/common/sample_common_sensor.c /home/$DOCKER_USER/NanoKVM/support/sg2002/additional/sophgo-middleware/v2/sample/common/sample_common_sensor.c
+COPY --chown=$DOCKER_USER support/sg2002/kvm_system/main/ /home/$DOCKER_USER/NanoKVM/support/sg2002/kvm_system/main/
+COPY --chown=$DOCKER_USER support/sg2002/kvm_vision_test/main/ /home/$DOCKER_USER/NanoKVM/support/sg2002/kvm_vision_test/main/
 
 RUN cd ~/MaixCDK \
     && . ./bin/activate \
