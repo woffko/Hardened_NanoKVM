@@ -92,6 +92,88 @@ fn start_roles(broker: &mut Broker, root: &Path, missing: bool) {
 }
 
 #[test]
+fn running_probes_survive_normal_idle_until_admitted_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    start_roles(&mut broker, root.path(), false);
+    // A native service must remain Running while an update is prepared, not
+    // expire from the fixture's former 15-second pre-Stop read timeout.
+    std::thread::sleep(Duration::from_secs(16));
+    assert_eq!(broker.group.poll(), [Some(ScopeStatus::Running); 3]);
+    let admission = broker.runtime_permit().unwrap();
+    let super::super::Shutdown::Draining(mut drain) = broker.shutdown(admission) else {
+        panic!("idle runtime shutdown refused")
+    };
+    until(|| drain.poll().unwrap() == DrainStatus::Drained);
+    assert!(drain.group.all_owner_processes_reaped());
+}
+
+#[test]
+fn running_probe_controller_eof_exits_without_a_stop_or_closure_receipt() {
+    use std::{net::Shutdown, os::fd::OwnedFd, process::Child};
+
+    // This direct child is a protocol-only probe with no descendants. Failure
+    // cleanup is not a receipt and never supplies native recovery authority.
+    struct Probe {
+        child: Child,
+        reaped: bool,
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if !self.reaped {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.journal.begin().unwrap();
+    let (mut control, peer) = UnixStream::pair().unwrap();
+    control
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    let mut probe = Probe {
+        child: Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_owner::broker::app_install::tests::scope_probe",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("NANOKVM_APP_NATIVE_ROOT", root.path())
+            .env("NANOKVM_APP_NATIVE_ROLE", "backend")
+            .env("NANOKVM_APP_NATIVE_RECEIPT", "complete")
+            .stdin(Stdio::from(OwnedFd::from(peer)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+        reaped: false,
+    };
+    let mut ready = [0];
+    control.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, *b"R");
+    control.shutdown(Shutdown::Write).unwrap();
+    let mut exit = None;
+    until(|| {
+        exit = probe.child.try_wait().unwrap();
+        exit.is_some()
+    });
+    probe.reaped = true;
+    assert!(exit.unwrap().success());
+    assert_eq!(
+        control.read(&mut ready).unwrap(),
+        0,
+        "EOF is not a D receipt"
+    );
+    assert!(root.path().join("backend-controller-lost").exists());
+    assert!(!root.path().join("backend-stopping").exists());
+    assert_eq!(native_phase(root.path()), 1, "EOF cannot close the journal");
+}
+
+#[test]
 fn scope_probe() {
     let Some(root) = std::env::var_os("NANOKVM_APP_NATIVE_ROOT") else {
         return;
@@ -105,7 +187,28 @@ fn scope_probe() {
         .unwrap();
     control.write_all(b"R").unwrap();
     let mut stop = [0];
-    control.read_exact(&mut stop).unwrap();
+    // The controller has not admitted Stop while its candidate is prepared.
+    // A read timeout is idle Running, not service death. Keep the per-read
+    // bound; the parent's unchanged 8-second deadline governs admitted drain.
+    loop {
+        match control.read(&mut stop) {
+            Ok(0) => {
+                // This protocol-only probe has no descendants. EOF ends it,
+                // but supplies neither D nor durable native closure evidence.
+                fs::write(root.join(format!("{role}-controller-lost")), b"lost").unwrap();
+                return;
+            }
+            Ok(_) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("native probe control failed: {error}"),
+        }
+    }
     assert_eq!(stop, *b"S");
     assert_eq!(
         native_phase(root),
