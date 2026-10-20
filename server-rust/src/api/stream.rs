@@ -1,7 +1,7 @@
 use ::time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use async_stream::stream;
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
     extract::{
         State,
@@ -11,6 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
+use futures_util::SinkExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -29,11 +30,16 @@ use crate::{
     AppError, Result,
     error::ApiResponse,
     ffi::kvm,
+    http::middleware::{CurrentSession, TransportSession},
     state::AppState,
     ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
 const FRAME_DETECT_INTERVAL: u8 = 60;
+
+#[cfg(test)]
+#[path = "stream_session_tests.rs"]
+mod session_lifetime_tests;
 pub const CAPTURE_STATUS_EVENT: &str = "capture-status";
 pub const CAPTURE_MODE_DIRECT: &str = "direct";
 pub const CAPTURE_MODE_H264: &str = "h264";
@@ -157,8 +163,8 @@ struct StreamFanout<T> {
     tx: broadcast::Sender<T>,
 }
 
-struct ClientGuard {
-    clients: &'static AtomicUsize,
+struct ClientGuard<'a> {
+    clients: &'a AtomicUsize,
 }
 
 impl<T: Clone> StreamFanout<T> {
@@ -171,7 +177,7 @@ impl<T: Clone> StreamFanout<T> {
         }
     }
 
-    fn add_client(&'static self) -> ClientGuard {
+    fn add_client(&self) -> ClientGuard<'_> {
         self.clients.fetch_add(1, Ordering::AcqRel);
         ClientGuard {
             clients: &self.clients,
@@ -191,7 +197,7 @@ impl<T: Clone> StreamFanout<T> {
     }
 }
 
-impl Drop for ClientGuard {
+impl Drop for ClientGuard<'_> {
     fn drop(&mut self) {
         self.clients.fetch_sub(1, Ordering::AcqRel);
     }
@@ -333,25 +339,26 @@ pub struct StopFrameDetectReq {
     pub duration: Option<u64>,
 }
 
-pub async fn mjpeg_stream() -> impl IntoResponse {
+pub async fn mjpeg_stream(
+    State(state): State<AppState>,
+    current: Option<Extension<CurrentSession>>,
+) -> Result<impl IntoResponse> {
+    let session = TransportSession::capture(&state.config, current)?;
     let stream = stream! {
-        let _guard = MJPEG_FANOUT.add_client();
-        let mut rx = MJPEG_FANOUT.subscribe();
+        if !session.is_active() {
+            return;
+        }
+        let guard = MJPEG_FANOUT.add_client();
+        let rx = MJPEG_FANOUT.subscribe();
         start_mjpeg_producer();
-
-        loop {
-            let frame = match rx.recv().await {
-                Ok(frame) => frame,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            yield Ok::<Bytes, io::Error>(frame.header);
-            yield Ok::<Bytes, io::Error>(frame.data);
-            yield Ok::<Bytes, io::Error>(Bytes::from_static(b"\r\n"));
+        let chunks = mjpeg_chunks(rx, session, guard);
+        tokio::pin!(chunks);
+        while let Some(chunk) = futures_util::StreamExt::next(&mut chunks).await {
+            yield chunk;
         }
     };
 
-    Response::builder()
+    Ok(Response::builder()
         .header(
             header::CONTENT_TYPE,
             "multipart/x-mixed-replace; boundary=frame",
@@ -360,36 +367,86 @@ pub async fn mjpeg_stream() -> impl IntoResponse {
         .header(header::CONNECTION, "keep-alive")
         .header(header::PRAGMA, "no-cache")
         .body(Body::from_stream(stream))
-        .expect("mjpeg response builder")
+        .expect("mjpeg response builder"))
+}
+
+fn mjpeg_chunks<'a>(
+    mut rx: broadcast::Receiver<MjpegFrame>,
+    session: TransportSession,
+    guard: ClientGuard<'a>,
+) -> impl futures_util::Stream<Item = std::result::Result<Bytes, io::Error>> + 'a {
+    stream! {
+        let _guard = guard;
+        'frames: loop {
+            let frame = tokio::select! {
+                biased;
+                _ = session.ended() => break,
+                frame = rx.recv() => match frame {
+                    Ok(frame) => frame,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            for chunk in [frame.header, frame.data, Bytes::from_static(b"\r\n")] {
+                if !session.is_active() {
+                    break 'frames;
+                }
+                yield Ok::<Bytes, io::Error>(chunk);
+            }
+        }
+    }
 }
 
 pub async fn h264_direct_stream(
     State(state): State<AppState>,
+    current: Option<Extension<CurrentSession>>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse> {
+    let session = TransportSession::capture(&state.config, current)?;
     if !validate_ws_origin(&headers, &state.config) {
         return Err(AppError::Forbidden("invalid websocket origin".to_string()));
     }
 
-    Ok(ws.on_upgrade(handle_h264_direct_socket))
+    Ok(ws.on_upgrade(move |socket| handle_h264_direct_socket(socket, session)))
 }
 
-async fn handle_h264_direct_socket(mut socket: WebSocket) {
-    let _guard = H264_DIRECT_FANOUT.add_client();
-    let mut rx = H264_DIRECT_FANOUT.subscribe();
+async fn handle_h264_direct_socket(socket: WebSocket, session: TransportSession) {
+    if !session.is_active() {
+        return;
+    }
+    let guard = H264_DIRECT_FANOUT.add_client();
+    let rx = H264_DIRECT_FANOUT.subscribe();
     start_h264_direct_producer();
+    h264_client(socket, rx, session, guard).await;
+}
 
+async fn h264_client(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<H264DirectFrame>,
+    session: TransportSession,
+    _guard: ClientGuard<'_>,
+) {
     loop {
-        let frame = match rx.recv().await {
-            Ok(frame) => frame,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => break,
+        let frame = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            frame = rx.recv() => match frame {
+                Ok(frame) => frame,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
         };
-        if socket.send(Message::Binary(frame.packet)).await.is_err() {
+        let sent = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            sent = socket.send(Message::Binary(frame.packet)) => sent,
+        };
+        if sent.is_err() {
             break;
         }
     }
+    let _ = time::timeout(Duration::from_millis(250), socket.close()).await;
 }
 
 fn start_mjpeg_producer() {

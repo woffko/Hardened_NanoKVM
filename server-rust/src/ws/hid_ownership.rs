@@ -130,6 +130,23 @@ impl<S: Sink> Lease<'_, S> {
         state.write(self.id, report)
     }
 
+    pub(super) fn write_if(
+        self,
+        report: Report,
+        allowed: impl FnOnce() -> bool,
+    ) -> io::Result<usize> {
+        let mut state = self.bus.state.lock().map_err(|_| poisoned())?;
+        // Recheck after a possibly delayed bus acquisition, immediately before
+        // beginning I/O. The liveness lock is never retained during device I/O.
+        if !allowed() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "HID input authority ended",
+            ));
+        }
+        state.write(self.id, report)
+    }
+
     pub(super) fn passive_mouse(self, report: Report, continuation: bool) -> io::Result<usize> {
         if report.endpoint() == Endpoint::Keyboard {
             return Err(io::Error::new(

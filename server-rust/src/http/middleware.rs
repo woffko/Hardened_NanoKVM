@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     body::Body,
     extract::State,
     extract::connect_info::ConnectInfo,
@@ -8,11 +9,56 @@ use axum::{
 };
 
 use crate::{
-    AppError, auth::session::Session, config::Config, http::tls::ClientAddr, state::AppState,
+    AppError,
+    auth::session::{Session, SessionLifetime},
+    config::Config,
+    http::tls::ClientAddr,
+    state::AppState,
 };
 
 #[derive(Debug, Clone)]
 pub struct CurrentSession(pub Session);
+
+#[derive(Clone)]
+pub(crate) struct TransportSession {
+    lifetime: Option<SessionLifetime>,
+}
+
+impl TransportSession {
+    pub(crate) fn capture(
+        config: &Config,
+        current: Option<Extension<CurrentSession>>,
+    ) -> crate::Result<Self> {
+        if config.auth_disabled() {
+            return Ok(Self { lifetime: None });
+        }
+        let Some(Extension(CurrentSession(session))) = current else {
+            return Err(AppError::Unauthorized);
+        };
+        let lifetime = session.lifetime();
+        if !lifetime.is_active() {
+            return Err(AppError::Unauthorized);
+        }
+        Ok(Self {
+            lifetime: Some(lifetime),
+        })
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.lifetime
+            .as_ref()
+            .is_none_or(SessionLifetime::is_active)
+    }
+
+    pub(crate) async fn ended(&self) {
+        match &self.lifetime {
+            Some(lifetime) => {
+                lifetime.ended().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+}
 
 pub async fn protected(
     State(state): State<AppState>,
@@ -180,5 +226,44 @@ mod tests {
     #[test]
     fn allows_non_browser_requests_without_origin_headers() {
         assert!(validate_http_origin(&HeaderMap::new(), &Config::default()));
+    }
+
+    #[tokio::test]
+    async fn enabled_transport_auth_requires_a_live_captured_session() {
+        let config = Config::default();
+        assert!(TransportSession::capture(&config, None).is_err());
+        let store = crate::auth::session::SessionStore::new();
+        let session = store.issue("admin", 60).await;
+        let guard =
+            TransportSession::capture(&config, Some(Extension(CurrentSession(session.clone()))))
+                .unwrap();
+        assert!(guard.is_active());
+        store.revoke(&session.token).await;
+        guard.ended().await;
+        assert!(!guard.is_active());
+        assert!(
+            TransportSession::capture(&config, Some(Extension(CurrentSession(session)))).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_auth_bypass_requires_both_explicit_configuration_switches() {
+        let mut enabled = Config::default();
+        enabled.security.allow_auth_disable = true;
+        assert!(TransportSession::capture(&enabled, None).is_err());
+        let mut config = Config {
+            authentication: "disable".into(),
+            ..Config::default()
+        };
+        config.security.allow_auth_disable = false;
+        assert!(TransportSession::capture(&config, None).is_err());
+        config.security.allow_auth_disable = true;
+        let guard = TransportSession::capture(&config, None).unwrap();
+        assert!(guard.is_active());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), guard.ended())
+                .await
+                .is_err()
+        );
     }
 }

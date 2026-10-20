@@ -564,6 +564,448 @@ fn blocked_io_does_not_block_owner_allocation_and_old_finish_cannot_follow_new_k
     );
 }
 
+struct WsRecordingOwner<S> {
+    bus: std::sync::Arc<Bus<S>>,
+    id: u64,
+}
+
+impl<S> Clone for WsRecordingOwner<S> {
+    fn clone(&self) -> Self {
+        Self {
+            bus: std::sync::Arc::clone(&self.bus),
+            id: self.id,
+        }
+    }
+}
+
+impl<S: Sink + Send + 'static> super::super::WsInput for WsRecordingOwner<S> {
+    fn write(
+        &self,
+        report: Report,
+        session: &crate::http::middleware::TransportSession,
+    ) -> io::Result<usize> {
+        Lease {
+            bus: &self.bus,
+            id: self.id,
+        }
+        .write_if(report, || session.is_active())
+    }
+
+    fn release(&self, endpoint: Endpoint) -> io::Result<usize> {
+        Lease {
+            bus: &self.bus,
+            id: self.id,
+        }
+        .release(endpoint, false)
+    }
+}
+
+fn ws_authority(
+    session: &crate::auth::session::Session,
+) -> crate::http::middleware::TransportSession {
+    crate::http::middleware::TransportSession::capture(
+        &crate::config::Config::default(),
+        Some(axum::Extension(crate::http::middleware::CurrentSession(
+            session.clone(),
+        ))),
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ws_revocation_during_actual_worker_io_discards_queue_and_joins_owned_cleanup() {
+    use std::{
+        sync::mpsc as sync,
+        time::{Duration, Instant},
+    };
+    struct Gated {
+        recording: Recording,
+        started: sync::SyncSender<()>,
+        release: Option<sync::Receiver<()>>,
+    }
+    impl Sink for Gated {
+        fn write(&mut self, report: Report) -> io::Result<()> {
+            if let Some(release) = self.release.take() {
+                self.started.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "synthetic WS I/O gate timeout")
+                })?;
+            }
+            self.recording.write(report)
+        }
+        fn close(&mut self) -> io::Result<()> {
+            self.recording.close()
+        }
+    }
+    let cases: [(Report, Report, &'static [Endpoint]); 3] = [
+        (KEY_A, KEY_B, &[Endpoint::Keyboard]),
+        (
+            REL_DOWN,
+            Report::Relative([2, 1, 2, 0]),
+            &[Endpoint::Relative, Endpoint::Absolute],
+        ),
+        (
+            ABS_DOWN,
+            Report::Absolute([1, 1, 2, 3, 4, 0]),
+            &[Endpoint::Relative, Endpoint::Absolute],
+        ),
+    ];
+    for (held, queued, endpoints) in cases {
+        let sessions = crate::auth::session::SessionStore::new();
+        let session = sessions.issue("admin", 60).await;
+        let (started, observed) = sync::sync_channel(1);
+        let (release, gate) = sync::sync_channel(1);
+        let bus = std::sync::Arc::new(Bus::new(Gated {
+            recording: Recording::default(),
+            started,
+            release: Some(gate),
+        }));
+        let id = bus.begin().unwrap().id;
+        let owner = WsRecordingOwner {
+            bus: std::sync::Arc::clone(&bus),
+            id,
+        };
+        let (send, receive) = tokio::sync::mpsc::channel(2);
+        send.send(held).await.unwrap();
+        send.send(queued).await.unwrap();
+        let worker = tokio::spawn(super::super::report_worker(
+            receive,
+            owner,
+            ws_authority(&session),
+            endpoints,
+        ));
+        tokio::task::yield_now().await;
+        let began = observed.recv_timeout(Duration::from_secs(2));
+        if began.is_err() {
+            let _ = release.send(());
+        }
+        began.unwrap();
+        let start = Instant::now();
+        sessions.revoke(&session.token).await;
+        let control_elapsed = start.elapsed();
+        let still_pending_io = !worker.is_finished();
+        release.send(()).unwrap(); // Release even before a timing assertion.
+        let clean = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(control_elapsed < Duration::from_secs(1));
+        assert!(
+            still_pending_io,
+            "cancel flag was incorrectly treated as a drain"
+        );
+        assert!(clean);
+        assert_eq!(
+            bus.state.lock().unwrap().sink.recording.effects,
+            vec![held, held.neutral()]
+        );
+        assert!(send.is_closed());
+    }
+}
+
+#[tokio::test]
+async fn ws_revoked_or_closed_connection_never_drains_its_pending_input_as_new_writes() {
+    for revoke in [false, true] {
+        let sessions = crate::auth::session::SessionStore::new();
+        let session = sessions.issue("admin", 60).await;
+        let authority = ws_authority(&session);
+        let bus = std::sync::Arc::new(Bus::new(Recording::default()));
+        let id = bus.begin().unwrap().id;
+        let owner = WsRecordingOwner {
+            bus: std::sync::Arc::clone(&bus),
+            id,
+        };
+        let (send, receive) = tokio::sync::mpsc::channel(2);
+        send.send(KEY_A).await.unwrap();
+        send.send(KEY_B).await.unwrap();
+        if revoke {
+            sessions.revoke(&session.token).await;
+        }
+        drop(send);
+        assert!(
+            super::super::report_worker(receive, owner, authority, &[Endpoint::Keyboard]).await
+        );
+        assert!(effects(&bus).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn ws_worker_reports_failed_owned_cleanup_as_uncertain_not_a_clean_drain() {
+    for after_effect in [false, true] {
+        let sessions = crate::auth::session::SessionStore::new();
+        let session = sessions.issue("admin", 60).await;
+        let authority = ws_authority(&session);
+        let bus = std::sync::Arc::new(Bus::new(Recording {
+            fail_at: Some(2),
+            fail_after_effect: after_effect,
+            ..Recording::default()
+        }));
+        let lease = bus.begin().unwrap();
+        let id = lease.id;
+        lease.write(KEY_A).unwrap();
+        let owner = WsRecordingOwner {
+            bus: std::sync::Arc::clone(&bus),
+            id,
+        };
+        let (_send, receive) = tokio::sync::mpsc::channel(1);
+        sessions.revoke(&session.token).await;
+        assert!(
+            !super::super::report_worker(receive, owner, authority, &[Endpoint::Keyboard]).await
+        );
+        assert!(bus.state.lock().unwrap().current[0].unwrap().needs_release);
+    }
+}
+
+#[tokio::test]
+async fn ws_worker_preserves_fresh_input_after_failed_report_and_successful_owned_recovery() {
+    use std::time::Duration;
+    let sessions = crate::auth::session::SessionStore::new();
+    let session = sessions.issue("admin", 60).await;
+    let authority = ws_authority(&session);
+    let bus = std::sync::Arc::new(Bus::new(Recording {
+        fail_at: Some(1),
+        fail_after_effect: true,
+        ..Recording::default()
+    }));
+    let id = bus.begin().unwrap().id;
+    let owner = WsRecordingOwner {
+        bus: std::sync::Arc::clone(&bus),
+        id,
+    };
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    send.send(KEY_A).await.unwrap();
+    send.send(KEY_B).await.unwrap();
+    let worker = tokio::spawn(super::super::report_worker(
+        receive,
+        owner,
+        authority,
+        &[Endpoint::Keyboard],
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while bus.state.lock().unwrap().sink.attempts.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(effects(&bus), vec![KEY_A, Report::Keyboard([0; 8])]);
+    // The queued old KEY_B was discarded; only this later explicit input may run.
+    send.send(KEY_B).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while bus.state.lock().unwrap().sink.attempts.len() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sessions.revoke(&session.token).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(
+        effects(&bus),
+        vec![
+            KEY_A,
+            Report::Keyboard([0; 8]),
+            KEY_B,
+            Report::Keyboard([0; 8])
+        ]
+    );
+}
+
+#[test]
+fn guarded_report_rechecks_authority_after_delayed_bus_acquisition_before_device_effects() {
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
+    let bus = Arc::new(Bus::new(Recording::default()));
+    let id = bus.begin().unwrap().id;
+    let allowed = Arc::new(Mutex::new(true));
+    let held = bus.state.lock().unwrap();
+    let (started, ready) = mpsc::sync_channel(1);
+    let (checking, checked) = mpsc::sync_channel(1);
+    let writer_bus = Arc::clone(&bus);
+    let writer_allowed = Arc::clone(&allowed);
+    let writer = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        Lease {
+            bus: &writer_bus,
+            id,
+        }
+        .write_if(KEY_A, || {
+            checking.send(()).unwrap();
+            *writer_allowed.lock().unwrap()
+        })
+    });
+    let began = ready.recv_timeout(Duration::from_secs(2));
+    let checked_before_bus_release = checked.recv_timeout(Duration::from_millis(20));
+    *allowed.lock().unwrap() = false;
+    drop(held); // Always release before assertions or joining the writer.
+    let result = writer.join().unwrap();
+    began.unwrap();
+    assert!(matches!(
+        checked_before_bus_release,
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    checked.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert!(effects(&bus).is_empty());
+}
+
+#[tokio::test]
+async fn authenticated_hid_session_revoke_joins_cleanup_without_releasing_a_later_session_owner() {
+    use crate::{
+        config::Config,
+        http::middleware::{CurrentSession, TransportSession, protected},
+        state::AppState,
+    };
+    use axum::{
+        Extension, Router,
+        extract::{State, ws::WebSocketUpgrade},
+        http::HeaderMap,
+        middleware::from_fn_with_state,
+        response::IntoResponse,
+        routing::get,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use std::{sync::Arc, time::Duration};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    async fn fixture(
+        State(state): State<AppState>,
+        Extension(bus): Extension<Arc<Bus<Recording>>>,
+        current: Option<Extension<CurrentSession>>,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> crate::Result<impl IntoResponse> {
+        let session = TransportSession::capture(&state.config, current)?;
+        if !crate::ws::origin::validate_ws_origin(&headers, &state.config) {
+            return Err(crate::AppError::Forbidden(
+                "invalid websocket origin".into(),
+            ));
+        }
+        let id = bus.begin().unwrap().id;
+        let owner = WsRecordingOwner { bus, id };
+        Ok(ws.on_upgrade(move |socket| super::super::handle_socket_owned(socket, session, owner)))
+    }
+
+    fn event(report: Report) -> Message {
+        let mut data = Vec::with_capacity(9);
+        match report {
+            Report::Keyboard(bytes) => {
+                data.push(super::super::KEYBOARD_EVENT);
+                data.extend_from_slice(&bytes);
+            }
+            Report::Relative(bytes) => {
+                data.push(super::super::MOUSE_EVENT);
+                data.extend_from_slice(&bytes);
+            }
+            Report::Absolute(bytes) => {
+                data.push(super::super::MOUSE_EVENT);
+                data.extend_from_slice(&bytes);
+            }
+        }
+        Message::Binary(data.into())
+    }
+
+    async fn wait_effects(bus: &Bus<Recording>, minimum: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while effects(bus).len() < minimum {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    struct ServerTask(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for ServerTask {
+        fn drop(&mut self) {
+            if let Some(task) = &self.0 {
+                task.abort();
+            }
+        }
+    }
+
+    let mut config = Config::default();
+    config.security.allow_default_admin = false;
+    let state = AppState::new(config).await.unwrap();
+    let bus = Arc::new(Bus::new(Recording::default()));
+    let router = Router::new()
+        .route("/hid", get(fixture))
+        .route_layer(from_fn_with_state(state.clone(), protected))
+        .layer(Extension(Arc::clone(&bus)))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let mut server = ServerTask(Some(tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    })));
+    let open = |token: String| async move {
+        let mut request = format!("ws://{address}/hid").into_client_request().unwrap();
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            format!("http://{address}").parse().unwrap(),
+        );
+        tokio_tungstenite::connect_async(request).await.unwrap().0
+    };
+
+    let old = state.sessions.issue("admin", 60).await;
+    let mut old_socket = open(old.token.clone()).await;
+    old_socket.send(event(KEY_A)).await.unwrap();
+    old_socket.send(event(ABS_DOWN)).await.unwrap();
+    wait_effects(&bus, 2).await;
+    let successor = state.sessions.issue("admin", 60).await;
+    let mut new_socket = open(successor.token.clone()).await;
+    new_socket.send(event(KEY_B)).await.unwrap();
+    wait_effects(&bus, 3).await;
+    state.sessions.revoke(&old.token).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match old_socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(old_socket);
+    wait_effects(&bus, 4).await;
+    let keyboard = effects(&bus)
+        .into_iter()
+        .filter(|report| matches!(report, Report::Keyboard(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(keyboard, vec![KEY_A, KEY_B]);
+    assert!(bus.state.lock().unwrap().current[0].unwrap().needs_release);
+    assert!(!bus.state.lock().unwrap().current[2].unwrap().needs_release);
+    new_socket.send(event(KEY_A)).await.unwrap();
+    wait_effects(&bus, 5).await;
+    state.sessions.revoke(&successor.token).await;
+    wait_effects(&bus, 6).await;
+    assert_eq!(effects(&bus).last(), Some(&Report::Keyboard([0; 8])));
+    drop(new_socket);
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server.0.take().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cached_fd_close_waits_off_tokio_under_a_report_bus_lock() {
     use std::{

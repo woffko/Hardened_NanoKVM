@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,7 +22,13 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{AppError, Result, state::AppState, system::usb, ws::origin::validate_ws_origin};
+use crate::{
+    AppError, Result,
+    http::middleware::{CurrentSession, TransportSession},
+    state::AppState,
+    system::usb,
+    ws::origin::validate_ws_origin,
+};
 
 #[path = "hid_ownership.rs"]
 mod ownership;
@@ -265,19 +272,22 @@ impl HidReports for InputOwner {
     }
 }
 
-impl InputOwner {
-    pub(crate) fn relative(&self, report: &[u8; 4]) -> io::Result<usize> {
+// The WS executor is statically dispatched over the same ownership bus in
+// production and recording fixtures. Session authority is checked under that
+// bus lock, not only before queueing a blocking write.
+trait WsInput: Clone + Send + Sync + 'static {
+    fn write(&self, report: Report, session: &TransportSession) -> io::Result<usize>;
+    fn release(&self, endpoint: Endpoint) -> io::Result<usize>;
+}
+
+impl WsInput for InputOwner {
+    fn write(&self, report: Report, session: &TransportSession) -> io::Result<usize> {
         touch_mouse_jiggler();
-        self.lease.write(Report::Relative(*report))
+        self.lease.write_if(report, || session.is_active())
     }
-    fn release_keyboard(&self) -> io::Result<usize> {
-        self.lease.release(Endpoint::Keyboard, false)
-    }
-    fn release_relative(&self) -> io::Result<usize> {
-        self.lease.release(Endpoint::Relative, false)
-    }
-    fn release_absolute(&self) -> io::Result<usize> {
-        self.lease.release(Endpoint::Absolute, false)
+
+    fn release(&self, endpoint: Endpoint) -> io::Result<usize> {
+        self.lease.release(endpoint, false)
     }
 }
 
@@ -297,46 +307,89 @@ pub fn broadcast_event(kind: &str, data: &str) {
 
 pub async fn connect(
     State(state): State<AppState>,
+    current: Option<Extension<CurrentSession>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse> {
+    let session = TransportSession::capture(&state.config, current)?;
     if !validate_ws_origin(&headers, &state.config) {
         return Err(AppError::Forbidden("invalid websocket origin".to_string()));
     }
 
     Ok(ws
         .max_message_size(MAX_WS_MESSAGE_BYTES)
-        .on_upgrade(handle_socket))
+        .on_upgrade(move |socket| handle_socket(socket, session)))
 }
 
-async fn handle_socket(socket: WebSocket) {
+async fn handle_socket(socket: WebSocket, session: TransportSession) {
+    if !session.is_active() {
+        return;
+    }
     let Ok(owner) = begin_input() else {
         return;
     };
+    handle_socket_owned(socket, session, owner).await;
+}
+
+async fn handle_socket_owned<Owner: WsInput>(
+    socket: WebSocket,
+    session: TransportSession,
+    owner: Owner,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (keyboard_tx, keyboard_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
     let (mouse_tx, mouse_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
-    let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx, owner.clone()));
-    let mouse_worker = tokio::spawn(mouse_worker(mouse_rx, owner));
-    send_capture_status_snapshot(&mut ws_tx).await;
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(report_worker(
+        keyboard_rx,
+        owner.clone(),
+        session.clone(),
+        &[Endpoint::Keyboard],
+    ));
+    workers.spawn(report_worker(
+        mouse_rx,
+        owner,
+        session.clone(),
+        &[Endpoint::Relative, Endpoint::Absolute],
+    ));
+    send_capture_status_snapshot(&mut ws_tx, &session).await;
 
     let mut event_rx = WS_EVENTS.subscribe();
+    let event_session = session.clone();
     let event_writer = tokio::spawn(async move {
         loop {
-            match event_rx.recv().await {
-                Ok(message) => {
-                    if ws_tx.send(Message::Text(message.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            let message = tokio::select! {
+                biased;
+                _ = event_session.ended() => break,
+                message = event_rx.recv() => match message {
+                    Ok(message) => message,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            let sent = tokio::select! {
+                biased;
+                _ = event_session.ended() => break,
+                sent = ws_tx.send(Message::Text(message.into())) => sent,
+            };
+            if sent.is_err() {
+                break;
             }
         }
     });
 
-    while let Some(message) = ws_rx.next().await {
-        let Ok(message) = message else {
+    let mut clean = true;
+    loop {
+        let message = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            finished = workers.join_next() => {
+                clean &= matches!(finished, Some(Ok(true)));
+                break;
+            }
+            message = ws_rx.next() => message,
+        };
+        let Some(Ok(message)) = message else {
             break;
         };
 
@@ -361,7 +414,7 @@ async fn handle_socket(socket: WebSocket) {
                 let Ok(report) = data[1..].try_into() else {
                     continue;
                 };
-                if keyboard_tx.send(report).await.is_err() {
+                if !enqueue_report(&keyboard_tx, Report::Keyboard(report), &session).await {
                     break;
                 }
             }
@@ -371,7 +424,7 @@ async fn handle_socket(socket: WebSocket) {
                     let Ok(report) = data[1..].try_into() else {
                         continue;
                     };
-                    if mouse_tx.send(MouseReport::Relative(report)).await.is_err() {
+                    if !enqueue_report(&mouse_tx, Report::Relative(report), &session).await {
                         break;
                     }
                 }
@@ -380,7 +433,7 @@ async fn handle_socket(socket: WebSocket) {
                     let Ok(report) = data[1..].try_into() else {
                         continue;
                     };
-                    if mouse_tx.send(MouseReport::Absolute(report)).await.is_err() {
+                    if !enqueue_report(&mouse_tx, Report::Absolute(report), &session).await {
                         break;
                     }
                 }
@@ -393,12 +446,16 @@ async fn handle_socket(socket: WebSocket) {
     drop(keyboard_tx);
     drop(mouse_tx);
     event_writer.abort();
-    let _ = keyboard_worker.await;
-    let _ = mouse_worker.await;
+    let _ = event_writer.await;
+    while let Some(finished) = workers.join_next().await {
+        clean &= matches!(finished, Ok(true));
+    }
+    tracing::debug!(clean, "HID websocket workers joined");
 }
 
 async fn send_capture_status_snapshot(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    session: &TransportSession,
 ) {
     for status in crate::api::stream::capture_status_snapshot() {
         let Ok(data) = serde_json::to_string(&status) else {
@@ -408,7 +465,12 @@ async fn send_capture_status_snapshot(
         else {
             continue;
         };
-        if ws_tx.send(Message::Text(message.into())).await.is_err() {
+        let sent = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            sent = ws_tx.send(Message::Text(message.into())) => sent,
+        };
+        if sent.is_err() {
             break;
         }
     }
@@ -418,46 +480,61 @@ fn ws_event_message(kind: &str, data: &str) -> Option<String> {
     serde_json::to_string(&WsEnvelope { kind, data }).ok()
 }
 
-async fn keyboard_worker(mut queue: mpsc::Receiver<[u8; 8]>, owner: InputOwner) {
-    while let Some(report) = queue.recv().await {
+async fn enqueue_report(
+    queue: &mpsc::Sender<Report>,
+    report: Report,
+    session: &TransportSession,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = session.ended() => false,
+        sent = queue.send(report) => sent.is_ok(),
+    }
+}
+
+async fn report_worker<Owner: WsInput>(
+    mut queue: mpsc::Receiver<Report>,
+    owner: Owner,
+    session: TransportSession,
+    endpoints: &'static [Endpoint],
+) -> bool {
+    loop {
+        let report = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            report = queue.recv() => match report {
+                Some(report) => report,
+                None => break,
+            },
+        };
+        if queue.is_closed() || !session.is_active() {
+            break;
+        }
         let writer = owner.clone();
-        if !write_hid_blocking(move || writer.keyboard(&report)).await {
+        let authority = session.clone();
+        if !write_hid_blocking(move || writer.write(report, &authority)).await {
             drain_hid_queue(&mut queue);
+            if !finish_ws_input(&owner, endpoints).await {
+                return false;
+            }
         }
     }
 
-    let _ = write_hid_blocking(move || owner.release_keyboard()).await;
+    // Never execute the revoked/closed connection's pending queue as cleanup.
+    // The current I/O is joined first, then only its owned endpoints compensate.
+    queue.close();
+    finish_ws_input(&owner, endpoints).await
 }
 
-enum MouseReport {
-    Relative([u8; 4]),
-    Absolute([u8; 6]),
-}
-
-async fn mouse_worker(mut queue: mpsc::Receiver<MouseReport>, owner: InputOwner) {
-    while let Some(report) = queue.recv().await {
+async fn finish_ws_input<Owner: WsInput>(owner: &Owner, endpoints: &[Endpoint]) -> bool {
+    let mut clean = true;
+    for &endpoint in endpoints {
         let writer = owner.clone();
-        match report {
-            MouseReport::Relative(report) => {
-                if !write_hid_blocking(move || writer.relative(&report)).await {
-                    drain_hid_queue(&mut queue);
-                    let writer = owner.clone();
-                    let _ = write_hid_blocking(move || writer.release_relative()).await;
-                }
-            }
-            MouseReport::Absolute(report) => {
-                if !write_hid_blocking(move || writer.absolute(&report)).await {
-                    drain_hid_queue(&mut queue);
-                    let writer = owner.clone();
-                    let _ = write_hid_blocking(move || writer.release_absolute()).await;
-                }
-            }
+        if !write_hid_blocking(move || writer.release(endpoint)).await {
+            clean = false;
         }
     }
-
-    let writer = owner.clone();
-    let _ = write_hid_blocking(move || writer.release_relative()).await;
-    let _ = write_hid_blocking(move || owner.release_absolute()).await;
+    clean
 }
 
 async fn write_hid_blocking<F>(write: F) -> bool
