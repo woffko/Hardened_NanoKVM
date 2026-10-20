@@ -131,7 +131,7 @@ fn validate_username(username: &str) -> Result<()> {
     if username.is_empty() || username.len() > 64 {
         return Err(AppError::BadRequest("invalid username".to_string()));
     }
-    if username.contains(['\'', '"', '\\', '/']) {
+    if username.contains(['\'', '"', '\\', '/']) || username.chars().any(char::is_control) {
         return Err(AppError::BadRequest("invalid username".to_string()));
     }
     Ok(())
@@ -141,6 +141,11 @@ fn validate_password(password: &str) -> Result<()> {
     if password.len() < 8 || password.len() > 256 {
         return Err(AppError::BadRequest(
             "password must be between 8 and 256 characters".to_string(),
+        ));
+    }
+    if password.contains(['\0', '\r', '\n']) {
+        return Err(AppError::BadRequest(
+            "password must not contain NUL, CR, or LF".to_string(),
         ));
     }
     Ok(())
@@ -166,6 +171,81 @@ fn write_account_0600(path: &PathBuf, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_preflight_rejects_password_protocol_delimiters_after_decoding() {
+        let encoded = [
+            "synthetic%0Apassword",
+            "synthetic%0Dpassword",
+            "synthetic%00password",
+            "synthetic%0D%0Apassword",
+        ];
+        let rejected = encoded
+            .iter()
+            .filter(|value| {
+                let password = crate::auth::compat_crypto::decode_frontend_password(value).unwrap();
+                matches!(
+                    validate_account_credentials("operator", &password),
+                    Err(AppError::BadRequest(_))
+                )
+            })
+            .count();
+        assert_eq!(rejected, encoded.len());
+    }
+
+    #[test]
+    fn credential_preflight_rejects_username_control_characters() {
+        let controls = ['\0', '\n', '\r', '\t', '\x1b', '\x7f', '\u{85}'];
+        let rejected = controls
+            .iter()
+            .filter(|control| {
+                let username = format!("oper{control}ator");
+                matches!(
+                    validate_account_credentials(&username, "synthetic password"),
+                    Err(AppError::BadRequest(_))
+                )
+            })
+            .count();
+        assert_eq!(rejected, controls.len());
+    }
+
+    #[test]
+    fn credential_preflight_preserves_supported_passwords_and_byte_limits() {
+        for username in ["operator", "оператор", "操作员"] {
+            for password in [
+                "synthetic password with spaces",
+                r#"synthetic "quotes" 'spaces' \ ;$()&| password"#,
+                "синтетический пароль",
+                "synthetic\tpassword",
+            ] {
+                validate_account_credentials(username, password).unwrap();
+            }
+        }
+        validate_account_credentials(&"a".repeat(64), &"é".repeat(128)).unwrap();
+        for (username, password) in [
+            ("".to_string(), "synthetic password".to_string()),
+            ("a".repeat(65), "synthetic password".to_string()),
+            ("operator".to_string(), "a".repeat(7)),
+            ("operator".to_string(), "é".repeat(129)),
+        ] {
+            assert!(validate_account_credentials(&username, &password).is_err());
+        }
+    }
+
+    #[test]
+    fn credential_preflight_does_not_reject_existing_legacy_password_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("pwd"));
+        let password = "synthetic\nlegacy password";
+        let hash = hash_password_unchecked(password).unwrap();
+        store.write_account("operator", &hash).unwrap();
+        assert!(store.verify("operator", password).unwrap());
+        assert!(
+            !store
+                .verify("operator", "synthetic wrong password")
+                .unwrap()
+        );
+    }
 
     #[test]
     fn argon2_hash_verifies() {
