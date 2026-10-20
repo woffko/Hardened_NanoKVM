@@ -256,6 +256,260 @@ async fn published(root: &Path, running: bool) -> Session {
     session
 }
 
+fn support_live(root: &Path) -> [(u64, u64, Vec<u8>); 9] {
+    [
+        "usr/libexec/nanokvm-app-recovery",
+        "usr/libexec/nanokvm-native-owner",
+        "usr/libexec/nanokvm-native-broker",
+        "usr/libexec/nanokvm-native-ctl",
+        "usr/libexec/nanokvm-native-recovery",
+        "etc/init.d/S02apprecover",
+        "etc/init.d/S30eth",
+        "etc/init.d/S30wifi",
+        "etc/init.d/S95nanokvm",
+    ]
+    .map(|name| {
+        let path = root.join(name);
+        let metadata = path.metadata().unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o755);
+        (metadata.dev(), metadata.ino(), fs::read(path).unwrap())
+    })
+}
+
+fn support_evidence(root: &Path) -> Vec<(std::ffi::OsString, u64, Vec<u8>)> {
+    let mut entries = Vec::with_capacity(11);
+    for entry in fs::read_dir(root.join("etc/kvm/application-support")).unwrap() {
+        let entry = entry.unwrap();
+        entries.push((
+            entry.file_name(),
+            entry.metadata().unwrap().ino(),
+            fs::read(entry.path()).unwrap(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
+fn release_support_terminal<T>(root: &Path, owner: T, release: impl Fn(T) -> Release<T>) -> Broker {
+    assert_eq!(support_evidence(root).len(), 10);
+    let foreign = root.join("etc/kvm/application-support/foreign");
+    fs::write(&foreign, b"unknown terminal evidence must be retained").unwrap();
+    fs::set_permissions(&foreign, fs::Permissions::from_mode(0o600)).unwrap();
+    let evidence = support_evidence(root);
+    let live = support_live(root);
+    let state = fs::read(root.join("application-slot/current/state")).unwrap();
+    let Release::Retained(owner) = release(owner) else {
+        panic!("unknown support evidence released terminal ownership")
+    };
+    excluded(root);
+    assert_eq!(support_evidence(root), evidence);
+    assert_eq!(support_live(root), live);
+    assert_eq!(
+        fs::read(root.join("application-slot/current/state")).unwrap(),
+        state
+    );
+    assert!(!root.join("application-slot/history").exists());
+    // Remove only this test's known foreign file, never unknown runtime data.
+    fs::remove_file(foreign).unwrap();
+    released(release(owner))
+}
+
+#[tokio::test]
+async fn real_drained_session_composes_support_exchange_trial_and_terminal_settlement() {
+    for mode in [
+        "valid",
+        "failed-ready",
+        "prepared-abort",
+        "no-ack",
+        "missing-receipt",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut broker = broker(root);
+        start_roles(&mut broker, root, false);
+        let install = crate::update::app_slot::support::accepted_fixture(root).await;
+        let transaction = install.transaction();
+        let old = support_live(root);
+        fs::write(root.join("hold-backend"), b"hold").unwrap();
+        let Start::Draining(mut session) = broker.begin_app_install(install) else {
+            panic!("support install drain refused")
+        };
+        until(|| root.join("backend-stopping").exists());
+        assert!(matches!(session.prepare_support(), Err(SlotError::Busy)));
+        assert!(matches!(
+            session.prepare_support_fixture(),
+            Err(SlotError::Busy)
+        ));
+        assert!(!root.join("etc/kvm/application-support").exists());
+        assert_eq!(support_live(root), old);
+        excluded(root);
+        fs::remove_file(root.join("hold-backend")).unwrap();
+        until(|| session.poll().unwrap() == DrainStatus::Drained);
+        assert_eq!(native_phase(root), 4);
+        // Production transition0 still refuses, even under a real closed owner.
+        assert!(matches!(session.prepare_support(), Err(SlotError::Invalid)));
+        assert!(!root.join("etc/kvm/application-support").exists());
+        let mut prepared = session.prepare_support_fixture().unwrap();
+        prepared.check().unwrap();
+        assert_eq!(support_live(root), old);
+        assert_eq!(support_evidence(root).len(), 10);
+        excluded(root);
+        prepared.exchange().unwrap();
+        prepared.check_exchanged().unwrap();
+        let new = support_live(root);
+        for (old, new) in old.iter().zip(&new) {
+            assert_eq!(old.0, new.0);
+            assert_ne!(old.1, new.1);
+            assert_ne!(old.2, new.2);
+        }
+        excluded(root);
+        drop(prepared);
+        let broker = if mode == "prepared-abort" {
+            let Rollback::Restored(restored) = session.rollback() else {
+                panic!("drained support preparation could not abort")
+            };
+            assert_eq!(support_live(root), old);
+            release_support_terminal(root, restored, RolledBack::release)
+        } else {
+            let foreign = root.join("etc/kvm/application-support/foreign");
+            fs::write(&foreign, b"unknown before app publication").unwrap();
+            fs::set_permissions(&foreign, fs::Permissions::from_mode(0o600)).unwrap();
+            let evidence = support_evidence(root);
+            assert!(matches!(session.publish(), Err(SlotError::Invalid)));
+            assert_eq!(support_evidence(root), evidence);
+            assert_eq!(support_live(root), new);
+            assert_eq!(
+                fs::read(root.join("kvmapp/identity")).unwrap(),
+                b"old unchanged"
+            );
+            excluded(root);
+            fs::remove_file(foreign).unwrap();
+            assert_eq!(
+                session.publish().unwrap(),
+                Status::Transaction(Phase::Published)
+            );
+            fs::write(root.join("hold-trial-ready"), b"hold").unwrap();
+            let BeginTrial::Started(mut trial) =
+                session.start_trial_command(trial_command(root, mode))
+            else {
+                panic!("support-backed trial refused")
+            };
+            until(|| root.join("trial-owner-started").exists());
+            assert_eq!(trial.poll(), TrialStatus::Starting);
+            assert_eq!(support_live(root), new);
+            excluded(root);
+            fs::remove_file(root.join("hold-trial-ready")).unwrap();
+            if matches!(mode, "no-ack" | "missing-receipt") {
+                until(|| trial.poll() == TrialStatus::Ready);
+                let trial = if mode == "no-ack" {
+                    let CommitTrial::Pending(trial) = trial.commit() else {
+                        panic!("missing support-backed commit ack was not retained")
+                    };
+                    until(|| root.join("trial-authorized").exists());
+                    trial
+                } else {
+                    trial
+                };
+                let StopTrial::Draining(mut session) = trial.stop() else {
+                    panic!("support-backed uncertain trial could not stop")
+                };
+                until(|| {
+                    if mode == "no-ack" {
+                        session.poll().unwrap() == DrainStatus::Drained
+                    } else {
+                        session.poll().unwrap() == DrainStatus::Uncertain
+                            && session.group.all_owner_processes_reaped()
+                    }
+                });
+                let evidence = support_evidence(root);
+                let state = fs::read(root.join("application-slot/current/state")).unwrap();
+                assert_eq!(
+                    state[8],
+                    if mode == "no-ack" {
+                        Phase::Committed as u8
+                    } else {
+                        Phase::Published as u8
+                    }
+                );
+                let Rollback::Retained(session) = session.rollback() else {
+                    panic!("committed or unclosed support-backed runtime rolled back")
+                };
+                assert_eq!(support_live(root), new);
+                assert_eq!(support_evidence(root), evidence);
+                assert_eq!(
+                    fs::read(root.join("application-slot/current/state")).unwrap(),
+                    state
+                );
+                assert!(!root.join("application-slot/history").exists());
+                assert_eq!(native_phase(root), 4);
+                excluded(root);
+                // All known probe processes are reaped. Losing this fixture's
+                // owner does not turn durable Stopping into a closure proof.
+                drop(session);
+                assert_eq!(native_phase(root), 4);
+                continue;
+            }
+            if mode == "valid" {
+                until(|| trial.poll() == TrialStatus::Ready);
+                let mut current = Some(trial);
+                let mut committed = None;
+                until(|| {
+                    match current.take().unwrap().commit() {
+                        CommitTrial::Pending(next) => current = Some(next),
+                        CommitTrial::Committed(done) => committed = Some(done),
+                        CommitTrial::Retained(_) => panic!("support-backed commit failed"),
+                    }
+                    committed.is_some()
+                });
+                assert_eq!(support_live(root), new);
+                release_support_terminal(root, committed.unwrap(), Committed::release)
+            } else {
+                until(|| trial.poll() == TrialStatus::Failed);
+                let CommitTrial::Retained(trial) = trial.commit() else {
+                    panic!("failed support-backed trial committed")
+                };
+                let StopTrial::Draining(mut session) = trial.stop() else {
+                    panic!("failed support-backed trial could not stop")
+                };
+                until(|| session.poll().unwrap() == DrainStatus::Drained);
+                assert_eq!(support_live(root), new);
+                let Rollback::Restored(restored) = session.rollback() else {
+                    panic!("joined support-backed trial could not rollback")
+                };
+                assert_eq!(support_live(root), old);
+                release_support_terminal(root, restored, RolledBack::release)
+            }
+        };
+        assert!(support_evidence(root).is_empty());
+        let status = crate::update::app_slot::job_status_fixture(root, transaction)
+            .unwrap()
+            .unwrap();
+        assert!(status.archived);
+        assert_eq!(
+            status.phase,
+            if mode == "valid" {
+                Phase::Committed
+            } else {
+                Phase::RolledBack
+            }
+        );
+        assert_eq!(support_live(root), if mode == "valid" { new } else { old });
+        if mode != "valid" {
+            assert_eq!(
+                fs::read(root.join("kvmapp/identity")).unwrap(),
+                b"old unchanged"
+            );
+        }
+        assert_admission_released(root);
+        assert_eq!(native_phase(root), 1);
+        let admission = broker.runtime_permit().unwrap();
+        let super::super::Shutdown::Draining(mut drain) = broker.shutdown(admission) else {
+            panic!("post-support terminal shutdown refused")
+        };
+        until(|| drain.poll().unwrap() == DrainStatus::Drained);
+    }
+}
+
 #[tokio::test]
 async fn published_trial_retains_freeze_and_commits_durably_before_backend_authorization() {
     let root = tempfile::tempdir().unwrap();

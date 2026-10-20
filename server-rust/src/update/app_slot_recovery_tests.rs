@@ -3,11 +3,11 @@ use super::tests::{Fixture, Position};
 use super::*;
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     os::unix::process::ExitStatusExt,
     process::{Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const NATIVE: &str = "/etc/kvm/native-runtime-owner/state";
@@ -36,8 +36,17 @@ fn recovery_child_fixture() {
         return;
     };
     let mode = std::env::var("NANOKVM_RECOVERY_MODE").unwrap();
+    let started = Instant::now();
+    let trace = |phase: &str| {
+        eprintln!(
+            "recovery-child {:.6}s: {phase}",
+            started.elapsed().as_secs_f64()
+        );
+    };
+    trace("fixture-start");
     let proc = Path::new(&root).join("proc");
     fs::create_dir_all(&proc).unwrap();
+    trace("proc-parent-ready");
     nix::mount::mount(
         Some("/proc"),
         proc.as_path(),
@@ -46,19 +55,27 @@ fn recovery_child_fixture() {
         None::<&str>,
     )
     .unwrap();
+    trace("proc-bound");
     nix::unistd::chroot(Path::new(&root)).unwrap();
     std::env::set_current_dir("/").unwrap();
+    trace("root-entered");
     if mode == "run" {
+        trace("native-enrollment-begin");
         crate::native_owner::broker::app_recovery_closed_fixture(&File::open("/etc/kvm").unwrap());
+        trace("native-enrollment-complete");
         drop(ProcessLock::acquire().unwrap());
+        trace("update-admission-probed");
         drop(
             super::super::state_writers::StateWriters::default()
                 .try_drain()
                 .unwrap(),
         );
+        trace("writer-admission-probed");
         // Process-local umask only, after fixture directory enrollment.
         nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o777));
+        trace("recover-begin");
         recover().unwrap();
+        trace("recover-returned-without-selected-stop");
         panic!("requested recovery checkpoint was not reached");
     }
     let before = fs::read(NATIVE).unwrap();
@@ -144,28 +161,72 @@ fn killed_recovery_resumes_exact_transaction_before_or_after_archival() {
                 fixture.root.path().join("etc/kvm/application-slot"),
             )
             .unwrap();
+            let started = Instant::now();
             let mut child = command(fixture.root.path(), "run")
                 .env("NANOKVM_APP_SLOT_TEST_STOP", point)
+                .env("NANOKVM_APP_SLOT_TEST_TRACE", "1")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
             let stdout = child.stdout.take().unwrap();
+            let mut stderr = child.stderr.take().unwrap();
+            let errors = std::thread::spawn(move || {
+                let mut kept = Vec::with_capacity(65536);
+                let mut dropped = 0_usize;
+                let mut last_read = None;
+                let mut buffer = [0; 2048];
+                loop {
+                    let count = stderr.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    last_read = Some(started.elapsed());
+                    let save = count.min(65536 - kept.len());
+                    kept.extend_from_slice(&buffer[..save]);
+                    dropped = dropped.saturating_add(count - save);
+                }
+                (kept, dropped, last_read)
+            });
             let (send, receive) = mpsc::channel();
             let reader = std::thread::spawn(move || {
+                let mut last = None;
                 for line in BufReader::new(stdout).lines() {
-                    if line.unwrap().contains("slot-checkpoint-ready") {
+                    let line = line.unwrap();
+                    let ready = line.contains("slot-checkpoint-ready");
+                    last = Some(line.chars().take(512).collect::<String>());
+                    if ready {
                         let _ = send.send(());
                         break;
                     }
                 }
+                last
             });
-            let reached = receive.recv_timeout(Duration::from_secs(15)).is_ok();
-            let _ = child.kill();
+            let checkpoint = receive.recv_timeout(Duration::from_secs(15));
+            let reached = checkpoint.is_ok();
+            let wchan =
+                (!reached).then(|| fs::read_to_string(format!("/proc/{}/wchan", child.id())));
+            let process_state = (!reached).then(|| {
+                fs::read_to_string(format!("/proc/{}/status", child.id())).map(|status| {
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("State:"))
+                        .map(str::to_owned)
+                })
+            });
+            let killed = child.kill();
             let output = child.wait_with_output().unwrap();
-            reader.join().unwrap();
-            assert!(reached, "{committed}/{point}: {output:?}");
+            let last_stdout = reader.join().unwrap();
+            let (stderr, dropped, last_read) = errors.join().unwrap();
+            assert!(
+                reached,
+                "{committed}/{point}: elapsed={:?}, checkpoint={checkpoint:?}, kill={killed:?}, \
+                 last_stdout={last_stdout:?}, stderr_dropped={dropped}, stderr_last_at={last_read:?}, \
+                 wchan={wchan:?}, process_state={process_state:?}, output={output:?}, stderr={}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stderr)
+            );
             assert_eq!(output.status.signal(), Some(9));
             let output = command(
                 fixture.root.path(),

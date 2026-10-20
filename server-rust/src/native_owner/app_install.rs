@@ -227,6 +227,26 @@ impl Session {
         })
     }
 
+    /// Retain this whole drained session while preparing independent support.
+    /// Epoch zero currently refuses before namespace mutation. This does not
+    /// publish the app, resume native work or establish trial health.
+    pub fn prepare_support(
+        &mut self,
+    ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
+        let closed = self.closed()?;
+        crate::update::app_slot::support::prepare(&mut self.install, closed)
+    }
+
+    #[cfg(test)]
+    fn prepare_support_fixture(
+        &mut self,
+    ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
+        // Keep the SAME whole-Session borrow and real drain proof. The private
+        // fixture bypasses only epoch0, never the native ownership boundary.
+        let closed = self.closed()?;
+        crate::update::app_slot::support::prepare_retained_fixture(&mut self.install, closed)
+    }
+
     /// Preserve only the fixed mutable data allowlist and journal the two live
     /// renames. This is publication, NOT trial health/commit or API success.
     pub fn publish(&mut self) -> Result<Status, SlotError> {

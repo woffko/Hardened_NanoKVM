@@ -37,6 +37,7 @@ impl AcceptedInstall {
         if record != self.record || record.phase != boundary.phase() {
             return Err(SlotError::Invalid);
         }
+        super::support::settle_terminal(self, boundary)?;
         self._store.retire(&record)
     }
 }
@@ -45,10 +46,13 @@ impl Store {
     pub(super) fn retire_recovered(
         &self,
         record: &Record,
-        _native: &crate::native_owner::broker::FencedAppRecovery,
+        native: &crate::native_owner::broker::FencedAppRecovery,
     ) -> Result<JobStatus> {
         // This borrow can only come from a retained native lifetime lease with
         // durable current-boot Stopping, not from a public status or phase.
+        super::support::settle_recovered(self, record, native)?;
+        #[cfg(test)]
+        checkpoint("recovery-support-settled");
         self.retire(record)
     }
 
@@ -59,6 +63,7 @@ impl Store {
             return Err(SlotError::Invalid);
         }
         self.layout(record)?;
+        super::support::require_clear(&self.rootfs, self.uid)?;
         let pinned = self.current.metadata()?;
         protected_directory(&self.current, self.device, self.uid, true)?;
         let name = format!("{:032x}", u128::from_be_bytes(record.transaction));

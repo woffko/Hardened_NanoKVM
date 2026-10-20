@@ -460,6 +460,16 @@ fn packaged_abi_survives_private_candidate_preflight_without_support_publication
             17_979_593_usize,
             "e73ddb41f95c691406e51ce44bcd913294304b24497a028ccdab3e522b366ccb",
         ),
+        (
+            "recovery",
+            18_127_517_usize,
+            "c5f44e96170d267ea608afc0543b3cf2bd4538247793005529551380fb5d39a0",
+        ),
+        (
+            "capacity",
+            18_127_834_usize,
+            "2e7ccbe875faf96662fdc3c64b4d556862d26329c439787612b89a3f291d34c6",
+        ),
     ] {
         for side in ["a", "b"] {
             let archive = project.join(format!(

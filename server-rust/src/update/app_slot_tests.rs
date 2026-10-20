@@ -256,6 +256,11 @@ fn boot_gate_child_fixture() {
     .unwrap();
     nix::unistd::chroot(Path::new(&root)).unwrap();
     std::env::set_current_dir("/").unwrap();
+    if let Some(route) = case.strip_prefix("support-") {
+        support_boot_gate(route);
+        println!("app-boot-gate-fixture-ran");
+        return;
+    }
     if !matches!(case.as_str(), "none" | "corrupt" | "missing-native") {
         crate::native_owner::broker::app_recovery_closed_fixture(&File::open("/etc/kvm").unwrap());
     }
@@ -299,6 +304,116 @@ fn boot_gate_child_fixture() {
 }
 
 #[cfg(feature = "sandbox-test-fixture")]
+fn support_boot_gate(route: &str) {
+    let support = Path::new("/etc/kvm/application-support");
+    let mut evidence = Vec::with_capacity(1);
+    for entry in fs::read_dir(support).unwrap() {
+        let path = entry.unwrap().path();
+        let metadata = path.metadata().unwrap();
+        evidence.push((path.clone(), metadata.ino(), fs::read(path).unwrap()));
+    }
+    assert!(evidence.len() <= 1);
+    let pending = !evidence.is_empty();
+    let current = Path::new("/etc/kvm/application-slot/current/state");
+    let before = fs::read(current).ok();
+    if !matches!(route, "none" | "absent") {
+        crate::native_owner::broker::app_recovery_closed_fixture(&File::open("/etc/kvm").unwrap());
+    }
+    let admission = ProcessLock::acquire().unwrap();
+    let native = if route == "native" {
+        Some(crate::native_owner::broker::ReadyAppRecovery::acquire().unwrap())
+    } else {
+        None
+    };
+    let writers = if route == "writer" {
+        Some(
+            super::super::state_writers::StateWriters::default()
+                .try_drain()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    if route != "update" {
+        drop(admission);
+    }
+    if route == "absent" {
+        assert!(matches!(
+            crate::native_owner::broker::ReadyAppRecovery::acquire(),
+            Err(crate::native_owner::broker::JournalError::Absent)
+        ));
+    }
+    let result = boot_gate();
+    if pending {
+        let malformed_plan =
+            route == "retire" && evidence[0].0.file_name() == Some(std::ffi::OsStr::new("plan"));
+        if malformed_plan {
+            // Full fenced recovery now inspects PLAN metadata before archival;
+            // this deliberately truncated file fails the strict size guard.
+            assert!(
+                matches!(result, Err(SlotError::Unsafe)),
+                "{route}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(SlotError::Invalid)),
+                "{route}: {result:?}"
+            );
+        }
+        assert_eq!(fs::read(current).ok(), before);
+        assert!(!Path::new("/etc/kvm/application-slot/history").exists());
+    } else if route == "none" {
+        assert_eq!(result.unwrap(), Status::NoTransaction);
+    } else {
+        let record = Record::decode(before.as_ref().unwrap()).unwrap();
+        assert_eq!(result.unwrap(), Status::Transaction(record.phase));
+        if route == "retire" {
+            assert_eq!(boot_gate().unwrap(), Status::NoTransaction);
+        }
+    }
+    if route == "none" {
+        let result = recover();
+        if pending {
+            assert!(matches!(result, Err(SlotError::Invalid)));
+        } else {
+            assert_eq!(result.unwrap(), Status::NoTransaction);
+        }
+    }
+    for (path, inode, bytes) in evidence {
+        assert_eq!(path.metadata().unwrap().ino(), inode);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(fs::read_dir(support).unwrap().count(), usize::from(pending));
+    drop((native, writers));
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+fn run_boot_gate_fixture(fixture: &Fixture, case: &str) {
+    let output = Command::new("/usr/bin/unshare")
+        .args(["--user", "--map-root-user", "--mount", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "update::app_slot::tests::boot_gate_child_fixture",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env("NANOKVM_APP_GATE_FIXTURE_ROOT", fixture.root.path())
+        .env("NANOKVM_APP_GATE_FIXTURE_CASE", case)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{case}: {output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("running 1 test")
+            && text.contains("1 passed; 0 failed")
+            && text.contains("app-boot-gate-fixture-ran"),
+        "{case}: {text}"
+    );
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
 #[test]
 fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupted_slots() {
     for (case, phase, position) in [
@@ -321,28 +436,7 @@ fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupt
         if case == "corrupt" {
             fs::write(directory.join("current/state"), b"corrupt fixture").unwrap();
         }
-        let output = Command::new("/usr/bin/unshare")
-            .args(["--user", "--map-root-user", "--mount", "--"])
-            .arg(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "update::app_slot::tests::boot_gate_child_fixture",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env_clear()
-            .env("NANOKVM_APP_GATE_FIXTURE_ROOT", fixture.root.path())
-            .env("NANOKVM_APP_GATE_FIXTURE_CASE", case)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{case}: {output:?}");
-        let text = String::from_utf8(output.stdout).unwrap();
-        assert!(
-            text.contains("running 1 test")
-                && text.contains("1 passed; 0 failed")
-                && text.contains("app-boot-gate-fixture-ran"),
-            "{case}: {text}"
-        );
+        run_boot_gate_fixture(&fixture, case);
         assert_eq!(
             fs::read(fixture.root.path().join("kvmapp/identity")).unwrap(),
             if matches!(case, "committed" | "missing-native") {
@@ -351,6 +445,59 @@ fn actual_fixed_root_boot_gate_respects_restart_admission_and_recovers_interrupt
                 b"old"
             }
         );
+    }
+}
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn actual_boot_shortcuts_and_terminal_retirement_never_bypass_pending_support_evidence() {
+    for route in ["none", "update", "native", "absent", "writer", "retire"] {
+        for phase in [Phase::Committed, Phase::RolledBack] {
+            for member in [
+                None,
+                Some("plan"),
+                Some("plan-next"),
+                Some("member-8"),
+                Some("foreign"),
+            ] {
+                let fixture = Fixture::new(
+                    phase,
+                    if phase == Phase::Committed {
+                        Position::Published
+                    } else {
+                        Position::Prepared
+                    },
+                );
+                let parent = fixture.root.path().join("etc/kvm");
+                fs::create_dir_all(&parent).unwrap();
+                // Full fenced recovery pins these protected live parents
+                // before examining deliberately malformed support evidence.
+                fs::create_dir_all(fixture.root.path().join("usr/libexec")).unwrap();
+                fs::create_dir_all(fixture.root.path().join("etc/init.d")).unwrap();
+                let directory = parent.join("application-slot");
+                fs::rename(fixture.root.path().join(DIRECTORY), &directory).unwrap();
+                if route == "none" {
+                    fs::remove_dir_all(directory).unwrap();
+                }
+                let support = parent.join("application-support");
+                fs::create_dir(&support).unwrap();
+                fs::set_permissions(&support, fs::Permissions::from_mode(0o700)).unwrap();
+                if let Some(member) = member {
+                    let path = support.join(member);
+                    fs::write(&path, b"retained torn support evidence").unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                }
+                run_boot_gate_fixture(&fixture, &format!("support-{route}"));
+                assert_eq!(
+                    fs::read(fixture.root.path().join("kvmapp/identity")).unwrap(),
+                    if phase == Phase::Committed {
+                        b"new"
+                    } else {
+                        b"old"
+                    }
+                );
+            }
+        }
     }
 }
 

@@ -33,6 +33,8 @@ const HASH_DOMAIN: &[u8] = b"NanoKVM app slot journal v1\0";
 mod history;
 #[path = "app_slot_recovery_intent.rs"]
 mod recovery_intent;
+#[path = "app_slot_support.rs"]
+pub mod support;
 #[path = "app_slot_terminal.rs"]
 mod terminal;
 #[cfg(test)]
@@ -212,6 +214,7 @@ impl AcceptedInstall {
         {
             return Err(SlotError::Invalid);
         }
+        support::before_trial(self, closed)?;
         Ok(())
     }
 
@@ -255,6 +258,7 @@ impl AcceptedInstall {
         {
             return Err(SlotError::Invalid);
         }
+        support::before_publish(self, closed)?;
         preserve_app_state(store)?;
         record.phase = Phase::Publishing;
         store.publish(&record)?;
@@ -302,6 +306,7 @@ impl AcceptedInstall {
         {
             return Err(SlotError::Invalid);
         }
+        support::before_rollback(self, closed)?;
         let status = self._store.recover()?;
         if status != Status::Transaction(Phase::RolledBack) {
             return Err(SlotError::Invalid);
@@ -1225,6 +1230,7 @@ fn recover_locked(admission: ProcessLock, defer_terminal: bool) -> Result<Status
     // decides whether an early recovery may touch the live slot.
     crate::native_owner::broker::check_update_admission().map_err(|_| SlotError::Busy)?;
     let Some(store) = Store::open_recovery(true)? else {
+        support::require_boot_clear()?;
         return Ok(Status::NoTransaction);
     };
     let record = store.record()?;
@@ -1237,6 +1243,7 @@ fn recover_locked(admission: ProcessLock, defer_terminal: bool) -> Result<Status
             | crate::native_owner::broker::JournalError::Unresolved
             | crate::native_owner::broker::JournalError::Absent,
         ) if terminal && defer_terminal => {
+            support::require_boot_clear()?;
             return Ok(Status::Transaction(record.phase));
         }
         Err(
@@ -1249,6 +1256,7 @@ fn recover_locked(admission: ProcessLock, defer_terminal: bool) -> Result<Status
     let writers = match super::state_writers::StateWriters::default().try_drain() {
         Ok(writers) => writers,
         Err(crate::AppError::Conflict(_)) if terminal && defer_terminal => {
+            support::require_boot_clear()?;
             return Ok(Status::Transaction(record.phase));
         }
         Err(crate::AppError::Conflict(_)) => return Err(SlotError::Busy),
@@ -1270,6 +1278,9 @@ fn recover_locked(admission: ProcessLock, defer_terminal: bool) -> Result<Status
     };
     #[cfg(test)]
     checkpoint("recovery-native-fenced");
+    support::recover_before_app(&recovery.store, &recovery.native)?;
+    #[cfg(test)]
+    checkpoint("recovery-support-reconciled");
     let status = recovery.store.recover()?;
     #[cfg(test)]
     checkpoint("recovery-slot-terminal");
@@ -1301,11 +1312,17 @@ struct Recovery {
 /// candidate receipt, runtime health acknowledgement or authorization from p3.
 pub fn boot_gate() -> Result<Status> {
     match status()? {
-        Status::NoTransaction => Ok(Status::NoTransaction),
+        Status::NoTransaction => {
+            support::require_boot_clear()?;
+            Ok(Status::NoTransaction)
+        }
         ready @ Status::Transaction(Phase::Committed | Phase::RolledBack) => {
             match ProcessLock::acquire() {
                 Ok(admission) => recover_locked(admission, true),
-                Err(super::operation_lock::LockError::Busy) => Ok(ready),
+                Err(super::operation_lock::LockError::Busy) => {
+                    support::require_boot_clear()?;
+                    Ok(ready)
+                }
                 Err(error) => Err(recovery_lock_error(error)),
             }
         }

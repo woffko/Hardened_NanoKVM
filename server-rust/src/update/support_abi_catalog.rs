@@ -82,13 +82,24 @@ pub fn inspect(backend: &File) -> io::Result<Catalog> {
     let size = metadata.len();
     let helpers = helper_family::inspect(backend)?;
     let scripts = boot_script_catalog::inspect_in_family(backend, size, &helpers)?;
-    let catalog = inspect_with(size, &helpers, &scripts, |out, offset| {
-        backend.read_exact_at(out, offset)
-    })?;
+    let catalog = inspect_in_catalogs(backend, size, &helpers, &scripts)?;
     if backend.metadata()?.len() != size {
         return Err(invalid());
     }
     Ok(catalog)
+}
+
+// Reuse only under a caller's same pinned FD, size and stable-source checks.
+// These catalogs are consistency diagnostics, not immutable-source authority.
+pub(super) fn inspect_in_catalogs(
+    backend: &File,
+    size: u64,
+    helpers: &helper_family::Family,
+    scripts: &boot_script_catalog::Catalog,
+) -> io::Result<Catalog> {
+    inspect_with(size, helpers, scripts, |out, offset| {
+        backend.read_exact_at(out, offset)
+    })
 }
 
 fn scope(offset: u64, helpers: &helper_family::Family) -> usize {

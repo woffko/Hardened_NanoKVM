@@ -576,8 +576,60 @@ Neither a file descriptor nor a parsed catalog establishes immutable provenance.
 The retained broker's compatibility query uses its own compiled declaration,
 not the successor broker executable on disk or a caller-supplied live version.
 It is still only a read-only prerequisite, not a `ClosedRuntime` capability.
-The full nine-entry staging, exchange, rollback, settlement and early-recovery
-transaction remains required before enabling canonical publication.
+The complete nine-entry protocol and its acceptance remain required before
+enabling canonical publication; the source boundaries below are not activation.
+
+The initial nine-file preparation core now lives inside the retained app-slot
+owner. `Session::prepare_support` first requires the same native drain and
+keeps the whole session borrowed. The internal closure token remains private.
+It pins both recorded app roots and the fixed support parents, checks both
+catalogs against the executing build, and allocates all successors anonymously
+before publishing a bounded, transaction-bound plan in the private rootfs
+`/etc/kvm/application-support` store. Named links must match the recorded inodes;
+all nine links precede `Ready`. This store is separate from app receipts and is
+not an importable restore/preserve tree. Capacity checks preserve recovery
+headroom but do not constitute a filesystem reservation.
+
+The retained guard now also exchanges the nine exact inode pairs and restores
+an uncommitted predecessor. Each exchange syncs both affected parents; retry
+checks actual placement rather than blindly exchanging again. App publication
+and frozen-trial admission require the complete successor family. Rollback
+restores old support before the old app, while canonical `Committed` never
+selects the predecessor on an unknown acknowledgement.
+
+Terminal cleanup runs under the same checked terminal owner before app archival
+or freeze release. It records the canonical cleanup direction, removes only
+exact inactive members, syncs each unlink and removes the plan last. A supported
+`plan-next` edge must match the same transaction, parents and objects; torn or
+foreign alternatives refuse. Early NoTransaction and terminal deferral paths
+require a clear support store instead of bypassing pending evidence.
+
+The current transition epoch is still zero, so the production entry refuses
+before creating that store. Stopped/prior-boot recovery now reconciles support
+before app slots under the same `FencedAppRecovery`, retained update/store/writer
+exclusions and durable recovery intent. Canonical `Committed` selects successor
+support; other supported app states restore predecessor. Terminal support cleanup
+precedes app archival, native `Closed` and intent removal. An empty support store
+is synced and rechecked without requiring an already archived `current` name.
+
+Host tests compose real retained `Session` drain and terminal owners with
+synthetic protected payloads and child protocol probes. They cover successful
+commit, failed-trial rollback, preparation abort, lost commit acknowledgement,
+missing closure receipt and unknown support evidence. The private test seam
+uses the real session's closure token and bypasses only transition0; it is absent
+from production. Separate fixed-root fixtures cover process kills and injected
+I/O failures through reconciliation, cleanup and archival. Their synthetic
+prior-epoch record is not a physical reboot or same-boot closure permission.
+
+Bounded child-private tmpfs tests also cover byte/inode reserve refusal, actual
+post-preflight `O_TMPFILE`/payload-write ENOSPC, readonly preparation/settlement
+and exact retained-owner retry. Separate success checkpoints prove that the
+intended kernel operation did not complete; an arbitrary later error is not
+accepted. Host-side evidence and the parent mountpoint remain unchanged.
+
+Real native/vendor runtime, ext4/vendor-media allocation, legacy first-bridge/
+restart, ordinary API activation and device migration remain incomplete. These
+host fixtures are not physical boot, hardware power-loss or release acceptance.
 
 ## Frozen trial and recovery integration
 
