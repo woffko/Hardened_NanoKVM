@@ -20,8 +20,7 @@ use std::{
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex, RwLock},
-    thread,
+    sync::{Arc, LazyLock, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tar::Archive;
@@ -47,6 +46,9 @@ use crate::{
 #[path = "picoclaw_action_plan.rs"]
 mod action_plan;
 use action_plan::{Batch as PreparedBatch, PreparedAction};
+#[path = "picoclaw_execution.rs"]
+pub(crate) mod execution;
+use execution::{Call, Completion};
 #[path = "picoclaw_worker.rs"]
 pub(crate) mod worker;
 
@@ -589,17 +591,26 @@ pub async fn get_runtime_session() -> Result<Response> {
     .into_response())
 }
 
-pub async fn release_runtime_session(headers: HeaderMap) -> Result<Response> {
+pub async fn release_runtime_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response> {
     let session_id = match require_session_id(&headers) {
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
 
+    let receipt = match state.picoclaw_worker.cancel(Some(&session_id)) {
+        Ok(receipt) => receipt,
+        Err(error) => return Ok(picoclaw_error_data(error)),
+    };
     let released = release_session_lock(&session_id);
+    let cancelled_calls = receipt.wait(Duration::from_secs(1)).await;
 
     Ok(Json(ApiResponse::ok(json!({
         "released": released,
         "execution_stop_verified": false,
+        "cancelled_calls": cancelled_calls,
         "current_session": session_lock_owner()
     })))
     .into_response())
@@ -807,6 +818,7 @@ pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
 }
 
 pub async fn gateway_ws(
+    State(state): State<AppState>,
     Query(query): Query<GatewayQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
@@ -869,7 +881,15 @@ pub async fn gateway_ws(
 
     update_runtime_gateway_state(true, "ready", None, Some(&session_id));
     Ok(ws
-        .on_upgrade(move |socket| handle_gateway_socket(session_id, socket, upstream, settings))
+        .on_upgrade(move |socket| {
+            handle_gateway_socket(
+                session_id,
+                socket,
+                upstream,
+                settings,
+                state.picoclaw_worker,
+            )
+        })
         .into_response())
 }
 
@@ -958,6 +978,20 @@ fn ensure_session_lock(session_id: &str) -> std::result::Result<(), PicoclawErro
     acquire_session_lock(session_id).map(|_| ())
 }
 
+fn check_session_lock(session_id: &str) -> std::result::Result<(), PicoclawErrorData> {
+    let mut lock = SESSION_LOCK
+        .lock()
+        .map_err(|_| PicoclawErrorData::new(CODE_RUNTIME_UNAVAILABLE, "session lock poisoned"))?;
+    lock.clear_expired(Instant::now());
+    if lock.owner_session_id != session_id || lock.owner_session_id.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_SESSION_ID_INVALID,
+            "PicoClaw input session is no longer active",
+        ));
+    }
+    Ok(())
+}
+
 fn release_session_lock(session_id: &str) -> bool {
     let Ok(mut lock) = SESSION_LOCK.lock() else {
         return false;
@@ -1036,6 +1070,7 @@ async fn handle_gateway_socket(
     socket: WebSocket,
     upstream: GatewayUpstream,
     settings: GatewaySettings,
+    worker: Arc<worker::Worker>,
 ) {
     let (mut downstream_tx, mut downstream_rx) = socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
@@ -1067,6 +1102,16 @@ async fn handle_gateway_socket(
                 }
                 if let Err(close) = validate_gateway_message_size(axum_message_len(&message), settings.max_message_bytes) {
                     break close;
+                }
+
+                match gateway_requests_cancel(&message, &session_id) {
+                    Ok(true) => {
+                        if let Err(error) = worker.cancel(Some(&session_id)) {
+                            break GatewayClose::upstream(error.message);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(close) => break close,
                 }
 
                 let is_close = matches!(message, AxumWsMessage::Close(_));
@@ -1135,17 +1180,26 @@ async fn handle_gateway_socket(
         }
     };
 
+    // Record cancellation before any potentially stalled transport close.
+    // This cancels selected admitted calls, not future task/session authority.
+    let _ = worker.cancel(Some(&session_id));
+    release_session_lock(&session_id);
     if close.code != CLOSE_NORMAL {
-        let _ = downstream_tx
-            .send(AxumWsMessage::Close(Some(AxumCloseFrame {
+        let _ = time::timeout(
+            write_timeout,
+            downstream_tx.send(AxumWsMessage::Close(Some(AxumCloseFrame {
                 code: close.code,
                 reason: close.reason.clone().into(),
-            })))
-            .await;
+            }))),
+        )
+        .await;
     }
-    let _ = upstream_tx.send(TungsteniteMessage::Close(None)).await;
+    let _ = time::timeout(
+        write_timeout,
+        upstream_tx.send(TungsteniteMessage::Close(None)),
+    )
+    .await;
 
-    release_session_lock(&session_id);
     update_runtime_gateway_state(false, "closed", Some(close.reason.clone()), None);
     debug!(
         session_id,
@@ -1153,6 +1207,38 @@ async fn handle_gateway_socket(
         reason = close.reason,
         "picoclaw gateway websocket closed"
     );
+}
+
+fn gateway_requests_cancel(
+    message: &AxumWsMessage,
+    session_id: &str,
+) -> std::result::Result<bool, GatewayClose> {
+    let text = match message {
+        AxumWsMessage::Text(text) => text,
+        AxumWsMessage::Binary(_) => {
+            return Err(GatewayClose::normal(
+                "binary gateway control is unsupported",
+            ));
+        }
+        _ => return Ok(false),
+    };
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+    }
+    let envelope: Envelope = serde_json::from_str(text)
+        .map_err(|_| GatewayClose::normal("invalid gateway control envelope"))?;
+    if envelope
+        .session_id
+        .as_deref()
+        .is_some_and(|id| id != session_id)
+    {
+        return Err(GatewayClose::normal("gateway session mismatch"));
+    }
+    Ok(envelope.r#type.as_deref() == Some("message.cancel"))
 }
 
 fn renew_gateway_session(session_id: &str) -> std::result::Result<(), GatewayClose> {
@@ -1408,37 +1494,69 @@ fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErr
 fn execute_actions_blocking(
     session_id: &str,
     batch: &PreparedBatch,
-) -> std::result::Result<ActionResult, PicoclawErrorData> {
+    call: &Call,
+) -> Completion<ActionResult> {
+    let owner = match hid_ws::begin_input() {
+        Ok(owner) => owner,
+        Err(error) => {
+            return Completion {
+                result: Err(hid_owner_error(error)),
+                clean: true,
+            };
+        }
+    };
+    execute_prepared(&owner, Some(session_id), batch, call)
+}
+
+fn execute_prepared<Output: hid_ws::HidReports>(
+    owner: &Output,
+    session_id: Option<&str>,
+    batch: &PreparedBatch,
+    call: &Call,
+) -> Completion<ActionResult> {
     let started_at = Instant::now();
-    let owner = hid_ws::begin_input().map_err(hid_owner_error)?;
     let (actions, result_action) = batch.parts();
     let mut total_writes = 0;
-    for (idx, action) in actions.iter().enumerate() {
-        if let Err(err) = ensure_session_lock(session_id) {
-            let _ = owner.finish();
-            return Err(err.with_index(idx));
-        }
-        match execute_action_blocking(&owner, action) {
-            Ok(writes) => total_writes += writes,
-            Err(err) => {
-                let _ = owner.finish();
-                return Err(err.with_index(idx));
+    let result = (|| {
+        for (idx, action) in actions.iter().enumerate() {
+            call.check().map_err(|error| error.with_index(idx))?;
+            if let Some(session_id) = session_id {
+                // Never reacquire authority after release/expiry. Full task
+                // generation binding is a separate gateway/bridge boundary.
+                check_session_lock(session_id).map_err(|error| error.with_index(idx))?;
             }
+            total_writes += execute_action_blocking(owner, action, call)
+                .map_err(|error| error.with_index(idx))?;
         }
-    }
-
-    total_writes += owner.finish().map_err(hid_owner_error)?;
-    Ok(ActionResult {
-        action: result_action.to_string(),
-        duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
-        hid_writes: total_writes,
-        executed_actions: (actions.len() > 1).then_some(actions.len()),
-    })
+        call.check()
+    })();
+    // Cancellation/deadline never suppresses owned compensation. A failed
+    // cleanup must stop this executor, not hand its slot to the next call.
+    let cleanup = owner.finish();
+    let clean = cleanup.is_ok();
+    let result = match cleanup {
+        Err(_) => {
+            let mut error = PicoclawErrorData::new(
+                "HID_CLEANUP_UNCERTAIN",
+                "owned HID cleanup failed; executor retained for recovery",
+            );
+            error.index = result.as_ref().err().and_then(|error| error.index);
+            Err(error)
+        }
+        Ok(writes) => result.map(|()| ActionResult {
+            action: result_action.to_string(),
+            duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            hid_writes: total_writes + writes,
+            executed_actions: (actions.len() > 1).then_some(actions.len()),
+        }),
+    };
+    Completion { result, clean }
 }
 
 fn execute_action_blocking<Output: hid_ws::HidReports>(
     owner: &Output,
     action: &PreparedAction,
+    call: &Call,
 ) -> std::result::Result<usize, PicoclawErrorData> {
     match *action {
         PreparedAction::Click {
@@ -1446,15 +1564,17 @@ fn execute_action_blocking<Output: hid_ws::HidReports>(
             button,
         } => {
             let mut writes = 0;
-            writes += send_mouse_move_with_button(owner, x, y, 0x00, 0)?;
-            writes += send_mouse_move_with_button(owner, x, y, button, 0)?;
-            thread::sleep(DEFAULT_CLICK_HOLD);
+            writes += send_mouse_move_with_button(owner, x, y, 0x00, 0, call)?;
+            writes += send_mouse_move_with_button(owner, x, y, button, 0, call)?;
+            call.wait(DEFAULT_CLICK_HOLD)?;
             writes += owner.settle_absolute().map_err(hid_owner_error)?;
             Ok(writes)
         }
-        PreparedAction::Move { point: (x, y) } => send_mouse_move_with_button(owner, x, y, 0x00, 0),
+        PreparedAction::Move { point: (x, y) } => {
+            send_mouse_move_with_button(owner, x, y, 0x00, 0, call)
+        }
         PreparedAction::Wait(duration) => {
-            thread::sleep(duration);
+            call.wait(duration)?;
             Ok(0)
         }
         PreparedAction::Drag {
@@ -1463,13 +1583,13 @@ fn execute_action_blocking<Output: hid_ws::HidReports>(
             button,
         } => {
             let mut writes = 0;
-            writes += send_mouse_move_with_button(owner, from_x, from_y, 0x00, 0)?;
-            writes += send_mouse_move_with_button(owner, from_x, from_y, button, 0)?;
+            writes += send_mouse_move_with_button(owner, from_x, from_y, 0x00, 0, call)?;
+            writes += send_mouse_move_with_button(owner, from_x, from_y, button, 0, call)?;
             for step in 1..=DEFAULT_DRAG_STEPS {
                 let ratio = step as f64 / DEFAULT_DRAG_STEPS as f64;
                 let x = from_x + (to_x - from_x) * ratio;
                 let y = from_y + (to_y - from_y) * ratio;
-                writes += send_mouse_move_with_button(owner, x, y, button, 0)?;
+                writes += send_mouse_move_with_button(owner, x, y, button, 0, call)?;
             }
             writes += owner.settle_absolute().map_err(hid_owner_error)?;
             Ok(writes)
@@ -1481,25 +1601,25 @@ fn execute_action_blocking<Output: hid_ws::HidReports>(
         } => {
             let mut writes = 0;
             for _ in 0..amount {
-                writes += send_mouse_move_with_button(owner, x, y, 0x00, i32::from(wheel))?;
+                writes += send_mouse_move_with_button(owner, x, y, 0x00, i32::from(wheel), call)?;
                 writes += owner.settle_absolute().map_err(hid_owner_error)?;
-                thread::sleep(DEFAULT_SCROLL_STEP);
+                call.wait(DEFAULT_SCROLL_STEP)?;
             }
             Ok(writes)
         }
         PreparedAction::Type(ref reports) => {
             let mut writes = 0;
             for report in reports {
-                writes += send_keyboard_report(owner, report)?;
+                writes += send_keyboard_report(owner, report, call)?;
                 writes += owner.settle_keyboard().map_err(hid_owner_error)?;
-                thread::sleep(hid::PASTE_KEY_DELAY);
+                call.wait(hid::PASTE_KEY_DELAY)?;
             }
             Ok(writes)
         }
         PreparedAction::Hotkey(report) => {
             let mut writes = 0;
-            writes += send_keyboard_report(owner, &report)?;
-            thread::sleep(DEFAULT_CLICK_HOLD);
+            writes += send_keyboard_report(owner, &report, call)?;
+            call.wait(DEFAULT_CLICK_HOLD)?;
             writes += owner.settle_keyboard().map_err(hid_owner_error)?;
             Ok(writes)
         }
@@ -1516,11 +1636,31 @@ pub(crate) fn execute_reports_fixture<Output: hid_ws::HidReports>(
     let batch = normalize_actions(raw)
         .and_then(PreparedBatch::prepare)
         .map_err(|error| error.message)?;
-    let mut writes = 0;
-    for action in batch.parts().0 {
-        writes += execute_action_blocking(owner, action).map_err(|error| error.message)?;
-    }
-    Ok(writes)
+    let call = Call::new(0, None);
+    call.start().map_err(|error| error.message)?;
+    execute_prepared(owner, None, &batch, &call)
+        .result
+        .map(|result| result.hid_writes)
+        .map_err(|error| error.message)
+}
+
+#[cfg(test)]
+pub(crate) fn execute_controlled_reports_fixture<Output: hid_ws::HidReports>(
+    owner: &Output,
+    call: &Call,
+    raw: &[u8],
+) -> (std::result::Result<usize, String>, bool) {
+    let batch = normalize_actions(raw)
+        .and_then(PreparedBatch::prepare)
+        .unwrap();
+    let completion = execute_prepared(owner, None, &batch, call);
+    (
+        completion
+            .result
+            .map(|result| result.hid_writes)
+            .map_err(|error| error.code.to_string()),
+        completion.clean,
+    )
 }
 
 fn normalized_point(
@@ -1574,7 +1714,9 @@ fn send_mouse_move_with_button<Output: hid_ws::HidReports>(
     y: f64,
     buttons: u8,
     wheel: i32,
+    call: &Call,
 ) -> std::result::Result<usize, PicoclawErrorData> {
+    call.check()?;
     let absolute_x = to_absolute_hid_coord(x);
     let absolute_y = to_absolute_hid_coord(y);
     let report = [
@@ -1596,7 +1738,9 @@ fn send_mouse_move_with_button<Output: hid_ws::HidReports>(
 fn send_keyboard_report<Output: hid_ws::HidReports>(
     owner: &Output,
     report: &[u8; 8],
+    call: &Call,
 ) -> std::result::Result<usize, PicoclawErrorData> {
+    call.check()?;
     owner.keyboard(report).map_err(|err| {
         PicoclawErrorData::new(
             CODE_HID_WRITE_FAILED,

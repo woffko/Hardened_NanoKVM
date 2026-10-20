@@ -242,6 +242,7 @@ pub(crate) trait HidReports {
     fn absolute(&self, report: &[u8; 6]) -> io::Result<usize>;
     fn settle_keyboard(&self) -> io::Result<usize>;
     fn settle_absolute(&self) -> io::Result<usize>;
+    fn finish(&self) -> io::Result<usize>;
 }
 
 impl HidReports for InputOwner {
@@ -259,6 +260,9 @@ impl HidReports for InputOwner {
     fn settle_absolute(&self) -> io::Result<usize> {
         self.lease.release(Endpoint::Absolute, true)
     }
+    fn finish(&self) -> io::Result<usize> {
+        self.lease.finish()
+    }
 }
 
 impl InputOwner {
@@ -274,9 +278,6 @@ impl InputOwner {
     }
     fn release_absolute(&self) -> io::Result<usize> {
         self.lease.release(Endpoint::Absolute, false)
-    }
-    pub(crate) fn finish(&self) -> io::Result<usize> {
-        self.lease.finish()
     }
 }
 

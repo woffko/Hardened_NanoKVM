@@ -19,6 +19,61 @@ fn probe() -> (
     (Work::Probe { started, release }, observed, resume)
 }
 
+pub(super) struct UncertainReports<'a> {
+    pub(super) call: &'a Call,
+}
+
+impl crate::ws::hid::HidReports for UncertainReports<'_> {
+    fn keyboard(&self, _: &[u8; 8]) -> std::io::Result<usize> {
+        self.call.cancel().unwrap();
+        Ok(1)
+    }
+    fn absolute(&self, _: &[u8; 6]) -> std::io::Result<usize> {
+        panic!("unexpected mouse fixture report")
+    }
+    fn settle_keyboard(&self) -> std::io::Result<usize> {
+        panic!("canceled hold must unwind to cleanup")
+    }
+    fn settle_absolute(&self) -> std::io::Result<usize> {
+        panic!("unexpected mouse fixture settle")
+    }
+    fn finish(&self) -> std::io::Result<usize> {
+        Err(std::io::Error::other("synthetic owned cleanup failure"))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_executor_cleanup_failure_pins_uncertainty_and_stops_worker_replacement() {
+    let worker = Worker::default();
+    let batch =
+        super::super::normalize_actions(br#"{"action":"hotkey","keys":["ctrl","alt","Delete"]}"#)
+            .and_then(PreparedBatch::prepare)
+            .unwrap();
+    let error = worker
+        .submit(Work::UncertainReports("cleanup-fixture".into(), batch))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "HID_CLEANUP_UNCERTAIN");
+    assert_eq!(error.index, Some(0));
+    let summary = worker
+        .cancel(Some("cleanup-fixture"))
+        .unwrap()
+        .wait(Duration::from_millis(10))
+        .await;
+    assert_eq!(summary.uncertain_calls, 1);
+    assert!(!summary.calls_drained);
+    let (work, never_started, _) = probe();
+    assert_eq!(
+        worker.submit(work).await.err().unwrap().code,
+        CODE_RUNTIME_UNAVAILABLE
+    );
+    assert!(matches!(
+        never_started.recv_timeout(Duration::from_secs(1)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn one_thread_bounds_queue_rejects_overflow_and_skips_cancelled_queued_work() {
     let worker = Worker::default();
@@ -91,6 +146,95 @@ async fn abandoned_running_request_does_not_free_the_executor_or_overlap_the_nex
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cancel_bypasses_a_full_queue_and_drain_waits_for_the_running_call() {
+    let worker = Worker::default();
+    let (work, began, release) = probe();
+    let mut running = Box::pin(worker.submit(work));
+    poll_pending(running.as_mut()).await;
+    began.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (work, queued_began, _) = probe();
+    let mut queued = Box::pin(worker.submit(work));
+    poll_pending(queued.as_mut()).await;
+    let foreign = worker
+        .cancel(Some("foreign-session"))
+        .unwrap()
+        .wait(Duration::ZERO)
+        .await;
+    assert_eq!(foreign.matched_calls, 0);
+    let receipt = worker.cancel(None).unwrap();
+    let pending = receipt.wait(Duration::from_millis(10)).await;
+    assert_eq!(pending.matched_calls, 2);
+    assert_eq!(pending.pending_calls, 2);
+    assert!(!pending.calls_drained);
+    let (overflow, _, _) = probe();
+    assert_eq!(
+        worker.submit(overflow).await.err().unwrap().code,
+        CODE_WORKER_BUSY
+    );
+    release.send(()).unwrap();
+    assert!(matches!(running.await.unwrap(), Output::Probe));
+    assert_eq!(queued.await.err().unwrap().code, "ACTION_CANCELLED");
+    assert!(matches!(
+        queued_began.recv_timeout(Duration::from_secs(2)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+    let done = worker
+        .cancel(None)
+        .unwrap()
+        .wait(Duration::from_secs(1))
+        .await;
+    assert_eq!(done.pending_calls, 0);
+    assert!(done.calls_drained);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn old_cancel_receipt_never_retargets_a_reused_control_slot() {
+    let worker = Worker::default();
+    let (work, began, release) = probe();
+    let mut first = Box::pin(worker.submit(work));
+    poll_pending(first.as_mut()).await;
+    began.recv_timeout(Duration::from_secs(2)).unwrap();
+    let old = worker.cancel(None).unwrap();
+    release.send(()).unwrap();
+    first.await.unwrap();
+    let (work, began, release) = probe();
+    let mut next = Box::pin(worker.submit(work));
+    poll_pending(next.as_mut()).await;
+    began.recv_timeout(Duration::from_secs(2)).unwrap();
+    let summary = old.wait(Duration::from_secs(1)).await;
+    assert!(summary.calls_drained);
+    assert_eq!(summary.call_ids, [Some(1), None]);
+    let current = worker
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .find(|call| call.id == 2)
+        .unwrap()
+        .clone();
+    assert!(current.check().is_ok());
+    release.send(()).unwrap();
+    next.await.unwrap();
+}
+
+#[tokio::test]
+async fn call_id_exhaustion_never_wraps_or_executes_unadmitted_work() {
+    let worker = Worker::default();
+    worker.admission.lock().unwrap().next_id = u64::MAX;
+    let (work, began, _) = probe();
+    assert_eq!(
+        worker.submit(work).await.err().unwrap().code,
+        CODE_RUNTIME_UNAVAILABLE
+    );
+    assert!(matches!(
+        began.recv_timeout(Duration::from_secs(1)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(worker.admission.lock().unwrap().next_id, u64::MAX);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn failed_executor_is_not_automatically_replaced_or_replayed() {
     let worker = Worker::default();
     let (work, started, release) = probe();
@@ -99,6 +243,13 @@ async fn failed_executor_is_not_automatically_replaced_or_replayed() {
     started.recv_timeout(Duration::from_secs(2)).unwrap();
     drop(release); // Deliberate panic in the cfg(test)-only executor probe.
     assert_eq!(failed.await.err().unwrap().code, CODE_RUNTIME_UNAVAILABLE);
+    let summary = worker
+        .cancel(None)
+        .unwrap()
+        .wait(Duration::from_millis(10))
+        .await;
+    assert_eq!(summary.uncertain_calls, 1);
+    assert!(!summary.calls_drained);
     let (work, started, _) = probe();
     let Err(error) = worker.submit(work).await else {
         panic!("uncertain executor was replaced")
@@ -235,6 +386,91 @@ async fn valid_direct_and_mcp_waits_leave_tokio_responsive_and_share_app_worker(
         };
         assert_eq!(result["action"], "wait");
         assert_eq!(result["hid_writes"], 0);
+    }
+    for call_mcp in [false, true] {
+        let body = serde_json::json!({"actions":[{"action":"wait","duration_ms":5000}]});
+        let mut request = Box::pin(async {
+            if call_mcp {
+                let rpc = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kvm_actions","arguments":body}});
+                mcp(
+                    State(state.clone()),
+                    headers.clone(),
+                    serde_json::to_vec(&rpc).unwrap().into(),
+                )
+                .await
+            } else {
+                actions(
+                    State(state.clone()),
+                    headers.clone(),
+                    serde_json::to_vec(&body).unwrap().into(),
+                )
+                .await
+            }
+        });
+        poll_pending(request.as_mut()).await;
+        let until = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let waiting = state
+                .picoclaw_worker
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .any(|call| {
+                    call.session.as_deref() == Some("worker-valid-wait-test") && call.waiting()
+                });
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < until,
+                "actual worker wait never began"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let began = std::time::Instant::now();
+        if call_mcp {
+            let response =
+                super::super::release_runtime_session(State(state.clone()), headers.clone())
+                    .await
+                    .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["code"], 0);
+            assert_eq!(value["data"]["released"], true);
+            assert_eq!(value["data"]["execution_stop_verified"], false);
+            assert_eq!(value["data"]["cancelled_calls"]["matched_calls"], 1);
+            assert_eq!(value["data"]["cancelled_calls"]["calls_drained"], true);
+        } else {
+            let receipt = state
+                .picoclaw_worker
+                .cancel(Some("worker-valid-wait-test"))
+                .unwrap();
+            let summary = receipt.wait(Duration::from_secs(1)).await;
+            assert_eq!(summary.matched_calls, 1);
+            assert!(summary.calls_drained);
+        }
+        let response = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(began.elapsed() < Duration::from_secs(1));
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if call_mcp {
+            assert_eq!(value["result"]["isError"], true);
+            assert_eq!(
+                value["result"]["content"][0]["text"],
+                "action call cancelled"
+            );
+        } else {
+            assert_eq!(value["code"], "ACTION_CANCELLED");
+        }
     }
     assert!(state.picoclaw_worker.started());
     assert_ne!(super::super::session_lock_owner(), "worker-valid-wait-test");

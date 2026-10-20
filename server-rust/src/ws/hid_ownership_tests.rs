@@ -54,6 +54,9 @@ impl super::super::HidReports for Lease<'_, Recording> {
     fn settle_absolute(&self) -> io::Result<usize> {
         self.release(Endpoint::Absolute, true)
     }
+    fn finish(&self) -> io::Result<usize> {
+        (*self).finish()
+    }
 }
 
 #[test]
@@ -105,6 +108,142 @@ fn actual_pico_report_executor_has_no_valid_prefix_effect_for_a_late_invalid_act
     let raw = br#"{"actions":[{"action":"click","x":0.5,"y":0.5},{"action":"type","text":"valid prefix then unsupported \ud83d\ude42"}]}"#;
     assert!(crate::api::picoclaw::execute_reports_fixture(&owner, raw).is_err());
     assert!(effects(&bus).is_empty());
+}
+
+struct CancelAt<'a> {
+    owner: Lease<'a, Recording>,
+    replacement: Option<Lease<'a, Recording>>,
+    call: &'a crate::api::picoclaw::execution::Call,
+    at: usize,
+    writes: std::cell::Cell<usize>,
+}
+
+impl CancelAt<'_> {
+    fn write(&self, report: Report) -> io::Result<usize> {
+        let count = self.owner.write(report)?;
+        let written = self.writes.get() + 1;
+        self.writes.set(written);
+        if written == self.at {
+            self.call.cancel_fixture();
+            // After the owned write returned (bus lock released), a real later
+            // owner can intervene before automatic key-up or error cleanup.
+            if let Some(manual) = self.replacement {
+                manual.write(match report {
+                    Report::Keyboard(_) => KEY_B,
+                    _ => ABS_DOWN,
+                })?;
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl super::super::HidReports for CancelAt<'_> {
+    fn keyboard(&self, report: &[u8; 8]) -> io::Result<usize> {
+        self.write(Report::Keyboard(*report))
+    }
+    fn absolute(&self, report: &[u8; 6]) -> io::Result<usize> {
+        self.write(Report::Absolute(*report))
+    }
+    fn settle_keyboard(&self) -> io::Result<usize> {
+        self.owner.release(Endpoint::Keyboard, true)
+    }
+    fn settle_absolute(&self) -> io::Result<usize> {
+        self.owner.release(Endpoint::Absolute, true)
+    }
+    fn finish(&self) -> io::Result<usize> {
+        self.owner.finish()
+    }
+}
+
+#[test]
+fn actual_executor_cancel_stops_report_loops_and_only_cleans_its_current_owner() {
+    use crate::api::picoclaw::{execute_controlled_reports_fixture, execution::Call};
+    for (raw, cancel_at, normal_effects) in [
+        (r#"{"action":"click","x":0.5,"y":0.5}"#, 2, 3),
+        (
+            r#"{"action":"drag","from":{"x":0.0,"y":0.0},"to":{"x":1.0,"y":1.0}}"#,
+            2,
+            3,
+        ),
+        (
+            r#"{"action":"scroll","amount":100,"direction":"down"}"#,
+            1,
+            2,
+        ),
+        (r#"{"action":"type","text":"aA\n\tlong remainder"}"#, 1, 2),
+        (
+            r#"{"action":"hotkey","keys":["ctrl","alt","Delete"]}"#,
+            1,
+            2,
+        ),
+    ] {
+        for replace in [false, true] {
+            let bus = Bus::new(Recording::default());
+            let owner = bus.begin().unwrap();
+            let manual = bus.begin().unwrap();
+            let call = Call::fixture();
+            let output = CancelAt {
+                owner,
+                replacement: replace.then_some(manual),
+                call: &call,
+                at: cancel_at,
+                writes: std::cell::Cell::new(0),
+            };
+            let (result, clean) =
+                execute_controlled_reports_fixture(&output, &call, raw.as_bytes());
+            assert_eq!(result.unwrap_err(), "ACTION_CANCELLED");
+            assert!(clean);
+            assert_eq!(output.writes.get(), cancel_at);
+            assert_eq!(owner.finish().unwrap(), 0);
+            let actual = effects(&bus);
+            if replace {
+                assert_eq!(actual.len(), cancel_at + 1);
+                assert!(actual.last().unwrap().held());
+                assert_eq!(manual.finish().unwrap(), 1);
+            } else {
+                assert_eq!(actual.len(), normal_effects);
+                assert!(!actual.last().unwrap().held());
+                assert!(
+                    bus.state
+                        .lock()
+                        .unwrap()
+                        .current
+                        .iter()
+                        .flatten()
+                        .all(|current| !current.needs_release)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn actual_executor_does_not_claim_clean_cancellation_after_failed_owned_compensation() {
+    use crate::api::picoclaw::{execute_controlled_reports_fixture, execution::Call};
+    for after_effect in [false, true] {
+        let bus = Bus::new(Recording {
+            fail_at: Some(2),
+            fail_after_effect: after_effect,
+            ..Recording::default()
+        });
+        let call = Call::fixture();
+        let output = CancelAt {
+            owner: bus.begin().unwrap(),
+            replacement: None,
+            call: &call,
+            at: 1,
+            writes: std::cell::Cell::new(0),
+        };
+        let (result, clean) = execute_controlled_reports_fixture(
+            &output,
+            &call,
+            br#"{"action":"hotkey","keys":["ctrl","alt","Delete"]}"#,
+        );
+        assert_eq!(result.unwrap_err(), "HID_CLEANUP_UNCERTAIN");
+        assert!(!clean);
+        assert!(bus.state.lock().unwrap().current[0].unwrap().needs_release);
+    }
 }
 
 #[test]
