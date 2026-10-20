@@ -57,6 +57,29 @@ fn shutdown(engine: &mut Engine) {
     });
 }
 
+fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
+    engine.install.as_ref().map(|install| {
+        let stage = match install.stage {
+            InstallStage::Draining => "draining",
+            InstallStage::PreparingSupport => "preparing-support",
+            InstallStage::SupportReady => "support-ready",
+            InstallStage::Published => "published",
+            InstallStage::Trial => "trial",
+            InstallStage::CommitPending => "commit-pending",
+            InstallStage::Rollback => "rollback",
+            InstallStage::Failed => "failed",
+        };
+        let owner = match &install.owner {
+            InstallOwner::Draining(_) => "draining",
+            InstallOwner::Trial(_) => "trial",
+            InstallOwner::Committed(_) => "committed",
+            InstallOwner::RolledBack(_) => "rolled-back",
+            InstallOwner::Refused { .. } => "refused",
+        };
+        (stage, owner)
+    })
+}
+
 #[test]
 fn busy_shutdown_is_not_admitted_and_can_be_reissued_after_exact_lock_release() {
     let root = tempfile::tempdir().unwrap();
@@ -209,6 +232,7 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     let mut engine = engine(root);
+    engine.fixture_trace_starts = true;
     start_all(&mut engine);
     let mut previous = None;
     let mut baseline = None;
@@ -217,9 +241,22 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
         let baseline = *baseline.get_or_insert(old);
         let started = Instant::now();
         loop {
+            let before = install_state(&engine);
+            let before_mode = engine.mode;
+            let before_roles = engine.roles;
             let tick_started = Instant::now();
             engine.tick();
             let tick_duration = tick_started.elapsed();
+            let after = install_state(&engine);
+            if before != after || tick_duration >= Duration::from_millis(100) {
+                eprintln!(
+                    "successive-install-tick: sequence={sequence}, before={before:?}/{before_mode:?}/{before_roles:?}, after={after:?}/{:?}/{:?}, backend={:?}, tick_duration={tick_duration:?}, elapsed={:?}",
+                    engine.mode,
+                    engine.roles,
+                    engine.backend_status,
+                    started.elapsed()
+                );
+            }
             if engine.install.is_none()
                 && engine.mode == Mode::Running
                 && engine.roles == [2; 2]
@@ -228,26 +265,7 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
                 break;
             }
             if started.elapsed() >= FIXTURE_WAIT {
-                let install = engine.install.as_ref().map(|install| {
-                    let stage = match install.stage {
-                        InstallStage::Draining => "draining",
-                        InstallStage::PreparingSupport => "preparing-support",
-                        InstallStage::SupportReady => "support-ready",
-                        InstallStage::Published => "published",
-                        InstallStage::Trial => "trial",
-                        InstallStage::CommitPending => "commit-pending",
-                        InstallStage::Rollback => "rollback",
-                        InstallStage::Failed => "failed",
-                    };
-                    let owner = match &install.owner {
-                        InstallOwner::Draining(_) => "draining",
-                        InstallOwner::Trial(_) => "trial",
-                        InstallOwner::Committed(_) => "committed",
-                        InstallOwner::RolledBack(_) => "rolled-back",
-                        InstallOwner::Refused { .. } => "refused",
-                    };
-                    (stage, owner)
-                });
+                let install = after;
                 let receipt = app_slot::job_status_fixture(root, transaction)
                     .ok()
                     .flatten()
