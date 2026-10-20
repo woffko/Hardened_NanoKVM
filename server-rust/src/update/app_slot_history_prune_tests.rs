@@ -178,6 +178,75 @@ fn prune_child() {
     .unwrap()
     .unwrap();
     let record = store.record().unwrap();
+    if let Ok(case) = std::env::var("NANOKVM_PRUNE_CURSOR_CASE") {
+        let (manifest, _) = pending(&store).unwrap().unwrap();
+        let (previous, desired) = match case.as_str() {
+            "fresh" | "resume" => (
+                None,
+                Cursor {
+                    index: 0,
+                    pending: false,
+                },
+            ),
+            "replace-pending" => (
+                Some(Cursor {
+                    index: 1,
+                    pending: false,
+                }),
+                Cursor {
+                    index: 1,
+                    pending: true,
+                },
+            ),
+            "advance-next" | "resume-advance" => (
+                Some(Cursor {
+                    index: 0,
+                    pending: true,
+                }),
+                Cursor {
+                    index: 1,
+                    pending: false,
+                },
+            ),
+            _ => panic!("unknown cursor fixture case"),
+        };
+        assert!(load_cursor(&store, CURSOR, &manifest).unwrap().map(|v| v.0) == previous);
+        match case.as_str() {
+            "fresh" | "replace-pending" | "advance-next" => {
+                assert!(
+                    load_cursor(&store, CURSOR_NEXT, &manifest)
+                        .unwrap()
+                        .is_none()
+                );
+                save_cursor(&store, &manifest, desired).unwrap();
+            }
+            "resume" | "resume-advance" => {
+                assert!(
+                    load_cursor(&store, CURSOR_NEXT, &manifest)
+                        .unwrap()
+                        .is_some_and(|(cursor, _)| cursor == desired)
+                );
+                assert!(
+                    resume_cursor(&store, &manifest)
+                        .unwrap()
+                        .is_some_and(|cursor| cursor == desired)
+                );
+            }
+            _ => panic!("unknown cursor fixture case"),
+        }
+        assert!(
+            load_cursor(&store, CURSOR, &manifest)
+                .unwrap()
+                .is_some_and(|(cursor, _)| cursor == desired)
+        );
+        assert!(
+            load_cursor(&store, CURSOR_NEXT, &manifest)
+                .unwrap()
+                .is_none()
+        );
+        println!("prune-cursor-probe-ran");
+        return;
+    }
     if let Ok(source) = std::env::var("NANOKVM_PRUNE_BIND_SOURCE") {
         let target = Path::new(&root)
             .join(DIRECTORY)
@@ -205,8 +274,12 @@ fn prune_child() {
     }
 }
 
-fn kill_at(fixture: &Fixture, point: &str) {
-    let mut child = command(fixture)
+fn kill_at(fixture: &Fixture, point: &str, cursor_case: Option<&str>) {
+    let mut command = command(fixture);
+    if let Some(case) = cursor_case {
+        command.env("NANOKVM_PRUNE_CURSOR_CASE", case);
+    }
+    let mut child = command
         .env("NANOKVM_APP_SLOT_TEST_STOP", point)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -265,6 +338,82 @@ fn points() -> Vec<String> {
         }
     }
     points
+}
+
+fn cursor_publication_probe(case: &str, stop: &str) {
+    let fixture = prunable();
+    kill_at(&fixture, stop, None);
+    if case == "resume-advance" {
+        // Node zero was already unlinked and its parent synced at `stop`.
+        // Leave its advancing NEXT linked before the publisher's parent sync.
+        kill_at(&fixture, "prune-cursor-linked", Some("advance-next"));
+    }
+    let output = command(&fixture)
+        .env("NANOKVM_PRUNE_CURSOR_CASE", case)
+        .env("NANOKVM_APP_SLOT_TEST_OPERATIONS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{case}: {output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("prune-cursor-probe-ran"));
+    let trace = String::from_utf8(output.stderr).unwrap();
+    let operations: Vec<_> = trace
+        .lines()
+        .filter_map(|line| line.strip_prefix("slot-operation: operation="))
+        .collect();
+    let count = |name: &str| {
+        operations
+            .iter()
+            .filter(|line| {
+                line.strip_prefix(name)
+                    .is_some_and(|tail| tail.starts_with(','))
+            })
+            .count()
+    };
+    let resumed = usize::from(matches!(case, "resume" | "resume-advance"));
+    assert_eq!(count("prune.publish.file-sync"), 1 - resumed);
+    assert_eq!(count("prune.publish.parent-sync"), 1 - resumed);
+    assert_eq!(count("prune.cursor.retry-file-sync"), resumed);
+    assert_eq!(count("prune.cursor.next-sync"), resumed);
+    assert_eq!(count("prune.cursor.published-sync"), 1);
+    let position = |name: &str| {
+        operations
+            .iter()
+            .position(|line| {
+                line.strip_prefix(name)
+                    .is_some_and(|tail| tail.starts_with(','))
+            })
+            .unwrap()
+    };
+    let (file_sync, next_sync) = if resumed == 1 {
+        ("prune.cursor.retry-file-sync", "prune.cursor.next-sync")
+    } else {
+        ("prune.publish.file-sync", "prune.publish.parent-sync")
+    };
+    assert!(position(file_sync) < position(next_sync));
+    assert!(position(next_sync) < position("prune.cursor.published-sync"));
+    let store = fixture.store(true).unwrap();
+    register(&store, &fixture.record).unwrap();
+    assert_pruned(&fixture);
+}
+
+#[test]
+fn cursor_publication_fresh_reuses_the_publish_directory_fence() {
+    cursor_publication_probe("fresh", "prune-manifest-published");
+}
+
+#[test]
+fn cursor_publication_orphaned_next_reestablishes_both_file_and_parent_fences() {
+    cursor_publication_probe("resume", "prune-cursor-linked");
+}
+
+#[test]
+fn cursor_publication_replaces_ready_with_pending_without_a_duplicate_parent_sync() {
+    cursor_publication_probe("replace-pending", "prune-delete-0-advanced");
+}
+
+#[test]
+fn cursor_publication_resumes_orphaned_advance_over_a_durably_removed_node() {
+    cursor_publication_probe("resume-advance", "prune-delete-0-synced");
 }
 
 #[test]
@@ -326,6 +475,7 @@ fn private_prune_capacity_child() {
             } else {
                 "prune-expiry-published"
             },
+            None,
         );
         nix::mount::mount(
             None::<&str>,
@@ -437,7 +587,7 @@ fn every_prune_io_boundary_retains_context_and_exact_retry_finishes() {
 fn real_sigkill_at_each_prune_boundary_resumes_only_exact_manifest_and_next_unlink() {
     for point in points() {
         let fixture = prunable();
-        kill_at(&fixture, &point);
+        kill_at(&fixture, &point, None);
         let store = fixture.store(true).unwrap();
         register(&store, &fixture.record).unwrap();
         assert_pruned(&fixture);
@@ -447,7 +597,7 @@ fn real_sigkill_at_each_prune_boundary_resumes_only_exact_manifest_and_next_unli
 #[test]
 fn killed_prune_rejects_substituted_descendant_and_preserves_both_objects() {
     let fixture = prunable();
-    kill_at(&fixture, "prune-delete-0-pending");
+    kill_at(&fixture, "prune-delete-0-pending", None);
     let path = victim(&fixture).join(QUARANTINE).join("extra/sub/data");
     let saved = fixture.root.path().join("saved-prune-descendant");
     fs::rename(&path, &saved).unwrap();
@@ -496,7 +646,7 @@ fn unknown_archives_or_missing_pins_refuse_before_prune_side_effects() {
 fn missing_or_foreign_progress_and_manifest_never_adopt_partial_deletion() {
     for kind in 0..4 {
         let fixture = prunable();
-        kill_at(&fixture, "prune-delete-0-synced");
+        kill_at(&fixture, "prune-delete-0-synced", None);
         let store = fixture.store(true).unwrap();
         let (mut manifest, _) = pending(&store).unwrap().unwrap();
         if kind == 0 {

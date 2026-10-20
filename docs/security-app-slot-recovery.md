@@ -433,6 +433,18 @@ revalidates the remaining tree and permits absence only for the one pending
 member. Missing/foreign/corrupt progress and substitutions refuse without repair.
 No recursive pathname deletion or collision overwrite is used.
 
+Cursor replacement keeps its file and directory durability fences on both fresh
+publication and retry. A fresh `NEXT` already passed the publisher's file sync
+and parent-directory sync; the caller does not repeat that same parent sync
+without an intervening write. A surviving `NEXT` found on retry is still synced
+as a file and directory before canonical rename. The post-rename directory sync
+remains mandatory before deletion or cursor advancement proceeds. Targeted
+subprocess tests distinguish these paths and recover a real process kill after
+the temporary link, in addition to the existing full prune crash/fault matrix.
+They also cover replacing an existing ready cursor with a pending cursor and
+recovering an orphaned advancing cursor after the node's durable removal.
+This removes duplicate flushes, not a required durable boundary or a test timeout.
+
 After the entire payload and its parent are durable, a protected expiry receipt
 is published and the current manifest/cursor are removed. The historical state
 and order receipts remain. `inactive_payload_retained=false` requires that valid

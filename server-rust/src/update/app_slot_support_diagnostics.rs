@@ -9,6 +9,9 @@ pub(crate) struct Elapsed {
 
 impl Elapsed {
     pub(crate) fn start(operation: &'static str, member: Option<usize>) -> Self {
+        if std::env::var_os("NANOKVM_APP_SLOT_TEST_OPERATIONS").is_some() {
+            eprintln!("slot-operation: operation={operation}, member={member:?}");
+        }
         Self {
             operation,
             member,

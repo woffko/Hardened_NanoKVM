@@ -221,7 +221,19 @@ fn save_cursor(store: &Store, manifest: &Manifest, desired: Cursor) -> Result<()
     )?;
     let bytes = desired.encode(manifest)?;
     match load_cursor(store, CURSOR_NEXT, manifest)? {
-        Some((next, file)) if next == desired => file.sync_all()?,
+        Some((next, file)) if next == desired => {
+            support_operation!(
+                "prune.cursor.retry-file-sync",
+                Some(desired.index),
+                file.sync_all()
+            )?;
+            // A surviving link may predate its original directory fsync.
+            support_operation!(
+                "prune.cursor.next-sync",
+                Some(desired.index),
+                store.current.sync_all()
+            )?;
+        }
         Some(_) => return Err(SlotError::Invalid),
         None => publish(
             &store.current,
@@ -235,11 +247,8 @@ fn save_cursor(store: &Store, manifest: &Manifest, desired: Cursor) -> Result<()
             },
         )?,
     }
-    support_operation!(
-        "prune.cursor.next-sync",
-        Some(desired.index),
-        store.current.sync_all()
-    )?;
+    // Fresh publish already synced this same parent after linking NEXT. No
+    // namespace write occurs before the checks and canonical rename below.
     let actual = load_cursor(store, CURSOR, manifest)?;
     if actual.as_ref().map(|v| v.0) != previous.as_ref().map(|v| v.0) {
         return Err(SlotError::Invalid);
