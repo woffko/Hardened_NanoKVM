@@ -179,6 +179,7 @@ pub(crate) fn prepare_retained_fixture(
     install: &mut AcceptedInstall,
     closed: ClosedRuntime,
 ) -> Result<Prepared<'_>> {
+    let _elapsed = diagnostics::Elapsed::start("fixture.prepare-total", None);
     let sources = Sources::open(install, &closed)?;
     match support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi) {
         Ok(()) | Err(support_abi_catalog::CompatibilityError::UnsupportedTransition) => {}
@@ -187,6 +188,17 @@ pub(crate) fn prepare_retained_fixture(
         }
     }
     stage(install, closed, sources)
+}
+
+#[test]
+fn diagnostic_observation_evaluates_the_operation_once_and_preserves_its_error() {
+    let mut calls = 0;
+    let result: Result<()> = support_operation!("diagnostic-proof", None, {
+        calls += 1;
+        Err(SlotError::Invalid)
+    });
+    assert_eq!(calls, 1);
+    assert!(matches!(result, Err(SlotError::Invalid)));
 }
 
 pub(super) fn support(root: &Path) -> PathBuf {

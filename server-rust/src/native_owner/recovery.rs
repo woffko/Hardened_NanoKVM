@@ -81,6 +81,13 @@ struct Recovery {
 }
 
 impl Recovery {
+    #[cfg(test)]
+    fn trace(&self, operation: &'static str) {
+        if self.pause_at.is_some() {
+            eprintln!("native-recovery-fixture: {operation}");
+        }
+    }
+
     fn root(create: bool) -> Result<Self, Error> {
         Ok(Self {
             store: Store::lock_root(create)?,
@@ -269,6 +276,8 @@ impl Recovery {
     }
 
     fn complete(&self) -> Result<(), Error> {
+        #[cfg(test)]
+        self.trace("complete.begin");
         let fence = self.fence()?.ok_or(Error::Recovery)?;
         let epoch = fence.epoch.ok_or(Error::Recovery)?;
         if epoch == self.store.epoch {
@@ -329,19 +338,27 @@ impl Recovery {
             Some(_) => return Err(Error::Ambiguous),
             None => self.publish_closed()?,
         }
+        #[cfg(test)]
+        self.trace("complete.closed-published");
         if Self::exists(&self.store.directory, NEXT)?
             || Self::exists(&self.store.directory, MEMBERS[2])?
             || Self::exists(&self.store.directory, MEMBERS[3])?
         {
             return Err(Error::Ambiguous);
         }
+        #[cfg(test)]
+        self.trace("complete.archive-stat.begin");
         let before = fence.directory.metadata()?;
         let actual = statat(&self.store.directory, RECOVERY, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| Error::Io)?;
         if actual.st_dev != before.dev() || actual.st_ino != before.ino() {
             return Err(Error::Unsafe);
         }
+        #[cfg(test)]
+        self.trace("complete.archive-stat.end");
         let boot = std::str::from_utf8(&epoch.0).map_err(|_| Error::Invalid)?;
+        #[cfg(test)]
+        self.trace("complete.archive-rename.begin");
         renameat_with(
             &self.store.directory,
             RECOVERY,
@@ -351,12 +368,16 @@ impl Recovery {
         )
         .map_err(|_| Error::Io)?;
         #[cfg(test)]
+        self.trace("complete.archive-rename.end");
+        #[cfg(test)]
         self.inject(Step::FenceArchived)?;
         self.store.directory.sync_all()?;
         Ok(())
     }
 
     fn publish_closed(&self) -> Result<(), Error> {
+        #[cfg(test)]
+        self.trace("publish-closed.begin");
         // Only derived public journal bytes are anonymous here; original evidence
         // was moved and synced first. TMPFILE failure has no named fallback.
         let mut file: File = openat2(
@@ -379,6 +400,8 @@ impl Recovery {
             return Err(Error::Unsafe);
         }
         file.write_all(&record(self.store.epoch, Phase::Closed))?;
+        #[cfg(test)]
+        self.trace("publish-closed.file-sync.begin");
         file.sync_all()?;
         #[cfg(test)]
         self.inject(Step::ClosureFileSynced)?;
@@ -411,6 +434,9 @@ impl Recovery {
 
     #[cfg(test)]
     fn inject(&self, step: Step) -> Result<(), Error> {
+        if self.pause_at.is_some() {
+            eprintln!("native-recovery-fixture: checkpoint-enter {step:?}");
+        }
         if let Some((at, name)) = self.create_at
             && at == step
         {

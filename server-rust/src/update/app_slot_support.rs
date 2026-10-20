@@ -29,6 +29,21 @@ use std::{
     },
 };
 
+#[cfg(test)]
+#[path = "app_slot_support_diagnostics.rs"]
+mod diagnostics;
+
+// The operation is evaluated once. Production expands to the original
+// expression; only test builds measure it. No fault/progress point is added.
+macro_rules! support_operation {
+    ($name:literal, $member:expr, $operation:expr) => {{
+        #[cfg(test)]
+        let _elapsed =
+            $crate::update::app_slot::support::diagnostics::Elapsed::start($name, $member);
+        $operation
+    }};
+}
+
 const COUNT: usize = 9;
 const DIRECTORY: &str = "application-support";
 const PLAN: &str = "plan";
@@ -74,18 +89,24 @@ impl Prepared<'_> {
     /// Errors retain this guard; a retry inspects exact inode pairs rather than
     /// repeating a rename whose outcome might already have been successful.
     pub fn exchange(&mut self) -> Result<()> {
+        #[cfg(test)]
+        let _elapsed = diagnostics::Elapsed::start("exchange.total", None);
         let record = accepted_context(self.install, &self.closed, &self.plan)?;
         if record.phase != AppPhase::Prepared {
             return Err(SlotError::Invalid);
         }
         self.ready_plan()?;
-        reconcile_pairs(
-            &self.install._store,
-            &self.directories,
-            &self.plan,
-            Direction::New,
+        support_operation!(
+            "exchange.pairs",
+            None,
+            reconcile_pairs(
+                &self.install._store,
+                &self.directories,
+                &self.plan,
+                Direction::New,
+            )
         )?;
-        self.check_exchanged()
+        support_operation!("exchange.check", None, self.check_exchanged())
     }
 
     /// No process launch or app-health acknowledgement is supplied by this check.
@@ -225,6 +246,8 @@ struct Sources {
 
 impl Sources {
     fn open(install: &AcceptedInstall, closed: &ClosedRuntime) -> Result<Self> {
+        #[cfg(test)]
+        let _elapsed = diagnostics::Elapsed::start("sources.open", None);
         let record = prepared_record(install, closed)?;
         let old = restore_fs::open_beneath(
             &install._store.rootfs,
@@ -261,9 +284,17 @@ impl Source {
         if size > helper_family::MAX_BACKEND_BYTES {
             return Err(SlotError::Invalid);
         }
-        let helpers = helper_family::inspect(&backend)?;
-        let scripts = boot_script_catalog::inspect_in_family(&backend, size, &helpers)?;
-        let abi = support_abi_catalog::inspect_in_catalogs(&backend, size, &helpers, &scripts)?;
+        let helpers = support_operation!("source.helpers", None, helper_family::inspect(&backend))?;
+        let scripts = support_operation!(
+            "source.scripts",
+            None,
+            boot_script_catalog::inspect_in_family(&backend, size, &helpers)
+        )?;
+        let abi = support_operation!(
+            "source.abi",
+            None,
+            support_abi_catalog::inspect_in_catalogs(&backend, size, &helpers, &scripts)
+        )?;
         let specs = std::array::from_fn(|index| {
             if index < 5 {
                 let member = &helpers.members()[index];
@@ -400,8 +431,16 @@ impl Directories {
             identities,
         };
         directories.check(store)?;
-        directories.support.sync_all()?;
-        directories.config.sync_all()?;
+        support_operation!(
+            "directories.support-sync",
+            None,
+            directories.support.sync_all()
+        )?;
+        support_operation!(
+            "directories.config-sync",
+            None,
+            directories.config.sync_all()
+        )?;
         Ok(directories)
     }
     fn check(&self, store: &Store) -> Result<()> {
@@ -512,6 +551,8 @@ fn open_regular(
 }
 
 fn hash_at(file: &File, start: u64, size: u64, mut output: Option<&mut File>) -> Result<[u8; 32]> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("hash-or-copy", None);
     let mut hash = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     let mut offset = 0;
@@ -664,12 +705,14 @@ fn publish_plan(
     plan: &Plan,
     predecessor: Option<&Plan>,
 ) -> Result<()> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("plan.publish-total", None);
     let capacity = Capacity::read(&directories.support)?;
     let journal = (record::BYTES as u64).div_ceil(capacity.unit) * capacity.unit;
     capacity.ensure(journal + 2 * capacity.unit, 1)?;
     let mut file = anonymous(&directories.support, 0o600)?;
     file.write_all(&plan.encode(store.uid, store.rootfs.metadata()?.gid())?)?;
-    file.sync_all()?;
+    support_operation!("plan.file-sync", None, file.sync_all())?;
     plan_point(plan.phase, "file-synced")?;
     let name = if predecessor.is_some() { NEXT } else { PLAN };
     let capacity = Capacity::read(&directories.support)?;
@@ -690,7 +733,7 @@ fn publish_plan(
         return Err(SlotError::Invalid);
     }
     plan_point(plan.phase, "linked")?;
-    directories.support.sync_all()?;
+    support_operation!("plan.link-sync", None, directories.support.sync_all())?;
     plan_point(plan.phase, "link-synced")?;
     if let Some(previous) = predecessor {
         if load_plan(directories, store, PLAN)? != *previous {
@@ -700,7 +743,7 @@ fn publish_plan(
         capacity.ensure(2 * capacity.unit, 0)?;
         renameat(&directories.support, NEXT, &directories.support, PLAN)?;
         plan_point(plan.phase, "renamed")?;
-        directories.support.sync_all()?;
+        support_operation!("plan.rename-sync", None, directories.support.sync_all())?;
         plan_point(plan.phase, "rename-synced")?;
     }
     if load_plan(directories, store, PLAN)? != *plan {
@@ -801,7 +844,11 @@ fn reconcile_pairs(
         return Err(SlotError::Invalid);
     }
     let record = bound_record(store, plan)?;
-    let initial = inspect_layout(directories, store, plan)?;
+    let initial = support_operation!(
+        "pairs.inspect-initial",
+        None,
+        inspect_layout(directories, store, plan)
+    )?;
     plan.check_layout(record.phase, &initial)?;
     let desired = if direction == Direction::New {
         Placement::NewOld
@@ -809,6 +856,8 @@ fn reconcile_pairs(
         Placement::OldNew
     };
     for (index, name) in NAMES.iter().enumerate() {
+        #[cfg(test)]
+        let _elapsed = diagnostics::Elapsed::start("pair.total", Some(index));
         let record = bound_record(store, plan)?;
         if (direction == Direction::Old && record.phase == AppPhase::Committed)
             || (direction == Direction::New
@@ -824,16 +873,24 @@ fn reconcile_pairs(
         if names != (1 << (COUNT + 1)) - 1 {
             return Err(SlotError::Invalid);
         }
-        let before = inspect_pair(directories, store, plan, index, names)?;
+        let before = support_operation!(
+            "pair.inspect",
+            Some(index),
+            inspect_pair(directories, store, plan, index, names)
+        )?;
         let capacity = Capacity::read(&directories.support)?;
         capacity.ensure(2 * capacity.unit, 0)?;
         if before != desired {
-            let result = renameat_with(
-                directories.live(index),
-                live_name(index),
-                &directories.support,
-                *name,
-                RenameFlags::EXCHANGE,
+            let result = support_operation!(
+                "pair.rename",
+                Some(index),
+                renameat_with(
+                    directories.live(index),
+                    live_name(index),
+                    &directories.support,
+                    *name,
+                    RenameFlags::EXCHANGE,
+                )
             );
             if let Err(error) = result {
                 // Do not infer an unchanged namespace from an error return.
@@ -849,10 +906,18 @@ fn reconcile_pairs(
         }
         // Even an already selected inode needs both barriers on an explicit
         // retry after a prior successful rename or ambiguous fsync result.
-        directories.live(index).sync_all()?;
+        support_operation!(
+            "pair.live-sync",
+            Some(index),
+            directories.live(index).sync_all()
+        )?;
         #[cfg(test)]
         exchange_point(direction, index, "live-synced")?;
-        directories.support.sync_all()?;
+        support_operation!(
+            "pair.support-sync",
+            Some(index),
+            directories.support.sync_all()
+        )?;
         #[cfg(test)]
         exchange_point(direction, index, "stage-synced")?;
     }
@@ -1089,9 +1154,15 @@ fn stage(
     closed: ClosedRuntime,
     sources: Sources,
 ) -> Result<Prepared<'_>> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("stage.total", None);
     sources.check(install, &closed)?;
     let store = &install._store;
-    let directories = Directories::open_mode(store, true)?;
+    let directories = support_operation!(
+        "stage.directories",
+        None,
+        Directories::open_mode(store, true)
+    )?;
     if inventory(&directories.support)? != 0 {
         return Err(SlotError::Invalid);
     }
@@ -1099,6 +1170,8 @@ fn stage(
     let mut successors: [Option<File>; COUNT] = std::array::from_fn(|_| None);
     let mut entries = Vec::with_capacity(COUNT);
     for index in 0..COUNT {
+        #[cfg(test)]
+        let _elapsed = diagnostics::Elapsed::start("stage.member-total", Some(index));
         sources.check(install, &closed)?;
         directories.check(store)?;
         space(&directories, &sources.new.specs, index)?;
@@ -1112,19 +1185,27 @@ fn stage(
         )?;
         let old_object = object(&file, store, old.size, 1, old.sha256)?;
         named_object(directories.live(index), live_name(index), store, old_object)?;
-        file.sync_all()?;
+        support_operation!("stage.predecessor-sync", Some(index), file.sync_all())?;
         old_files[index] = Some(file);
         let new = &sources.new.specs[index];
         #[cfg(all(test, feature = "sandbox-test-fixture"))]
         point(&format!("successor-preflight-{index}"))?;
-        let mut file = anonymous(&directories.support, 0o755)?;
-        let hash = hash_at(&sources.new.backend, new.start, new.size, Some(&mut file))?;
+        let mut file = support_operation!(
+            "stage.anonymous",
+            Some(index),
+            anonymous(&directories.support, 0o755)
+        )?;
+        let hash = support_operation!(
+            "stage.copy",
+            Some(index),
+            hash_at(&sources.new.backend, new.start, new.size, Some(&mut file))
+        )?;
         if hash != new.sha256 {
             #[cfg(test)]
             point("source-copy-hash-mismatch")?;
             return Err(SlotError::Invalid);
         }
-        file.sync_all()?;
+        support_operation!("stage.successor-sync", Some(index), file.sync_all())?;
         let new_object = object(&file, store, new.size, 0, hash)?;
         successors[index] = Some(file);
         entries.push(Entry {
@@ -1135,14 +1216,26 @@ fn stage(
         point(&format!("anonymous-{index}"))?;
     }
     point("predecessor-files-synced")?;
-    directories.executable.sync_all()?;
+    support_operation!(
+        "stage.predecessor-executable-sync",
+        None,
+        directories.executable.sync_all()
+    )?;
     point("predecessor-executable-synced")?;
-    directories.init.sync_all()?;
+    support_operation!(
+        "stage.predecessor-init-sync",
+        None,
+        directories.init.sync_all()
+    )?;
     point("predecessor-init-synced")?;
     for source in [&sources.old, &sources.new] {
-        source.backend.sync_all()?;
-        pin_directory(&source.root, "server", store, false)?.sync_all()?;
-        source.root.sync_all()?;
+        support_operation!("stage.source-backend-sync", None, source.backend.sync_all())?;
+        support_operation!(
+            "stage.source-server-sync",
+            None,
+            pin_directory(&source.root, "server", store, false)?.sync_all()
+        )?;
+        support_operation!("stage.source-root-sync", None, source.root.sync_all())?;
     }
     point("source-roots-synced")?;
     sources.check(install, &closed)?;
@@ -1177,7 +1270,11 @@ fn stage(
         )?;
         #[cfg(test)]
         point(&format!("member-linked-{index}"))?;
-        directories.support.sync_all()?;
+        support_operation!(
+            "stage.member-link-sync",
+            Some(index),
+            directories.support.sync_all()
+        )?;
         #[cfg(test)]
         point(&format!("member-synced-{index}"))?;
     }
@@ -1198,7 +1295,7 @@ fn stage(
         directories,
         plan,
     };
-    prepared.check()?;
+    support_operation!("stage.final-check", None, prepared.check())?;
     Ok(prepared)
 }
 

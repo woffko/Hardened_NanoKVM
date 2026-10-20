@@ -1,7 +1,8 @@
 use super::*;
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    io::Read,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -373,7 +374,9 @@ fn crash_probe() {
         .unwrap()
         .parse()
         .unwrap();
+    eprintln!("native-recovery-fixture: start step={index}");
     let mut r = recovery(Path::new(&root), if index < 2 { BOOT } else { OTHER }).unwrap();
+    eprintln!("native-recovery-fixture: singleton-leased step={index}");
     r.pause_at = Some((STEPS[index], Path::new(&root).join("ready")));
     if index < 2 {
         r.prepare().unwrap();
@@ -383,15 +386,66 @@ fn crash_probe() {
     panic!("fixture did not pause");
 }
 
+fn bounded_diagnostic(path: impl AsRef<Path>) -> String {
+    let mut text = String::with_capacity(4096);
+    match File::open(path).and_then(|file| file.take(4096).read_to_string(&mut text)) {
+        Ok(_) => text,
+        Err(error) => format!("unavailable: {error}"),
+    }
+}
+
+#[test]
+fn diagnostic_capture_is_bounded_and_a_missing_log_is_not_recovery_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    fs::write(&path, vec![b'x'; 8192]).unwrap();
+    assert_eq!(bounded_diagnostic(&path).len(), 4096);
+    assert!(bounded_diagnostic(root.path().join("absent")).starts_with("unavailable:"));
+}
+
+fn child_threads(pid: u32) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(8192);
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return "task list unavailable".into();
+    };
+    let mut tids = Vec::with_capacity(16);
+    for entry in entries.take(16).flatten() {
+        if let Some(tid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        {
+            tids.push(tid);
+        }
+    }
+    tids.sort_unstable();
+    for tid in tids {
+        let wchan = bounded_diagnostic(format!("/proc/{pid}/task/{tid}/wchan"));
+        let syscall = bounded_diagnostic(format!("/proc/{pid}/task/{tid}/syscall"));
+        writeln!(&mut text, "tid={tid} wchan={wchan:?} syscall={syscall:?}").unwrap();
+    }
+    text
+}
+
 #[test]
 fn actual_process_death_at_every_recovery_boundary_preserves_evidence_and_fencing() {
-    for index in 0..STEPS.len() {
+    for (index, step) in STEPS.iter().enumerate() {
         let root = tempfile::tempdir().unwrap();
         seed(root.path());
         if index >= 2 {
             let r = recovery(root.path(), BOOT).unwrap();
             r.prepare().unwrap();
         }
+        // A regular private fixture log cannot fill a pipe and block the child.
+        // It is diagnostic only, outside the protected admission directory.
+        let trace_path = root.path().join("child-trace");
+        let trace = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&trace_path)
+            .unwrap();
         let mut child = Probe(
             Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -403,15 +457,33 @@ fn actual_process_death_at_every_recovery_boundary_preserves_evidence_and_fencin
                 .env("NANOKVM_NATIVE_RECOVERY_FIXTURE", root.path())
                 .env("NANOKVM_NATIVE_RECOVERY_STEP", index.to_string())
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(trace.try_clone().unwrap()))
+                .stderr(Stdio::from(trace))
                 .spawn()
                 .unwrap(),
         );
         let start = Instant::now();
         while fs::read(root.path().join("ready")).ok().as_deref() != Some(b"fixture") {
-            assert!(start.elapsed() < Duration::from_secs(6), "step={index}");
-            assert!(child.0.try_wait().unwrap().is_none(), "step={index}");
+            let status = child.0.try_wait().unwrap();
+            if start.elapsed() >= Duration::from_secs(6) || status.is_some() {
+                let elapsed = start.elapsed();
+                // try_wait(Some) has already reaped the child. Do not inspect
+                // /proc or send a signal through a potentially reused PID.
+                let threads = if status.is_none() {
+                    child_threads(child.0.id())
+                } else {
+                    "child already exited; no live PID inspection".into()
+                };
+                if status.is_none() {
+                    let _ = child.0.kill();
+                }
+                let reaped = child.0.wait();
+                let trace = bounded_diagnostic(&trace_path);
+                panic!(
+                    "recovery readiness failed BEFORE kill/recovery assertions: step={index}/{:?}, elapsed={elapsed:?}, status={status:?}, reaped={reaped:?}, threads:\n{threads}\nchild trace (first4096bytes):\n{trace}",
+                    step
+                );
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         child.0.kill().unwrap();

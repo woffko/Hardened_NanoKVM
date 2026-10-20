@@ -80,6 +80,47 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
     })
 }
 
+fn normal_install_until(engine: &mut Engine, root: &Path, transaction: [u8; 16], sequence: usize) {
+    let started = Instant::now();
+    loop {
+        let before = install_state(engine);
+        let tick_started = Instant::now();
+        engine.tick();
+        let tick_duration = tick_started.elapsed();
+        let after = install_state(engine);
+        if before != after || tick_duration >= Duration::from_millis(100) {
+            eprintln!(
+                "payload-prelude-tick: sequence={sequence}, before={before:?}, after={after:?}, mode={:?}, roles={:?}, backend={:?}, tick_duration={tick_duration:?}, elapsed={:?}",
+                engine.mode,
+                engine.roles,
+                engine.backend_status,
+                started.elapsed()
+            );
+        }
+        if engine.install.is_none()
+            && engine.mode == Mode::Running
+            && engine.roles == [2; 2]
+            && engine.backend_status == Some(Status::Running)
+        {
+            return;
+        }
+        if started.elapsed() >= FIXTURE_WAIT {
+            let receipt = app_slot::job_status_fixture(root, transaction)
+                .ok()
+                .flatten()
+                .map(|status| (status.phase as u8, status.archived));
+            panic!(
+                "payload-prune prelude timeout BEFORE fault injection: sequence={sequence}, transaction={transaction:02x?}, stage={after:?}, mode={:?}, roles={:?}, backend={:?}, receipt={receipt:?}, tick_duration={tick_duration:?}, elapsed={:?}",
+                engine.mode,
+                engine.roles,
+                engine.backend_status,
+                started.elapsed()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn busy_shutdown_is_not_admitted_and_can_be_reissued_after_exact_lock_release() {
     let root = tempfile::tempdir().unwrap();
@@ -335,15 +376,9 @@ async fn payload_prune_failure_retains_full_terminal_owner_until_explicit_root_r
     let mut engine = engine(root);
     start_all(&mut engine);
     let mut transactions = Vec::new();
-    for _ in 0..2 {
+    for sequence in 1..=2 {
         let (_, transaction) = accept(&mut engine, root).await;
-        until(|| {
-            engine.tick();
-            engine.install.is_none()
-                && engine.mode == Mode::Running
-                && engine.roles == [2; 2]
-                && engine.backend_status == Some(Status::Running)
-        });
+        normal_install_until(&mut engine, root, transaction, sequence);
         transactions.push(transaction);
     }
     let victim = root
