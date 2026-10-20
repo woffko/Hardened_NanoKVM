@@ -69,16 +69,13 @@ export const Wifi = () => {
         case -4:
           setState('denied');
           return;
-        case -2:
-        case -3:
+        default:
           setState('failed');
           return;
       }
-    } catch (err) {
-      console.log(err);
+    } catch {
+      setState('failed');
     }
-
-    setState('success');
   }
 
   if (!isAuthenticated) {
