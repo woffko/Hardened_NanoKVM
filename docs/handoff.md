@@ -368,8 +368,9 @@ Remediation status:
   zero kernel alerts. This remains valid kernel/device evidence, but the image
   does not contain the corrected bridge server and must not be published. The
   kernel scope is frozen; fresh app/rootfs/full-image A/B pipelines are next.
-- The superseded isolated unsigned raw.12 preflight passes
-  `scripts/verify-rc12-raw-bundle.sh`. Its 57,134,321-byte archive SHA-256 is
+- The superseded isolated unsigned raw.12 preflight passed the then-current
+  `scripts/verify-rc12-raw-bundle.sh`; this is a retained historical result, not
+  a PASS of today's signed-default verifier. Its 57,134,321-byte archive SHA-256 is
   `85f5a52be375456eef0acdc618a77219fc0de7d42675d05bc30ee82ec3969b1e`;
   the decompressed rootfs and boot payloads remain byte-exact to selected A at
   `a5254238d690cd963b2b0f663977211634c424d78fb5e30fa095d815ab5d7701`
@@ -379,6 +380,8 @@ Remediation status:
   requires the wrong bridge version and cannot be installed or published. The retained report SHA-256 is
   `5fa4a27dbdc93e2c429af0dd4d945d2adb6d659e1e50d9c9363b90fc17fe6358`.
   It is retained only as historical packaging evidence.
+  Current verifier scope, signed defaults and explicit unsigned-fixture limits
+  are documented in [historical raw verification](security-raw-bundle-verification.md).
 - A new RSA-4096 production key was created outside the repository with key ID
   `hardened-system-prod-2026q3`; its public DER SHA-256 is
   `97ddb5600accf0e431c74f82b03acf249668bf75fe0de2e41724c91720516f75`.

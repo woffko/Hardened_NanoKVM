@@ -1,0 +1,17 @@
+{
+  "kind": "hardened-nanokvm-system-update",
+  "format": 2,
+  "channel": "preview",
+  "version": "0.3.0-raw.12",
+  "target": "sg2002-licheervnano-sd",
+  "name": "hardened-nanokvm-system-0.3.0-raw.12.tar.gz",
+  "sha256": "cf6bbef5599197f4b5ed926f22bed12352f2fdc275eb8f32fc8344d3ed7eae96",
+  "sha512": "Dk+LHRZGGDq1gVu+Nm+bA7KQY3+v0OpQYq3yKb9EgcWo6vd3qMllVMlo4rKA3BiLB6AmCRhEtPScOC5pZgFsRw==",
+  "size": 57144130,
+  "url": "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.3.0-raw.12/hardened-nanokvm-system-0.3.0-raw.12.tar.gz",
+  "release_notes_url": "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12",
+  "security_patch_level": "Buildroot 2026.05.1 security maintenance Linux 5.10.265 SG2002 vendor port",
+  "required_app_version": "2.0.42",
+  "signature_algorithm": "sha256-rsa-pkcs1-v1_5",
+  "signature_key_id": "hardened-system-prod-2026q3"
+}

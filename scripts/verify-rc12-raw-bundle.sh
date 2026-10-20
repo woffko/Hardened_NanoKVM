@@ -2,16 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-EXPECTED_SIGNATURE_MODE="${EXPECTED_SIGNATURE_MODE:-unsigned}"
+# Historical RC12 integrity only, not the current remediation-candidate gate.
+EXPECTED_SIGNATURE_MODE="${EXPECTED_SIGNATURE_MODE:-signed}"
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
 	echo "usage: $0 <archive.tar.gz> <system-latest.json> [signature] [public-key]" >&2
+	echo "Signed metadata is required by default; unsigned is explicit historical-fixture-only." >&2
 	exit 1
 fi
 ARCHIVE="$(readlink -f "$1")"
 METADATA="$(readlink -f "$2")"
 SIGNATURE="${3:-}"
-PUBLIC_KEY="${4:-$ROOT_DIR/kvmapp/system/keys/system-update-signing.pub.pem}"
+PUBLIC_KEY="${4:-$ROOT_DIR/kvmapp/system/keys/update-keys/hardened-system-prod-2026q3.pub.pem}"
 
 fail() {
 	echo "FAIL: $*" >&2
@@ -26,6 +28,29 @@ done
 [ -f "$METADATA" ] || fail "metadata is missing"
 [ "$(basename "$ARCHIVE")" = hardened-nanokvm-system-0.3.0-raw.12.tar.gz ] || \
 	fail "unexpected archive name"
+
+# Authenticate exact metadata bytes before inspecting or expanding any payload.
+# The key is fixed here or explicitly supplied by the reviewer, never resolved
+# from an untrusted metadata path. No legacy-key fallback after verification fails.
+case "$EXPECTED_SIGNATURE_MODE" in
+	signed)
+		[ -n "$SIGNATURE" ] || fail "signed verification requires a signature"
+		[ -f "$SIGNATURE" ] || fail "signature is missing"
+		[ -f "$PUBLIC_KEY" ] || fail "public key is missing"
+		command -v openssl >/dev/null 2>&1 || fail "missing command: openssl"
+		[ "$(jq -r .signature_algorithm "$METADATA")" = sha256-rsa-pkcs1-v1_5 ] || fail "signed algorithm"
+		[ "$(jq -r .signature_key_id "$METADATA")" = hardened-system-prod-2026q3 ] || fail "signed key id"
+		"$ROOT_DIR/scripts/verify-system-update-metadata.sh" \
+			"$METADATA" "$SIGNATURE" "$PUBLIC_KEY" >/dev/null
+		;;
+	unsigned)
+		[ "$(jq -r .signature_algorithm "$METADATA")" = unsigned ] || fail "unsigned algorithm"
+		[ "$(jq -r .signature_key_id "$METADATA")" = unsigned ] || fail "unsigned key id"
+		[ -z "$SIGNATURE" ] || fail "unsigned verification received a signature"
+		echo "WARNING: unsigned historical-fixture verification; not release acceptance" >&2
+		;;
+	*) fail "invalid EXPECTED_SIGNATURE_MODE" ;;
+esac
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nanokvm-rc12-raw-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -68,24 +93,6 @@ archive_size="$(wc -c < "$ARCHIVE" | tr -d ' ')"
 [ "$(jq -r .sha256 "$METADATA")" = "$archive_sha" ] || fail "metadata archive hash"
 [ "$(jq -r .size "$METADATA")" = "$archive_size" ] || fail "metadata archive size"
 
-case "$EXPECTED_SIGNATURE_MODE" in
-	unsigned)
-		[ "$(jq -r .signature_algorithm "$METADATA")" = unsigned ] || fail "unsigned algorithm"
-		[ "$(jq -r .signature_key_id "$METADATA")" = unsigned ] || fail "unsigned key id"
-		[ -z "$SIGNATURE" ] || fail "unsigned verification received a signature"
-		;;
-	signed)
-		[ -n "$SIGNATURE" ] || fail "signed verification requires a signature"
-		[ -f "$SIGNATURE" ] || fail "signature is missing"
-		[ -f "$PUBLIC_KEY" ] || fail "public key is missing"
-		[ "$(jq -r .signature_algorithm "$METADATA")" = sha256-rsa-pkcs1-v1_5 ] || fail "signed algorithm"
-		[ "$(jq -r .signature_key_id "$METADATA")" = hardened-system-prod-2026q3 ] || fail "signed key id"
-		"$ROOT_DIR/scripts/verify-system-update-metadata.sh" \
-			"$METADATA" "$SIGNATURE" "$PUBLIC_KEY" >/dev/null
-		;;
-	*) fail "invalid EXPECTED_SIGNATURE_MODE" ;;
-esac
-
 printf 'ARCHIVE_SHA256=%s\n' "$archive_sha"
 printf 'ARCHIVE_SIZE=%s\n' "$archive_size"
 printf 'ROOTFS_SHA256=%s\n' "$rootfs_sha"
@@ -93,5 +100,10 @@ printf 'ROOTFS_SIZE=%s\n' "$rootfs_size"
 printf 'BOOT_SHA256=%s\n' "$boot_sha"
 printf 'BOOT_SIZE=%s\n' "$boot_size"
 printf 'METADATA_FORMAT=2\nREQUIRED_APP_VERSION=2.0.42\n'
+printf 'VERIFICATION_SCOPE=historical-rc12\n'
 printf 'SIGNATURE_MODE=%s\n' "$EXPECTED_SIGNATURE_MODE"
-printf 'SUCCESS: RC12 raw bundle gate passed\n'
+if [ "$EXPECTED_SIGNATURE_MODE" = signed ]; then
+	printf 'SUCCESS: signed historical RC12 raw bundle gate passed\n'
+else
+	printf 'SUCCESS: unsigned historical RC12 fixture integrity passed (NOT RELEASE ACCEPTANCE)\n'
+fi

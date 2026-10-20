@@ -914,8 +914,10 @@ Current generic/Buildroot rootfs validators require this new protocol by default
 they must reject historical images missing independent recovery, not silently
 skip it based on a version label. Historical RC12 validation remains separate:
 `scripts/verify-rc12-raw-bundle.sh` pins the accepted rootfs/boot hashes and does
-not call the new rootfs gate. Use its signed mode and the matching retained
-metadata/signature/public key for signed RC12 evidence. This is not a way to
+not call the new rootfs gate. Its default now requires signed metadata and uses
+the production public key; supply the matching retained metadata/signature.
+Explicit unsigned inspection is fixture-only, not release acceptance; see
+[historical raw verification](security-raw-bundle-verification.md). This is not a way to
 authorize a new candidate without independent support.
 
 `server-rust/scripts/test-embedded-app-recovery.sh` checks host capture of the
