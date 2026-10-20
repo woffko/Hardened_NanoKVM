@@ -1232,7 +1232,9 @@ fn point(name: &str) -> Result<()> {
 #[path = "app_slot_support_tests.rs"]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{fixture as accepted_fixture, prepare_retained_fixture};
+pub(crate) use tests::{
+    fixture as accepted_fixture, populate_retained_fixture, prepare_retained_fixture,
+};
 
 #[cfg(test)]
 #[path = "app_slot_support_exchange_tests.rs"]

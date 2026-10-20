@@ -573,9 +573,10 @@ Only declarations wholly enclosed in a script frame are treated as opaque
 script data; a checksummed declaration crossing its edge is rejected.
 Neither a file descriptor nor a parsed catalog establishes immutable provenance.
 
-The retained broker's compatibility query uses its own compiled declaration,
+The retained broker's in-process compatibility check uses its own compiled declaration,
 not the successor broker executable on disk or a caller-supplied live version.
-It is still only a read-only prerequisite, not a `ClosedRuntime` capability.
+There is no separate ABI-query operation on the native control wire. The
+read-only method is a prerequisite, not a `ClosedRuntime` capability.
 The complete nine-entry protocol and its acceptance remain required before
 enabling canonical publication; the source boundaries below are not activation.
 
@@ -612,6 +613,19 @@ support; other supported app states restore predecessor. Terminal support cleanu
 precedes app archival, native `Closed` and intent removal. An empty support store
 is synced and rechecked without requiring an already archived `current` name.
 
+The retained Engine now calls preparation and exchange itself before publishing
+the app. Its explicit stages separate complete three-scope drain, support
+preparation/exchange, app publication and frozen trial. Preparation borrows the
+same drained `Session`; the guard is not stored as a self-reference across
+daemon ticks. A failed or ambiguous prepare/exchange/publication attempt keeps
+that session and its exclusions, enters uncertainty and is not retried by
+observation. Explicit cancellation still uses joined rollback and terminal
+settlement. With the current epoch0 the production Engine therefore refuses
+before support or app publication; it no longer skips directly to app publish.
+This wiring does not enable the ordinary update API or assert complete service
+closure. The synchronous bounded filesystem phase does not promise a hard IPC
+response deadline during slow I/O.
+
 Host tests compose real retained `Session` drain and terminal owners with
 synthetic protected payloads and child protocol probes. They cover successful
 commit, failed-trial rollback, preparation abort, lost commit acknowledgement,
@@ -626,6 +640,16 @@ post-preflight `O_TMPFILE`/payload-write ENOSPC, readonly preparation/settlement
 and exact retained-owner retry. Separate success checkpoints prove that the
 intended kernel operation did not complete; an arbitrary later error is not
 accepted. Host-side evidence and the parent mountpoint remain unchanged.
+
+Engine fixtures now carry synthetic complete predecessor/successor families,
+including successive installs and production fixed-root endpoint delivery. Their
+private opt-in permits only the unsupported-transition result; missing or
+incompatible declarations still fail. They check refusal of the executing
+epoch0, absent/matching-unknown contracts, every unknown live member, all-three
+scope closure before exchange, cancellation before app publication and foreign
+support evidence after exchange. Commit acknowledgement, failed-trial rollback
+and missing-closure cases also retain/check the real nine-file journal. These
+payloads and child probes are not authenticated release/device acceptance.
 
 Real native/vendor runtime, ext4/vendor-media allocation, legacy first-bridge/
 restart, ordinary API activation and device migration remain incomplete. These

@@ -92,6 +92,86 @@ pub(crate) async fn fixture(root: &Path) -> AcceptedInstall {
     install
 }
 
+fn fixture_directory(parent: &File, path: &str) -> File {
+    let mut directory = parent.try_clone().unwrap();
+    for component in path.split('/') {
+        if let Err(error) = mkdirat(&directory, component, Mode::from_raw_mode(0o755)) {
+            assert_eq!(error, rustix::io::Errno::EXIST);
+        }
+        directory =
+            restore_fs::open_beneath(&directory, component, OFlags::RDONLY | OFlags::DIRECTORY)
+                .unwrap();
+    }
+    directory
+}
+
+fn fixture_write_at(parent: &File, name: &str, bytes: &[u8]) {
+    let mut file = File::from(
+        openat2(
+            parent,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o755),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .unwrap(),
+    );
+    fchmod(&file, Mode::from_raw_mode(0o755)).unwrap();
+    file.write_all(bytes).unwrap();
+}
+
+/// Synthetic data for the engine's retained AcceptedInstall. Use its pinned
+/// roots, including fixed-root chroot fixtures; no caller-selected live path.
+/// Later installs retain the preceding published family and live inodes.
+pub(crate) fn populate_retained_fixture(install: &AcceptedInstall) {
+    let store = &install._store;
+    let record = store.record().unwrap();
+    assert_eq!(record.phase, AppPhase::Prepared);
+    let old = restore_fs::open_beneath(&store.rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)
+        .unwrap();
+    let new = restore_fs::open_beneath(&store.current, "new", OFlags::RDONLY | OFlags::DIRECTORY)
+        .unwrap();
+    let initial = match restore_fs::open_beneath(&old, "server/NanoKVM-Server", OFlags::RDONLY) {
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => panic!("fixture predecessor: {error}"),
+    };
+    if initial {
+        fixture_write_at(
+            &fixture_directory(&old, "server"),
+            "NanoKVM-Server",
+            &family("predecessor"),
+        );
+    }
+    let variant = format!(
+        "engine-successor-{:032x}",
+        u128::from_be_bytes(record.transaction)
+    );
+    fixture_write_at(
+        &fixture_directory(&new, "server"),
+        "NanoKVM-Server",
+        &family(&variant),
+    );
+    fixture_directory(&store.rootfs, "etc/kvm");
+    let executable = fixture_directory(&store.rootfs, "usr/libexec");
+    let init = fixture_directory(&store.rootfs, "etc/init.d");
+    if initial {
+        let source = Source::open(old, record.old, store).unwrap();
+        for (index, spec) in source.specs.iter().enumerate() {
+            let mut bytes = vec![0; spec.size as usize];
+            source
+                .backend
+                .read_exact_at(&mut bytes, spec.start)
+                .unwrap();
+            fixture_write_at(
+                if index < 5 { &executable } else { &init },
+                live_name(index),
+                &bytes,
+            );
+        }
+    }
+}
+
 /// Exercise the private filesystem protocol with the caller's real drained
 /// Session token. Only the unsupported transition-epoch check is bypassed;
 /// source/context, ownership and all staging checks remain unchanged.
@@ -100,6 +180,12 @@ pub(crate) fn prepare_retained_fixture(
     closed: ClosedRuntime,
 ) -> Result<Prepared<'_>> {
     let sources = Sources::open(install, &closed)?;
+    match support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi) {
+        Ok(()) | Err(support_abi_catalog::CompatibilityError::UnsupportedTransition) => {}
+        Err(support_abi_catalog::CompatibilityError::UnknownOrIncompatible) => {
+            return Err(SlotError::Invalid);
+        }
+    }
     stage(install, closed, sources)
 }
 

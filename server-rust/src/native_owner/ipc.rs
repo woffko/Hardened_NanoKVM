@@ -267,6 +267,8 @@ enum InstallOwner {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InstallStage {
     Draining,
+    PreparingSupport,
+    SupportReady,
     Published,
     Trial,
     CommitPending,
@@ -299,6 +301,8 @@ struct Engine {
     fixture_hold_published: bool,
     #[cfg(test)]
     fixture_trace_starts: bool,
+    #[cfg(test)]
+    fixture_allow_unsupported_support: bool,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -328,6 +332,8 @@ impl Engine {
             fixture_hold_published: false,
             #[cfg(test)]
             fixture_trace_starts: false,
+            #[cfg(test)]
+            fixture_allow_unsupported_support: false,
         }
     }
     fn command(&self, role: Role) -> std::process::Command {
@@ -502,6 +508,29 @@ impl Engine {
                         self.backend_status = Some(Status::Closed(Completion::Stopped));
                         match stage {
                             InstallStage::Draining => {
+                                // Keep a cancellation/observation boundary after
+                                // all three scopes join, before support writes.
+                                stage = InstallStage::PreparingSupport;
+                            }
+                            InstallStage::PreparingSupport => {
+                                // This code executes in the retained broker, not
+                                // a freshly installed helper or an ABI probe.
+                                // The guard borrows the SAME drained Session;
+                                // never store a self-reference across ticks.
+                                #[cfg(test)]
+                                let prepared = if self.fixture_allow_unsupported_support {
+                                    session.prepare_support_fixture()
+                                } else {
+                                    session.prepare_support()
+                                };
+                                #[cfg(not(test))]
+                                let prepared = session.prepare_support();
+                                stage = match prepared.and_then(|mut support| support.exchange()) {
+                                    Ok(()) => InstallStage::SupportReady,
+                                    Err(_) => InstallStage::Failed,
+                                };
+                            }
+                            InstallStage::SupportReady => {
                                 // Exactly one publication attempt. Unknown I/O
                                 // retains the owner, never a fresh transaction.
                                 stage = match session.publish() {
@@ -698,6 +727,13 @@ impl Engine {
             Err(app_slot::SlotError::Busy) => return Code::Busy,
             Err(_) => return Code::Invalid,
         };
+        #[cfg(test)]
+        if self.fixture.is_some() || self.fixture_hold_published {
+            // Synthetic payload only; production never rewrites accepted roots.
+            // Positive engine fixtures bypass ONLY epoch0 below, not staging,
+            // source/live validation, retained ownership or recovery ordering.
+            app_slot::support::populate_retained_fixture(&install);
+        }
         let Some(Owner::Running(broker)) = self.owner.take() else {
             return Code::Uncertain;
         };

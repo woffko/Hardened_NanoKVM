@@ -2,6 +2,9 @@ use super::*;
 use crate::update::app_slot::issuer_tests::{assert_excluded, prepared_fixture, received_fixture};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+#[path = "app_engine_support_tests.rs"]
+mod support;
+
 fn start_all(engine: &mut Engine) {
     for operation in [
         Operation::EnsureKvm,
@@ -94,12 +97,19 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
         fs::read(root.join("hwmon")).unwrap(),
     ];
     let (old, transaction) = accept(&mut engine, root).await;
+    let predecessor_support = support::live(root);
     until(|| {
         engine.tick();
         root.join("trial-owner-started").exists()
     });
     assert_eq!(engine.mode, Mode::Installing);
     assert_eq!(engine.roles, [4; 2]);
+    let successor_support = support::live(root);
+    for (old, new) in predecessor_support.iter().zip(&successor_support) {
+        assert_ne!(old.0, new.0);
+        assert_ne!(old.1, new.1);
+    }
+    assert_eq!(support::evidence(root).len(), 10);
     assert!(matches!(
         engine.install.as_ref().unwrap().owner,
         InstallOwner::Trial(_)
@@ -129,6 +139,8 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
             .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
     });
     assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+    assert_eq!(support::live(root), successor_support);
+    assert_eq!(support::evidence(root).len(), 10);
     assert_eq!(engine.mode, Mode::Installing);
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::CommitPending);
     assert_eq!(
@@ -180,6 +192,8 @@ async fn engine_drives_trial_commit_and_post_freeze_supervision_without_early_su
             .archived
     );
     assert!(!root.join("application-slot/current").exists());
+    assert_eq!(support::live(root), successor_support);
+    assert!(support::evidence(root).is_empty());
     drop(
         crate::update::operation_lock::ProcessLock::from_parent(
             &File::open(root).unwrap(),
@@ -552,6 +566,8 @@ fn receipt_engine_until(
         }
         let stage = engine.install.as_ref().map(|install| match install.stage {
             InstallStage::Draining => "draining",
+            InstallStage::PreparingSupport => "preparing-support",
+            InstallStage::SupportReady => "support-ready",
             InstallStage::Published => "published",
             InstallStage::Trial => "trial",
             InstallStage::CommitPending => "commit-pending",
@@ -743,14 +759,19 @@ async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_re
     let mut engine = engine(root);
     start_all(&mut engine);
     let (old, transaction) = accept(&mut engine, root).await;
+    let predecessor_support = support::live(root);
     until(|| {
         engine.tick();
         root.join("trial-stopping").exists()
     });
+    let successor_support = support::live(root);
+    assert_ne!(successor_support, predecessor_support);
     for _ in 0..3 {
         engine.tick();
         assert_eq!(engine.mode, Mode::Installing);
         assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
+        assert_eq!(support::live(root), successor_support);
+        assert_eq!(support::evidence(root).len(), 10);
         assert_excluded(root);
     }
     assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
@@ -776,6 +797,8 @@ async fn failed_trial_is_joined_before_automatic_uncommitted_rollback_and_old_re
             .archived
     );
     assert!(!root.join("application-slot/current").exists());
+    assert_eq!(support::live(root), predecessor_support);
+    assert!(support::evidence(root).is_empty());
     assert_eq!(engine.request(2, Operation::BackendRunning).code, Code::Ok);
     shutdown(&mut engine);
 }
@@ -793,6 +816,8 @@ async fn cancelled_trial_without_closure_receipt_never_rolls_back_or_releases_ad
         engine.tick();
         root.join("trial-owner-started").exists()
     });
+    let successor_support = support::live(root);
+    let support_evidence = support::evidence(root);
     let pid = fs::read_to_string(root.join("trial-owner-started")).unwrap();
     let pid: u32 = pid.parse().unwrap();
     let cancelled = engine.request(2, Operation::CancelAppInstall);
@@ -806,6 +831,8 @@ async fn cancelled_trial_without_closure_receipt_never_rolls_back_or_releases_ad
     assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
     assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
     assert!(!root.join("trial-authorized").exists());
+    assert_eq!(support::live(root), successor_support);
+    assert_eq!(support::evidence(root), support_evidence);
     assert_excluded(root);
     assert_eq!(
         engine.request(2, Operation::CancelAppInstall).code,

@@ -238,7 +238,7 @@ impl Session {
     }
 
     #[cfg(test)]
-    fn prepare_support_fixture(
+    pub(super) fn prepare_support_fixture(
         &mut self,
     ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
         // Keep the SAME whole-Session borrow and real drain proof. The private

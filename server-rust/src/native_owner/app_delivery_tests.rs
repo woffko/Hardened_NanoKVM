@@ -39,6 +39,7 @@ fn broker_child() {
     let root = Path::new(&root);
     let mut server = Server::new(broker(root), nix::unistd::geteuid().as_raw()).unwrap();
     server.engine.fixture = Some(root.to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
     fs::write(root.join("broker-ready"), b"ready").unwrap();
     server.run().unwrap();
 }
@@ -370,6 +371,7 @@ fn stalled_or_malformed_install_offer_does_not_block_lifecycle_or_stop_backend()
     let uid = nix::unistd::geteuid().as_raw();
     let mut server = Server::new(broker(root.path()), uid).unwrap();
     server.engine.fixture = Some(root.path().to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
     let mut pending = Vec::new();
@@ -549,6 +551,7 @@ fn fixed_root_delivery_child() {
     // This fixture proves production fixed-root delivery/issuer composition,
     // not execution of a native trial inside its deliberately minimal chroot.
     server.engine.fixture_hold_published = true;
+    server.engine.fixture_allow_unsupported_support = true;
     let (send, recv) = std::sync::mpsc::channel();
     server.cancel = Some(recv);
     std::thread::scope(|scope| {

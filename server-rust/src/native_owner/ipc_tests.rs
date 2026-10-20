@@ -27,6 +27,7 @@ fn broker(root: &Path) -> Broker {
 fn engine(root: &Path) -> Engine {
     let mut e = Engine::new(broker(root));
     e.fixture = Some(root.to_path_buf());
+    e.fixture_allow_unsupported_support = true;
     e
 }
 #[track_caller]
@@ -645,6 +646,7 @@ impl Drop for Cancel {
 fn serve(root: &Path, uid: u32, f: impl FnOnce()) {
     let mut server = Server::new(broker(root), uid).unwrap();
     server.engine.fixture = Some(root.to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     serve_prepared(server, f);
 }
