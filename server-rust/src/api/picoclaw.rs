@@ -2907,7 +2907,6 @@ fn seconds_to_millis_i32(seconds: i64) -> Option<i32> {
 
 struct ConfigDocument {
     config_path: PathBuf,
-    security_path: PathBuf,
     raw: JsonValue,
     security: serde_yaml::Value,
 }
@@ -2924,10 +2923,6 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
     } = crate::update::picoclaw_config::read_pair(&config_path)?;
     let raw: JsonValue = serde_json::from_slice(&data)
         .map_err(|err| AppError::Internal(format!("failed to parse picoclaw config: {err}")))?;
-    let security_path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("/root/.picoclaw"))
-        .join(".security.yml");
     let security = match security_data {
         Some(data) => serde_yaml::from_slice(&data).map_err(|err| {
             AppError::Internal(format!("failed to parse picoclaw security config: {err}"))
@@ -2937,7 +2932,6 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
 
     Ok(ConfigDocument {
         config_path,
-        security_path,
         raw,
         security,
     })
@@ -3131,15 +3125,8 @@ fn update_model_config_file(
     );
     defaults.remove("model");
 
-    save_json(permit, &doc.config_path, &doc.raw)?;
-    save_model_secret(
-        permit,
-        &mut doc.security,
-        &doc.security_path,
-        &model_name,
-        updated_index,
-        api_key,
-    )?;
+    set_model_secret(&mut doc.security, &model_name, updated_index, api_key);
+    save_config_document(permit, &doc)?;
     Ok(model_name)
 }
 
@@ -3158,6 +3145,27 @@ fn extract_model_name(model: &str) -> Option<String> {
     )
 }
 
+fn save_config_document(
+    permit: &crate::update::state_writers::ConfigPermit,
+    doc: &ConfigDocument,
+) -> Result<()> {
+    let config =
+        zeroize::Zeroizing::new(serde_json::to_vec_pretty(&doc.raw).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw config: {err}"))
+        })?);
+    let security =
+        zeroize::Zeroizing::new(serde_yaml::to_string(&doc.security).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw security: {err}"))
+        })?);
+    crate::update::picoclaw_config::replace_pair(
+        permit,
+        &doc.config_path,
+        &config,
+        Some(security.as_bytes()),
+    )
+}
+
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 fn save_json(
     permit: &crate::update::state_writers::ConfigPermit,
     path: &Path,
@@ -3170,6 +3178,7 @@ fn save_json(
     crate::update::picoclaw_config::replace(permit, path, &data)
 }
 
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 fn save_yaml(
     permit: &crate::update::state_writers::ConfigPermit,
     path: &Path,
@@ -3275,14 +3284,12 @@ fn set_pico_security_token(security: &mut serde_yaml::Value, token: &str) {
     );
 }
 
-fn save_model_secret(
-    permit: &crate::update::state_writers::ConfigPermit,
+fn set_model_secret(
     security: &mut serde_yaml::Value,
-    path: &Path,
     model_name: &str,
     index: usize,
     api_key: &str,
-) -> Result<()> {
+) {
     if !security.is_mapping() {
         *security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
@@ -3309,8 +3316,6 @@ fn save_model_secret(
         serde_yaml::Value::String(format!("{model_name}:{index}")),
         serde_yaml::Value::Mapping(entry),
     );
-
-    save_yaml(permit, path, security)
 }
 
 async fn ensure_startup_defaults() -> Result<()> {
@@ -3369,8 +3374,7 @@ fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -
     );
     let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
     headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
-    save_json(permit, &doc.config_path, &doc.raw)?;
-    save_yaml(permit, &doc.security_path, &doc.security)
+    save_config_document(permit, &doc)
 }
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]

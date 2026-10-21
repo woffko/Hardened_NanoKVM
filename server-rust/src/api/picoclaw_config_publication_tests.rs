@@ -5,6 +5,9 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+#[path = "picoclaw_config_pair_tests.rs"]
+mod pair;
+
 struct OwnedProbe(Option<Child>);
 impl Drop for OwnedProbe {
     fn drop(&mut self) {
@@ -37,6 +40,7 @@ fn run_private_root(case: &str) {
         .env_clear()
         .env("NANOKVM_PICO_CONFIG_FIXTURE", root.path())
         .env("NANOKVM_PICO_CONFIG_CASE", case)
+        .env("PICOCLAW_HOME", "/root/custom pico")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -118,6 +122,16 @@ fn actual_config_io_never_crosses_a_private_mount_boundary() {
     run_private_root("mount");
 }
 
+#[test]
+fn actual_model_pair_preflights_both_documents_before_changing_either() {
+    run_private_root("pair-preflight");
+}
+
+#[test]
+fn actual_model_pair_keeps_custom_fields_and_publishes_the_matching_secret() {
+    run_private_root("pair-model");
+}
+
 fn put_private(path: &Path, data: &[u8]) {
     fs::write(path, data).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -134,12 +148,77 @@ fn private_root_child() {
     let writers = crate::update::state_writers::StateWriters::for_test_parent(
         fs::File::open("/writers").unwrap(),
     );
-    let permit = writers.configuration().unwrap();
     let directory = Path::new("/root/custom pico");
+    if case == "pair-lock-read" {
+        assert!(matches!(
+            load_config_document_at(directory.join("config.json")),
+            Err(AppError::Conflict(_))
+        ));
+        println!("pico-config-fixture-ran");
+        return;
+    }
+    let permit = writers.configuration().unwrap();
     let sentinel = Path::new("/outside/synthetic-sentinel");
     fs::write(sentinel, b"synthetic-sentinel-unchanged").unwrap();
     fs::set_permissions(sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     match case.as_str() {
+        "pair-write" => pair::write(&permit, directory),
+        "pair-recover" => pair::recover(&permit, directory),
+        "pair-refuse" => pair::refuse(&permit, directory, sentinel),
+        "pair-model" => {
+            let config = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            let original = json!({"custom": {"keep": true}, "agents": {"defaults": {"custom": "retained"}}, "model_list": [{"model_name": "chosen", "model": "old/chosen", "api_base": "https://old.invalid", "api_key": "synthetic-legacy", "custom": "retained"}]});
+            put_private(&config, &serde_json::to_vec(&original).unwrap());
+            put_private(&security, b"custom: retained\nmodel_list: {}\n");
+            assert_eq!(
+                update_model_config_file(
+                    &permit,
+                    "https://new.invalid/v1",
+                    "synthetic-new-key",
+                    "new/chosen"
+                )
+                .unwrap(),
+                "chosen"
+            );
+            let loaded = load_config_document_at(config).unwrap();
+            assert_eq!(loaded.raw["custom"], original["custom"]);
+            assert_eq!(loaded.raw["agents"]["defaults"]["custom"], "retained");
+            assert_eq!(loaded.raw["model_list"][0]["custom"], "retained");
+            assert_eq!(
+                loaded.raw["model_list"][0]["api_base"],
+                "https://new.invalid/v1"
+            );
+            assert!(loaded.raw["model_list"][0].get("api_key").is_none());
+            assert_eq!(loaded.security["custom"].as_str(), Some("retained"));
+            assert_eq!(
+                loaded.security["model_list"]["chosen:0"]["api_keys"][0].as_str(),
+                Some("synthetic-new-key")
+            );
+            assert!(is_model_configured(&loaded.raw, &loaded.security, "chosen"));
+            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+        }
+        "pair-preflight" => {
+            let target = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            let old_config = br#"{"model_list":[],"agents":{"defaults":{"model_name":"old"}}}"#;
+            let old_security = b"model_list: {}\n";
+            put_private(&target, old_config);
+            put_private(&security, old_security);
+            let oversized_key = "x".repeat(crate::update::picoclaw_config::MAX_FILE_BYTES);
+            assert!(
+                update_model_config_file(
+                    &permit,
+                    "https://fixture.invalid/v1",
+                    &oversized_key,
+                    "fixture/new-model"
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&target).unwrap(), old_config);
+            assert_eq!(fs::read(&security).unwrap(), old_security);
+            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+        }
         "symlink" => {
             let target = directory.join("config.json");
             std::os::unix::fs::symlink(sentinel, &target).unwrap();
