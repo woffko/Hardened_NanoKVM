@@ -335,6 +335,7 @@ enum InstallOwner {
         cancel_requested: bool,
     },
     Trial(app_install::TrialSession),
+    Committing(app_install::CommittingTrial),
     Committed(app_install::Retirement),
     RolledBack(app_install::Retirement),
     Refused {
@@ -396,6 +397,8 @@ struct Engine {
     fixture_support: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
     fixture_publication: Option<app_install::InstallIoFixture>,
+    #[cfg(test)]
+    fixture_commit: Option<app_install::InstallIoFixture>,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -439,6 +442,8 @@ impl Engine {
             fixture_support: None,
             #[cfg(test)]
             fixture_publication: None,
+            #[cfg(test)]
+            fixture_commit: None,
         }
     }
     fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
@@ -883,21 +888,42 @@ impl Engine {
                 } else {
                     match status {
                         app_install::TrialStatus::Starting => InstallOwner::Trial(trial),
-                        app_install::TrialStatus::Ready => match trial.commit() {
-                            app_install::CommitTrial::Committed(committed) => {
+                        app_install::TrialStatus::Ready => match trial.start_commit() {
+                            app_install::BeginCommit::Started(owner) => {
+                                #[cfg(test)]
+                                let owner = {
+                                    let mut owner = owner;
+                                    if let Some(fixture) = self.fixture_commit.take() {
+                                        owner.set_fixture(fixture);
+                                    }
+                                    owner
+                                };
+                                stage = InstallStage::CommitPending;
+                                InstallOwner::Committing(owner)
+                            }
+                            app_install::BeginCommit::Committed(committed) => {
                                 return Some(
                                     self.begin_retirement(committed.begin_retirement(), true),
                                 );
                             }
-                            app_install::CommitTrial::Pending(trial) => {
+                            app_install::BeginCommit::Pending(trial) => {
                                 stage = InstallStage::CommitPending;
                                 InstallOwner::Trial(trial)
                             }
-                            app_install::CommitTrial::Retained(trial) => {
+                            app_install::BeginCommit::Retained(trial) => {
                                 stage = InstallStage::Failed;
                                 InstallOwner::Trial(trial)
                             }
                         },
+                        app_install::TrialStatus::Failed | app_install::TrialStatus::Uncertain
+                            if stage == InstallStage::CommitPending =>
+                        {
+                            // Commit I/O/ack has been admitted. A lost trial
+                            // cannot authorize Stop->rollback of possibly
+                            // Committed state, even before its acknowledgement.
+                            stage = InstallStage::Failed;
+                            InstallOwner::Trial(trial)
+                        }
                         app_install::TrialStatus::Failed | app_install::TrialStatus::Uncertain => {
                             match trial.stop() {
                                 app_install::StopTrial::Draining(session) => {
@@ -910,6 +936,30 @@ impl Engine {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            InstallOwner::Committing(owner) => {
+                self.roles = [4; 2];
+                self.backend_status = Some(Status::Running);
+                match owner.poll() {
+                    app_install::CommitPoll::Pending { owner, uncertain } => {
+                        if uncertain {
+                            stage = InstallStage::Failed;
+                            self.roles = [6; 2];
+                            self.backend_status = Some(Status::Uncertain);
+                        }
+                        InstallOwner::Committing(owner)
+                    }
+                    app_install::CommitPoll::Failed(owner) => {
+                        stage = InstallStage::Failed;
+                        self.roles = [6; 2];
+                        self.backend_status = Some(Status::Uncertain);
+                        InstallOwner::Committing(owner)
+                    }
+                    app_install::CommitPoll::Ready(trial) => {
+                        stage = InstallStage::CommitPending;
+                        InstallOwner::Trial(*trial)
                     }
                 }
             }
@@ -1031,6 +1081,17 @@ impl Engine {
                     Code::Uncertain
                 } else {
                     Code::Ok
+                }
+            }
+            InstallOwner::Committing(owner) => {
+                self.install = Some(Install {
+                    owner: InstallOwner::Committing(owner),
+                    stage,
+                });
+                if stage == InstallStage::Failed {
+                    Code::Uncertain
+                } else {
+                    Code::Busy
                 }
             }
             InstallOwner::Trial(trial) => {

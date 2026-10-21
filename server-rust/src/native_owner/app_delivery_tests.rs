@@ -632,6 +632,86 @@ fn actual_idle_eof_after_publication_retains_the_same_job_for_fresh_client_cance
     });
 }
 
+#[test]
+fn actual_idle_eof_during_commit_keeps_both_leases_and_never_authorizes_early_ack() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path();
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut server = Server::new(broker(path), uid).unwrap();
+    server.engine.fixture = Some(path.to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
+    server.idle = Duration::from_millis(200);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    server.engine.fixture_commit = Some(app_install::InstallIoFixture::BlockAfterIo {
+        entered,
+        resume: resumed,
+    });
+    serve_prepared(server, move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (owner, prepared) = runtime.block_on(prepared_fixture(path));
+        let transaction = prepared.transaction();
+        let directory = File::open(path.join("native-runtime-owner")).unwrap();
+        let socket = journal::socket::connect_install(&directory, uid).unwrap();
+        app_install_lease::Sender::fixture(socket, uid)
+            .unwrap()
+            .send(prepared.into_handoff())
+            .unwrap();
+        drop(owner);
+        let mut idle = connect(path);
+        observed(&mut idle, Mode::Installing);
+        until(|| entering.try_recv().is_ok());
+        until(|| {
+            matches!(
+                rustix::net::recv(
+                    &idle.stream,
+                    &mut [0_u8; 1],
+                    rustix::net::RecvFlags::DONTWAIT
+                ),
+                Ok((0, _))
+            )
+        });
+        drop(idle);
+        let status = app_slot::job_status_fixture(path, transaction)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, app_slot::Phase::Committed);
+        assert!(!status.archived);
+        assert_eq!(
+            fs::read(path.join("native-runtime-owner/state")).unwrap()[44],
+            1
+        );
+        assert!(!path.join("trial-authorized").exists());
+        assert!(!path.join("trial-stopping").exists());
+        assert_excluded(path);
+        let mut control = connect(path);
+        observed(&mut control, Mode::Installing);
+        for operation in [Operation::CancelAppInstall, Operation::RetryAppRetirement] {
+            let reply = exchange(&mut control, operation);
+            assert_eq!(reply.code, Code::Busy);
+            assert_eq!(reply.mode, Mode::Installing);
+        }
+        drop(control);
+        resume.send(()).unwrap();
+        until(|| {
+            app_slot::job_status_fixture(path, transaction)
+                .unwrap()
+                .is_some_and(|job| job.archived && job.phase == app_slot::Phase::Committed)
+        });
+        assert!(path.join("trial-authorized").exists());
+        let mut control = connect(path);
+        observed(&mut control, Mode::Running);
+        until(|| {
+            let reply = exchange(&mut control, Operation::Shutdown);
+            assert!(matches!(reply.code, Code::Ok | Code::Busy));
+            reply.mode == Mode::Stopped
+        });
+    });
+}
+
 #[tokio::test]
 async fn invalid_canonical_receipt_rejects_valid_leases_before_any_native_stop() {
     let root = tempfile::tempdir().unwrap();

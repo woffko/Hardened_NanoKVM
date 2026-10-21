@@ -2,16 +2,19 @@
 //! No HTTP/worker transport or arbitrary executable selector is exposed.
 
 use super::{Broker, JournalError, controller, journal};
+use crate::update::app_slot::{AcceptedInstall, Phase, SlotError};
 #[cfg(test)]
-use crate::update::app_slot::Status;
-use crate::update::app_slot::{AcceptedInstall, Phase, SlotError, support::support_operation};
+use crate::update::app_slot::{Status, support::support_operation};
 
+#[path = "app_commit_prepare.rs"]
+mod committing;
 #[path = "app_install_prepare.rs"]
 mod preparation;
 #[path = "app_retirement.rs"]
 mod retirement;
 #[path = "app_install_work.rs"]
 mod work;
+pub(super) use committing::{CommittingTrial, Poll as CommitPoll};
 pub(super) use preparation::{Kind as PreparationKind, Poll as PreparationPoll, PreparingInstall};
 pub(super) use retirement::{Poll as RetirementPoll, Retirement};
 #[cfg(test)]
@@ -114,6 +117,13 @@ pub enum StopTrial {
 }
 
 pub enum CommitTrial {
+    Committed(Committed),
+    Pending(TrialSession),
+    Retained(TrialSession),
+}
+
+pub(super) enum BeginCommit {
+    Started(CommittingTrial),
     Committed(Committed),
     Pending(TrialSession),
     Retained(TrialSession),
@@ -421,25 +431,7 @@ impl TrialSession {
         if self.journal.ready().is_err() {
             return TrialStatus::Uncertain;
         }
-        let status = self.group.poll();
-        if status.contains(&Some(controller::Status::Uncertain))
-            || status.iter().enumerate().any(|(index, s)| {
-                index != 2 && !matches!(s, None | Some(controller::Status::Closed(_)))
-            })
-        {
-            TrialStatus::Uncertain
-        } else if self.failed
-            || matches!(
-                status[2],
-                None | Some(controller::Status::Closed(_) | controller::Status::TrialFailed)
-            )
-        {
-            TrialStatus::Failed
-        } else if status[2] == Some(controller::Status::Running) {
-            TrialStatus::Ready
-        } else {
-            TrialStatus::Starting
-        }
+        trial_group_status(&mut self.group, self.failed)
     }
 
     pub fn stop(mut self) -> StopTrial {
@@ -461,6 +453,50 @@ impl TrialSession {
         })
     }
 
+    pub(super) fn start_commit(mut self) -> BeginCommit {
+        match self.poll() {
+            TrialStatus::Starting => return BeginCommit::Pending(self),
+            TrialStatus::Ready => {}
+            _ => return BeginCommit::Retained(self),
+        }
+        let transaction = self.install.transaction();
+        if !self.native_resumed {
+            let ready = TrialReady { transaction };
+            let work = work::InstallWork::commit(
+                work::CommitState {
+                    journal: self.journal,
+                    install: self.install,
+                },
+                ready,
+            );
+            return BeginCommit::Started(CommittingTrial::new(
+                self.group,
+                self.enrollment,
+                #[cfg(test)]
+                self.update_parent,
+                self.failed,
+                work,
+            ));
+        }
+        // native_resumed is minted only by joined, known-success commit I/O.
+        // Retrying a pending nonblocking acknowledgement never rewrites files.
+        match self.group.commit_trial(transaction) {
+            Ok(false) => BeginCommit::Pending(self),
+            Ok(true) => BeginCommit::Committed(Committed {
+                broker: Broker {
+                    group: self.group,
+                    journal: self.journal,
+                    enrollment: self.enrollment,
+                    #[cfg(test)]
+                    update_parent: self.update_parent,
+                },
+                install: self.install,
+            }),
+            Err(_) => BeginCommit::Retained(self),
+        }
+    }
+
+    #[cfg(test)]
     pub fn commit(mut self) -> CommitTrial {
         #[cfg(test)]
         let _elapsed = crate::update::app_slot::support::diagnostics::Elapsed::start(
@@ -507,6 +543,29 @@ impl TrialSession {
             }),
             Err(_) => CommitTrial::Retained(self),
         }
+    }
+}
+
+fn trial_group_status(group: &mut controller::Group, failed: bool) -> TrialStatus {
+    let status = group.poll();
+    if group.uncertainty_latched()
+        || status.contains(&Some(controller::Status::Uncertain))
+        || status.iter().enumerate().any(|(index, s)| {
+            index != 2 && !matches!(s, None | Some(controller::Status::Closed(_)))
+        })
+    {
+        TrialStatus::Uncertain
+    } else if failed
+        || matches!(
+            status[2],
+            None | Some(controller::Status::Closed(_) | controller::Status::TrialFailed)
+        )
+    {
+        TrialStatus::Failed
+    } else if status[2] == Some(controller::Status::Running) {
+        TrialStatus::Ready
+    } else {
+        TrialStatus::Starting
     }
 }
 

@@ -563,8 +563,21 @@ or publication I/O is active queues rollback until the worker has joined and
 closure/layout are revalidated. It cannot overlap a
 support exchange/publication or override native uncertainty. Failed preparation
 or publication is not implicitly replayed by observation/reconnect; terminal
-retry below does not address these nonterminal stages. Remaining commit/rollback
-steps are still synchronous and require separate responsiveness acceptance.
+retry below does not address these nonterminal stages.
+
+Durable commit uses a separate fixed worker holding both the accepted install
+and native journal, including their exclusion leases. The live trial Group and
+boot enrollment remain supervised by the broker; its control path never waits
+on the worker's mutex or filesystem writes. The worker commits the app record
+and resumes the native journal in that order, without sending backend Commit.
+Only a finished, joined, known-success result and fresh native health permit
+the broker to acknowledge the trial on a later tick. Native uncertainty is
+latched across both writes and the acknowledgement gap. Failed or uncertain
+commit retains the complete owner, even if the app record is already Committed;
+observation, reconnect, cancellation and terminal retry cannot replay it or
+authorize Stop/rollback. Teardown joins before releasing journal/update leases.
+Remaining rollback and other synchronous steps still require separate
+responsiveness acceptance; these host checks are not target/device acceptance.
 
 Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
 protected lifecycle channel. This is the fixed `RetryAppRetirement` opcode in

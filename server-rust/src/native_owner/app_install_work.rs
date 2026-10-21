@@ -1,7 +1,8 @@
 //! Fixed filesystem operations under one retained accepted-install owner.
 //! Native supervision and proof construction never run in this worker.
 
-use super::{AcceptedInstall, ClosedRuntime, TerminalBoundary};
+use super::{AcceptedInstall, ClosedRuntime, TerminalBoundary, TrialReady, journal};
+use crate::update::app_slot::support::support_operation;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
@@ -15,7 +16,19 @@ enum Operation {
         fixture: bool,
     },
     Publish(ClosedRuntime),
+    Commit(TrialReady),
     Retire(TerminalBoundary),
+}
+
+pub(super) struct CommitState {
+    // Release the singleton before accepted update/writer admission LAST.
+    pub(super) journal: journal::Store,
+    pub(super) install: AcceptedInstall,
+}
+
+enum Payload {
+    Install(AcceptedInstall),
+    Commit(CommitState),
 }
 impl Operation {
     fn worker_copy(&self) -> Self {
@@ -34,6 +47,9 @@ impl Operation {
             Self::Publish(closed) => Self::Publish(ClosedRuntime {
                 transaction: closed.transaction(),
             }),
+            Self::Commit(ready) => Self::Commit(TrialReady {
+                transaction: ready.transaction(),
+            }),
             Self::Retire(boundary) => Self::Retire(TerminalBoundary {
                 transaction: boundary.transaction(),
                 phase: boundary.phase(),
@@ -41,13 +57,16 @@ impl Operation {
         }
     }
 
-    fn execute(self, install: &mut AcceptedInstall) -> bool {
-        match self {
-            Self::Support {
-                closed,
-                #[cfg(test)]
-                fixture,
-            } => {
+    fn execute(self, payload: &mut Payload, #[cfg(test)] fault: &Option<Fixture>) -> bool {
+        match (self, payload) {
+            (
+                Self::Support {
+                    closed,
+                    #[cfg(test)]
+                    fixture,
+                },
+                Payload::Install(install),
+            ) => {
                 #[cfg(test)]
                 let prepared = if fixture {
                     crate::update::app_slot::support::prepare_retained_fixture(install, closed)
@@ -58,13 +77,45 @@ impl Operation {
                 let prepared = crate::update::app_slot::support::prepare(install, closed);
                 prepared.and_then(|mut support| support.exchange()).is_ok()
             }
-            Self::Publish(closed) => matches!(
+            (Self::Publish(closed), Payload::Install(install)) => matches!(
                 install.publish(&closed),
                 Ok(crate::update::app_slot::Status::Transaction(
                     crate::update::app_slot::Phase::Published
                 ))
             ),
-            Self::Retire(boundary) => install.retire(&boundary).is_ok(),
+            (Self::Commit(ready), Payload::Commit(state)) => {
+                if !matches!(
+                    support_operation!("native.commit.slot", None, state.install.commit(&ready)),
+                    Ok(crate::update::app_slot::Status::Transaction(
+                        crate::update::app_slot::Phase::Committed
+                    ))
+                ) {
+                    return false;
+                }
+                #[cfg(test)]
+                match fault {
+                    Some(Fixture::BlockCommitJournal { entered, resume }) => {
+                        if entered.send(()).is_err() || resume.recv().is_err() {
+                            return false;
+                        }
+                    }
+                    Some(Fixture::PanicAfterCommitRecord) => {
+                        panic!("fixture failure between commit record and native journal");
+                    }
+                    _ => {}
+                }
+                support_operation!(
+                    "native.commit.journal-resume",
+                    None,
+                    state.journal.resume_active()
+                )
+                .is_ok()
+            }
+            (Self::Retire(boundary), Payload::Install(install)) => {
+                install.retire(&boundary).is_ok()
+            }
+            // A mismatched fixed factory cannot shed or reinterpret authority.
+            _ => false,
         }
     }
 }
@@ -96,7 +147,7 @@ pub(super) struct InstallWork {
     state: State,
     operation: Operation,
     // Declaration order: join the worker before releasing admission LAST.
-    install: Arc<Mutex<Option<AcceptedInstall>>>,
+    payload: Arc<Mutex<Option<Payload>>>,
     #[cfg(test)]
     fixture: Option<Fixture>,
 }
@@ -111,15 +162,20 @@ pub(crate) enum Fixture {
         entered: std::sync::mpsc::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
     },
+    BlockCommitJournal {
+        entered: std::sync::mpsc::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    },
     Panic,
     PanicAfterIo,
+    PanicAfterCommitRecord,
     SpawnFailure,
 }
 
 impl InstallWork {
     pub(super) fn support(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
         Self::new(
-            install,
+            Payload::Install(install),
             Operation::Support {
                 closed,
                 #[cfg(test)]
@@ -131,7 +187,7 @@ impl InstallWork {
     #[cfg(test)]
     pub(super) fn support_fixture(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
         Self::new(
-            install,
+            Payload::Install(install),
             Operation::Support {
                 closed,
                 fixture: true,
@@ -140,18 +196,22 @@ impl InstallWork {
     }
 
     pub(super) fn retire(install: AcceptedInstall, boundary: TerminalBoundary) -> Self {
-        Self::new(install, Operation::Retire(boundary))
+        Self::new(Payload::Install(install), Operation::Retire(boundary))
     }
 
     pub(super) fn publish(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
-        Self::new(install, Operation::Publish(closed))
+        Self::new(Payload::Install(install), Operation::Publish(closed))
     }
 
-    fn new(install: AcceptedInstall, operation: Operation) -> Self {
+    pub(super) fn commit(state: CommitState, ready: TrialReady) -> Self {
+        Self::new(Payload::Commit(state), Operation::Commit(ready))
+    }
+
+    fn new(payload: Payload, operation: Operation) -> Self {
         Self {
             state: State::Idle,
             operation,
-            install: Arc::new(Mutex::new(Some(install))),
+            payload: Arc::new(Mutex::new(Some(payload))),
             #[cfg(test)]
             fixture: None,
         }
@@ -161,6 +221,11 @@ impl InstallWork {
     pub(super) fn set_fixture(&mut self, fixture: Fixture) {
         assert!(matches!(self.state, State::Idle));
         self.fixture = Some(fixture);
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_settled(&self) -> bool {
+        matches!(self.state, State::Failed | State::Complete)
     }
 
     pub(super) fn retry_terminal(&mut self) -> bool {
@@ -213,12 +278,30 @@ impl InstallWork {
         }
         // Joined worker + unique Arc: exclusive get_mut cannot block. Never
         // recover a poisoned mutex or manufacture an empty accepted owner.
-        let install = Arc::get_mut(&mut self.install)
+        let payload = Arc::get_mut(&mut self.payload)
             .and_then(|slot| slot.get_mut().ok())
-            .and_then(Option::take);
-        match install {
-            Some(install) => Ok(install),
-            None => Err(self),
+            .and_then(|slot| slot.take_if(|payload| matches!(payload, Payload::Install(_))));
+        match payload {
+            Some(Payload::Install(install)) => Ok(install),
+            _ => Err(self),
+        }
+    }
+
+    pub(super) fn into_commit(mut self) -> Result<CommitState, Self> {
+        // Failed/unknown commit work has no extractable success authority.
+        if !matches!(self.state, State::Complete) {
+            return Err(self);
+        }
+        let payload = Arc::get_mut(&mut self.payload)
+            .and_then(|slot| slot.get_mut().ok())
+            .and_then(|slot| {
+                slot.take_if(|payload| {
+                    matches!(payload, Payload::Commit(state) if state.journal.ready().is_ok())
+                })
+            });
+        match payload {
+            Some(Payload::Commit(state)) => Ok(state),
+            _ => Err(self),
         }
     }
 
@@ -230,20 +313,21 @@ impl InstallWork {
             self.state = State::Failed;
             return;
         }
-        let install = Arc::clone(&self.install);
+        let payload = Arc::clone(&self.payload);
         let operation = self.operation.worker_copy();
         let name = match operation {
             Operation::Support { .. } => "app-support",
             Operation::Publish(_) => "app-publication",
+            Operation::Commit(_) => "app-commit",
             Operation::Retire(_) => "app-retirement",
         };
         self.state = match thread::Builder::new().name(name.into()).spawn(move || {
             // The original Arc remains with the main owner even on spawn
-            // failure/panic. Catch only a borrow; never move out the install.
-            let Ok(mut slot) = install.lock() else {
+            // failure/panic. Catch only a borrow of the complete payload.
+            let Ok(mut slot) = payload.lock() else {
                 return false;
             };
-            let Some(install) = slot.as_mut() else {
+            let Some(payload) = slot.as_mut() else {
                 return false;
             };
             catch_unwind(AssertUnwindSafe(|| {
@@ -260,11 +344,17 @@ impl InstallWork {
                     Some(
                         Fixture::SpawnFailure
                         | Fixture::PanicAfterIo
+                        | Fixture::PanicAfterCommitRecord
+                        | Fixture::BlockCommitJournal { .. }
                         | Fixture::BlockAfterIo { .. },
                     )
                     | None => {}
                 }
-                let succeeded = operation.execute(install);
+                let succeeded = operation.execute(
+                    payload,
+                    #[cfg(test)]
+                    &fixture,
+                );
                 #[cfg(test)]
                 if let Some(Fixture::BlockAfterIo { entered, resume }) = fixture
                     && (entered.send(()).is_err() || resume.recv().is_err())

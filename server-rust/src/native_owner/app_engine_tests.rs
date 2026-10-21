@@ -11,6 +11,9 @@ mod retirement;
 #[path = "app_publication_work_tests.rs"]
 mod publication;
 
+#[path = "app_commit_work_tests.rs"]
+mod commit_work;
+
 fn start_all(engine: &mut Engine) {
     for operation in [
         Operation::EnsureKvm,
@@ -81,6 +84,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
             InstallOwner::Draining(_) => "draining",
             InstallOwner::PreparingInstall { .. } => "preparing-install",
             InstallOwner::Trial(_) => "trial",
+            InstallOwner::Committing(_) => "committing",
             InstallOwner::Committed(_) => "committed",
             InstallOwner::RolledBack(_) => "rolled-back",
             InstallOwner::Refused { .. } => "refused",
@@ -303,14 +307,22 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
         let (old, transaction) = accept(&mut engine, root).await;
         let baseline = *baseline.get_or_insert(old);
         let started = Instant::now();
+        // Durable ordering has no six-second whole-install SLA. Keep the
+        // existing durability watchdog separate from actual control latency.
         loop {
             let before = install_state(&engine);
             let before_mode = engine.mode;
             let before_roles = engine.roles;
             let tick_started = Instant::now();
-            engine.tick();
+            let observation = engine.request(2, Operation::Observe);
             let tick_duration = tick_started.elapsed();
             let after = install_state(&engine);
+            assert_eq!(observation.code, Code::Ok);
+            assert_eq!(observation.mode, engine.mode);
+            assert!(
+                tick_duration < Duration::from_millis(250),
+                "successive install control stall: sequence={sequence}, before={before:?}, after={after:?}, response_duration={tick_duration:?}"
+            );
             if before != after || tick_duration >= Duration::from_millis(100) {
                 eprintln!(
                     "successive-install-tick: sequence={sequence}, before={before:?}/{before_mode:?}/{before_roles:?}, after={after:?}/{:?}/{:?}, backend={:?}, tick_duration={tick_duration:?}, elapsed={:?}",
@@ -327,7 +339,7 @@ async fn successive_installs_keep_independent_durable_jobs_order_and_inactive_sl
             {
                 break;
             }
-            if started.elapsed() >= FIXTURE_WAIT {
+            if started.elapsed() >= Duration::from_secs(30) {
                 let install = after;
                 let receipt = app_slot::job_status_fixture(root, transaction)
                     .ok()
@@ -995,7 +1007,7 @@ async fn commit_publication_failure_retains_engine_owner_and_never_retries_or_re
     });
     assert!(matches!(
         engine.install.as_ref().unwrap().owner,
-        InstallOwner::Trial(_)
+        InstallOwner::Committing(_)
     ));
     assert!(engine.install.as_ref().unwrap().stage == InstallStage::Failed);
     assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
