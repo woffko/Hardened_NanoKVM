@@ -46,6 +46,10 @@ pub(super) fn backend_trial_command(home: &Home) -> Command {
     owner_command("backend-trial", home)
 }
 
+pub(super) fn picoclaw_onboard_command(home: &Home) -> Command {
+    owner_command("picoclaw-onboard", home)
+}
+
 fn owner_command(role: &'static str, home: &Home) -> Command {
     let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
     command
@@ -58,7 +62,10 @@ fn owner_command(role: &'static str, home: &Home) -> Command {
         .stderr(Stdio::inherit());
     // Freeze the containing Group's selection, not this launcher's later cwd
     // or environment. No caller-controlled environment map is accepted.
-    if matches!(role, "backend" | "backend-trial" | "picoclaw") {
+    if matches!(
+        role,
+        "backend" | "backend-trial" | "picoclaw" | "picoclaw-onboard"
+    ) {
         command.env("PICOCLAW_HOME", home.path());
     }
     command

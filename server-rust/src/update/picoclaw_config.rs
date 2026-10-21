@@ -20,8 +20,11 @@ pub(crate) const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 const CONFIG: &str = "config.json";
 const SECURITY: &str = ".security.yml";
 
+#[path = "picoclaw_onboard.rs"]
+mod onboard;
 #[path = "picoclaw_config_pair.rs"]
 mod pair;
+pub(crate) use onboard::Onboarding;
 
 fn invalid() -> AppError {
     AppError::Config("invalid or unsafe picoclaw configuration storage".into())
@@ -362,6 +365,7 @@ pub(crate) fn read_pair(path: &Path) -> Result<RawDocuments> {
 }
 
 /// Config-owned first-run setup only; this is not external-writer quiescence.
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 pub(crate) fn needs_onboard(_permit: &ConfigPermit, path: &Path) -> Result<bool> {
     if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
         return Err(invalid());

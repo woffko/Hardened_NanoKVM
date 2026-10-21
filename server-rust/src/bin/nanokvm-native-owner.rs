@@ -12,17 +12,33 @@ use std::{
 };
 
 fn command(role: &str) -> Option<Command> {
-    if role == "picoclaw" {
+    if matches!(role, "picoclaw" | "picoclaw-onboard") {
         let home = nanokvm_rust_server::native_owner::picoclaw_home::resolve().ok()?;
+        let onboard = role == "picoclaw-onboard";
+        let runtime_home = if onboard {
+            home.join(nanokvm_rust_server::native_owner::picoclaw_home::ONBOARD_DIRECTORY)
+        } else {
+            home
+        };
         let mut command = Command::new("/usr/bin/picoclaw");
         command
-            .arg("gateway")
+            .arg(if onboard { "onboard" } else { "gateway" })
             .env_clear()
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .env("HOME", "/root")
+            .env(
+                "HOME",
+                if onboard {
+                    runtime_home.as_path()
+                } else {
+                    std::path::Path::new("/root")
+                },
+            )
             .env("LANG", "C")
-            .env("PICOCLAW_HOME", &home)
-            .current_dir(home);
+            .env("PICOCLAW_HOME", &runtime_home)
+            .current_dir(&runtime_home);
+        if onboard {
+            command.env("PICOCLAW_CONFIG", runtime_home.join("config.json"));
+        }
         return Some(command);
     }
     let (loader, program) = match role {
@@ -74,7 +90,7 @@ fn main() -> ExitCode {
         .flatten()
     else {
         eprintln!(
-            "usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend|backend-trial|picoclaw}}"
+            "usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend|backend-trial|picoclaw|picoclaw-onboard}}"
         );
         return ExitCode::from(64);
     };
@@ -91,6 +107,10 @@ fn main() -> ExitCode {
     });
     if !authorized {
         return ExitCode::from(70);
+    }
+    // Dedicated single-threaded process; upstream's new files stay private.
+    if args[2] == "picoclaw-onboard" {
+        nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     }
     command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     let result = if args[2] == "backend-trial" {
@@ -157,6 +177,26 @@ mod tests {
         for process in [&backend, &pico] {
             assert!(process.get_envs().any(|(name, value)| name == "PICOCLAW_HOME" && value == Some(home.as_os_str())));
         }
+        let onboard = command("picoclaw-onboard").unwrap();
+        let scratch =
+            home.join(nanokvm_rust_server::native_owner::picoclaw_home::ONBOARD_DIRECTORY);
+        assert_eq!(onboard.get_program(), "/usr/bin/picoclaw");
+        assert_eq!(onboard.get_args().collect::<Vec<_>>(), ["onboard"]);
+        assert_eq!(onboard.get_current_dir(), Some(scratch.as_path()));
+        for key in ["HOME", "PICOCLAW_HOME"] {
+            assert!(
+                onboard
+                    .get_envs()
+                    .any(|(name, value)| name == key && value == Some(scratch.as_os_str()))
+            );
+        }
+        assert!(
+            onboard
+                .get_envs()
+                .any(|(name, value)| name == "PICOCLAW_CONFIG"
+                    && value == Some(scratch.join("config.json").as_os_str()))
+        );
+        assert_eq!(onboard.get_envs().count(), 5);
         let trial = command("backend-trial").unwrap();
         assert_eq!(trial.get_program(), backend.get_program());
         assert_eq!(trial.get_args().last().unwrap(), "--app-trial");

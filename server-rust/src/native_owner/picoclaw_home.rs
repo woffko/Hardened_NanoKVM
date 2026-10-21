@@ -8,6 +8,8 @@ use std::{
 
 const DEFAULT: &str = "/root/.picoclaw";
 const MAX_BYTES: usize = 4095;
+/// Fixed fresh scratch, never an alternative runtime home selected by a client.
+pub const ONBOARD_DIRECTORY: &str = ".nanokvm-onboard";
 
 /// Immutable launch configuration, not filesystem trust or a writer capability.
 /// The containing Group retains this value through drain, trial and rollback.

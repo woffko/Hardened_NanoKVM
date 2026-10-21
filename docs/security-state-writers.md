@@ -12,7 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
-| PicoClaw model/default/token and Rust-initiated onboard | Config-owned Rust pair/onboard; startup/default no-op preserves the pair; ordinary API/S96 start/stop now use current/fresh-boot-gated home-bound broker operations and retained Stop join | Onboard/profile/workspace/session/installer writers, serialized mutation/deletion through stopped ownership, runtime-intent handoff, helper migration and pending-capture settlement remain open |
+| PicoClaw model/default/token and onboarding | Config-owned Rust pair; startup/default no-op; API/S96 start/stop/onboard use current/fresh-boot-gated home-bound scopes; broker retains Update/Config through first-run closure and checked scratch import | Interrupted onboarding recovery, profile/workspace/session/installer writers, serialized mutation/deletion through stopped ownership, runtime-intent handoff, helper migration and pending-capture settlement remain open |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -71,8 +71,9 @@ host-tested subreaper/pidfd scope for fresh launches. Static helpers are package
 and current S95 routes KVM/hwmon/backend through the broker after fresh-boot
 enrollment; this is not deployed device acceptance or capture integration. An
 optional Pico slot now participates in native/all-role drains when enrolled.
-Ordinary API/S96 start/stop route through that slot with current-helper and
-fresh-boot gates; onboarding remains separately legacy. It does not adopt
+Ordinary API/S96 start/stop/onboard route through that slot with current-helper and
+fresh-boot gates. Onboarding retains Update/Config through receipt/reap/EOF and
+checked scratch import; interrupted retry/retirement remains open. It does not adopt
 existing services. The broker freezes one lexical absolute home before
 opening the native journal and retains it across drain/trial/rollback; backend
 and optional Pico commands inherit that selection. Malformed explicit selection
@@ -85,7 +86,7 @@ settles the pair only for a closed owned scope, and compares the installed
 generation before a fixed launch. Live generation checks refuse pending intent
 instead of reading Rust's virtual committed view. Stop retains only Update until
 receipt/reap/EOF and does not reacquire a caller's Config. These operations do
-not stop or adopt an independent legacy process; all-writer/onboard migration,
+not stop or adopt an independent legacy process; all-writer migration/onboarding recovery,
 complete helper/script transition and raw capture acceptance remain open.
 It therefore does not
 upgrade any source group to runtime-quiescent. The broker's fixed local IPC and
@@ -96,8 +97,8 @@ remain required.
 The boot receipt now binds the compiled five-script generation and exact
 optional S96 presence/content. Same-boot add/remove cannot reuse Ready; malformed
 or foreign script state is refused without repair. This is provenance checking,
-not process ownership or a cooperative writer lease. Current S96 start/stop use
-the broker, but its onboard path and optional installer/all-writer migration
+not process ownership or a cooperative writer lease. Current S96 start/stop/onboard use
+the broker, but interrupted onboarding and optional installer/all-writer migration
 remain open.
 
 Run `make test-state-writer-inventory`. The source security-policy check also

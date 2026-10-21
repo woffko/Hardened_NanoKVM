@@ -61,7 +61,7 @@ pub struct Epochs {
 // journal magic suffixes. Do not advertise transition support from parsing alone.
 pub const CURRENT: Epochs = Epochs {
     app_storage: 1,
-    native_lifecycle: 7,
+    native_lifecycle: 8,
     helper_framing: 1,
     boot_script_framing: 1,
     support_transition: 0,

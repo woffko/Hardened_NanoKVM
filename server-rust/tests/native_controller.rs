@@ -18,6 +18,46 @@ use std::{
 
 const LIMIT: Duration = Duration::from_secs(8);
 
+#[test]
+fn onboard_factory_selects_only_the_fixed_scope_and_frozen_home() {
+    let home = picoclaw_home::Home::resolve().unwrap();
+    let command = controller::picoclaw_onboard_command(&home);
+    assert_eq!(command.get_program(), "/usr/libexec/nanokvm-native-owner");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["--scope", "picoclaw-onboard"]
+    );
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == "PICOCLAW_HOME" && value == Some(home.path().as_os_str()))
+    );
+    assert_eq!(command.get_envs().count(), 4);
+}
+
+#[test]
+fn successful_one_shot_pico_leader_exit_joins_its_remaining_descendant() {
+    let root = tempfile::tempdir().unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::Picoclaw, command("scope", "parent-exit", root.path()))
+        .unwrap();
+    until(|| {
+        matches!(
+            group.poll()[3],
+            Some(Status::Closed(controller::Completion::SuccessfulExit))
+        )
+    });
+    let leaf = fs::read_to_string(root.path().join("leaf.pid")).unwrap();
+    assert!(
+        !Path::new(&format!("/proc/{leaf}")).exists(),
+        "closure must include the orphaned descendant's reap"
+    );
+    let mut drained = group.begin_drain();
+    until(|| drained.poll() == DrainStatus::Drained);
+    assert!(drained.all_owner_processes_reaped());
+}
+
 fn command(kind: &str, mode: &str, root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-owner-fixture"));
     command

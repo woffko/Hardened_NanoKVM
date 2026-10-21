@@ -40,6 +40,8 @@ pub enum Operation {
     PicoclawRunning = 15,
     StopPicoclaw = 16,
     PicoclawStopped = 17,
+    OnboardPicoclaw = 18,
+    PicoclawOnboardComplete = 19,
 }
 impl Operation {
     fn binds_picoclaw_home(self) -> bool {
@@ -50,6 +52,8 @@ impl Operation {
                 | Self::PicoclawRunning
                 | Self::StopPicoclaw
                 | Self::PicoclawStopped
+                | Self::OnboardPicoclaw
+                | Self::PicoclawOnboardComplete
         )
     }
 
@@ -72,6 +76,8 @@ impl Operation {
             15 => Some(Self::PicoclawRunning),
             16 => Some(Self::StopPicoclaw),
             17 => Some(Self::PicoclawStopped),
+            18 => Some(Self::OnboardPicoclaw),
+            19 => Some(Self::PicoclawOnboardComplete),
             _ => None,
         }
     }
@@ -218,6 +224,8 @@ impl Channel {
                 | Operation::PicoclawRunning
                 | Operation::StopPicoclaw
                 | Operation::PicoclawStopped
+                | Operation::OnboardPicoclaw
+                | Operation::PicoclawOnboardComplete
         ) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -364,6 +372,8 @@ struct Engine {
     picoclaw_generation: Option<crate::update::picoclaw_config::Generation>,
     // Retained until receipt + owner reap + EOF, even if the caller disconnects.
     picoclaw_stop: Option<crate::update::operation_lock::ProcessLock>,
+    picoclaw_onboard: Option<picoclaw::Onboard>,
+    picoclaw_onboard_result: Option<bool>,
     #[cfg(test)]
     fixture: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -399,6 +409,8 @@ impl Engine {
             picoclaw_status: None,
             picoclaw_generation: None,
             picoclaw_stop: None,
+            picoclaw_onboard: None,
+            picoclaw_onboard_result: None,
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -789,6 +801,7 @@ impl Engine {
             || self.abandoned
             || self.backend_restart.is_some()
             || self.picoclaw_stop.is_some()
+            || self.picoclaw_onboard.is_some()
             || !matches!(self.owner, Some(Owner::Running(_)))
         {
             return Code::Busy;
@@ -951,7 +964,9 @@ impl Engine {
             | Operation::EnsurePicoclaw
             | Operation::PicoclawRunning
             | Operation::StopPicoclaw
-            | Operation::PicoclawStopped => code = Code::Invalid,
+            | Operation::PicoclawStopped
+            | Operation::OnboardPicoclaw
+            | Operation::PicoclawOnboardComplete => code = Code::Invalid,
             Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
@@ -975,6 +990,7 @@ impl Engine {
                 if self.mode != Mode::Running
                     || self.backend_restart.is_some()
                     || self.picoclaw_stop.is_some()
+                    || self.picoclaw_onboard.is_some()
                 {
                     code = Code::Busy;
                 } else if let Some(Owner::Running(broker)) = self.owner.as_mut() {
@@ -1014,7 +1030,10 @@ impl Engine {
                 }
             }
             Operation::Pause => {
-                if self.backend_restart.is_some() || self.picoclaw_stop.is_some() {
+                if self.backend_restart.is_some()
+                    || self.picoclaw_stop.is_some()
+                    || self.picoclaw_onboard.is_some()
+                {
                     code = Code::Busy;
                 } else if self.lease == Some(key) && !self.abandoned {
                 } else {
@@ -1061,6 +1080,7 @@ impl Engine {
                     || self.abandoned
                     || self.backend_restart.is_some()
                     || self.picoclaw_stop.is_some()
+                    || self.picoclaw_onboard.is_some()
                 {
                     code = Code::Busy;
                 } else {

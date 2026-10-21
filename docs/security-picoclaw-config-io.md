@@ -33,8 +33,8 @@ path only on a matching Running reply. It cannot set a home or submit a path.
 It is a point-in-time identity query, not a writer/native lease, configuration
 generation receipt or permission for a later start/capture on another connection.
 No filesystem trust check is supplied by this fingerprint. Current S96 start/
-stop probe `picoclaw-control-ready` and use fixed home-bound broker operations;
-only its separate legacy onboard setup uses the local selector/chdir. API
+stop/onboard probe `picoclaw-control-ready` and use fixed home-bound broker operations.
+API
 control additionally checks exact current support before default preparation.
 Independent legacy launchers and different service-user layouts remain
 un-migrated; complete all-writer/configuration handoff is still required.
@@ -98,13 +98,43 @@ can leave a private temporary. If the rename succeeds but the directory sync
 fails, the result is indeterminate durability: an error does not mean no bytes
 were changed. There is no automatic rollback or blind retry guarantee.
 
-Rust-initiated first-run `onboard` is enrolled in the same Config domain. Under
-the permit it rechecks whether setup is needed, creates/checks missing private
-rootfs ancestors, waits for the script and validates the resulting documents
-before releasing ownership. The owned callback survives HTTP receiver loss.
-The bundled S96 script uses umask 077 for new files/directories. Its independently
-invoked lifecycle, an older installed script and the external binary's own
-publication/forking semantics are not made safe merely by this enrollment.
+## Owned first-run import
+
+API and current S96 submit the fixed home-bound native onboarding operation.
+The API does not hold Config while asking the broker to acquire Update/Config.
+The broker refuses a live gateway and retains both admissions until the one-shot
+has a valid completion receipt, owner reap and EOF, then imports its output.
+An abandoned API/ctl receiver does not release those admissions. Deadline/Stop
+requests native cleanup and never reports import success; missing closure pins
+uncertainty instead of authorizing another writer.
+
+The installed home/pair is not passed to upstream `onboard`: a fresh private
+`.nanokvm-onboard` scratch is created with exclusive mkdir, and the command's
+home/config/cwd point there. Inspected upstream v0.2.8
+[onboard helpers](https://github.com/sipeed/picoclaw/blob/v0.2.8/cmd/picoclaw/internal/onboard/helpers.go)
+write workspace templates over existing files; running them in the scratch
+avoids resetting user workspace contents. This source inspection does not
+establish identity of the separately distributed NanoKVM optional binary.
+
+Completed import uses pinned no-follow/no-cross-mount descriptors, root-owned
+single-link regular files and bounded reads. It limits traversal to 256 entries
+(including directories), depth 12, 4 MiB/file and 8 MiB total input. Unknown
+scratch-root members, an unexpected configured workspace, unsafe files/mounts
+and symlink/hardlink aliases refuse before destination file publication.
+Existing user templates/data are retained. Three compiled app assets provide
+AGENT_KVM as AGENT.md, the kvm-control skill and its executable fallback bridge;
+unknown conflicting generated assets require explicit migration instead of being
+overwritten. Destination preflight is read-only, including missing parents.
+New files/parents are synced; JSON/YAML publication occurs last, with workspace
+rewritten to the installed home and restricted defaults for this new config.
+An existing valid config pair remains unchanged and does not launch upstream.
+
+This is not a whole-workspace transaction. A later I/O failure may leave newly
+published default files without a committed pair. Scratch evidence is retained;
+orphan scratch/dangling security is refused, not deleted, adopted or blindly
+retried. Durable closed-owner retry/retirement, SIGKILL/kernel-I/O settlement,
+actual optional-binary validation and installed-device acceptance remain open.
+The scratch is not a restore-schema member or proof of all-writer quiescence.
 
 ## Startup defaults and connection-time publication
 
@@ -131,7 +161,7 @@ and the installed-runtime/fallback acceptance checks remain separate gates.
 The two canonical names still change separately. Independent native readers
 that ignore the directory lock/journal can observe an intermediate pair.
 Native stop/join/enrollment and start-after-recovery integration therefore remain
-mandatory for every writer, beyond the new fixed API/S96 start/stop routing.
+mandatory for every writer, beyond the new fixed API/S96 start/stop/onboard routing.
 Raw capture must settle or reject a pending journal under the effective
 home/service barrier before reading canonical files. The journal is not silently
 added to the preserved archive schema, nor is a Rust Config permit proof that

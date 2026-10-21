@@ -58,8 +58,6 @@ const PICOCLAW_DOWNLOAD_URL: &str =
     "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz";
 const PICOCLAW_CHECKSUM_URL: &str =
     "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/sha512.txt";
-const ETC_INIT_PICOCLAW_SCRIPT: &str = "/etc/init.d/S96picoclaw";
-const KVMAPP_PICOCLAW_SCRIPT: &str = "/kvmapp/system/init.d/S96picoclaw";
 const DEFAULT_GATEWAY_HOST: &str = "127.0.0.1";
 const DEFAULT_GATEWAY_PORT: u16 = 18790;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
@@ -70,7 +68,7 @@ const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(60);
+const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(90);
 const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
 const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
@@ -2731,6 +2729,7 @@ fn install_binary(src: &Path, target: &Path) -> Result<()> {
 enum PicoControl {
     Ensure,
     Stop,
+    Onboard,
 }
 
 async fn native_control_ready() -> Result<crate::native_owner::broker::boot::Permit> {
@@ -2764,6 +2763,7 @@ async fn run_native_control(
     let (argument, timeout) = match control {
         PicoControl::Ensure => ("ensure-picoclaw", PICOCLAW_START_TIMEOUT),
         PicoControl::Stop => ("stop-picoclaw", PICOCLAW_STOP_TIMEOUT),
+        PicoControl::Onboard => ("onboard-picoclaw", PICOCLAW_ONBOARD_TIMEOUT),
     };
     // The command owner retains the boot proof through cancellation, capture
     // cleanup and direct-child reap. Broker Stop independently retains its
@@ -2784,55 +2784,6 @@ async fn run_native_control(
         Err(AppError::Conflict(
             "picoclaw native operation did not confirm completion; no fallback attempted".into(),
         ))
-    }
-}
-
-async fn run_script(action: &'static str, timeout: Duration) -> Result<(String, String)> {
-    if action != "onboard" {
-        return Err(AppError::BadRequest(
-            "only picoclaw onboarding uses a script".into(),
-        ));
-    }
-    // Gate before selecting either the installed or bundled script: an older
-    // installed S96 may not contain the new shell guard. Do not auto-install or
-    // enable this optional service just to refresh its script.
-    let gate = command::run_allowed(
-        AllowedCommand::AppSlotGate,
-        ["gate"],
-        Duration::from_secs(20),
-    )
-    .await?;
-    if gate.status != 0 {
-        return Err(AppError::Conflict(
-            "picoclaw script is blocked by unresolved app recovery; no script started".into(),
-        ));
-    }
-    let (command, display) = if Path::new(ETC_INIT_PICOCLAW_SCRIPT).exists() {
-        (
-            AllowedCommand::ServicePicoclawEtc,
-            format!("{ETC_INIT_PICOCLAW_SCRIPT} {action}"),
-        )
-    } else if Path::new(KVMAPP_PICOCLAW_SCRIPT).exists() {
-        (
-            AllowedCommand::ServicePicoclawKvmapp,
-            format!("{KVMAPP_PICOCLAW_SCRIPT} {action}"),
-        )
-    } else {
-        return Err(AppError::Internal(format!(
-            "picoclaw start script not found: {ETC_INIT_PICOCLAW_SCRIPT} or {KVMAPP_PICOCLAW_SCRIPT}"
-        )));
-    };
-
-    let output = command::run_allowed(command, [action], timeout).await?;
-    let trimmed = command_output_text(&output);
-    if output.status == 0 {
-        Ok((display, trimmed))
-    } else {
-        Err(AppError::Internal(if trimmed.is_empty() {
-            format!("picoclaw script {action} failed")
-        } else {
-            trimmed
-        }))
     }
 }
 
@@ -2995,28 +2946,13 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
 }
 
 async fn onboard_runtime_config() -> Result<()> {
-    crate::update::state_writers::StateWriters::default()
-        .configuration()?
-        .run(|permit| async move {
-            let needed = permit
-                .blocking(|permit| {
-                    crate::update::picoclaw_config::needs_onboard(permit, &resolve_config_path()?)
-                })
-                .await?;
-            let result = if needed {
-                run_script("onboard", PICOCLAW_ONBOARD_TIMEOUT).await?;
-                // Native success is not a protected-config receipt. Validate
-                // its output before releasing this Rust-initiated writer.
-                permit
-                    .blocking(|_| load_config_document().map(|_| ()))
-                    .await
-            } else {
-                Ok(())
-            };
-            drop(permit);
-            result
-        })
+    // The broker owns Update -> Config across native completion and checked
+    // import. Holding Config here would invert/reacquire those admissions.
+    let support = native_control_ready().await?;
+    run_native_control(PicoControl::Onboard, support).await?;
+    task::spawn_blocking(|| load_config_document().map(|_| ()))
         .await
+        .map_err(|_| AppError::Internal("picoclaw onboarding validation task failed".into()))?
 }
 
 fn resolve_config_path() -> Result<PathBuf> {

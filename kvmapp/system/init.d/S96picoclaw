@@ -2,110 +2,14 @@
 
 umask 077
 
-BIN_PATH="${PICOCLAW_BIN_PATH:-/usr/bin/picoclaw}"
-LOG_FILE="${PICOCLAW_LOG_FILE:-/tmp/picoclaw.log}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-
-setup_runtime_env() {
-  [ -x "$BIN_PATH" ] || {
-    echo "picoclaw binary not found: $BIN_PATH"
-    return 1
-  }
-
-  # Same resolver as Rust, before chdir. A relative override must not be
-  # interpreted a second time from inside itself. No passwd/HOME fallback.
-  PICOCLAW_HOME="$(/usr/libexec/nanokvm-native-ctl picoclaw-home)" || {
-    echo "failed to resolve picoclaw home"
-    return 1
-  }
-  HOME=/root
-  export HOME
-  export PICOCLAW_HOME
-
-  mkdir -p "$PICOCLAW_HOME" || {
-    echo "failed to create picoclaw home: $PICOCLAW_HOME"
-    return 1
-  }
-
-  cd "$PICOCLAW_HOME" || {
-    echo "failed to enter picoclaw home: $PICOCLAW_HOME"
-    return 1
-  }
-}
-
-resolve_kvm_control_source() {
-  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-  for candidate in \
-    "/kvmapp/picoclaw/skills/kvm-control" \
-    "/kvmapp/skills/kvm-control" \
-    "$SCRIPT_DIR/../../../picoclaw/skills/kvm-control"
-  do
-    if [ -d "$candidate" ] && [ -f "$candidate/SKILL.md" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-sync_kvm_control_skill() {
-  source_dir="$(resolve_kvm_control_source)" || {
-    echo "kvm-control skill source not found"
-    return 1
-  }
-
-  skills_dir="$PICOCLAW_HOME/workspace/skills"
-  target_dir="$skills_dir/kvm-control"
-  mkdir -p "$skills_dir" || {
-    echo "failed to create skills directory: $skills_dir"
-    return 1
-  }
-
-  rm -rf "$target_dir" || {
-    echo "failed to remove old kvm-control skill: $target_dir"
-    return 1
-  }
-
-  cp -R "$source_dir" "$target_dir" || {
-    echo "failed to copy kvm-control skill to $target_dir"
-    return 1
-  }
-}
-
-sync_agent_profile() {
-  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-  source_file="/kvmapp/picoclaw/AGENT_KVM.md"
-  target_file="$PICOCLAW_HOME/workspace/AGENT.md"
-  workspace_dir="$PICOCLAW_HOME/workspace"
-
-  [ -f "$source_file" ] || {
-    echo "agent profile source not found: $source_file"
-    return 1
-  }
-
-  mkdir -p "$workspace_dir" || {
-    echo "failed to create workspace directory: $workspace_dir"
-    return 1
-  }
-
-  cp -f "$source_file" "$target_file" || {
-    echo "failed to copy agent profile to $target_file"
-    return 1
-  }
-}
-
 start_service() {
   /usr/libexec/nanokvm-native-ctl picoclaw-control-ready >/dev/null || return $?
   /usr/libexec/nanokvm-native-ctl ensure-picoclaw
 }
 
 onboard_service() {
-  /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
-  setup_runtime_env || return 1
-  "$BIN_PATH" onboard >>"$LOG_FILE" 2>&1 || return 1
-  sync_kvm_control_skill || return 1
-  sync_agent_profile || return 1
+  /usr/libexec/nanokvm-native-ctl picoclaw-control-ready >/dev/null || return $?
+  /usr/libexec/nanokvm-native-ctl onboard-picoclaw
 }
 
 stop_service() {

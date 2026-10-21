@@ -33,6 +33,10 @@ fn shipped_broker_and_ctl_reject_generic_paths_and_maintenance_cli() {
                 vec!["stop-picoclaw", "/tmp/other"],
                 vec!["picoclaw-stopped", "extra"],
                 vec!["picoclaw-stopped", "/tmp/other"],
+                vec!["onboard-picoclaw", "extra"],
+                vec!["onboard-picoclaw", "/tmp/other"],
+                vec!["picoclaw-onboard-complete", "extra"],
+                vec!["picoclaw-onboard-complete", "/tmp/other"],
             ],
         ),
         (

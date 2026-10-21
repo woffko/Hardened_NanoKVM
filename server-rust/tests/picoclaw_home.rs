@@ -85,7 +85,7 @@ fn invalid_home_check_refuses_before_contacting_a_broker_or_creating_state() {
 }
 
 #[test]
-fn actual_s96_setup_exports_the_same_absolute_home_before_chdir() {
+fn actual_s96_delegates_home_selection_and_never_changes_cwd_or_creates_state() {
     let source = if let Some(reference) = std::env::var_os("NANOKVM_PICO_HOME_SOURCE_REF") {
         let output = Command::new("git")
             .args([
@@ -103,15 +103,10 @@ fn actual_s96_setup_exports_the_same_absolute_home_before_chdir() {
     } else {
         include_str!("../../kvmapp/system/init.d/S96picoclaw").to_string()
     };
-    let prefix = source
-        .split("resolve_kvm_control_source() {")
-        .next()
-        .unwrap();
-    let helper = env!("CARGO_BIN_EXE_nanokvm-native-ctl");
-    let script = format!(
-        "{}\nsetup_runtime_env || exit 91\n\"$BIN_PATH\" gateway\n",
-        prefix.replace("/usr/libexec/nanokvm-native-ctl", helper)
-    );
+    // Refuse historical direct launch bodies BEFORE executing any shell fixture.
+    assert!(!source.contains("setup_runtime_env"));
+    assert!(!source.contains("mkdir"));
+    assert!(!source.contains("cd "));
     for relative in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let expected = root.path().join("custom home");
@@ -120,33 +115,23 @@ fn actual_s96_setup_exports_the_same_absolute_home_before_chdir() {
         } else {
             expected.as_os_str()
         };
-        let output = Command::new("/bin/sh")
-            .args(["-c", &script, "s96-home-fixture"])
-            .current_dir(root.path())
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", root.path())
-            .env("PICOCLAW_HOME", selected)
-            .env(
-                "PICOCLAW_BIN_PATH",
-                env!("CARGO_BIN_EXE_nanokvm-native-owner-fixture"),
-            )
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "private S96 setup failed: {:?}",
-            output.status
+        let script = source.replace(
+            "/usr/libexec/nanokvm-native-ctl",
+            root.path().join("missing-ctl").to_str().unwrap(),
         );
-        let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(expected.join("picoclaw-runtime.fixture")).unwrap())
+        for action in ["start", "stop", "onboard", "restart"] {
+            let output = Command::new("/bin/sh")
+                .args(["-c", &script, "s96-home-fixture", action])
+                .current_dir(root.path())
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.path())
+                .env("PICOCLAW_HOME", selected)
+                .output()
                 .unwrap();
-        assert_eq!(
-            value["home"].as_str().unwrap(),
-            expected.to_str().unwrap(),
-            "native PICOCLAW_HOME must be absolute before cd"
-        );
-        assert_eq!(value["cwd"].as_str().unwrap(), expected.to_str().unwrap());
-        assert_eq!(value["user_home"], "/root");
+            assert_eq!(output.status.code(), Some(127));
+            assert!(!expected.exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        }
     }
 }

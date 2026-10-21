@@ -5,6 +5,8 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+#[path = "picoclaw_onboard_tests.rs"]
+mod onboard;
 #[path = "picoclaw_config_pair_tests.rs"]
 mod pair;
 
@@ -186,6 +188,11 @@ fn private_root_child() {
     let sentinel = Path::new("/outside/synthetic-sentinel");
     fs::write(sentinel, b"synthetic-sentinel-unchanged").unwrap();
     fs::set_permissions(sentinel, fs::Permissions::from_mode(0o600)).unwrap();
+    if case.starts_with("onboard-") {
+        onboard::exercise(&case, &permit, directory);
+        println!("pico-config-fixture-ran");
+        return;
+    }
     match case.as_str() {
         "native-control-unavailable" => {
             startup_fixture(directory, json!({}));
@@ -214,6 +221,7 @@ fn private_root_child() {
                     "native refusal must precede startup/default publication"
                 );
                 assert!(stop_runtime_inner().await.is_err());
+                assert!(onboard_runtime_config().await.is_err());
                 assert_ne!(runtime_status().status, "stopped");
                 let response = uninstall_runtime().await.unwrap();
                 let bytes = axum::body::to_bytes(response.into_body(), 4096)

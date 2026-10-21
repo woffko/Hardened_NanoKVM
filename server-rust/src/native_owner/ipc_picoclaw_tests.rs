@@ -1,11 +1,13 @@
 use super::*;
 use crate::update::{operation_lock::ProcessLock, state_writers::StateWriters};
 
-const OPS: [Operation; 4] = [
+const OPS: [Operation; 6] = [
     Operation::EnsurePicoclaw,
     Operation::PicoclawRunning,
     Operation::StopPicoclaw,
     Operation::PicoclawStopped,
+    Operation::OnboardPicoclaw,
+    Operation::PicoclawOnboardComplete,
 ];
 
 fn frame(op: Operation, home: &Home, serial: u64) -> [u8; FRAME] {
@@ -40,7 +42,7 @@ fn close(mut engine: Engine) {
 
 #[test]
 fn each_fixed_service_operation_requires_a_full_home_bound_frame() {
-    for (op, byte) in OPS.into_iter().zip([14, 15, 16, 17]) {
+    for (op, byte) in OPS.into_iter().zip([14, 15, 16, 17, 18, 19]) {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let mut channel = Channel::verified(stream, nix::unistd::geteuid().as_raw()).unwrap();
         assert_eq!(
@@ -63,6 +65,256 @@ fn each_fixed_service_operation_requires_a_full_home_bound_frame() {
             io::ErrorKind::WouldBlock
         );
     }
+}
+
+#[test]
+fn onboard_probe() {
+    let Some(root) = std::env::var_os("NANOKVM_NATIVE_ONBOARD_FIXTURE") else {
+        return;
+    };
+    let root = Path::new(&root);
+    fs::write(root.join("onboard-pid"), std::process::id().to_string()).unwrap();
+    let mut control = UnixStream::from(rustix::io::dup(std::io::stdin()).unwrap());
+    control.set_nonblocking(true).unwrap();
+    control.write_all(b"R").unwrap();
+    let mut stopped = false;
+    until(|| {
+        let mut byte = [0];
+        match control.read(&mut byte) {
+            Ok(1) => {
+                assert_eq!(byte, *b"S");
+                stopped = true;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            other => panic!("onboard control lost: {other:?}"),
+        }
+        if stopped {
+            fs::write(root.join("onboard-stopping"), b"stopping").unwrap();
+        }
+        (stopped && !root.join("onboard-stop-hold").exists())
+            || root.join("onboard-release").exists()
+    });
+    if root.join("onboard-missing-receipt").exists() {
+        return;
+    }
+    if stopped {
+        control.write_all(b"D\0").unwrap();
+    } else if root.join("onboard-fail").exists() {
+        control.write_all(b"D\x02").unwrap();
+        std::process::exit(71);
+    } else {
+        control.write_all(b"D\x01").unwrap();
+    }
+}
+
+#[test]
+fn onboard_retains_both_admissions_after_caller_loss_until_successful_closure() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = configured(root.path());
+    assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+    until(|| {
+        engine.tick();
+        root.path().join("onboard-pid").exists()
+    });
+    engine.disconnected(7);
+    assert!(engine.picoclaw_onboard.is_some());
+    let parent = File::open(root.path()).unwrap();
+    assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+    assert!(
+        StateWriters::for_test_parent(parent.try_clone().unwrap())
+            .configuration()
+            .is_err()
+    );
+    assert_eq!(
+        call(&mut engine, Operation::PicoclawRunning).code,
+        Code::Unavailable
+    );
+    assert_eq!(
+        call(&mut engine, Operation::PicoclawOnboardComplete).code,
+        Code::Unavailable
+    );
+    for op in [Operation::OnboardPicoclaw, Operation::EnsurePicoclaw] {
+        assert_eq!(call(&mut engine, op).code, Code::Busy);
+    }
+    for op in [
+        Operation::Pause,
+        Operation::RestartBackend,
+        Operation::Shutdown,
+    ] {
+        assert_eq!(engine.request(7, op).code, Code::Busy);
+    }
+    fs::write(root.path().join("onboard-release"), b"release").unwrap();
+    until(|| {
+        engine.tick();
+        engine.picoclaw_onboard.is_none()
+    });
+    assert_eq!(
+        call(&mut engine, Operation::PicoclawOnboardComplete).code,
+        Code::Ok
+    );
+    drop(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+    drop(
+        StateWriters::for_test_parent(parent)
+            .configuration()
+            .unwrap(),
+    );
+    close(engine);
+}
+
+#[test]
+fn onboard_stop_and_deadline_never_report_a_successful_import() {
+    for deadline in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        fs::write(root.path().join("onboard-stop-hold"), b"hold").unwrap();
+        assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+        until(|| {
+            engine.tick();
+            engine.picoclaw_status == Some(Status::Running)
+        });
+        if deadline {
+            engine.picoclaw_onboard.as_mut().unwrap().deadline = Instant::now();
+            engine.tick();
+        } else {
+            assert_eq!(call(&mut engine, Operation::StopPicoclaw).code, Code::Ok);
+        }
+        until(|| root.path().join("onboard-stopping").exists());
+        engine.tick();
+        assert!(engine.picoclaw_onboard.is_some());
+        assert_eq!(
+            call(&mut engine, Operation::PicoclawStopped).code,
+            Code::Unavailable
+        );
+        fs::remove_file(root.path().join("onboard-stop-hold")).unwrap();
+        until(|| {
+            engine.tick();
+            engine.picoclaw_onboard.is_none()
+        });
+        assert_eq!(
+            call(&mut engine, Operation::PicoclawOnboardComplete).code,
+            Code::Invalid
+        );
+        assert_eq!(call(&mut engine, Operation::PicoclawStopped).code, Code::Ok);
+        close(engine);
+    }
+}
+
+#[test]
+fn onboard_failed_exit_and_missing_receipt_are_not_completion() {
+    for missing in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        fs::write(
+            root.path().join(if missing {
+                "onboard-missing-receipt"
+            } else {
+                "onboard-fail"
+            }),
+            b"fixture",
+        )
+        .unwrap();
+        assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+        until(|| root.path().join("onboard-pid").exists());
+        let pid = fs::read_to_string(root.path().join("onboard-pid")).unwrap();
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        until(|| {
+            engine.tick();
+            if missing {
+                engine.mode == Mode::Uncertain
+            } else {
+                engine.picoclaw_onboard.is_none()
+            }
+        });
+        if missing {
+            until(|| {
+                engine.tick();
+                !Path::new(&format!("/proc/{pid}")).exists()
+            });
+            assert!(engine.picoclaw_onboard.is_some());
+            assert_eq!(
+                call(&mut engine, Operation::PicoclawOnboardComplete).code,
+                Code::Uncertain
+            );
+            assert!(
+                StateWriters::for_test_parent(File::open(root.path()).unwrap())
+                    .configuration()
+                    .is_err()
+            );
+            drop(engine); // Known childless/reaped fixture only, no closure claim.
+        } else {
+            assert_eq!(
+                call(&mut engine, Operation::PicoclawOnboardComplete).code,
+                Code::Invalid
+            );
+            close(engine);
+        }
+    }
+}
+
+#[test]
+fn onboard_refuses_live_gateway_and_admission_contention_before_starting_a_writer() {
+    for conflict in ["gateway", "update", "config"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        if conflict == "gateway" {
+            assert_eq!(call(&mut engine, Operation::EnsurePicoclaw).code, Code::Ok);
+            ready(&mut engine);
+        }
+        let parent = File::open(root.path()).unwrap();
+        let update = (conflict == "update")
+            .then(|| ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+        let config = (conflict == "config").then(|| {
+            StateWriters::for_test_parent(parent.try_clone().unwrap())
+                .configuration()
+                .unwrap()
+        });
+        assert_eq!(
+            call(&mut engine, Operation::OnboardPicoclaw).code,
+            Code::Busy
+        );
+        assert!(!root.path().join("onboard-pid").exists());
+        assert!(engine.picoclaw_onboard.is_none());
+        if conflict == "gateway" {
+            assert_eq!(call(&mut engine, Operation::PicoclawRunning).code, Code::Ok);
+        }
+        drop(config);
+        drop(update);
+        close(engine);
+    }
+}
+
+#[test]
+fn real_endpoint_onboard_survives_disconnected_client_and_releases_config_only_after_completion() {
+    let root = tempfile::tempdir().unwrap();
+    serve(root.path(), nix::unistd::geteuid().as_raw(), || {
+        let mut channel = connect(root.path());
+        assert_eq!(
+            exchange_service(&mut channel, Operation::OnboardPicoclaw).code,
+            Code::Ok
+        );
+        until(|| root.path().join("onboard-pid").exists());
+        drop(channel);
+        let parent = File::open(root.path()).unwrap();
+        assert!(
+            StateWriters::for_test_parent(parent.try_clone().unwrap())
+                .configuration()
+                .is_err()
+        );
+        let mut observer = connect(root.path());
+        assert_eq!(
+            exchange_service(&mut observer, Operation::PicoclawOnboardComplete).code,
+            Code::Unavailable
+        );
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        until(|| {
+            exchange_service(&mut observer, Operation::PicoclawOnboardComplete).code == Code::Ok
+        });
+        drop(
+            StateWriters::for_test_parent(parent)
+                .configuration()
+                .unwrap(),
+        );
+    });
 }
 
 #[test]

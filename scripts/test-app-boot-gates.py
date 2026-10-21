@@ -68,6 +68,26 @@ def protected_copy(body, name):
         return result.returncode == 0 and (root / "etc/init.d" / name).read_text() == "independent protected code\n"
 
 
+def denied_native_consumer(body, name, operation):
+    body = function(body, name)
+    statements = [line.strip() for line in body.splitlines()[1:-1]
+                  if line.strip() and not line.lstrip().startswith("#")]
+    if statements != [
+        "/usr/libexec/nanokvm-native-ctl picoclaw-control-ready >/dev/null || return $?",
+        "/usr/libexec/nanokvm-native-ctl " + operation,
+    ]:
+        return False  # Historical copy/launcher bodies must never execute.
+    with tempfile.TemporaryDirectory(prefix="nanokvm-native-consumer-") as temporary:
+        root = Path(temporary)
+        helper, log = root / "helper", root / "calls"
+        helper.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$GATE_LOG"\nexit 75\n')
+        helper.chmod(0o700)
+        body = body.replace("/usr/libexec/nanokvm-native-ctl", str(helper))
+        result = subprocess.run(["/bin/sh", "-c", body + "\n" + name],
+                                env={"GATE_LOG": str(log)}, capture_output=True, timeout=5)
+        return result.returncode == 75 and log.read_text() == "picoclaw-control-ready\n"
+
+
 def optional_hwmon_absent(body):
     body = function(body, "start_hwmon_shadow")
     lines = body.splitlines()
@@ -126,10 +146,13 @@ def main():
         ("S30eth", ["apply_ipv6_dhcpv6"]), ("S30wifi", ["ap_start"]),
         ("S95nanokvm", ["start_kvm_system_runtime", "start_hwmon_shadow", "start_server_runtime",
                          "restart_server_runtime", "restart_server_safe", "start_runtime"]),
-        ("S96picoclaw", ["resolve_kvm_control_source", "sync_agent_profile", "onboard_service"]),
     ]:
         for name in names:
             check(file + " " + name + " denial before side effects", denied_consumer(sources[file], name))
+    for name, operation in [("start_service", "ensure-picoclaw"), ("stop_service", "stop-picoclaw"),
+                            ("onboard_service", "onboard-picoclaw")]:
+        check("S96 " + name + " native denial before side effects",
+              denied_native_consumer(sources["S96picoclaw"], name, operation))
     s95 = sources["S95nanokvm"]
     check("optional absent hwmon does not fail normal startup", optional_hwmon_absent(s95))
     for mode in ["start", "restart"]:
@@ -145,7 +168,8 @@ def main():
                              check=True, capture_output=True, text=True, timeout=10).stdout
     else:
         api = (ROOT / api_path).read_text()
-    prefix = api.split("async fn run_script(", 1)[1].split("let (command, display)", 1)[0]
+    onboard = api.split("async fn onboard_runtime_config()", 1)[-1].split("fn resolve_config_path()", 1)[0]
+    preflight = api.split("async fn native_control_ready()", 1)[-1].split("async fn run_native_control(", 1)[0]
     stop = api.split("async fn stop_runtime_inner()", 1)[1].split("async fn run_install_runtime()", 1)[0]
     native = api.split("async fn run_native_control(", 1)[-1].split("async fn run_script(", 1)[0]
     check("picoclaw Stop is independent of app gate and script selection",
@@ -154,9 +178,11 @@ def main():
           and "output.status == 0" in native and "run_allowed_owned(" in native
           and "AllowedCommand::AppSlotGate" not in stop and 'run_script("stop"' not in stop
           and "killall" not in api)
-    check("picoclaw onboard API gates before selecting even an older installed script",
-          "AllowedCommand::AppSlotGate" in prefix and '["gate"]' in prefix
-          and "gate.status != 0" in prefix and 'action != "onboard"' in prefix)
+    check("picoclaw onboard API requires exact current support and fresh boot, no legacy script selection",
+          "native_control_ready().await?" in onboard and
+          "run_native_control(PicoControl::Onboard, support).await?" in onboard and
+          "native_bootstrap::check_installed()" in preflight and "boot::require_ready()" in preflight and
+          "async fn run_script(" not in api)
     if not args.baseline_ref:
         s02 = source("S02apprecover", None)
         with tempfile.TemporaryDirectory(prefix="nanokvm-early-app-gate-") as temporary:

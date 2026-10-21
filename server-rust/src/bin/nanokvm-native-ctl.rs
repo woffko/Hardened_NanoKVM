@@ -49,7 +49,14 @@ fn main() -> ExitCode {
     let pico_service = args.len() == 1
         && matches!(
             args[0].to_str(),
-            Some("ensure-picoclaw" | "picoclaw-running" | "stop-picoclaw" | "picoclaw-stopped")
+            Some(
+                "ensure-picoclaw"
+                    | "picoclaw-running"
+                    | "stop-picoclaw"
+                    | "picoclaw-stopped"
+                    | "onboard-picoclaw"
+                    | "picoclaw-onboard-complete"
+            )
         );
     let selected_home = if home_check || pico_service {
         match nanokvm_rust_server::native_owner::picoclaw_home::Home::resolve() {
@@ -95,6 +102,8 @@ fn main() -> ExitCode {
             Some("picoclaw-running") => Some(Operation::PicoclawRunning),
             Some("stop-picoclaw") => Some(Operation::StopPicoclaw),
             Some("picoclaw-stopped") => Some(Operation::PicoclawStopped),
+            Some("onboard-picoclaw") => Some(Operation::OnboardPicoclaw),
+            Some("picoclaw-onboard-complete") => Some(Operation::PicoclawOnboardComplete),
             _ => None,
         }
     } else {
@@ -102,7 +111,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|picoclaw-control-ready|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|picoclaw-control-ready|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|onboard-picoclaw|picoclaw-onboard-complete|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -132,7 +141,12 @@ fn main() -> ExitCode {
     );
     let mut backend_wait = false;
     let mut pico_wait = false;
-    while start.elapsed() < Duration::from_secs(15) {
+    let timeout = Duration::from_secs(if op == Operation::OnboardPicoclaw {
+        75
+    } else {
+        15
+    });
+    while start.elapsed() < timeout {
         match channel.poll() {
             Ok(Some(reply)) => {
                 if matches!(
@@ -140,6 +154,7 @@ fn main() -> ExitCode {
                     Operation::BackendRunning
                         | Operation::PicoclawRunning
                         | Operation::PicoclawStopped
+                        | Operation::PicoclawOnboardComplete
                 ) && reply.code == Code::Unavailable
                 {
                     return ExitCode::from(1);
@@ -151,15 +166,19 @@ fn main() -> ExitCode {
                     return ExitCode::from(71);
                 }
                 if pico_service {
-                    if matches!(op, Operation::PicoclawRunning | Operation::PicoclawStopped)
-                        || (pico_wait && reply.code == Code::Ok)
+                    if matches!(
+                        op,
+                        Operation::PicoclawRunning
+                            | Operation::PicoclawStopped
+                            | Operation::PicoclawOnboardComplete
+                    ) || (pico_wait && reply.code == Code::Ok)
                     {
                         return ExitCode::SUCCESS;
                     }
-                    let query = if op == Operation::StopPicoclaw {
-                        Operation::PicoclawStopped
-                    } else {
-                        Operation::PicoclawRunning
+                    let query = match op {
+                        Operation::StopPicoclaw => Operation::PicoclawStopped,
+                        Operation::OnboardPicoclaw => Operation::PicoclawOnboardComplete,
+                        _ => Operation::PicoclawRunning,
                     };
                     let Some(home) = &selected_home else {
                         return ExitCode::from(71);
