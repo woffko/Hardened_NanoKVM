@@ -106,13 +106,26 @@ impl Drop for Paused {
 }
 
 fn paused(fixture: &Fixture, point: &str) -> Paused {
+    let (expected, variable, marker) = if point.starts_with("optional-") {
+        (
+            "chain",
+            "NANOKVM_APP_BOOTSTRAP_TEST_STOP",
+            "app-bootstrap-checkpoint-ready",
+        )
+    } else {
+        (
+            if point == "boot-ready" {
+                "hold-ready"
+            } else {
+                "success"
+            },
+            "NANOKVM_NATIVE_BOOTSTRAP_TEST_STOP",
+            "native-bootstrap-checkpoint-ready",
+        )
+    };
     let mut child = fixture
-        .command(if point == "boot-ready" {
-            "hold-ready"
-        } else {
-            "success"
-        })
-        .env("NANOKVM_NATIVE_BOOTSTRAP_TEST_STOP", point)
+        .command(expected)
+        .env(variable, point)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -122,7 +135,7 @@ fn paused(fixture: &Fixture, point: &str) -> Paused {
     let (send, receive) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if line.unwrap().contains("native-bootstrap-checkpoint-ready") {
+            if line.unwrap().contains(marker) {
                 let _ = send.send(());
                 return;
             }
@@ -168,13 +181,45 @@ fn fixed_root_child() {
             .map(drop)
             .map_err(io::Error::other),
         "chain" | "hold-ready" | "chain-failure" => prepare_boot_support().and_then(|support| {
+            let writers = super::super::state_writers::StateWriters::default();
+            assert!(writers.configuration().is_err());
             if expected == "hold-ready" {
                 checkpoint("boot-ready");
             }
             let checked = app_bootstrap::check_before_legacy_install();
             drop(support);
+            assert!(writers.configuration().is_ok());
             checked
         }),
+        "configuration-busy" => {
+            let writers = super::super::state_writers::StateWriters::default();
+            let config = writers.configuration().unwrap();
+            assert!(prepare_boot_support().is_err());
+            assert!(fs::read_dir("/usr/libexec").unwrap().next().is_none());
+            assert!(!Path::new("/etc/kvm/native-runtime-boot/state").exists());
+            assert!(ProcessLock::acquire().is_ok());
+            drop(config);
+            drop(prepare_boot_support().unwrap());
+            assert!(writers.configuration().is_ok());
+            Ok(())
+        }
+        "configuration-observer-busy" => {
+            assert!(
+                super::super::state_writers::StateWriters::default()
+                    .configuration()
+                    .is_err()
+            );
+            Ok(())
+        }
+        "publication-authority" => {
+            check_boot_publication_authority();
+            Ok(())
+        }
+        "publication-shared-refusal" => {
+            let permit = crate::native_owner::broker::boot::require_ready().unwrap();
+            assert!(permit.check_armed_publication().is_err());
+            Ok(())
+        }
         "legacy-refusal" => app_bootstrap::check_before_legacy_install(),
         _ => ensure_installed(),
     };
@@ -183,9 +228,22 @@ fn fixed_root_child() {
             result.unwrap();
             check_installed().unwrap();
         }
-        "activate" | "ready" | "update-fence" => result.unwrap(),
+        "activate"
+        | "ready"
+        | "update-fence"
+        | "configuration-busy"
+        | "configuration-observer-busy"
+        | "publication-authority"
+        | "publication-shared-refusal" => result.unwrap(),
         "activate-failure" | "ready-failure" => assert!(result.is_err()),
-        "failure" | "legacy-refusal" | "chain-failure" => assert!(result.is_err()),
+        "failure" | "legacy-refusal" | "chain-failure" => {
+            assert!(result.is_err());
+            assert!(
+                super::super::state_writers::StateWriters::default()
+                    .configuration()
+                    .is_ok()
+            );
+        }
         "busy" => {
             let error = result.unwrap_err();
             assert!(matches!(
@@ -198,6 +256,42 @@ fn fixed_root_child() {
         _ => panic!("invalid native fixture case"),
     }
     println!("native-fixed-root-fixture-ran");
+}
+
+fn check_boot_publication_authority() {
+    use sha2::{Digest, Sha256};
+    let support = prepare_boot_support().unwrap();
+    let path = Path::new("/etc/kvm/native-runtime-boot/state");
+    let armed = fs::read(path).unwrap();
+    assert_eq!(armed[44], 2);
+    assert!(support._boot.check_armed_publication().is_ok());
+    for case in ["factory", "prior-armed", "ready", "corrupt"] {
+        let mut bytes = armed.clone();
+        match case {
+            "factory" => {
+                bytes[8..44].fill(0);
+                bytes[44] = 1;
+            }
+            "prior-armed" => {
+                let prior = b"00000000-0000-4000-8000-000000000001";
+                assert_ne!(&bytes[8..44], prior);
+                bytes[8..44].copy_from_slice(prior);
+            }
+            "ready" => {
+                bytes[44] = 3;
+                bytes[48..80].fill(0x21);
+            }
+            "corrupt" => bytes[0] ^= 1,
+            _ => unreachable!(),
+        }
+        let digest = Sha256::digest(&bytes[..80]);
+        bytes[80..].copy_from_slice(&digest);
+        fs::write(path, &bytes).unwrap();
+        assert!(support._boot.check_armed_publication().is_err(), "{case}");
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    fs::write(path, &armed).unwrap();
+    assert!(support._boot.check_armed_publication().is_ok());
 }
 
 fn check_production_update_fence() {
@@ -380,6 +474,215 @@ fn fixed_root_factory_activates_only_with_exact_consumer_scripts() {
             fs::read(parent.join("state")).unwrap()[44],
             if fault { 1 } else { 3 }
         );
+    }
+}
+
+#[test]
+fn boot_support_retains_configuration_and_refuses_contention_before_publication() {
+    Fixture::new().run("configuration-busy");
+}
+
+#[test]
+fn optional_publication_requires_exclusive_current_boot_armed_authority() {
+    Fixture::new().run("publication-authority");
+    let fixture = Fixture::new();
+    let parent = fixture.seed_factory();
+    fixture.run("activate");
+    let before = fs::read(parent.join("state")).unwrap();
+    fixture.run("publication-shared-refusal");
+    assert_eq!(fs::read(parent.join("state")).unwrap(), before);
+    fixture.run("ready");
+}
+
+#[test]
+fn optional_bootstrap_preserves_absence_and_only_migrates_the_exact_rc12_source() {
+    let legacy = include_bytes!("../../tests/fixtures/rc12-S96picoclaw.sh");
+    use sha2::{Digest, Sha256};
+    assert_eq!(legacy.len(), 3316);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(legacy)),
+        "499258cb3d84aad2ddf179b7d5f6e3e82abb7db889f3db22b8ae3a9f0ae88272"
+    );
+    for case in [
+        "absent",
+        "current",
+        "legacy",
+        "custom",
+        "mode",
+        "symlink",
+        "hardlink",
+        "fifo",
+        "directory",
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.root.path().join("etc/init.d/S96picoclaw");
+        if case != "absent" {
+            fs::write(
+                &path,
+                if case == "current" {
+                    app_bootstrap::PICO_BOOT_SCRIPT
+                } else {
+                    legacy
+                },
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            match case {
+                "custom" => fs::write(&path, b"custom optional service; preserve me").unwrap(),
+                "mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+                "symlink" => {
+                    fs::remove_file(&path).unwrap();
+                    std::os::unix::fs::symlink("S95nanokvm", &path).unwrap();
+                }
+                "hardlink" => fs::hard_link(&path, path.with_file_name("pico-alias")).unwrap(),
+                "fifo" => {
+                    fs::remove_file(&path).unwrap();
+                    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap();
+                }
+                "directory" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                _ => {}
+            }
+        }
+        let before = fs::symlink_metadata(&path).ok().map(|m| m.ino());
+        let allowed = matches!(case, "absent" | "current" | "legacy");
+        fixture.run(if allowed { "chain" } else { "chain-failure" });
+        let evidence: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".S96picoclaw-next-")
+            })
+            .collect();
+        if case == "absent" {
+            assert!(!path.exists());
+            assert!(evidence.is_empty());
+            continue;
+        }
+        if !allowed {
+            assert_eq!(path.symlink_metadata().unwrap().ino(), before.unwrap());
+            assert!(evidence.is_empty());
+            match case {
+                "custom" => assert_eq!(
+                    fs::read(&path).unwrap(),
+                    b"custom optional service; preserve me"
+                ),
+                "mode" => {
+                    assert_eq!(fs::read(&path).unwrap(), legacy);
+                    assert_eq!(path.metadata().unwrap().mode() & 0o7777, 0o644);
+                }
+                "symlink" => assert_eq!(fs::read_link(&path).unwrap(), Path::new("S95nanokvm")),
+                "hardlink" => {
+                    assert_eq!(fs::read(&path).unwrap(), legacy);
+                    assert_eq!(path.metadata().unwrap().nlink(), 2);
+                }
+                "fifo" => assert!(std::os::unix::fs::FileTypeExt::is_fifo(
+                    &path.symlink_metadata().unwrap().file_type()
+                )),
+                "directory" => assert!(path.is_dir()),
+                _ => unreachable!(),
+            }
+            continue;
+        }
+        assert_eq!(fs::read(&path).unwrap(), app_bootstrap::PICO_BOOT_SCRIPT);
+        if case == "legacy" {
+            assert_ne!(path.metadata().unwrap().ino(), before.unwrap());
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].metadata().unwrap().ino(), before.unwrap());
+            assert_eq!(fs::read(&evidence[0]).unwrap(), legacy);
+        } else {
+            assert_eq!(path.metadata().unwrap().ino(), before.unwrap());
+            assert!(evidence.is_empty());
+        }
+        let inode = path.metadata().unwrap().ino();
+        fixture.run("chain");
+        assert_eq!(path.metadata().unwrap().ino(), inode);
+        fixture.run("activate-failure");
+        fixture.run("ready-failure");
+    }
+}
+
+#[test]
+fn optional_publication_process_death_keeps_old_evidence_and_never_grants_ready() {
+    let legacy = include_bytes!("../../tests/fixtures/rc12-S96picoclaw.sh");
+    for point in [
+        "optional-written",
+        "optional-synced",
+        "optional-exchanged",
+        "optional-published",
+        "optional-verified",
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.root.path().join("etc/init.d/S96picoclaw");
+        fs::write(&path, legacy).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let legacy_inode = path.metadata().unwrap().ino();
+        let mut child = paused(&fixture, point);
+        fixture.run("busy");
+        fixture.run("configuration-observer-busy");
+        fixture.run("ready-failure");
+        child.child.kill().unwrap();
+        assert_eq!(child.child.wait().unwrap().signal(), Some(9));
+        drop(child);
+        let exchanged = matches!(
+            point,
+            "optional-exchanged" | "optional-published" | "optional-verified"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            if exchanged {
+                app_bootstrap::PICO_BOOT_SCRIPT
+            } else {
+                legacy
+            },
+            "{point}"
+        );
+        let evidence: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".S96picoclaw-next-")
+            })
+            .map(|path| {
+                let metadata = path.metadata().unwrap();
+                let bytes = fs::read(&path).unwrap();
+                (path, metadata.ino(), metadata.mode() & 0o7777, bytes)
+            })
+            .collect();
+        assert_eq!(evidence.len(), 1, "{point}");
+        if exchanged {
+            assert_eq!(evidence[0].1, legacy_inode);
+            assert_eq!(evidence[0].3, legacy);
+        }
+        let state = fixture
+            .root
+            .path()
+            .join("etc/kvm/native-runtime-boot/state");
+        let armed = fs::read(&state).unwrap();
+        assert_eq!(armed[44], 2);
+        assert_eq!(&armed[45..80], &[0; 35]);
+        fixture.run("activate-failure");
+        fixture.run("ready-failure");
+        fixture.run("chain");
+        fixture.run("chain");
+        assert_eq!(fs::read(&path).unwrap(), app_bootstrap::PICO_BOOT_SCRIPT);
+        assert_eq!(fs::read(&state).unwrap(), armed);
+        for (path, inode, mode, bytes) in evidence {
+            let metadata = path.metadata().unwrap();
+            assert_eq!(metadata.ino(), inode, "{point}");
+            assert_eq!(metadata.mode() & 0o7777, mode, "{point}");
+            assert_eq!(fs::read(path).unwrap(), bytes, "{point}");
+        }
+        fixture.run("activate-failure");
+        fixture.run("ready-failure");
     }
 }
 

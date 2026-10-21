@@ -13,6 +13,9 @@ use std::{
 };
 
 const EXECUTABLE: &str = "nanokvm-app-recovery";
+const PICO_NAME: &str = "S96picoclaw";
+pub(super) const PICO_BOOT_SCRIPT: &[u8] =
+    include_bytes!("../../../kvmapp/system/init.d/S96picoclaw");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HelperVersion {
@@ -32,6 +35,96 @@ const V1_PREDECESSORS: &[HelperVersion] = &[HelperVersion {
         0x35, 0xe8,
     ],
 }];
+
+// Exact RC12 source at 387793ab and reviewed development source at 4606dfb.
+// A custom/unknown installed service is never replaced from a name alone.
+const PICO_PREDECESSORS: &[HelperVersion] = &[
+    HelperVersion {
+        size: 3316,
+        sha256: [
+            0x49, 0x92, 0x58, 0xcb, 0x3d, 0x84, 0xaa, 0xd2, 0xdd, 0xf1, 0x79, 0xb7, 0xd5, 0xf6,
+            0xe3, 0xe8, 0x2a, 0xbb, 0x7d, 0xb8, 0x89, 0xf3, 0xdb, 0x22, 0xb8, 0xae, 0x3a, 0x9f,
+            0x0a, 0xe8, 0x82, 0x72,
+        ],
+    },
+    HelperVersion {
+        size: 3313,
+        sha256: [
+            0x3a, 0x2b, 0xff, 0x86, 0xd2, 0x84, 0xbf, 0x6f, 0x38, 0x66, 0x6d, 0xb7, 0x11, 0x33,
+            0x94, 0x1b, 0x22, 0xe4, 0x6f, 0x04, 0xf8, 0x06, 0x8c, 0x15, 0xf1, 0xfd, 0x58, 0x6b,
+            0x9d, 0x0f, 0x81, 0x53,
+        ],
+    },
+];
+
+pub(super) fn publish_optional_picoclaw(
+    boot: &crate::native_owner::broker::boot::Permit,
+    _configuration: &super::state_writers::ConfigPermit,
+    _admission: &ProcessLock,
+) -> io::Result<()> {
+    if !nix::unistd::geteuid().is_root()
+        || nix::unistd::getegid().as_raw() != 0
+        || PICO_BOOT_SCRIPT.is_empty()
+        || PICO_BOOT_SCRIPT.len() > super::boot_script_binding::MAX_SCRIPT
+        || !PICO_BOOT_SCRIPT.starts_with(b"#!/bin/sh\n")
+        || PICO_BOOT_SCRIPT.contains(&0)
+    {
+        return Err(invalid());
+    }
+    let root = restore_fs::open_root(Path::new("/"), true)?;
+    let parent = boot_parent_at(&root, 0)?;
+    match existing(&parent, PICO_NAME, PICO_BOOT_SCRIPT, 0) {
+        Ok(None) => return Ok(()), // Never install/enable an absent optional service.
+        Ok(Some(file)) => {
+            if file.metadata()?.gid() != 0 {
+                return Err(invalid());
+            }
+            file.sync_all()?;
+            return parent.sync_all();
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {}
+        Err(error) => return Err(error),
+    }
+    boot.check_armed_publication().map_err(io::Error::other)?;
+    if !no_transaction()? {
+        return Err(invalid());
+    }
+    let previous = predecessor(&parent, PICO_NAME, 0, PICO_PREDECESSORS)?;
+    if previous.metadata()?.gid() != 0 {
+        return Err(invalid());
+    }
+    previous.sync_all()?;
+    let inode = previous.metadata()?.ino();
+    let name = stage_image(&parent, PICO_BOOT_SCRIPT, PICO_NAME)?;
+    let named = predecessor(&parent, PICO_NAME, 0, PICO_PREDECESSORS)?;
+    if named.metadata()?.ino() != inode || named.metadata()?.gid() != 0 {
+        return Err(invalid());
+    }
+    renameat_with(
+        &parent,
+        name.as_str(),
+        &parent,
+        PICO_NAME,
+        RenameFlags::EXCHANGE,
+    )?;
+    #[cfg(test)]
+    checkpoint("optional-exchanged");
+    parent.sync_all()?;
+    #[cfg(test)]
+    checkpoint("optional-published");
+    let retained = predecessor(&parent, &name, 0, PICO_PREDECESSORS)?;
+    if retained.metadata()?.ino() != inode || retained.metadata()?.gid() != 0 {
+        return Err(invalid());
+    }
+    let current = existing(&parent, PICO_NAME, PICO_BOOT_SCRIPT, 0)?.ok_or_else(invalid)?;
+    if current.metadata()?.gid() != 0 {
+        return Err(invalid());
+    }
+    current.sync_all()?;
+    #[cfg(test)]
+    checkpoint("optional-verified");
+    Ok(())
+}
 
 // Trusted backend source bytes, never a runtime /kvmapp or manifest fallback.
 // S95 must not overwrite these independent gates from a rolled-back bundle.
@@ -354,19 +447,16 @@ fn ensure_at(
         }
         Err(error) => return Err(error),
     }
-    let name = stage_helper(parent, image)?;
+    let name = stage_image(parent, image, EXECUTABLE)?;
     publish(parent, &name, image, uid)
 }
 
-fn stage_helper(parent: &File, image: &[u8]) -> io::Result<String> {
+fn stage_image(parent: &File, image: &[u8], executable: &str) -> io::Result<String> {
     let mut nonce = [0; 16];
     OsRng
         .try_fill_bytes(&mut nonce)
         .map_err(|_| io::Error::other("app bootstrap entropy unavailable"))?;
-    let name = format!(
-        ".nanokvm-app-recovery-next-{:032x}",
-        u128::from_be_bytes(nonce)
-    );
+    let name = format!(".{executable}-next-{:032x}", u128::from_be_bytes(nonce));
     let mut file: File = openat(
         parent,
         name.as_str(),
@@ -378,11 +468,19 @@ fn stage_helper(parent: &File, image: &[u8]) -> io::Result<String> {
     fchmod(&file, Mode::from_raw_mode(0o600))?;
     file.write_all(image)?;
     #[cfg(test)]
-    checkpoint("written");
+    checkpoint(if executable == PICO_NAME {
+        "optional-written"
+    } else {
+        "written"
+    });
     fchmod(&file, Mode::from_raw_mode(0o755))?;
     file.sync_all()?;
     #[cfg(test)]
-    checkpoint("synced");
+    checkpoint(if executable == PICO_NAME {
+        "optional-synced"
+    } else {
+        "synced"
+    });
     Ok(name)
 }
 
@@ -395,7 +493,7 @@ fn migrate_at(
     let previous = predecessor(parent, EXECUTABLE, uid, predecessors)?;
     previous.sync_all()?;
     let inode = previous.metadata()?.ino();
-    let name = stage_helper(parent, image)?;
+    let name = stage_image(parent, image, EXECUTABLE)?;
     // The caller holds update admission throughout status inspection, staging
     // and publication. Recheck the protected canonical name before exchange;
     // unrelated privileged writers must use the same admission protocol.

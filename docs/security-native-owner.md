@@ -141,8 +141,8 @@ retaining the backend. Full shutdown/install joins every enrolled slot. The
 backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
-native lifecycle compatibility epoch is now 4; epoch-1/2/3 transitions are refused,
-and `support_transition=0` still refuses even a matching epoch-4 live transition.
+native lifecycle compatibility epoch is now 5; epoch-1/2/3/4 transitions are refused,
+and `support_transition=0` still refuses even a matching epoch-5 live transition.
 The separate boot receipt now has a generation-bound v2 format; the native
 Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
 was introduced.
@@ -167,6 +167,36 @@ before any native intent or launch; it is not silently replaced by the root
 default. This is a deliberately fail-closed launch configuration, not Pico-only
 error isolation or validation of filesystem trust. Independent legacy launchers
 are not automatically migrated by this in-memory binding.
+
+### Optional S96 file publication during legacy bootstrap
+
+`prepare_boot_support` now retains UpdateEX, then a configuration-writer permit,
+then the boot permit until the caller finishes mandatory script publication.
+Configuration contention refuses before publishing any support helper. Release
+order is boot, configuration, update; the later startup trust/configuration
+reload still runs only after these permits are dropped.
+
+An absent `S96picoclaw` stays absent. An exact current protected script is synced
+without changing its inode. A differing installed script is replaceable only
+with a live exclusive boot permit whose canonical receipt is Armed for this
+kernel boot, no app-slot transaction, and an exact reviewed predecessor identity:
+RC12 source at `387793ab` (3316 bytes, SHA-256
+`499258cb3d84aad2ddf179b7d5f6e3e82abb7db889f3db22b8ae3a9f0ae88272`),
+or development source at `4606dfb` (3313 bytes, SHA-256
+`3a2bff86d284bf6f38666db71133941b22e46f04f8068c15f1fd586b9d0f8153`).
+Unknown/custom content, unsafe metadata, symlinks, hardlinks and non-regular
+objects are refused without overwriting them. A shared Ready observation is
+never replacement authority.
+
+Publication stages immutable compiled bytes under an exclusive random name,
+syncs the file, rechecks the old canonical inode, exchanges names atomically,
+syncs the parent and verifies both installed and retained old images. The old
+inode remains evidence, not a fallback executable; orphan staging evidence is
+not consumed or deleted on retry. This is filesystem publication, not stopping,
+adopting or restarting a running legacy gateway. It cannot grant same-boot
+Ready, does not add a fifth framed support-catalog entry, and does not enable
+the still-unsupported live helper/support transaction. Actual S96/API routing,
+all Pico writers, pending-pair settlement and H2 remain required.
 
 ## Durable native broker admission
 

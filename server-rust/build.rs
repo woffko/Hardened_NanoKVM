@@ -69,8 +69,11 @@ fn read_boot_script(manifest: &std::path::Path, name: &str) -> Vec<u8> {
         .read_to_end(&mut bytes)
         .expect("read trusted boot script");
     assert!(
-        !bytes.is_empty() && bytes.len() <= boot_script_binding::MAX_SCRIPT,
-        "invalid boot script size"
+        !bytes.is_empty()
+            && bytes.len() <= boot_script_binding::MAX_SCRIPT
+            && bytes.starts_with(b"#!/bin/sh\n")
+            && !bytes.contains(&0),
+        "invalid boot script source"
     );
     bytes
 }

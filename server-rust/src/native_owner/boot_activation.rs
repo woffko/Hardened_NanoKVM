@@ -34,6 +34,7 @@ enum State {
 /// descriptors are CLOEXEC. Drop explicitly unlocks fork-before-exec aliases.
 pub struct Permit {
     directory: File,
+    exclusive: bool,
 }
 
 impl Drop for Permit {
@@ -43,6 +44,15 @@ impl Drop for Permit {
 }
 
 impl Permit {
+    /// Only a live exclusive current-boot Armed owner may replace a known
+    /// optional legacy consumer. Ready/shared observation is not publication.
+    pub(crate) fn check_armed_publication(&self) -> Result<(), Error> {
+        if !self.exclusive || load(self, 0)? != Some(State::Armed(Epoch::current()?)) {
+            return Err(Error::Inactive);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(parent: &File) -> Self {
         lock(parent, true, false, nix::unistd::geteuid().as_raw()).unwrap()
@@ -92,7 +102,10 @@ fn lock(parent: &File, create: bool, exclusive: bool, uid: u32) -> Result<Permit
             Error::Io
         }
     })?;
-    Ok(Permit { directory })
+    Ok(Permit {
+        directory,
+        exclusive,
+    })
 }
 
 fn regular(parent: &File, name: &str, uid: u32, mode: u32) -> Result<File, Error> {

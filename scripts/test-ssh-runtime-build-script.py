@@ -121,7 +121,7 @@ def main():
         trusted = Path(__file__).resolve().parent.parent / "kvmapp/system/init.d"
         names = ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm", "S96picoclaw"]
         for name in names:
-            for fault in ["missing", "empty", "oversized"]:
+            for fault in ["missing", "empty", "oversized", "header", "nul"]:
                 source_root = work / (name + "-" + fault)
                 manifest = source_root / "server-rust"
                 manifest.mkdir(parents=True)
@@ -131,7 +131,9 @@ def main():
                     (scripts / member).write_bytes((trusted / member).read_bytes())
                 if fault == "missing": (scripts / name).unlink()
                 elif fault == "empty": (scripts / name).write_bytes(b"")
-                else: (scripts / name).write_bytes(bytes(1024 * 1024 + 1))
+                elif fault == "oversized": (scripts / name).write_bytes(bytes(1024 * 1024 + 1))
+                elif fault == "header": (scripts / name).write_bytes(b"#!/bin/bash\nexit 0\n")
+                else: (scripts / name).write_bytes((scripts / name).read_bytes()+b"\0")
                 output = source_root / "out"
                 output.mkdir()
                 env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TARGET": "riscv64gc-unknown-linux-musl",

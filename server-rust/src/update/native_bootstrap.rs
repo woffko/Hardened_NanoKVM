@@ -1,7 +1,12 @@
 //! Fixed-root, compile-bound native program bootstrap before boot publication.
 //! This establishes files only, never ownership of an existing native process.
 
-use super::{app_bootstrap, app_slot, operation_lock::ProcessLock, restore_binding, restore_fs};
+use super::{
+    app_bootstrap, app_slot,
+    operation_lock::ProcessLock,
+    restore_binding, restore_fs,
+    state_writers::{ConfigPermit, StateWriters},
+};
 use crate::native_owner::embedded;
 use rand_core::{OsRng, RngCore};
 use rustix::fs::{Mode, OFlags, RenameFlags, fchmod, openat, renameat_with};
@@ -17,20 +22,26 @@ type Images<'a> = [&'a [u8]; 4];
 /// Retain until all compile-bound consumer scripts have been published. This
 /// lease does not stop native processes or authorize an app-slot transaction.
 pub struct BootSupport {
-    _admission: ProcessLock,
     _boot: crate::native_owner::broker::boot::Permit,
+    _configuration: ConfigPermit,
+    _admission: ProcessLock,
 }
 
 pub fn prepare_boot_support() -> io::Result<BootSupport> {
     let app = app_bootstrap::embedded_recovery()?;
     let native = embedded_images()?;
     let admission = ProcessLock::acquire().map_err(io::Error::other)?;
+    let configuration = StateWriters::default()
+        .configuration()
+        .map_err(io::Error::other)?;
     app_bootstrap::ensure_with_admission(app, &admission)?;
     ensure_locked(native, &admission)?;
     let boot = crate::native_owner::broker::boot::prepare().map_err(io::Error::other)?;
+    app_bootstrap::publish_optional_picoclaw(&boot, &configuration, &admission)?;
     Ok(BootSupport {
-        _admission: admission,
         _boot: boot,
+        _configuration: configuration,
+        _admission: admission,
     })
 }
 
