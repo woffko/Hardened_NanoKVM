@@ -34,10 +34,20 @@ impl StateWriters {
     }
 
     pub(crate) fn configuration(&self) -> Result<ConfigPermit> {
-        self.enroll(
+        let permit = self.enroll(
             Domain::Configuration,
             "configuration change already in progress",
-        )
+        )?;
+        self.check_picoclaw_fence()?;
+        Ok(permit)
+    }
+
+    fn check_picoclaw_fence(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(parent) = &self.parent {
+            return super::picoclaw_config::jobs::check_fixture(parent);
+        }
+        super::picoclaw_config::jobs::check_writer_admission()
     }
 
     fn enroll<Role>(&self, domain: Domain, busy: &'static str) -> Result<WriterPermit<Role>> {
@@ -107,6 +117,7 @@ impl StateWriters {
         let activity = self
             .lock(Domain::WriterActivity, false)
             .map_err(writer_error)?;
+        self.check_picoclaw_fence()?;
         Ok(WriterDrain {
             _activity: activity,
             _admission: admission,
@@ -149,6 +160,7 @@ impl WriterPause<'_> {
         })
         .await
         .map_err(|_| AppError::Conflict("configuration writers did not drain".into()))??;
+        self.writers.check_picoclaw_fence()?;
         Ok(WriterDrain {
             _activity: activity,
             _admission: self.admission,

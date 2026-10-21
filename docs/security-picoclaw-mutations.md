@@ -5,6 +5,32 @@ activation or acceptance report. The ordinary model/profile/install/uninstall
 writers, durable store, new transport and recovery path are not yet migrated.
 The legacy onboarding completion boolean is not a durable job receipt.
 
+## Current connected reader/fence slice
+
+The fixed-root reader recognizes an 8,608-byte private `NKPJOB01` metadata
+snapshot: store epoch, monotonic head, at most one active job and a contiguous
+last-32 terminal ring. It validates fixed kinds/phases/results/runtime intent,
+nonzero private identities, canonical encoding and a domain-separated checksum.
+The checksum detects corruption, not a malicious root writer. Parsed records
+are data, never native-closure, bootstrap or recovery capabilities.
+
+Existing snapshots are consulted before returning a Config permit or either
+synchronous/asynchronous writer drain. Active, uncertain, corrupt, unsafe,
+missing-state or extra-member evidence refuses admission and is preserved.
+Reads do not initialize, rewrite, settle, resume or prune a job. Producers must
+own Update then Config before taking the store's exclusive lock; this short
+read-side shared lock is not a substitute for their lifetime ownership.
+
+This slice deliberately has NO production initializer, accepted-job writer,
+phase-transition API, payload store, retirement or recovery bypass. An absent
+directory is still the legacy preactivation state, not proof of an empty or
+previously initialized store. Store-loss protection needs a separately enrolled
+bootstrap anchor: the current native boot marker cannot establish it alone.
+Existing onboarding does not publish these records yet. The SIGKILL and root
+tests create synthetic records only in disposable fixtures; they do not prove
+durable acceptance or a replay-safe producer. Ordinary unmanaged Pico writers
+and OS-level H2 isolation remain outside this connected cooperative fence.
+
 ## Authority and scope
 
 The native broker owns each accepted operation, not its HTTP caller. Admission
@@ -52,6 +78,19 @@ never treated as permission to execute that old request.
 Retiring a receipt never resets the sequence or reopens its request identity.
 Store loss/corruption is a recovery condition, not an implicit fresh start.
 
+Before acceptance or any target mutation, the producer durably publishes a
+separate immutable `active` intent bound to that job ID/source/payload. It
+remains present across every state/payload/scratch/activation transition,
+including publication of the final completed snapshot. Only known-success
+sync of that snapshot and its parent, with the entire operation settled,
+permits exact retirement of `active`. A completed snapshot with that fence
+still present is completion-pending, not an acknowledged public result.
+Unknown state-publication sync cannot remove the fence. If final fence-unlink
+sync is unknown, either the fence remains and recovery is conservative, or it
+is absent beside an already durable completed state. Recovery may retire the
+exact remaining fence; it must never repeat the mutation from observation.
+This extra intent/finalization publisher is required but not implemented yet.
+
 Credential-bearing payload and source snapshots stay in protected 0600 files
 and bounded zeroizing buffers. They are not argv, environment, log, Debug or
 public status data. The in-memory `Generation` type remains nonserializable;
@@ -76,6 +115,16 @@ source pair/workspace identities, support identity and operation. Successful
 mutation does not mean the old task resumed. Restart is a separate Activating
 step requiring the complete settled pair, current support/generation admission
 and an explicit runtime result. Removing the runtime never restarts it.
+
+The intent separately persists `resume_allowed`, initially set from the observed
+running state except for removal. An authorized Stop or session revocation must
+durably lower this flag before its acknowledgement; it cannot be re-enabled by
+observation, recovery or a new boot. A previously running job whose restart was
+suppressed records the distinct runtime result `Suppressed`, not `NotRequested`
+or `Resumed`. This flag is not permission to restart: current runtime admission
+and all settlement checks are still required. The reader checks these record
+shapes, but the production producer and monotonic transition enforcement remain
+unimplemented.
 
 Failure before any mutation can become a terminal failed/cancelled receipt only
 after native closure and exact scratch/payload retirement. Once mutation may

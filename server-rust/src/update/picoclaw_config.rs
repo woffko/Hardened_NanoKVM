@@ -26,6 +26,9 @@ mod onboard;
 mod pair;
 pub(crate) use onboard::Onboarding;
 
+#[path = "picoclaw_jobs.rs"]
+pub(crate) mod jobs;
+
 fn invalid() -> AppError {
     AppError::Config("invalid or unsafe picoclaw configuration storage".into())
 }
