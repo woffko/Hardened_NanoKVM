@@ -29,6 +29,8 @@ pub(crate) struct Onboarding {
     home: Directory,
     stage: Directory,
     path: PathBuf,
+    #[cfg(test)]
+    fail_after_member: Option<usize>,
 }
 
 struct Artifact {
@@ -227,13 +229,22 @@ impl Onboarding {
             home,
             stage,
             path: Self::path(home_path),
+            #[cfg(test)]
+            fail_after_member: None,
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after_member(&mut self, count: usize) {
+        assert!(count != 0);
+        self.fail_after_member = Some(count);
     }
 
     /// Only call after receipt + owner reap + EOF, never on a child exit alone.
     /// The pair is published LAST. Default templates never overwrite user data;
     /// generated assets either match exactly or require explicit migration.
-    pub(crate) fn finish(self, permit: &ConfigPermit) -> Result<()> {
+    /// Borrow the retained stage: neither success nor Err consumes its leases.
+    pub(crate) fn finish(&mut self, permit: &ConfigPermit) -> Result<()> {
         let named = child(&self.home, STAGE, false)?;
         if Revision::from(&named.file.metadata()?) != Revision::from(&self.stage.file.metadata()?) {
             return Err(invalid());
@@ -357,6 +368,14 @@ impl Onboarding {
             .map_err(std::io::Error::from)?;
             file.sync_all()?;
             directory.file.sync_all()?;
+            #[cfg(test)]
+            if let Some(remaining) = self.fail_after_member.as_mut() {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    self.fail_after_member = None;
+                    return Err(std::io::Error::other("fixture interrupted onboard import").into());
+                }
+            }
         }
         // The caller still owns both admissions and the home flock here.
         let _ = permit;

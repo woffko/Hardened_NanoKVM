@@ -404,6 +404,15 @@ struct BackendRestart {
     _admission: RuntimePermit,
     safe_mode: bool,
 }
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Join filesystem work before implicit field teardown can release the
+        // running broker/singleton. Its payload and admissions remain owned.
+        if let Some(onboard) = self.picoclaw_onboard.as_mut() {
+            onboard.work.join_for_teardown();
+        }
+    }
+}
 impl Engine {
     fn new(broker: Broker) -> Self {
         Self {

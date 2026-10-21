@@ -42,6 +42,11 @@ fn onboard_enforces_depth_and_global_entry_bounds_including_empty_directories() 
     run_private_root("onboard-bounds");
 }
 
+#[test]
+fn onboard_partial_import_error_retains_scratch_home_lock_and_unpublished_pair() {
+    run_private_root("onboard-partial-import");
+}
+
 fn output(home: &Path) -> PathBuf {
     home.join(crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY)
 }
@@ -102,7 +107,7 @@ pub(super) fn exercise(case: &str, permit: &ConfigPermit, home: &Path) {
         for index in 0..2 {
             let selected = home.join(format!("case{index}"));
             let config = selected.join("config.json");
-            let stage = Onboarding::prepare(permit, &config).unwrap().unwrap();
+            let mut stage = Onboarding::prepare(permit, &config).unwrap().unwrap();
             populate(&selected);
             if case == "onboard-source-links" {
                 fs::remove_file(output(&selected).join("workspace/SOUL.md")).unwrap();
@@ -157,10 +162,37 @@ pub(super) fn exercise(case: &str, permit: &ConfigPermit, home: &Path) {
         );
         return;
     }
-    let stage = Onboarding::prepare(permit, &config).unwrap().unwrap();
+    let mut stage = Onboarding::prepare(permit, &config).unwrap().unwrap();
     assert_eq!(fs::metadata(output(home)).unwrap().mode() & 0o777, 0o700);
     populate(home);
     match case {
+        "onboard-partial-import" => {
+            stage.fail_after_member(1);
+            assert!(stage.finish(permit).is_err());
+            assert!(!config.exists());
+            assert!(!home.join(".security.yml").exists());
+            assert_eq!(
+                fs::read(home.join("workspace/SOUL.md")).unwrap(),
+                b"upstream default"
+            );
+            assert!(!home.join("workspace/memory/README.md").exists());
+            assert!(output(home).join("workspace/memory/README.md").is_file());
+            // The retained object still owns its checked scratch and exclusive
+            // home lease. Returning Err must not consume that authority.
+            assert!(Onboarding::prepare(permit, &config).is_err());
+            let home_file = fs::File::open(home).unwrap();
+            assert_eq!(
+                rustix::fs::flock(
+                    &home_file,
+                    rustix::fs::FlockOperation::NonBlockingLockExclusive
+                ),
+                Err(rustix::io::Errno::WOULDBLOCK)
+            );
+            drop(stage);
+            // Owner drop is not recovery: scratch is still refused/preserved.
+            assert!(Onboarding::prepare(permit, &config).is_err());
+            assert!(output(home).join("config.json").is_file());
+        }
         "onboard-destination-link" => {
             std::os::unix::fs::symlink("/outside", home.join("workspace")).unwrap();
             assert!(stage.finish(permit).is_err());
@@ -191,6 +223,7 @@ pub(super) fn exercise(case: &str, permit: &ConfigPermit, home: &Path) {
             put_private(&home.join("workspace/memory/notes"), b"user notes");
             let inode = fs::metadata(home.join("workspace/SOUL.md")).unwrap().ino();
             stage.finish(permit).unwrap();
+            drop(stage);
             assert_eq!(
                 fs::metadata(home.join("workspace/SOUL.md")).unwrap().ino(),
                 inode

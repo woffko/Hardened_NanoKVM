@@ -1,4 +1,5 @@
 use super::*;
+use crate::native_owner::broker::ipc::picoclaw::work::Fixture as ImportFixture;
 use crate::update::{operation_lock::ProcessLock, state_writers::StateWriters};
 
 const OPS: [Operation; 6] = [
@@ -159,6 +160,406 @@ fn onboard_retains_both_admissions_after_caller_loss_until_successful_closure() 
             .unwrap(),
     );
     close(engine);
+}
+
+#[test]
+fn onboard_import_runs_off_loop_and_stop_cannot_abandon_its_owner() {
+    for stop_during_import in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        let (entered, observed) = std::sync::mpsc::channel();
+        // Declared after Engine: disconnect this gate before joined teardown
+        // even if an assertion fails while the import worker is held.
+        let (resume, resumed) = std::sync::mpsc::channel();
+        assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+        engine
+            .picoclaw_onboard
+            .as_mut()
+            .unwrap()
+            .work
+            .set_fixture(ImportFixture::Block {
+                entered,
+                resume: resumed,
+            });
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        until(|| {
+            engine.tick();
+            observed.try_recv().is_ok()
+        });
+        engine.disconnected(7);
+        let parent = File::open(root.path()).unwrap();
+        for _ in 0..20 {
+            let start = Instant::now();
+            assert_eq!(engine.request(8, Operation::Observe).code, Code::Ok);
+            assert!(start.elapsed() < Duration::from_millis(250));
+            assert!(engine.picoclaw_onboard.is_some());
+            assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+            assert!(
+                StateWriters::for_test_parent(parent.try_clone().unwrap())
+                    .configuration()
+                    .is_err()
+            );
+            assert_eq!(
+                call(&mut engine, Operation::EnsurePicoclaw).code,
+                Code::Busy
+            );
+        }
+        if stop_during_import {
+            assert_eq!(call(&mut engine, Operation::StopPicoclaw).code, Code::Ok);
+            let start = Instant::now();
+            engine.tick();
+            assert!(start.elapsed() < Duration::from_millis(250));
+            assert!(engine.picoclaw_onboard.is_some());
+        }
+        assert_eq!(
+            call(&mut engine, Operation::PicoclawStopped).code,
+            Code::Unavailable
+        );
+        resume.send(()).unwrap();
+        until(|| {
+            engine.tick();
+            engine.picoclaw_onboard.is_none()
+        });
+        assert_eq!(
+            call(&mut engine, Operation::PicoclawOnboardComplete).code,
+            if stop_during_import {
+                Code::Invalid
+            } else {
+                Code::Ok
+            }
+        );
+        assert_eq!(call(&mut engine, Operation::PicoclawStopped).code, Code::Ok);
+        drop(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+        drop(
+            StateWriters::for_test_parent(parent)
+                .configuration()
+                .unwrap(),
+        );
+        close(engine);
+    }
+}
+
+#[test]
+fn onboard_import_error_panic_and_spawn_failure_retain_admissions_without_retry() {
+    for fixture in [
+        ImportFixture::Fail,
+        ImportFixture::Panic,
+        ImportFixture::SpawnFailure,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+        engine
+            .picoclaw_onboard
+            .as_mut()
+            .unwrap()
+            .work
+            .set_fixture(fixture);
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        until(|| {
+            engine.tick();
+            engine.mode == Mode::Uncertain
+        });
+        assert!(matches!(
+            engine.picoclaw_status,
+            Some(Status::Closed(Completion::SuccessfulExit))
+        ));
+        let parent = File::open(root.path()).unwrap();
+        for _ in 0..3 {
+            engine.disconnected(7);
+            engine.tick();
+            assert!(engine.picoclaw_onboard.is_some());
+            assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+            assert!(
+                StateWriters::for_test_parent(parent.try_clone().unwrap())
+                    .configuration()
+                    .is_err()
+            );
+            for operation in OPS {
+                assert_eq!(call(&mut engine, operation).code, Code::Uncertain);
+            }
+            assert_eq!(engine.request(8, Operation::Shutdown).code, Code::Uncertain);
+        }
+        // Explicit test teardown is not recovery or a successful receipt.
+        drop(engine);
+        drop(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap());
+        drop(
+            StateWriters::for_test_parent(parent)
+                .configuration()
+                .unwrap(),
+        );
+    }
+}
+
+#[test]
+fn onboard_late_success_cannot_release_a_preexisting_uncertain_broker() {
+    for before_import in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = configured(root.path());
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+        engine
+            .picoclaw_onboard
+            .as_mut()
+            .unwrap()
+            .work
+            .set_fixture(ImportFixture::Block {
+                entered,
+                resume: resumed,
+            });
+        if before_import {
+            engine.mode = Mode::Uncertain;
+        }
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        if before_import {
+            until(|| {
+                engine.tick();
+                matches!(
+                    engine.picoclaw_status,
+                    Some(Status::Closed(Completion::SuccessfulExit))
+                )
+            });
+            assert!(matches!(
+                observed.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        } else {
+            until(|| {
+                engine.tick();
+                observed.try_recv().is_ok()
+            });
+            // Test the Engine-level uncertainty fence independently of Group's
+            // existing sticky native ownership latch.
+            engine.mode = Mode::Uncertain;
+            resume.send(()).unwrap();
+            until(|| {
+                engine
+                    .picoclaw_onboard
+                    .as_ref()
+                    .unwrap()
+                    .work
+                    .worker_finished_fixture()
+            });
+        }
+        let parent = File::open(root.path()).unwrap();
+        for _ in 0..3 {
+            engine.tick();
+            assert!(engine.picoclaw_onboard.is_some());
+            assert_eq!(engine.picoclaw_onboard_result, None);
+            assert_eq!(
+                call(&mut engine, Operation::PicoclawOnboardComplete).code,
+                Code::Uncertain
+            );
+            assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+            assert!(
+                StateWriters::for_test_parent(parent.try_clone().unwrap())
+                    .configuration()
+                    .is_err()
+            );
+        }
+        drop(engine);
+    }
+}
+
+#[test]
+fn onboard_actual_partial_import_retains_engine_and_both_admissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("root/.picoclaw")).unwrap();
+    fs::set_permissions(root.path().join("root"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(
+        root.path().join("root/.picoclaw"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let child = std::process::Command::new("/usr/bin/unshare")
+        .args(["--user", "--map-root-user", "--mount", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "native_owner::broker::ipc::tests::picoclaw::onboard_partial_import_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env("NANOKVM_ONBOARD_IMPORT_ROOT", root.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    struct OwnedChild(Option<std::process::Child>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut owned = OwnedChild(Some(child));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if owned.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "partial-import namespace fixture timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = owned.0.take().unwrap().wait_with_output().unwrap();
+    assert!(output.status.success(), "partial import: {output:?}");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("actual-partial-import-retained")
+    );
+}
+
+#[test]
+fn onboard_engine_teardown_joins_import_before_releasing_native_singleton() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = configured(root.path());
+    assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+    std::thread::scope(|scope| {
+        let (entered, observed) = std::sync::mpsc::channel();
+        // Scoped closure drops this gate before scope joins on assertion panic.
+        let (resume, resumed) = std::sync::mpsc::channel();
+        engine
+            .picoclaw_onboard
+            .as_mut()
+            .unwrap()
+            .work
+            .set_fixture(ImportFixture::Block {
+                entered,
+                resume: resumed,
+            });
+        fs::write(root.path().join("onboard-release"), b"release").unwrap();
+        until(|| {
+            engine.tick();
+            observed.try_recv().is_ok()
+        });
+        let (dropping, drop_entered) = std::sync::mpsc::channel();
+        let (finished, complete) = std::sync::mpsc::channel();
+        let teardown = scope.spawn(move || {
+            dropping.send(()).unwrap();
+            drop(engine);
+            finished.send(()).unwrap();
+        });
+        drop_entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            complete.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        let parent = File::open(root.path()).unwrap();
+        assert!(matches!(
+            journal::Store::fixture(&parent, nix::unistd::geteuid().as_raw(), BOOT),
+            Err(crate::native_owner::broker::JournalError::Busy)
+        ));
+        assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+        assert!(
+            StateWriters::for_test_parent(parent.try_clone().unwrap())
+                .configuration()
+                .is_err()
+        );
+        resume.send(()).unwrap();
+        teardown.join().unwrap();
+        complete.recv_timeout(Duration::from_secs(1)).unwrap();
+    });
+}
+
+#[test]
+fn onboard_partial_import_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(root) = std::env::var_os("NANOKVM_ONBOARD_IMPORT_ROOT") else {
+        return;
+    };
+    let root = Path::new(&root);
+    // Launch the synthetic fixed native one-shot before chroot so its executable
+    // remains available. Controller fds/reap and actual import run afterward.
+    let mut engine = configured(root);
+    assert_eq!(call(&mut engine, Operation::OnboardPicoclaw).code, Code::Ok);
+    until(|| root.join("onboard-pid").exists());
+    fs::write(root.join("onboard-release"), b"release").unwrap();
+    nix::unistd::chroot(root).unwrap();
+    std::env::set_current_dir("/").unwrap();
+    let home = Path::new("/root/.picoclaw");
+    engine
+        .picoclaw_onboard
+        .as_mut()
+        .unwrap()
+        .work
+        .prepare_stage_fixture(&home.join("config.json"), 1);
+    let stage = home.join(crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY);
+    fs::create_dir(stage.join("workspace")).unwrap();
+    for (path, bytes) in [
+        (
+            stage.join("config.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "agents": {"defaults": {"workspace": stage.join("workspace")}},
+                "model_list": []
+            }))
+            .unwrap(),
+        ),
+        (stage.join(".security.yml"), b"model_list: []\n".to_vec()),
+        (
+            stage.join("workspace/first"),
+            b"first synthetic member".to_vec(),
+        ),
+        (
+            stage.join("workspace/second"),
+            b"second synthetic member".to_vec(),
+        ),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Uncertain
+    });
+    assert!(matches!(
+        engine.picoclaw_status,
+        Some(Status::Closed(Completion::SuccessfulExit))
+    ));
+    assert_eq!(
+        fs::read(home.join("workspace/first")).unwrap(),
+        b"first synthetic member"
+    );
+    assert!(!home.join("workspace/second").exists());
+    assert!(!home.join("config.json").exists());
+    assert!(!home.join(".security.yml").exists());
+    assert!(stage.join("workspace/second").is_file());
+    let parent = File::open("/").unwrap();
+    for _ in 0..3 {
+        engine.disconnected(7);
+        engine.tick();
+        assert!(engine.picoclaw_onboard.is_some());
+        assert!(ProcessLock::from_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+        assert!(
+            StateWriters::for_test_parent(parent.try_clone().unwrap())
+                .configuration()
+                .is_err()
+        );
+        assert_eq!(
+            call(&mut engine, Operation::EnsurePicoclaw).code,
+            Code::Uncertain
+        );
+    }
+    let home_file = File::open(home).unwrap();
+    assert_eq!(
+        rustix::fs::flock(
+            &home_file,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        ),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    );
+    drop(engine);
+    assert!(stage.join("workspace/second").is_file());
+    println!("actual-partial-import-retained");
 }
 
 #[test]

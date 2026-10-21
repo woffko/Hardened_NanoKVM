@@ -3,33 +3,51 @@
 use super::*;
 use crate::update::picoclaw_config::{self, Generation};
 
+#[path = "picoclaw_onboard_work.rs"]
+pub(super) mod work;
+use work::{ImportStatus, ImportWork};
+
 pub(super) struct Onboard {
-    admission: RuntimePermit,
-    stage: Option<picoclaw_config::Onboarding>,
+    pub(super) work: ImportWork,
     pub(super) deadline: Instant,
     cancelled: bool,
+    importing: bool,
 }
 
 impl Engine {
     pub(super) fn tick_picoclaw(&mut self, broker: &mut Broker) {
         self.picoclaw_status = broker.group.poll()[3];
-        if broker.group.uncertainty_latched() {
+        if broker.group.uncertainty_latched() || self.mode == Mode::Uncertain {
             self.mode = Mode::Uncertain;
             return;
         }
         if let Some(mut onboard) = self.picoclaw_onboard.take() {
             if let Some(Status::Closed(completion)) = self.picoclaw_status {
                 let success = !onboard.cancelled && completion == Completion::SuccessfulExit;
-                self.picoclaw_onboard_result = Some(
-                    success
-                        && match onboard.stage.take() {
-                            Some(stage) => stage.finish(&onboard.admission._configuration).is_ok(),
-                            None => cfg!(test),
-                        },
-                );
-                // Config and Update are released only after the entire owned
-                // tree closed AND completed output publication returned.
-                drop(onboard);
+                if success || onboard.importing {
+                    // Stop after import admission cannot drop/join a live I/O
+                    // worker on this loop or reinterpret its partial result.
+                    onboard.importing = true;
+                    match onboard.work.poll_closed() {
+                        ImportStatus::Pending => self.picoclaw_onboard = Some(onboard),
+                        ImportStatus::Complete => {
+                            self.picoclaw_onboard_result = Some(!onboard.cancelled);
+                            // Successful I/O and joined worker, not a returned
+                            // Err, release the complete in-memory owner.
+                            drop(onboard);
+                        }
+                        ImportStatus::Failed => {
+                            self.picoclaw_onboard_result = Some(false);
+                            self.mode = Mode::Uncertain;
+                            self.picoclaw_onboard = Some(onboard);
+                        }
+                    }
+                } else {
+                    // No import was started: the one-shot is proven closed.
+                    // Scratch remains evidence; durable retirement is separate.
+                    self.picoclaw_onboard_result = Some(false);
+                    drop(onboard);
+                }
             } else {
                 if !onboard.cancelled && Instant::now() >= onboard.deadline {
                     onboard.cancelled = true;
@@ -190,10 +208,10 @@ impl Engine {
             Ok(()) => {
                 self.picoclaw_generation = None;
                 self.picoclaw_onboard = Some(Onboard {
-                    admission,
-                    stage,
+                    work: ImportWork::new(admission, stage),
                     deadline: Instant::now() + Duration::from_secs(60),
                     cancelled: false,
+                    importing: false,
                 });
                 self.picoclaw_status = broker.group.poll()[3];
                 Code::Ok
@@ -203,10 +221,10 @@ impl Engine {
                 // No closure proof: retain admission even for a journal or
                 // ownership failure, and close further lifecycle admission.
                 self.picoclaw_onboard = Some(Onboard {
-                    admission,
-                    stage,
+                    work: ImportWork::new(admission, stage),
                     deadline: Instant::now(),
                     cancelled: true,
+                    importing: false,
                 });
                 self.mode = Mode::Uncertain;
                 Code::Uncertain

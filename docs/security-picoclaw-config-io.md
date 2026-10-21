@@ -108,6 +108,17 @@ An abandoned API/ctl receiver does not release those admissions. Deadline/Stop
 requests native cleanup and never reports import success; missing closure pins
 uncertainty instead of authorizing another writer.
 
+After successful native closure, checked import runs in one fixed joined worker;
+the broker keeps supervising native cells without locking its I/O payload. The
+worker retains the complete Update/Config permit and checked stage. Import Err,
+spawn failure or a caught host-test unwind keeps them owned and marks the broker
+Uncertain rather than releasing a partially completed operation. Stop after
+import admission cannot abandon that worker. Preexisting broker/native
+uncertainty wins over a late successful I/O result. Engine teardown joins before
+releasing its native singleton. Production process death still needs durable
+recovery; panic=abort is unchanged. Initial scratch preparation is not made
+asynchronous by this import-only change.
+
 The installed home/pair is not passed to upstream `onboard`: a fresh private
 `.nanokvm-onboard` scratch is created with exclusive mkdir, and the command's
 home/config/cwd point there. Inspected upstream v0.2.8
@@ -135,6 +146,9 @@ orphan scratch/dangling security is refused, not deleted, adopted or blindly
 retried. Durable closed-owner retry/retirement, SIGKILL/kernel-I/O settlement,
 actual optional-binary validation and installed-device acceptance remain open.
 The scratch is not a restore-schema member or proof of all-writer quiescence.
+The complete [mutation-job protocol](security-picoclaw-mutations.md) is selected,
+but its durable store/result correlation/recovery and ordinary writer migration
+are not yet implemented. The legacy completion boolean is not a job receipt.
 
 ## Startup defaults and connection-time publication
 
@@ -202,3 +216,11 @@ malformed-policy refusal before provisioning. An actual interrupted-pair case
 refuses connection-time preparation without changing the canonical pair, then
 recovers only through stopped-launch preparation. These host fixtures do not
 execute the installed PicoClaw binary or prove OS-level tool isolation.
+
+Retained-import fixtures additionally combine a real checked scratch and actual
+Engine with a synthetic fixed one-shot's receipt/reap/EOF. A test-only error
+after the first synced workspace member keeps the pair unpublished and retains
+Update/Config/home ownership. Held-worker controls, Stop/caller loss, spawn and
+caught-unwind failures, preexisting uncertainty and joined singleton teardown
+are checked separately. The injected error is not a kernel-fault or power-loss
+test; durable whole-job recovery and scratch retirement are still unimplemented.
