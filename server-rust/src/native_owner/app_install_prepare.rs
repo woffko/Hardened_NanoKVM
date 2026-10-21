@@ -1,33 +1,44 @@
-//! Main-thread closed-runtime proof plus one retained support I/O operation.
+//! Main-thread closed-runtime supervision plus one fixed install I/O operation.
 use super::work::{InstallWork, Status};
 use super::{Session, controller, journal};
 
 pub(crate) enum Poll {
     Pending {
-        owner: PreparingSupport,
+        owner: PreparingInstall,
         uncertain: bool,
     },
-    Ready(Session),
+    Ready {
+        session: Session,
+        kind: Kind,
+    },
     Failed {
         session: Session,
         uncertain: bool,
     },
-    Retained(PreparingSupport),
+    Retained(PreparingInstall),
 }
 
-pub(crate) struct PreparingSupport {
+#[derive(Clone, Copy)]
+pub(crate) enum Kind {
+    Support,
+    Publication,
+}
+
+pub(crate) struct PreparingInstall {
     group: controller::Drain,
     journal: journal::Store,
     enrollment: super::super::boot::Permit,
     #[cfg(test)]
     update_parent: Option<std::fs::File>,
     uncertain: bool,
+    kind: Kind,
     // Native handles drop first; worker joins before accepted admission LAST.
     work: InstallWork,
 }
 
-impl PreparingSupport {
+impl PreparingInstall {
     pub(super) fn new(
+        kind: Kind,
         group: controller::Drain,
         journal: journal::Store,
         enrollment: super::super::boot::Permit,
@@ -41,6 +52,7 @@ impl PreparingSupport {
             #[cfg(test)]
             update_parent,
             uncertain: false,
+            kind,
             work,
         }
     }
@@ -87,7 +99,10 @@ impl PreparingSupport {
                 uncertain: self.uncertain,
             }
         } else {
-            Poll::Ready(session)
+            Poll::Ready {
+                session,
+                kind: self.kind,
+            }
         }
     }
 

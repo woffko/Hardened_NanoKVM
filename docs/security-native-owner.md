@@ -864,18 +864,26 @@ back to Session requires a finished/joined worker, unique accepted ownership
 and fresh main-thread closure checks. Native uncertainty remains distinct from
 a filesystem failure and cannot be cleared by a queued cancellation.
 
-Cancel during support I/O acknowledges a queued rollback, not completed
-cancellation. It never starts a concurrent filesystem operation: after join,
-rollback must obtain a fresh closed-runtime proof and validate the actual
-support/app layout. Native uncertainty prevents that transition. Observation,
-reconnect and path repair never retry failed preparation. Spawn failure, caught
-unwind and panic-after-I/O fixtures retain the same accepted owner; production
-panic=abort still requires durable process recovery. Teardown joins before
-releasing admission, so kernel-blocked I/O can delay teardown.
+After support exchange, app publication uses the same retained closed-runtime
+supervision with a distinct fixed worker operation. It obtains a fresh closure
+proof before starting and requires the exact `Published` filesystem result.
+Preservation, canonical layout checks, journal records, renames and fsyncs are
+unchanged. Native Drain/journal/enrollment stay on the broker. A support result
+can advance only to SupportReady; a publication result only to Published, and
+neither starts trial until the worker is joined and native closure is rechecked.
 
-With the current epoch0 the production Engine still refuses before support or
-app publication. This does not enable the ordinary update API, establish all
-writer quiescence or make the remaining synchronous publication/commit/rollback
+Cancel during support or publication I/O acknowledges a queued rollback, not
+completed cancellation. It never starts a concurrent filesystem operation:
+after join, rollback must obtain a fresh closed-runtime proof and validate the
+actual support/app layout. Native uncertainty prevents that transition. Observation,
+reconnect and path repair never retry failed preparation or publication. Spawn
+failure, caught unwind and panic-after-I/O fixtures retain the same accepted
+owner; production panic=abort still requires durable process recovery. Teardown
+joins before releasing admission, so kernel-blocked I/O can delay teardown.
+
+With support-transition epoch0 the production Engine still refuses before
+support or app publication. This does not enable the ordinary update API, establish all
+writer quiescence or make the remaining synchronous commit/rollback
 steps nonblocking. No whole-install hard latency or target acceptance is claimed.
 
 Host tests compose real retained `Session` drain and terminal owners with

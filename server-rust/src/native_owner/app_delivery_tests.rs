@@ -551,6 +551,87 @@ fn actual_idle_control_eof_during_held_support_io_retains_install_for_fresh_clie
     });
 }
 
+#[test]
+fn actual_idle_eof_after_publication_retains_the_same_job_for_fresh_client_cancel() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path();
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut server = Server::new(broker(path), uid).unwrap();
+    server.engine.fixture = Some(path.to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
+    server.idle = Duration::from_millis(200);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    server.engine.fixture_publication = Some(app_install::InstallIoFixture::BlockAfterIo {
+        entered,
+        resume: resumed,
+    });
+    // Own the gate sender in the callback so assertion unwind cannot strand
+    // the joining server teardown behind a still-open receiver.
+    serve_prepared(server, move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (owner, prepared) = runtime.block_on(prepared_fixture(path));
+        let transaction = prepared.transaction();
+        let old = path.join("kvmapp").metadata().unwrap().ino();
+        let directory = File::open(path.join("native-runtime-owner")).unwrap();
+        let socket = journal::socket::connect_install(&directory, uid).unwrap();
+        app_install_lease::Sender::fixture(socket, uid)
+            .unwrap()
+            .send(prepared.into_handoff())
+            .unwrap();
+        drop(owner);
+        let mut idle = connect(path);
+        observed(&mut idle, Mode::Installing);
+        until(|| entering.try_recv().is_ok());
+        until(|| {
+            matches!(
+                rustix::net::recv(
+                    &idle.stream,
+                    &mut [0_u8; 1],
+                    rustix::net::RecvFlags::DONTWAIT
+                ),
+                Ok((0, _))
+            )
+        });
+        drop(idle);
+        assert_excluded(path);
+        assert_ne!(path.join("kvmapp").metadata().unwrap().ino(), old);
+        let published = app_slot::job_status_fixture(path, transaction)
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.phase, app_slot::Phase::Published);
+        assert!(!published.archived);
+        assert!(!path.join("trial-owner-started").exists());
+        let mut control = connect(path);
+        observed(&mut control, Mode::Installing);
+        let cancellation = exchange(&mut control, Operation::CancelAppInstall);
+        assert_eq!(cancellation.code, Code::Ok);
+        assert_eq!(cancellation.mode, Mode::Installing);
+        assert_excluded(path);
+        // Close only after a complete Cancel reply, not an ambiguous transport
+        // error. Cancellation remains owned even with no observation client.
+        drop(control);
+        resume.send(()).unwrap();
+        until(|| {
+            app_slot::job_status_fixture(path, transaction)
+                .unwrap()
+                .is_some_and(|job| job.archived && job.phase == app_slot::Phase::RolledBack)
+        });
+        let mut control = connect(path);
+        observed(&mut control, Mode::Running);
+        assert_eq!(path.join("kvmapp").metadata().unwrap().ino(), old);
+        assert!(!path.join("trial-owner-started").exists());
+        until(|| {
+            let reply = exchange(&mut control, Operation::Shutdown);
+            assert!(matches!(reply.code, Code::Ok | Code::Busy));
+            reply.mode == Mode::Stopped
+        });
+    });
+}
+
 #[tokio::test]
 async fn invalid_canonical_receipt_rejects_valid_leases_before_any_native_stop() {
     let root = tempfile::tempdir().unwrap();

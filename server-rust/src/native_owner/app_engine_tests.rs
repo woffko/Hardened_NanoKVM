@@ -8,6 +8,9 @@ mod support;
 #[path = "app_retirement_tests.rs"]
 mod retirement;
 
+#[path = "app_publication_work_tests.rs"]
+mod publication;
+
 fn start_all(engine: &mut Engine) {
     for operation in [
         Operation::EnsureKvm,
@@ -66,6 +69,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
             InstallStage::Draining => "draining",
             InstallStage::PreparingSupport => "preparing-support",
             InstallStage::SupportReady => "support-ready",
+            InstallStage::Publishing => "publishing",
             InstallStage::Published => "published",
             InstallStage::Trial => "trial",
             InstallStage::CommitPending => "commit-pending",
@@ -75,7 +79,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
         };
         let owner = match &install.owner {
             InstallOwner::Draining(_) => "draining",
-            InstallOwner::PreparingSupport { .. } => "preparing-support",
+            InstallOwner::PreparingInstall { .. } => "preparing-install",
             InstallOwner::Trial(_) => "trial",
             InstallOwner::Committed(_) => "committed",
             InstallOwner::RolledBack(_) => "rolled-back",
@@ -687,6 +691,7 @@ fn receipt_engine_until(
             InstallStage::Draining => "draining",
             InstallStage::PreparingSupport => "preparing-support",
             InstallStage::SupportReady => "support-ready",
+            InstallStage::Publishing => "publishing",
             InstallStage::Published => "published",
             InstallStage::Trial => "trial",
             InstallStage::CommitPending => "commit-pending",

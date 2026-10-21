@@ -281,7 +281,7 @@ async fn blocked_support_before_and_after_io_keeps_control_responsive_and_queues
         });
         assert!(matches!(
             engine.install.as_ref().unwrap().owner,
-            InstallOwner::PreparingSupport { .. }
+            InstallOwner::PreparingInstall { .. }
         ));
         let held_live = live(root);
         let held_evidence = evidence(root);
@@ -410,7 +410,7 @@ async fn support_success_cannot_clear_native_journal_uncertainty_seen_during_wor
     assert_eq!(cancellation.mode, Mode::Installing);
     let foreign = root.join("native-runtime-owner/.state.next");
     fs::write(&foreign, b"known fixture journal collision").unwrap();
-    let InstallOwner::PreparingSupport { owner, .. } = &mut engine.install.as_mut().unwrap().owner
+    let InstallOwner::PreparingInstall { owner, .. } = &mut engine.install.as_mut().unwrap().owner
     else {
         panic!("support worker was not retained");
     };

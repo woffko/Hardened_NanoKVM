@@ -2,23 +2,23 @@
 //! No HTTP/worker transport or arbitrary executable selector is exposed.
 
 use super::{Broker, JournalError, controller, journal};
-use crate::update::app_slot::{
-    AcceptedInstall, Phase, SlotError, Status, support::support_operation,
-};
+#[cfg(test)]
+use crate::update::app_slot::Status;
+use crate::update::app_slot::{AcceptedInstall, Phase, SlotError, support::support_operation};
 
-#[path = "app_support_prepare.rs"]
+#[path = "app_install_prepare.rs"]
 mod preparation;
 #[path = "app_retirement.rs"]
 mod retirement;
 #[path = "app_install_work.rs"]
 mod work;
-pub(super) use preparation::{Poll as PreparationPoll, PreparingSupport};
+pub(super) use preparation::{Kind as PreparationKind, Poll as PreparationPoll, PreparingInstall};
 pub(super) use retirement::{Poll as RetirementPoll, Retirement};
 #[cfg(test)]
 pub(super) use work::Fixture as InstallIoFixture;
 
-pub(super) enum BeginSupport {
-    Started(PreparingSupport),
+pub(super) enum BeginPreparation {
+    Started(PreparingInstall),
     Retained(Session),
 }
 
@@ -291,12 +291,13 @@ impl Session {
         crate::update::app_slot::support::prepare_retained_fixture(&mut self.install, closed)
     }
 
-    pub(super) fn start_support(mut self) -> BeginSupport {
+    pub(super) fn start_support(mut self) -> BeginPreparation {
         let Ok(closed) = self.closed() else {
-            return BeginSupport::Retained(self);
+            return BeginPreparation::Retained(self);
         };
         let work = work::InstallWork::support(self.install, closed);
-        BeginSupport::Started(PreparingSupport::new(
+        BeginPreparation::Started(PreparingInstall::new(
+            PreparationKind::Support,
             self.group,
             self.journal,
             self.enrollment,
@@ -307,12 +308,13 @@ impl Session {
     }
 
     #[cfg(test)]
-    pub(super) fn start_support_fixture(mut self) -> BeginSupport {
+    pub(super) fn start_support_fixture(mut self) -> BeginPreparation {
         let Ok(closed) = self.closed() else {
-            return BeginSupport::Retained(self);
+            return BeginPreparation::Retained(self);
         };
         let work = work::InstallWork::support_fixture(self.install, closed);
-        BeginSupport::Started(PreparingSupport::new(
+        BeginPreparation::Started(PreparingInstall::new(
+            PreparationKind::Support,
             self.group,
             self.journal,
             self.enrollment,
@@ -321,8 +323,25 @@ impl Session {
         ))
     }
 
+    pub(super) fn start_publication(mut self) -> BeginPreparation {
+        let Ok(closed) = self.closed() else {
+            return BeginPreparation::Retained(self);
+        };
+        let work = work::InstallWork::publish(self.install, closed);
+        BeginPreparation::Started(PreparingInstall::new(
+            PreparationKind::Publication,
+            self.group,
+            self.journal,
+            self.enrollment,
+            #[cfg(test)]
+            self.update_parent,
+            work,
+        ))
+    }
+
     /// Preserve only the fixed mutable data allowlist and journal the two live
     /// renames. This is publication, NOT trial health/commit or API success.
+    #[cfg(test)]
     pub fn publish(&mut self) -> Result<Status, SlotError> {
         let closed = self.closed()?;
         self.install.publish(&closed)

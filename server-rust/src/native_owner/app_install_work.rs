@@ -14,6 +14,7 @@ enum Operation {
         #[cfg(test)]
         fixture: bool,
     },
+    Publish(ClosedRuntime),
     Retire(TerminalBoundary),
 }
 impl Operation {
@@ -30,6 +31,9 @@ impl Operation {
                 #[cfg(test)]
                 fixture: *fixture,
             },
+            Self::Publish(closed) => Self::Publish(ClosedRuntime {
+                transaction: closed.transaction(),
+            }),
             Self::Retire(boundary) => Self::Retire(TerminalBoundary {
                 transaction: boundary.transaction(),
                 phase: boundary.phase(),
@@ -54,6 +58,12 @@ impl Operation {
                 let prepared = crate::update::app_slot::support::prepare(install, closed);
                 prepared.and_then(|mut support| support.exchange()).is_ok()
             }
+            Self::Publish(closed) => matches!(
+                install.publish(&closed),
+                Ok(crate::update::app_slot::Status::Transaction(
+                    crate::update::app_slot::Phase::Published
+                ))
+            ),
             Self::Retire(boundary) => install.retire(&boundary).is_ok(),
         }
     }
@@ -131,6 +141,10 @@ impl InstallWork {
 
     pub(super) fn retire(install: AcceptedInstall, boundary: TerminalBoundary) -> Self {
         Self::new(install, Operation::Retire(boundary))
+    }
+
+    pub(super) fn publish(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
+        Self::new(install, Operation::Publish(closed))
     }
 
     fn new(install: AcceptedInstall, operation: Operation) -> Self {
@@ -220,6 +234,7 @@ impl InstallWork {
         let operation = self.operation.worker_copy();
         let name = match operation {
             Operation::Support { .. } => "app-support",
+            Operation::Publish(_) => "app-publication",
             Operation::Retire(_) => "app-retirement",
         };
         self.state = match thread::Builder::new().name(name.into()).spawn(move || {

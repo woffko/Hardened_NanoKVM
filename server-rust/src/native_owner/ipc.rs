@@ -330,8 +330,8 @@ enum Owner {
 
 enum InstallOwner {
     Draining(app_install::Session),
-    PreparingSupport {
-        owner: app_install::PreparingSupport,
+    PreparingInstall {
+        owner: app_install::PreparingInstall,
         cancel_requested: bool,
     },
     Trial(app_install::TrialSession),
@@ -347,6 +347,7 @@ enum InstallStage {
     Draining,
     PreparingSupport,
     SupportReady,
+    Publishing,
     Published,
     Trial,
     CommitPending,
@@ -393,6 +394,8 @@ struct Engine {
     fixture_retirement: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
     fixture_support: Option<app_install::InstallIoFixture>,
+    #[cfg(test)]
+    fixture_publication: Option<app_install::InstallIoFixture>,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -434,6 +437,8 @@ impl Engine {
             fixture_retirement: None,
             #[cfg(test)]
             fixture_support: None,
+            #[cfg(test)]
+            fixture_publication: None,
         }
     }
     fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
@@ -691,7 +696,7 @@ impl Engine {
                                 #[cfg(not(test))]
                                 let started = session.start_support();
                                 return Some(match started {
-                                    app_install::BeginSupport::Started(owner) => {
+                                    app_install::BeginPreparation::Started(owner) => {
                                         #[cfg(test)]
                                         let owner = {
                                             let mut owner = owner;
@@ -701,14 +706,14 @@ impl Engine {
                                             owner
                                         };
                                         Install {
-                                            owner: InstallOwner::PreparingSupport {
+                                            owner: InstallOwner::PreparingInstall {
                                                 owner,
                                                 cancel_requested: false,
                                             },
                                             stage: InstallStage::PreparingSupport,
                                         }
                                     }
-                                    app_install::BeginSupport::Retained(session) => {
+                                    app_install::BeginPreparation::Retained(session) => {
                                         self.mode = Mode::Uncertain;
                                         Install {
                                             owner: InstallOwner::Draining(session),
@@ -718,14 +723,35 @@ impl Engine {
                                 });
                             }
                             InstallStage::SupportReady => {
-                                // Exactly one publication attempt. Unknown I/O
-                                // retains the owner, never a fresh transaction.
-                                stage = match session.publish() {
-                                    Ok(app_slot::Status::Transaction(
-                                        app_slot::Phase::Published,
-                                    )) => InstallStage::Published,
-                                    _ => InstallStage::Failed,
-                                };
+                                // The same closed Session owns exactly one
+                                // asynchronous publication, never a callback or
+                                // caller-selected phase. Supervision stays here.
+                                return Some(match session.start_publication() {
+                                    app_install::BeginPreparation::Started(owner) => {
+                                        #[cfg(test)]
+                                        let owner = {
+                                            let mut owner = owner;
+                                            if let Some(fixture) = self.fixture_publication.take() {
+                                                owner.set_fixture(fixture);
+                                            }
+                                            owner
+                                        };
+                                        Install {
+                                            owner: InstallOwner::PreparingInstall {
+                                                owner,
+                                                cancel_requested: false,
+                                            },
+                                            stage: InstallStage::Publishing,
+                                        }
+                                    }
+                                    app_install::BeginPreparation::Retained(session) => {
+                                        self.mode = Mode::Uncertain;
+                                        Install {
+                                            owner: InstallOwner::Draining(session),
+                                            stage: InstallStage::Failed,
+                                        }
+                                    }
+                                });
                             }
                             InstallStage::Published => {
                                 // The fixed-root delivery-only fixture has no
@@ -786,7 +812,7 @@ impl Engine {
                 }
                 InstallOwner::Draining(session)
             }
-            InstallOwner::PreparingSupport {
+            InstallOwner::PreparingInstall {
                 owner,
                 cancel_requested,
             } => {
@@ -799,16 +825,21 @@ impl Engine {
                             self.backend_status = Some(Status::Uncertain);
                             stage = InstallStage::Failed;
                         }
-                        InstallOwner::PreparingSupport {
+                        InstallOwner::PreparingInstall {
                             owner,
                             cancel_requested,
                         }
                     }
-                    app_install::PreparationPoll::Ready(session) => {
+                    app_install::PreparationPoll::Ready { session, kind } => {
                         stage = if cancel_requested {
                             InstallStage::Rollback
                         } else {
-                            InstallStage::SupportReady
+                            match kind {
+                                app_install::PreparationKind::Support => InstallStage::SupportReady,
+                                app_install::PreparationKind::Publication => {
+                                    InstallStage::Published
+                                }
+                            }
                         };
                         InstallOwner::Draining(session)
                     }
@@ -826,7 +857,7 @@ impl Engine {
                     }
                     app_install::PreparationPoll::Retained(owner) => {
                         stage = InstallStage::Failed;
-                        InstallOwner::PreparingSupport {
+                        InstallOwner::PreparingInstall {
                             owner,
                             cancel_requested,
                         }
@@ -974,11 +1005,11 @@ impl Engine {
         };
         let Install { owner, stage } = install;
         match owner {
-            InstallOwner::PreparingSupport { owner, .. } => {
+            InstallOwner::PreparingInstall { owner, .. } => {
                 // A cancel request owns the eventual rollback, never a second
                 // concurrent filesystem operation. Join first, recheck closure.
                 self.install = Some(Install {
-                    owner: InstallOwner::PreparingSupport {
+                    owner: InstallOwner::PreparingInstall {
                         owner,
                         cancel_requested: true,
                     },
