@@ -730,6 +730,119 @@ fn custom_config_account_secret_and_relative_tls_paths_become_canonical() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn authenticated_restored_tls_material_serves_tls12_and_tls13() {
+    use crate::http::tls::{TlsListener, install_crypto_provider, load_server_config};
+    use axum::serve::Listener;
+    use std::{sync::Arc, time::Duration};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        time::timeout,
+    };
+    use tokio_rustls::{
+        TlsConnector,
+        rustls::{ClientConfig, RootCertStore, pki_types::ServerName, version},
+    };
+
+    install_crypto_provider();
+    let (source, mut effective) = fixture();
+    let pair = rcgen::generate_simple_self_signed(vec!["fixture.invalid".to_string()]).unwrap();
+    effective.proto = "https".to_string();
+    effective.cert.crt = "tls/custom.crt".to_string();
+    effective.cert.key = "tls/custom.key".to_string();
+    put(
+        source.path(),
+        "etc/kvm/tls/custom.crt",
+        pair.cert.pem().as_bytes(),
+    );
+    put(
+        source.path(),
+        "etc/kvm/tls/custom.key",
+        pair.key_pair.serialize_pem().as_bytes(),
+    );
+    write_config(source.path(), CONFIG_PATH, &effective);
+    let mut restored = checked(&captured(source.path(), &effective, CWD, CONFIG_PATH)).unwrap();
+    let config: Config = serde_yaml::from_slice(&member(&mut restored, CONFIG)).unwrap();
+    assert_eq!(config.proto, "https");
+    assert_eq!(config.cert.crt, format!("/{CERT}"));
+    assert_eq!(config.cert.key, format!("/{KEY}"));
+    let destination = tempdir().unwrap();
+    put(destination.path(), CERT, &member(&mut restored, CERT));
+    put(destination.path(), KEY, &member(&mut restored, KEY));
+
+    // Exercise the real path-based startup loader and listener using the
+    // authenticated archive's material, not a separately built ServerConfig.
+    // This does not claim the production early-boot applier has run.
+    for protocol in [&version::TLS12, &version::TLS13] {
+        let server = load_server_config(
+            destination
+                .path()
+                .join(config.cert.crt.trim_start_matches('/')),
+            destination
+                .path()
+                .join(config.cert.key.trim_start_matches('/')),
+        )
+        .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(pair.cert.der().clone()).unwrap();
+        let mut client = ClientConfig::builder_with_protocol_versions(&[protocol])
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let mut listener = TlsListener::new(tcp, server);
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let peer_addr = stream.local_addr().unwrap();
+        let connector = TlsConnector::from(Arc::new(client));
+        let (accepted, connected) = timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                listener.accept(),
+                connector.connect(ServerName::try_from("fixture.invalid").unwrap(), stream)
+            )
+        })
+        .await
+        .expect("restored TLS handshake did not finish");
+        let (mut server_stream, accepted_addr) = accepted;
+        let mut client_stream = connected.unwrap();
+        assert_eq!(accepted_addr, peer_addr);
+        assert_eq!(
+            server_stream.get_ref().1.protocol_version(),
+            Some(protocol.version)
+        );
+        assert_eq!(
+            client_stream.get_ref().1.protocol_version(),
+            Some(protocol.version)
+        );
+        assert_eq!(
+            server_stream.get_ref().1.alpn_protocol(),
+            Some(b"http/1.1".as_slice())
+        );
+        assert_eq!(
+            client_stream.get_ref().1.alpn_protocol(),
+            Some(b"http/1.1".as_slice())
+        );
+        assert_eq!(
+            client_stream.get_ref().1.peer_certificates().unwrap(),
+            std::slice::from_ref(pair.cert.der())
+        );
+        const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+        let mut received = [0; RESPONSE.len()];
+        let (sent, read) = timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                server_stream.write_all(RESPONSE),
+                client_stream.read_exact(&mut received)
+            )
+        })
+        .await
+        .expect("restored TLS application data did not finish");
+        sent.unwrap();
+        read.unwrap();
+        assert_eq!(&received, RESPONSE);
+    }
+}
+
 #[test]
 fn newer_persisted_preferences_are_not_overwritten_by_startup_config() {
     let (root, effective) = fixture();

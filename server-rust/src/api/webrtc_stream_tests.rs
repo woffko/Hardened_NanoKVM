@@ -4,6 +4,126 @@ use axum::{Router, middleware::from_fn_with_state, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
+#[tokio::test]
+async fn real_loopback_dtls_pair_transfers_data_and_closes_both_peers() {
+    use webrtc::{
+        data_channel::data_channel_message::DataChannelMessage,
+        dtls_transport::dtls_transport_state::RTCDtlsTransportState,
+        ice_transport::ice_gathering_state::RTCIceGatheringState,
+        peer_connection::peer_connection_state::RTCPeerConnectionState,
+    };
+
+    // Keep real ICE/DTLS/SCTP traffic on loopback, with no STUN/TURN or mDNS.
+    // The certificate/provider path is the library default used by ReadyPeer.
+    let mut settings = SettingEngine::default();
+    settings.set_network_types(vec![NetworkType::Udp4]);
+    settings.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+    settings.set_include_loopback_candidate(true);
+    settings.set_ip_filter(Box::new(|ip| ip.is_loopback()));
+    let api = APIBuilder::new().with_setting_engine(settings).build();
+    let offer = api
+        .new_peer_connection(RTCConfiguration::default())
+        .await
+        .unwrap();
+    let answer = match api.new_peer_connection(RTCConfiguration::default()).await {
+        Ok(peer) => peer,
+        Err(error) => {
+            time::timeout(Duration::from_secs(3), offer.close())
+                .await
+                .unwrap()
+                .unwrap();
+            panic!("second loopback peer creation failed: {error}");
+        }
+    };
+    let (received_tx, mut received_rx) = mpsc::channel::<DataChannelMessage>(1);
+    answer.on_data_channel(Box::new(move |channel| {
+        let received_tx = received_tx.clone();
+        Box::pin(async move {
+            channel.on_message(Box::new(move |message| {
+                let received_tx = received_tx.clone();
+                Box::pin(async move {
+                    let _ = received_tx.try_send(message);
+                })
+            }));
+        })
+    }));
+    const PAYLOAD: &str = "synthetic loopback DTLS compatibility probe";
+    let exchange = time::timeout(Duration::from_secs(8), async {
+        let channel = offer.create_data_channel("dependency-probe", None).await?;
+        let (opened_tx, mut opened_rx) = mpsc::channel(1);
+        channel.on_open(Box::new(move || {
+            Box::pin(async move {
+                let _ = opened_tx.try_send(());
+            })
+        }));
+        let description = offer.create_offer(None).await?;
+        let mut gathered = offer.gathering_complete_promise().await;
+        offer.set_local_description(description).await?;
+        // The upstream promise signals completion by closing the channel,
+        // not by sending Some(()). Check the actual state after it resolves.
+        let _ = gathered.recv().await;
+        if offer.ice_gathering_state() != RTCIceGatheringState::Complete {
+            return Err(webrtc::Error::new("offer ICE gathering stopped".into()));
+        }
+        answer
+            .set_remote_description(
+                offer
+                    .local_description()
+                    .await
+                    .ok_or_else(|| webrtc::Error::new("offer description missing".into()))?,
+            )
+            .await?;
+        let description = answer.create_answer(None).await?;
+        let mut gathered = answer.gathering_complete_promise().await;
+        answer.set_local_description(description).await?;
+        let _ = gathered.recv().await;
+        if answer.ice_gathering_state() != RTCIceGatheringState::Complete {
+            return Err(webrtc::Error::new("answer ICE gathering stopped".into()));
+        }
+        offer
+            .set_remote_description(
+                answer
+                    .local_description()
+                    .await
+                    .ok_or_else(|| webrtc::Error::new("answer description missing".into()))?,
+            )
+            .await?;
+        opened_rx
+            .recv()
+            .await
+            .ok_or_else(|| webrtc::Error::new("data channel did not open".into()))?;
+        channel.send_text(PAYLOAD).await?;
+        let message = received_rx
+            .recv()
+            .await
+            .ok_or_else(|| webrtc::Error::new("data channel closed without a message".into()))?;
+        Ok::<_, webrtc::Error>((
+            message,
+            offer.sctp().transport().state(),
+            answer.sctp().transport().state(),
+        ))
+    })
+    .await;
+
+    // Always attempt both owned closes, even after exchange failure/timeout,
+    // before asserting its result. No detached task owns either peer.
+    let closed = time::timeout(Duration::from_secs(3), async {
+        tokio::join!(offer.close(), answer.close())
+    })
+    .await;
+    let (offer_closed, answer_closed) = closed.expect("loopback peer cleanup timed out");
+    offer_closed.unwrap();
+    answer_closed.unwrap();
+    assert_eq!(offer.connection_state(), RTCPeerConnectionState::Closed);
+    assert_eq!(answer.connection_state(), RTCPeerConnectionState::Closed);
+    let (message, offer_dtls, answer_dtls) =
+        exchange.expect("loopback DTLS exchange timed out").unwrap();
+    assert_eq!(offer_dtls, RTCDtlsTransportState::Connected);
+    assert_eq!(answer_dtls, RTCDtlsTransportState::Connected);
+    assert!(message.is_string);
+    assert_eq!(message.data.as_ref(), PAYLOAD.as_bytes());
+}
+
 fn access(session: &Session) -> PeerAccess {
     PeerAccess::new(
         TransportSession::capture(
