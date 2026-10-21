@@ -10,6 +10,18 @@ fn main() -> ExitCode {
         "/support-abi-nanokvm-native-ctl.binding"
     )));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == "picoclaw-home" {
+        return match nanokvm_rust_server::native_owner::picoclaw_home::resolve() {
+            Ok(home) => {
+                println!("{}", home.display());
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("invalid picoclaw home; no runtime action taken");
+                ExitCode::from(64)
+            }
+        };
+    }
     if args.len() == 1 {
         let result = match args[0].to_str() {
             Some("activate-boot") => Some(boot::activate_early()),

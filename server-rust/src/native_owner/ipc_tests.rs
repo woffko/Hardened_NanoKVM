@@ -53,6 +53,7 @@ pub(super) fn owner_command(root: &Path, role: Role) -> Command {
             Role::KvmSystem => "kvm",
             Role::Hwmon => "hwmon",
             Role::Backend => "backend",
+            Role::Picoclaw => "picoclaw",
         },
     )
     .stdout(Stdio::null())
@@ -215,9 +216,10 @@ fn owner_probe() {
     let mut stop = [0];
     s.read_exact(&mut stop).unwrap();
     assert_eq!(stop, *b"S");
-    if role == "backend" && root.join("backend-stop-hold").exists() {
-        fs::write(root.join("backend-stopping"), b"stopping").unwrap();
-        until(|| !root.join("backend-stop-hold").exists());
+    let hold = root.join(format!("{role}-stop-hold"));
+    if hold.exists() {
+        fs::write(root.join(format!("{role}-stopping")), b"stopping").unwrap();
+        until(|| !hold.exists());
     }
     s.write_all(b"D\0").unwrap();
 }
@@ -237,8 +239,30 @@ fn native_pause_keeps_backend_and_resume_never_publishes_false_closed() {
         e.tick();
         e.roles == [2; 2] && e.backend_status == Some(Status::Running)
     });
+    let Some(Owner::Running(broker)) = e.owner.as_mut() else {
+        panic!("no serving broker")
+    };
+    broker
+        .start_owned(Role::Picoclaw, owner_command(root.path(), Role::Picoclaw))
+        .unwrap();
+    until(|| {
+        let Some(Owner::Running(broker)) = e.owner.as_mut() else {
+            return false;
+        };
+        broker.group.poll()[3] == Some(Status::Running)
+    });
+    fs::write(root.path().join("picoclaw-stop-hold"), b"hold").unwrap();
     let backend = fs::read(root.path().join("backend")).unwrap();
     assert_eq!(e.request(1, Operation::Pause).code, Code::Ok);
+    until(|| root.path().join("picoclaw-stopping").exists());
+    e.tick();
+    assert_eq!(
+        e.mode,
+        Mode::Draining,
+        "Pico receipt/owner exit is still pending"
+    );
+    assert_eq!(e.backend_status, Some(Status::Running));
+    fs::remove_file(root.path().join("picoclaw-stop-hold")).unwrap();
     until(|| {
         e.tick();
         e.mode == Mode::Paused
@@ -264,6 +288,45 @@ fn native_pause_keeps_backend_and_resume_never_publishes_false_closed() {
     assert_eq!(
         fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
         2
+    );
+}
+
+#[test]
+fn optional_pico_owner_loss_blocks_ipc_admission_without_a_public_role_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let mut e = engine(root.path());
+    assert_eq!(e.request(1, Operation::EnsureBackend).code, Code::Ok);
+    until(|| {
+        e.tick();
+        e.backend_status == Some(Status::Running)
+    });
+    let Some(Owner::Running(broker)) = e.owner.as_mut() else {
+        panic!("no serving broker")
+    };
+    broker
+        .start_owned(Role::Picoclaw, Command::new("/bin/true"))
+        .unwrap();
+    until(|| {
+        e.tick();
+        e.mode == Mode::Uncertain
+    });
+    assert_eq!(
+        e.roles, [0; 2],
+        "optional Pico must not masquerade as a public KVM/hwmon status byte"
+    );
+    assert_eq!(e.backend_status, Some(Status::Running));
+    assert_eq!(e.request(1, Operation::EnsureKvm).code, Code::Uncertain);
+    assert_eq!(e.request(1, Operation::EnsureHwmon).code, Code::Uncertain);
+    assert_eq!(e.request(1, Operation::Shutdown).code, Code::Uncertain);
+    until(|| {
+        e.tick();
+        matches!(e.owner.as_ref(), Some(Owner::Stopping(drain)) if drain.group.all_owner_processes_reaped())
+    });
+    assert_eq!(e.mode, Mode::Uncertain);
+    assert_eq!(
+        fs::read(root.path().join("native-runtime-owner/state")).unwrap()[44],
+        4,
+        "owner loss cannot publish Closed"
     );
 }
 

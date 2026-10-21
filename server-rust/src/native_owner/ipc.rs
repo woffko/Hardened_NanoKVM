@@ -357,7 +357,7 @@ impl Engine {
                 self.backend_status = broker.backend_status();
                 let states = broker.poll();
                 self.roles = states.map(role_status);
-                if states.contains(&Some(Status::Uncertain)) {
+                if broker.group.uncertainty_latched() {
                     self.mode = Mode::Uncertain;
                 }
                 if self.mode == Mode::Running {
@@ -435,7 +435,7 @@ impl Engine {
                     self.mode = Mode::Uncertain;
                 }
                 self.roles = broker.poll().map(role_status);
-                if self.roles.contains(&6) {
+                if broker.group.uncertainty_latched() {
                     self.mode = Mode::Uncertain;
                 }
                 Owner::Running(broker)

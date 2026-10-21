@@ -408,6 +408,7 @@ fn production_binary_has_no_generic_command_or_fixture_fallback() {
         vec!["--scope", "watchdog"],
         vec!["--fixture"],
         vec!["--scope", "hwmon"],
+        vec!["--scope", "picoclaw"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-owner"))
             .args(args)

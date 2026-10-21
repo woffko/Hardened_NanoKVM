@@ -28,11 +28,11 @@ fn independent_wire_vectors_fix_group_order_endian_and_hash_domain() {
             },
         }
     );
-    frame[16..36].copy_from_slice(&[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    frame[16..36].copy_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     frame[96..].copy_from_slice(&[
-        0xdc, 0x2d, 0x9a, 0x9b, 0x0b, 0x22, 0xb1, 0x4c, 0x43, 0xc7, 0x55, 0x3b, 0x64, 0x6c, 0xff,
-        0xdb, 0x32, 0xaf, 0xc7, 0xa5, 0x05, 0xf5, 0xd3, 0x51, 0x15, 0xd9, 0xe4, 0x73, 0x28, 0x6d,
-        0x5b, 0x33,
+        0x43, 0x36, 0x12, 0x5b, 0x53, 0x54, 0xb8, 0xeb, 0x46, 0x36, 0xd4, 0x80, 0x0a, 0xa0, 0x86,
+        0x22, 0xd7, 0xab, 0xff, 0x55, 0x01, 0xd0, 0x18, 0xbe, 0x9a, 0x4d, 0x6f, 0xe0, 0x73, 0x1f,
+        0xe6, 0xe3,
     ]);
     assert_eq!(encode(Role::NativeBroker), frame);
 }
@@ -95,7 +95,7 @@ fn checksummed_unknown_format_length_role_and_reserved_data_are_not_literals() {
 
 #[test]
 fn unknown_group_epochs_remain_explicit_diagnostics_not_compatibility() {
-    for (index, unknown) in [0, 2, u32::MAX].into_iter().enumerate() {
+    for (index, unknown) in [0, u32::MAX - 1, u32::MAX].into_iter().enumerate() {
         for group in 0..5 {
             let mut frame = encode(Role::NativeBroker);
             let offset = 16 + group * 4;

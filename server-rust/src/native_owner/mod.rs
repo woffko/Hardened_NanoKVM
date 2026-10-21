@@ -3,3 +3,4 @@
 pub mod broker;
 pub mod controller;
 pub mod embedded;
+pub mod picoclaw_home;

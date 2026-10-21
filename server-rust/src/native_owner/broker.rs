@@ -161,7 +161,7 @@ impl Broker {
     }
 
     pub fn poll(&mut self) -> [Option<Status>; 2] {
-        let [kvm, hwmon, _backend] = self.group.poll();
+        let [kvm, hwmon, _backend, _picoclaw] = self.group.poll();
         [kvm, hwmon]
     }
 
@@ -267,7 +267,7 @@ pub struct RetainedDrain {
     journal: journal::Store,
     maintenance: bool,
     enrollment: boot::Permit,
-    // Full shutdown must retain update exclusion until all three trees join.
+    // Full shutdown retains update exclusion until every owned tree joins.
     shutdown_admission: Option<RuntimePermit>,
     #[cfg(test)]
     update_parent: Option<std::fs::File>,

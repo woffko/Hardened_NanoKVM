@@ -60,6 +60,7 @@ fn start_roles(broker: &mut Broker, root: &Path, missing: bool) {
         (Role::KvmSystem, "kvm"),
         (Role::Hwmon, "hwmon"),
         (Role::Backend, "backend"),
+        (Role::Picoclaw, "picoclaw"),
     ] {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
@@ -88,7 +89,7 @@ fn start_roles(broker: &mut Broker, root: &Path, missing: bool) {
             broker.start_owned(role, command).unwrap();
         }
     }
-    until(|| broker.group.poll() == [Some(ScopeStatus::Running); 3]);
+    until(|| broker.group.poll() == [Some(ScopeStatus::Running); 4]);
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn running_probes_survive_normal_idle_until_admitted_shutdown() {
     // A native service must remain Running while an update is prepared, not
     // expire from the fixture's former 15-second pre-Stop read timeout.
     std::thread::sleep(Duration::from_secs(16));
-    assert_eq!(broker.group.poll(), [Some(ScopeStatus::Running); 3]);
+    assert_eq!(broker.group.poll(), [Some(ScopeStatus::Running); 4]);
     let admission = broker.runtime_permit().unwrap();
     let super::super::Shutdown::Draining(mut drain) = broker.shutdown(admission) else {
         panic!("idle runtime shutdown refused")
@@ -632,6 +633,13 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
         )); 2],
         "previously running native writers must stay closed throughout trial"
     );
+    assert_eq!(
+        trial.group.poll()[3],
+        Some(ScopeStatus::Closed(
+            crate::native_owner::controller::Completion::Stopped
+        )),
+        "optional Pico writer must stay closed throughout trial"
+    );
     let CommitTrial::Pending(retained) = trial.commit() else {
         panic!("unready trial committed")
     };
@@ -692,7 +700,11 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
     );
     assert_admission_released(root.path());
     // Native writers resume only in the ordinary post-freeze broker path.
-    for (role, name) in [(Role::KvmSystem, "kvm"), (Role::Hwmon, "hwmon")] {
+    for (role, name) in [
+        (Role::KvmSystem, "kvm"),
+        (Role::Hwmon, "hwmon"),
+        (Role::Picoclaw, "picoclaw"),
+    ] {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -708,7 +720,7 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
             .stderr(Stdio::inherit());
         broker.start_owned(role, command).unwrap();
     }
-    until(|| broker.group.poll() == [Some(ScopeStatus::Running); 3]);
+    until(|| broker.group.poll() == [Some(ScopeStatus::Running); 4]);
     let admission = broker.runtime_permit().unwrap();
     let super::super::Shutdown::Draining(mut drain) = broker.shutdown(admission) else {
         panic!("shutdown refused")
@@ -982,7 +994,7 @@ async fn all_three_scopes_must_join_before_publication_and_rollback_releases_no_
         broker.group.poll(),
         [Some(ScopeStatus::Closed(
             crate::native_owner::controller::Completion::Stopped
-        )); 3]
+        )); 4]
     );
 }
 

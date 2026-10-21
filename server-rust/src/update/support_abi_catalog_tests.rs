@@ -1,4 +1,26 @@
 use super::*;
+
+#[test]
+fn lifecycle_epoch_one_cannot_authorize_the_optional_pico_runtime_transition() {
+    assert_eq!(abi::CURRENT.native_lifecycle, 2);
+    let current = catalog_fixture();
+    let mut old = catalog_fixture();
+    for member in &mut old.members {
+        member.declaration.epochs.native_lifecycle = 1;
+    }
+    assert_eq!(
+        check_transition(&old, &current),
+        Err(CompatibilityError::UnknownOrIncompatible)
+    );
+    assert_eq!(
+        check_transition(&current, &old),
+        Err(CompatibilityError::UnknownOrIncompatible)
+    );
+    assert_eq!(
+        check_transition(&current, &current),
+        Err(CompatibilityError::UnsupportedTransition)
+    );
+}
 use crate::update::{app_bootstrap::BOOT_SCRIPT_FRAMES, restore_binding};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};

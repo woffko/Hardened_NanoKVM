@@ -12,6 +12,19 @@ use std::{
 };
 
 fn command(role: &str) -> Option<Command> {
+    if role == "picoclaw" {
+        let home = nanokvm_rust_server::native_owner::picoclaw_home::resolve().ok()?;
+        let mut command = Command::new("/usr/bin/picoclaw");
+        command
+            .arg("gateway")
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("HOME", "/root")
+            .env("LANG", "C")
+            .env("PICOCLAW_HOME", &home)
+            .current_dir(home);
+        return Some(command);
+    }
     let (loader, program) = match role {
         "kvm-system" => (
             "/lib/ld-musl-riscv64v0p7_xthead.so.1",
@@ -41,6 +54,12 @@ fn command(role: &str) -> Option<Command> {
     if role == "backend-trial" {
         command.arg("--app-trial");
     }
+    if matches!(role, "backend" | "backend-trial") {
+        command.env(
+            "PICOCLAW_HOME",
+            nanokvm_rust_server::native_owner::picoclaw_home::resolve().ok()?,
+        );
+    }
     Some(command)
 }
 
@@ -54,7 +73,9 @@ fn main() -> ExitCode {
         .then(|| args[2].to_str().and_then(command))
         .flatten()
     else {
-        eprintln!("usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend|backend-trial}}");
+        eprintln!(
+            "usage: nanokvm-native-owner --scope {{kvm-system|hwmon|backend|backend-trial|picoclaw}}"
+        );
         return ExitCode::from(64);
     };
     // Only a root direct parent over its anonymous socketpair may launch a
@@ -102,10 +123,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roles_select_only_the_three_fixed_programs() {
+    fn roles_select_only_fixed_programs_and_share_the_absolute_pico_home() {
         assert!(command("kvm-system").is_some());
         assert!(command("hwmon").is_some());
         assert!(command("backend").is_some());
+        assert!(command("picoclaw").is_some());
         let kvm = command("kvm-system").unwrap();
         assert_eq!(kvm.get_program(), "/lib/ld-musl-riscv64v0p7_xthead.so.1");
         assert_eq!(
@@ -126,12 +148,28 @@ mod tests {
                 "/kvmapp/server/NanoKVM-Server"
             ]
         );
-        assert_eq!(backend.get_envs().count(), 3);
+        assert_eq!(backend.get_envs().count(), 4);
+        let pico = command("picoclaw").unwrap();
+        assert_eq!(pico.get_program(), "/usr/bin/picoclaw");
+        assert_eq!(pico.get_args().collect::<Vec<_>>(), ["gateway"]);
+        let home = nanokvm_rust_server::native_owner::picoclaw_home::resolve().unwrap();
+        assert_eq!(pico.get_current_dir(), Some(home.as_path()));
+        for process in [&backend, &pico] {
+            assert!(process.get_envs().any(|(name, value)| name == "PICOCLAW_HOME" && value == Some(home.as_os_str())));
+        }
         let trial = command("backend-trial").unwrap();
         assert_eq!(trial.get_program(), backend.get_program());
         assert_eq!(trial.get_args().last().unwrap(), "--app-trial");
         assert_eq!(trial.get_args().count(), backend.get_args().count() + 1);
-        for role in ["", "/bin/sh", "watchdog", "../../other", "hwmon;reboot"] {
+        for role in [
+            "",
+            "/bin/sh",
+            "watchdog",
+            "../../other",
+            "hwmon;reboot",
+            "picoclaw onboard",
+            "picoclaw;sh",
+        ] {
             assert!(command(role).is_none());
         }
     }

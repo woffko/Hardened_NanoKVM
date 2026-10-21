@@ -12,7 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
-| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work/onboard validation; private pair journal and coherent Rust reads | Profile/workspace/session/installer and independent runtime/onboard writers, effective home, native start/recovery, service closure and pending-capture settlement remain open |
+| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work/onboard validation; private pair journal/coherent Rust reads, shared lexical home selector and optional native-owner slot | Profile/workspace/session/installer and independent runtime/onboard writers, broker-frozen home/generation, actual native start/recovery/stop-join routing and pending-capture settlement remain open |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -67,8 +67,12 @@ files. Native publication/start-after-recovery, stale-temporary GC and all
 external producer/service closure remain prerequisites; no runtime drain is proven.
 
 A [dedicated native process owner](security-native-owner.md) now provides a
-host-tested subreaper/pidfd scope for fresh launches. It is not packaged or wired
-to S95/capture yet and does not adopt existing services. It therefore does not
+host-tested subreaper/pidfd scope for fresh launches. Static helpers are packaged
+and current S95 routes KVM/hwmon/backend through the broker after fresh-boot
+enrollment; this is not deployed device acceptance or capture integration. An
+optional Pico slot now participates in native/all-role drains when enrolled,
+but ordinary API/S96 does not route its lifecycle through that slot yet. It does
+not adopt existing services. It therefore does not
 upgrade any source group to runtime-quiescent. The broker's fixed local IPC and
 explicit new-boot native journal recovery are host-tested components, not raw
 restore authority. Watchdog/init/recovery integration and actual target support

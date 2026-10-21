@@ -209,7 +209,7 @@ impl RolledBack {
 impl Broker {
     /// An accepted app install already owns UpdateEX + writer admission/activity
     /// EX. Do NOT reacquire UpdateEX or an enrolled ConfigPermit underneath it.
-    /// Stopping must be durable BEFORE any of the three scope Stop requests.
+    /// Stopping must be durable BEFORE any owned scope Stop request.
     pub fn begin_app_install(mut self, install: AcceptedInstall) -> Start {
         if self.journal.stopping().is_err() {
             return Start::Retained {
@@ -236,7 +236,7 @@ impl Session {
     pub fn poll(&mut self) -> Result<controller::DrainStatus, JournalError> {
         self.journal.ready()?;
         // Deliberately never publish Closed. The app transaction is ongoing
-        // even after all three native/backend trees have been joined.
+        // even after every native/backend tree has been joined.
         Ok(self.group.poll())
     }
 
@@ -351,9 +351,9 @@ impl TrialSession {
         }
         let status = self.group.poll();
         if status.contains(&Some(controller::Status::Uncertain))
-            || status[..2]
-                .iter()
-                .any(|s| !matches!(s, None | Some(controller::Status::Closed(_))))
+            || status.iter().enumerate().any(|(index, s)| {
+                index != 2 && !matches!(s, None | Some(controller::Status::Closed(_)))
+            })
         {
             TrialStatus::Uncertain
         } else if self.failed

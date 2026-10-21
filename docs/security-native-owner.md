@@ -11,7 +11,8 @@ snapshot/capture acceptance.
 
 The broker-side [app-install session](security-app-slot-recovery.md#native-closed-publication-and-retained-rollback-not-activated)
 now composes accepted app/update/writer admission with durable `Stopping` and a
-three-scope drain before slot publication. It retains that fence through explicit
+all-owned-scope drain before slot publication, including an enrolled optional
+PicoClaw scope. It retains that fence through explicit
 old-slot rollback and offers a typed backend-only frozen trial transition.
 The daemon now invokes it for a validated prepared offer on its separate
 app-install endpoint and now drives its frozen trial, commit and failure/cancel
@@ -28,13 +29,18 @@ Before launch the owner requires an anonymous Unix socketpair, exactly one
 thread, no pre-existing children, default SIGCHLD disposition, and no extra
 inherited descriptors. Its private control duplicate is CLOEXEC and child stdin
 is `/dev/null` for normal roles. Production entry additionally requires root and
-the socket peer credentials of its direct parent. Three normal fixed roles are
-accepted: `kvm-system`, `hwmon` and `backend`, with explicit vendor loaders/library
-path. The fixed `backend-trial` variant adds only `--app-trial` and a separately
+the socket peer credentials of its direct parent. Four normal fixed roles are
+accepted: `kvm-system`, `hwmon`, `backend` and optional `picoclaw`. The first three
+use explicit vendor loaders/library paths. PicoClaw selects only
+`/usr/bin/picoclaw gateway`; it is not automatically enabled or launched by the
+current broker IPC/S96 path. The fixed `backend-trial` variant adds only `--app-trial` and a separately
 created transaction-bound startup channel after the inherited-FD audit.
 Backend executes `/kvmapp/server/NanoKVM-Server` directly; no mutable `/tmp`
 staging copy or PID-file adoption remains in the current S95 launcher.
-There is no generic shell/program/path, environment selector or fixture fallback.
+There is no generic shell/program/path or environment selector or fixture fallback.
+The one named `PICOCLAW_HOME` input is resolved to an absolute pathname for the
+backend/trial and Pico command environments; it does not authorize filesystem
+access, pair recovery, a configuration generation or a service transition.
 
 The owner enables the kernel child-subreaper property and checks actual pidfd /
 `waitid(P_PIDFD)` support before starting native work. Subreaper adoption survives
@@ -42,7 +48,7 @@ ordinary daemonization, including `setsid`; it does not itself stop a process.
 See [Linux subreaper semantics](https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html)
 and [pidfd identity/lifetime](https://man7.org/linux/man-pages/man2/pidfd_open.2.html).
 
-Explicit Stop starts TERM, followed by KILL after two seconds. Native KVM/hwmon
+Explicit Stop starts TERM, followed by KILL after two seconds. Native KVM/hwmon/PicoClaw
 controller EOF also starts cleanup. Backend controller loss, invalid transport
 or natural leader exit instead waits for fixed UpdateEX admission before any
 descendant signal; the acquired guard is retained through complete reap. An
@@ -90,8 +96,9 @@ are not yet accepted from these fixtures.
 
 ## Controller-side sibling ownership
 
-`native_owner::controller::Group` owns the three fixed roles as sibling
-owner processes. It never installs a subreaper in the async backend and has no
+`native_owner::controller::Group` has four fixed sibling slots, including the
+optional PicoClaw role. It owns those sibling owner processes, never installs a
+subreaper in the async backend and has no
 public arbitrary-command/path/environment selector. Production commands select
 only `/usr/libexec/nanokvm-native-owner --scope <fixed-role>`. The controller
 is compiled and used by the broker component and current S95 source.
@@ -110,8 +117,8 @@ owner. No cleanup deadline kills the subreaper or declares successful closure.
 
 Missing/truncated/duplicate/unknown protocol, a receipt/exit mismatch, or owner
 death without a receipt makes ownership sticky-uncertain. The group requests
-Stop on the two native siblings and refuses new starts/resume. It does not stop
-a healthy backend merely because KVM/hwmon ownership is uncertain. Backend
+Stop on every non-backend sibling and refuses new starts/resume. It does not stop
+a healthy backend merely because KVM/hwmon/PicoClaw ownership is uncertain. Backend
 protocol failure/drop closes control without fabricating an admitted Stop byte;
 the backend owner then uses its update-gated EOF path. Even reaping all direct owner
 processes does **not** clear uncertainty or prove their descendants are gone.
@@ -126,6 +133,32 @@ missing receipt and forced death of a childless wire stub with a real sibling.
 That forced-death fixture tests detection/admission, **not recovery of an orphaned
 native tree after killing a real subreaper**. Process-tree size/high-churn limits,
 unusual clone exit signals, durable crash recovery and vendor runtime remain open.
+
+### Optional PicoClaw prerequisite, not activated service integration
+
+Native-only maintenance stops and joins KVM, hwmon and an enrolled PicoClaw scope,
+retaining the backend. Full shutdown/install joins every enrolled slot. The
+backend-only app trial rejects any non-backend slot that is neither absent nor
+closed. Pico ownership uncertainty latches broker admission even though the
+existing fixed control reply still has only the KVM/hwmon status bytes. The
+native lifecycle compatibility epoch is now 2; epoch-1 transitions are refused,
+and `support_transition=0` still refuses even a matching epoch-2 live transition.
+No journal format or automatic legacy adoption was introduced.
+
+Host fixtures include a SIGSTOP-held Pico owner, a daemonized setsid descendant
+which ignores TERM, maintenance retaining a real backend tree, hidden-role
+receipt loss, and four-role app install/trial/rollback. These establish the
+controller/retained-session behavior, not execution or health of the installed
+PicoClaw program.
+
+The ordinary API/S96 still starts the gateway directly and uses legacy stop;
+there is no production Pico ensure/stop IPC operation yet. Do not interpret
+the new role primitive as a service migration or C1/H2 closure. Before activation,
+bind the broker-selected effective home/generation, settle the pending pair
+journal under retained writer/native admission, cover onboard/install/profile
+writers and replace legacy stop/start without process-name adoption. Preserve
+the separate enforceable local-tool privilege boundary and target GUI/HID autonomy.
+Different launcher environments/cwds are not unified by a shared lexical resolver.
 
 ## Durable native broker admission
 
@@ -334,7 +367,7 @@ No boot-ID, path or environment override exists in production.
 
 Current S95 removes KVM/backend PID scanning/adoption/staging and hwmon
 PID/killall fallbacks. It uses a fixed standalone broker, fixed ctl commands,
-and verified three-scope shutdown before stopping the watchdog shells. A denied
+and verified all-owned-scope shutdown before stopping the watchdog shells. A denied
 shutdown preserves those watchdogs. Watchdog retries request admitted ensures
 or backend restarts, never direct process launch, kill or broker replacement. The KVM
 role runs the foreground vendor program directly from `/kvmapp/kvm_system` with
@@ -614,7 +647,7 @@ precedes app archival, native `Closed` and intent removal. An empty support stor
 is synced and rechecked without requiring an already archived `current` name.
 
 The retained Engine now calls preparation and exchange itself before publishing
-the app. Its explicit stages separate complete three-scope drain, support
+the app. Its explicit stages separate complete all-owned-scope drain, support
 preparation/exchange, app publication and frozen trial. Preparation borrows the
 same drained `Session`; the guard is not stored as a self-reference across
 daemon ticks. A failed or ambiguous prepare/exchange/publication attempt keeps

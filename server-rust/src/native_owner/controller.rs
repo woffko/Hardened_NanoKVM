@@ -15,14 +15,18 @@ pub enum Role {
     KvmSystem,
     Hwmon,
     Backend,
+    Picoclaw,
 }
 
 impl Role {
+    pub(super) const NATIVE: [Self; 3] = [Self::KvmSystem, Self::Hwmon, Self::Picoclaw];
+
     fn index(self) -> usize {
         match self {
             Self::KvmSystem => 0,
             Self::Hwmon => 1,
             Self::Backend => 2,
+            Self::Picoclaw => 3,
         }
     }
 
@@ -31,6 +35,7 @@ impl Role {
             Self::KvmSystem => "kvm-system",
             Self::Hwmon => "hwmon",
             Self::Backend => "backend",
+            Self::Picoclaw => "picoclaw",
         };
         owner_command(role)
     }
@@ -50,6 +55,14 @@ fn owner_command(role: &'static str) -> Command {
         .env("LANG", "C")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // This is one named configuration input, not a generic environment API.
+    // The fresh owner resolves it before chdir; backend/Pico must not silently
+    // disagree merely because the controller clears unrelated environment.
+    if matches!(role, "backend" | "backend-trial" | "picoclaw")
+        && let Some(home) = std::env::var_os("PICOCLAW_HOME")
+    {
+        command.env("PICOCLAW_HOME", home);
+    }
     command
 }
 
@@ -351,7 +364,7 @@ impl Drop for Cell {
 /// this object (and their durable maintenance intent) across their own deadlines.
 #[derive(Default)]
 pub struct Group {
-    cells: [Option<Cell>; 3],
+    cells: [Option<Cell>; 4],
     uncertain: bool,
 }
 
@@ -406,7 +419,7 @@ impl Group {
             .commit_trial(transaction)
     }
 
-    pub fn poll(&mut self) -> [Option<Status>; 3] {
+    pub fn poll(&mut self) -> [Option<Status>; 4] {
         let status = self
             .cells
             .each_mut()
@@ -416,8 +429,10 @@ impl Group {
             // Native uncertainty closes admission but must not send Stop to a
             // healthy backend that may own an active update. Full shutdown is
             // a separate, update-admitted operation.
-            for cell in self.cells[..2].iter_mut().flatten() {
-                cell.stop();
+            for role in Role::NATIVE {
+                if let Some(cell) = self.cells[role.index()].as_mut() {
+                    cell.stop();
+                }
             }
         }
         status
@@ -427,6 +442,12 @@ impl Group {
     /// A terminal install retry must not clear a later owner-loss failure.
     pub(super) fn ownership_uncertain(&mut self) -> bool {
         self.poll();
+        self.uncertain
+    }
+
+    /// Read the latch from the preceding poll without consuming more protocol
+    /// bytes. An IPC tick must not refresh hidden roles just to inspect it.
+    pub(super) fn uncertainty_latched(&self) -> bool {
         self.uncertain
     }
 
@@ -452,8 +473,10 @@ impl Group {
     /// Native-only maintenance retains the serving backend and its update job.
     /// This is NOT backend/all-writer quiescence or raw handoff authority.
     pub(super) fn begin_native_drain(mut self) -> Drain {
-        for cell in self.cells[..2].iter_mut().flatten() {
-            cell.stop();
+        for role in Role::NATIVE {
+            if let Some(cell) = self.cells[role.index()].as_mut() {
+                cell.stop();
+            }
         }
         Drain {
             group: self,
@@ -505,9 +528,11 @@ impl Drain {
         let status = self.group.poll();
         if self.group.uncertain {
             DrainStatus::Uncertain
-        } else if status[..if self.keep_backend { 2 } else { 3 }]
+        } else if status
             .iter()
-            .all(|s| matches!(s, None | Some(Status::Closed(_))))
+            .enumerate()
+            .filter(|(index, _)| !self.keep_backend || *index != Role::Backend.index())
+            .all(|(_, s)| matches!(s, None | Some(Status::Closed(_))))
         {
             DrainStatus::Drained
         } else {
@@ -526,9 +551,42 @@ impl Drain {
     }
 }
 
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+#[path = "controller_picoclaw_tests.rs"]
+mod picoclaw_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertainty_snapshot_does_not_consume_pending_owner_protocol() {
+        let (control, mut peer) = UnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let mut cell = Cell::spawn(Command::new("/bin/true"), Role::Picoclaw).unwrap();
+        cell.control = control;
+        let mut group = Group::default();
+        group.cells[Role::Picoclaw.index()] = Some(cell);
+        peer.write_all(b"X").unwrap();
+        assert!(!group.uncertainty_latched());
+        assert!(
+            !group.cells[Role::Picoclaw.index()]
+                .as_ref()
+                .unwrap()
+                .invalid
+        );
+        assert_eq!(
+            group.poll()[Role::Picoclaw.index()],
+            Some(Status::Uncertain)
+        );
+        assert!(group.uncertainty_latched());
+        group.cells[Role::Picoclaw.index()]
+            .as_mut()
+            .unwrap()
+            .child
+            .wait()
+            .unwrap();
+    }
 
     #[test]
     fn admitted_stop_never_interleaves_a_partial_commit_frame() {
@@ -595,14 +653,21 @@ mod tests {
             (Role::KvmSystem, "kvm-system"),
             (Role::Hwmon, "hwmon"),
             (Role::Backend, "backend"),
+            (Role::Picoclaw, "picoclaw"),
         ] {
             let command = role.command();
             assert_eq!(command.get_program(), "/usr/libexec/nanokvm-native-owner");
             assert_eq!(command.get_args().collect::<Vec<_>>(), ["--scope", name]);
             let env = command.get_envs().collect::<Vec<_>>();
-            assert_eq!(env.len(), 3);
+            assert!(matches!(env.len(), 3 | 4));
             for (name, value) in env {
-                assert!(matches!(name.to_str(), Some("HOME" | "LANG" | "PATH")));
+                assert!(matches!(
+                    name.to_str(),
+                    Some("HOME" | "LANG" | "PATH" | "PICOCLAW_HOME")
+                ));
+                if name == "PICOCLAW_HOME" {
+                    assert!(matches!(role, Role::Backend | Role::Picoclaw));
+                }
                 assert!(value.is_some());
             }
         }

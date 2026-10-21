@@ -7,31 +7,19 @@ LOG_FILE="${PICOCLAW_LOG_FILE:-/tmp/picoclaw.log}"
 BIN_NAME="$(basename "$BIN_PATH")"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
-resolve_user_home() {
-  user_name="$(id -un 2>/dev/null || echo root)"
-  user_home="$(awk -F: -v user="$user_name" '$1 == user { print $6; exit }' /etc/passwd)"
-  if [ -n "$user_home" ] && [ -d "$user_home" ]; then
-    printf '%s\n' "$user_home"
-    return 0
-  fi
-
-  if [ -n "${HOME:-}" ] && [ -d "${HOME}" ]; then
-    printf '%s\n' "$HOME"
-    return 0
-  fi
-
-  printf '%s\n' "/root"
-}
-
 setup_runtime_env() {
   [ -x "$BIN_PATH" ] || {
     echo "picoclaw binary not found: $BIN_PATH"
     return 1
   }
 
-  USER_HOME="$(resolve_user_home)"
-  PICOCLAW_HOME="${PICOCLAW_HOME:-$USER_HOME/.picoclaw}"
-  HOME="$USER_HOME"
+  # Same resolver as Rust, before chdir. A relative override must not be
+  # interpreted a second time from inside itself. No passwd/HOME fallback.
+  PICOCLAW_HOME="$(/usr/libexec/nanokvm-native-ctl picoclaw-home)" || {
+    echo "failed to resolve picoclaw home"
+    return 1
+  }
+  HOME=/root
   export HOME
   export PICOCLAW_HOME
 

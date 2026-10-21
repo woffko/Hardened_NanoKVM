@@ -146,6 +146,19 @@ fn child(mode: &str, root: &Path) -> ! {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "gateway" {
+        fs::write(
+            "picoclaw-runtime.fixture",
+            serde_json::to_vec(&serde_json::json!({
+                "home": std::env::var("PICOCLAW_HOME").unwrap(),
+                "cwd": std::env::current_dir().unwrap(),
+                "user_home": std::env::var("HOME").unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        return ExitCode::SUCCESS;
+    }
     if args.get(1).map(String::as_str) == Some("wire") {
         let root = Path::new(&args[3]);
         fs::write(root.join("owner.pid"), std::process::id().to_string()).unwrap();

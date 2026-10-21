@@ -15,6 +15,19 @@ mounts are rejected. A custom home on another mounted filesystem, including
 public USB storage, is not supported by this private-rootfs protocol. It fails
 before writes; it is not silently redirected to the default home.
 
+Rust, the fixed native role command and the new bundled S96 use the same lexical
+home selector. `nanokvm-native-ctl picoclaw-home` is a read-only path query: it
+does not connect to the broker, create directories, onboard or repair state.
+Unset/Unicode-whitespace-only values select `/root/.picoclaw`; relative values
+become absolute before S96 changes cwd. Spaces and UTF-8 names are retained;
+parent traversal, control characters, non-UTF-8 or overlong effective paths fail
+explicitly, without fallback. `HOME`/passwd do not select a second default.
+Existing non-root/passwd-selected layouts need an explicit compatible
+`PICOCLAW_HOME`, not discovery or reset. Missing/old ctl support refuses setup.
+This is not a persistent broker home/generation binding: independent launchers
+with different overrides/cwds can still select different homes. Absolute,
+consistent service configuration and the retained migration remain required.
+
 Existing credential files must be root-owned regular single-link files with
 mode 0600. Reads are bounded to 4 MiB per file and compare inode/metadata revision,
 including modification/change times, before and after reading. Malformed
@@ -93,7 +106,7 @@ added to the preserved archive schema, nor is a Rust Config permit proof that
 native writers are stopped. All writers must be enrolled or stopped/joined.
 
 Profile/workspace/session/installer and independent service/local-tool writers,
-effective-home alignment with non-root service users, stale-temporary recovery,
+broker-frozen effective-home alignment and non-root service-user migration, stale-temporary recovery,
 fault-injected kernel I/O/fsync outcomes, native onboard acceptance, device tests
 and raw migration remain open. PicoClaw local tools still need H2 isolation.
 Target GUI/HID/BIOS/terminal autonomy is unchanged by this file protocol.

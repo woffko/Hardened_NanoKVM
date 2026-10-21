@@ -2963,12 +2963,7 @@ async fn onboard_runtime_config() -> Result<()> {
 }
 
 fn resolve_config_path() -> Result<PathBuf> {
-    let home = std::env::var("PICOCLAW_HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root/.picoclaw"));
-    Ok(home.join("config.json"))
+    Ok(crate::native_owner::picoclaw_home::resolve()?.join("config.json"))
 }
 
 fn is_model_configured(config: &JsonValue, security: &serde_yaml::Value, model_name: &str) -> bool {
