@@ -545,7 +545,9 @@ pub async fn uninstall_runtime() -> Result<Response> {
         ));
     }
 
-    let _ = stop_runtime_inner().await;
+    if let Err(err) = stop_runtime_inner().await {
+        return Ok(picoclaw_error(CODE_RUNTIME_START_FAILED, err));
+    }
     if let Ok(config_path) = resolve_config_path() {
         if let Some(parent) = config_path.parent() {
             let _ = fs::remove_dir_all(parent);
@@ -2485,10 +2487,13 @@ async fn start_runtime_inner() -> std::result::Result<(String, String), String> 
         return Err("picoclaw is not installed".to_string());
     }
 
+    let support = native_control_ready()
+        .await
+        .map_err(|err| err.to_string())?;
     ensure_startup_defaults()
         .await
         .map_err(|err| err.to_string())?;
-    let (command, output) = run_script("start", PICOCLAW_START_TIMEOUT)
+    let (command, output) = run_native_control(PicoControl::Ensure, support)
         .await
         .map_err(|err| err.to_string())?;
     time::sleep(Duration::from_millis(1500)).await;
@@ -2503,10 +2508,12 @@ async fn start_runtime_inner() -> std::result::Result<(String, String), String> 
 }
 
 async fn stop_runtime_inner() -> std::result::Result<(String, String), String> {
-    let (command, output) = run_script("stop", PICOCLAW_STOP_TIMEOUT)
+    let support = native_control_ready()
         .await
         .map_err(|err| err.to_string())?;
-    time::sleep(Duration::from_millis(500)).await;
+    let (command, output) = run_native_control(PicoControl::Stop, support)
+        .await
+        .map_err(|err| err.to_string())?;
 
     let settings = load_gateway_settings().ok();
     set_runtime_status(RuntimeStatus {
@@ -2721,19 +2728,69 @@ fn install_binary(src: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run_script(action: &'static str, timeout: Duration) -> Result<(String, String)> {
-    if action == "stop" {
-        // Stop remains available with an unresolved/missing app slot. Match
-        // S96's best-effort killall semantics without executing app code.
-        let output = command::run_allowed(
-            AllowedCommand::PicoclawStop,
-            ["killall", "picoclaw"],
-            timeout,
-        )
-        .await?;
-        return Ok((
-            "/bin/busybox killall picoclaw".into(),
+enum PicoControl {
+    Ensure,
+    Stop,
+}
+
+async fn native_control_ready() -> Result<crate::native_owner::broker::boot::Permit> {
+    // Admit before queuing a blocking callback, not inside it. Contenders fail
+    // immediately instead of growing a queue of helper-hashing/fsync tasks.
+    let admission = crate::update::operation_lock::ProcessLock::acquire()
+        .map_err(|_| AppError::Conflict("picoclaw native control admission unavailable".into()))?;
+    task::spawn_blocking(move || {
+        // Management may remain available when boot-support publication fails.
+        // Never let an old ctl/broker's empty scope stand in for a stopped
+        // legacy gateway. Check this backend's exact helpers under admission,
+        // then retain its current fresh-boot consumer profile through control.
+        let _admission = admission;
+        crate::update::native_bootstrap::check_installed().map_err(|_| {
+            AppError::Conflict("picoclaw requires matching current native support".into())
+        })?;
+        crate::native_owner::broker::boot::require_ready().map_err(|_| {
+            AppError::Conflict(
+                "picoclaw requires a fresh enrolled boot with current scripts".into(),
+            )
+        })
+    })
+    .await
+    .map_err(|_| AppError::Internal("picoclaw native preflight task failed".into()))?
+}
+
+async fn run_native_control(
+    control: PicoControl,
+    support: crate::native_owner::broker::boot::Permit,
+) -> Result<(String, String)> {
+    let (argument, timeout) = match control {
+        PicoControl::Ensure => ("ensure-picoclaw", PICOCLAW_START_TIMEOUT),
+        PicoControl::Stop => ("stop-picoclaw", PICOCLAW_STOP_TIMEOUT),
+    };
+    // The command owner retains the boot proof through cancellation, capture
+    // cleanup and direct-child reap. Broker Stop independently retains its
+    // Update exclusion and owned tree until receipt/reap/EOF, even if ctl dies.
+    let output = command::run_allowed_owned(
+        AllowedCommand::NativePicoclawControl,
+        [argument],
+        timeout,
+        support,
+    )
+    .await?;
+    if output.status == 0 {
+        Ok((
+            format!("/usr/libexec/nanokvm-native-ctl {argument}"),
             command_output_text(&output),
+        ))
+    } else {
+        Err(AppError::Conflict(
+            "picoclaw native operation did not confirm completion; no fallback attempted".into(),
+        ))
+    }
+}
+
+async fn run_script(action: &'static str, timeout: Duration) -> Result<(String, String)> {
+    if action != "onboard" {
+        return Err(AppError::BadRequest(
+            "only picoclaw onboarding uses a script".into(),
         ));
     }
     // Gate before selecting either the installed or bundled script: an older

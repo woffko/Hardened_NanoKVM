@@ -205,6 +205,10 @@ test-state-writer-inventory:
 test-picoclaw-bridge-boundary:
 	@node scripts/test-picoclaw-bridge-boundary.cjs
 
+.PHONY: test-picoclaw-native-routing
+test-picoclaw-native-routing:
+	@python3 -B scripts/test-picoclaw-native-routing.py
+
 # Build hardware support libraries
 support: check-root builder-image
 	@echo "Building support..."

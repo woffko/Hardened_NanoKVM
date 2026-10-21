@@ -23,6 +23,8 @@ fn shipped_broker_and_ctl_reject_generic_paths_and_maintenance_cli() {
                 vec!["retry-app-retirement", "/tmp/other"],
                 vec!["picoclaw-home", "extra"],
                 vec!["picoclaw-home-check", "extra"],
+                vec!["picoclaw-control-ready", "extra"],
+                vec!["picoclaw-control-ready", "/tmp/other"],
                 vec!["ensure-picoclaw", "extra"],
                 vec!["ensure-picoclaw", "/tmp/other"],
                 vec!["picoclaw-running", "extra"],

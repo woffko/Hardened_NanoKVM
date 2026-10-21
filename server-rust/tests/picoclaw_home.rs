@@ -65,19 +65,21 @@ fn invalid_home_check_refuses_before_contacting_a_broker_or_creating_state() {
         OsString::from("/bad\nname"),
         OsString::from_vec(b"/bad\xff".to_vec()),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-ctl"))
-            .arg("picoclaw-home-check")
-            .current_dir(root.path())
-            .env_clear()
-            .env("PICOCLAW_HOME", home)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(64));
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            output.stderr,
-            b"invalid picoclaw home; no runtime action taken\n"
-        );
+        for operation in ["picoclaw-home-check", "picoclaw-control-ready"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-ctl"))
+                .arg(operation)
+                .current_dir(root.path())
+                .env_clear()
+                .env("PICOCLAW_HOME", &home)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(64));
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                output.stderr,
+                b"invalid picoclaw home; no runtime action taken\n"
+            );
+        }
     }
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }

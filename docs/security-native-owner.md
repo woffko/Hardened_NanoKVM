@@ -134,15 +134,15 @@ That forced-death fixture tests detection/admission, **not recovery of an orphan
 native tree after killing a real subreaper**. Process-tree size/high-churn limits,
 unusual clone exit signals, durable crash recovery and vendor runtime remain open.
 
-### Optional PicoClaw prerequisite, not activated service integration
+### Optional PicoClaw scope and partial service integration
 
 Native-only maintenance stops and joins KVM, hwmon and an enrolled PicoClaw scope,
 retaining the backend. Full shutdown/install joins every enrolled slot. The
 backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
-native lifecycle compatibility epoch is now 6; epoch-1/2/3/4/5 transitions are refused,
-and `support_transition=0` still refuses even a matching epoch-6 live transition.
+native lifecycle compatibility epoch is now 7; epoch-1 through epoch-6 transitions
+are refused, and `support_transition=0` still refuses even a matching epoch-7 live transition.
 The separate boot receipt now has a generation-bound v2 format; the native
 Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
 was introduced.
@@ -153,14 +153,15 @@ receipt loss, and four-role app install/trial/rollback. These establish the
 controller/retained-session behavior, not execution or health of the installed
 PicoClaw program.
 
-The ordinary API/S96 still starts the gateway directly and uses legacy stop.
-Fixed broker ensure/stop IPC and root-only ctl commands now exist, but these
-legacy entrypoints are not routed through them yet. Do not interpret the new
-operations as adoption of an already running legacy process or C1/H2 closure.
-Before routing those entrypoints, finish all-writer/configuration generation
-enrollment, cover onboard/install/profile writers and replace legacy stop/start
-without process-name adoption. Preserve the separate enforceable local-tool
-privilege boundary and target GUI/HID autonomy.
+Ordinary API and current S96 start/stop now use fixed broker ensure/stop rather
+than direct gateway launch, pidof or process-name killing. This is partial
+service integration, not adoption of an already running legacy process or C1/H2
+closure. Onboard, install/uninstall and profile/workspace writers still require
+complete ownership/enrollment, runtime-intent handoff and target acceptance.
+Uninstall now refuses deletion after an unverified Stop, but this alone is not
+serialized stopped ownership through deletion or protection against all writers.
+Preserve the separate enforceable local-tool privilege boundary and target
+GUI/HID autonomy.
 The broker now freezes its lexical home before opening the native journal and
 uses the same absolute selection for backend, trial and optional Pico launches
 through drain/resume/rollback. A malformed explicit home refuses broker startup
@@ -196,14 +197,18 @@ inode remains evidence, not a fallback executable; orphan staging evidence is
 not consumed or deleted on retry. This is filesystem publication, not stopping,
 adopting or restarting a running legacy gateway. It cannot grant same-boot
 Ready, does not add a fifth framed support-catalog entry, and does not enable
-the still-unsupported live helper/support transaction. Actual S96/API routing,
-all Pico writers, pending-pair settlement and H2 remain required.
+the still-unsupported live helper/support transaction. Current S96/API route
+start/stop through the broker only with current enrolled support; all Pico
+writers, complete legacy/helper migration, pending-pair capture settlement and
+H2 remain required.
 
 ### Fixed optional-scope service operations
 
 The NKC2/NKR2 frames remain 48 bytes. Each operation below carries the full
 32-byte home fingerprint in its own request; a prior home query grants nothing.
 The ctl accepts no alternate executable, pathname, environment map or arguments.
+All four ctl service operations require and retain a current fresh-boot receipt
+for this executing client's compiled consumer profile, before broker contact.
 
 | Operation | Opcode | Fixed ctl command | Meaning |
 | --- | --- | --- | --- |
@@ -245,6 +250,40 @@ These commands concern the enrolled optional scope only. They do not prove an
 independently launched legacy gateway is stopped. API/S96 migration must first
 exclude those legacy launchers and bind every writer, including gateway default
 refresh, onboard, binary install/uninstall and profile/workspace changes.
+
+### Ordinary API/S96 control routing
+
+API start takes nonblocking Update admission before queuing blocking preflight
+work (contenders cannot grow a helper-hashing queue), checks this backend's
+exact installed native helpers and obtains its compiled current fresh-boot proof
+before preparing defaults. It releases Update before submitting Ensure (the broker
+acquires its own Update/Config), but the command owner retains the shared boot
+proof through capture/cancellation/direct-child reap. Stop uses the same fixed
+helper proof and no app-script selection, Config read or process-name fallback.
+A helper error, timeout or lost reply is not Stopped. The existing broker retains
+its own Stop exclusion/receipt/reap/EOF responsibility after the client dies.
+
+S96 first calls the new `picoclaw-control-ready` entrypoint, then the actual
+ensure/stop operation. Older clients that knew the original service verbs reject
+this new entrypoint instead of acknowledging an empty owned scope. The new probe
+checks/retains the compiled boot profile and uses the existing full-home-bound
+Running-owner query; it grants no lease to the later connection. Every actual
+service operation independently binds the home and retains the boot profile.
+S96 no longer changes cwd, creates the home, opens a gateway log or launches the
+runtime for start/stop; its separate legacy onboarding path still does writes.
+Missing/mismatched helpers refuse without fallback. Restart stops before start
+and propagates a failed/unverified Stop; extra arguments refuse without control.
+
+A legacy installation with missing/different helpers or an Armed/old-generation
+receipt can retain diagnostic web access, but new API control refuses before
+default publication. Publishing a script is not enrollment; a supported helper
+transition and real fresh boot are still required. Do not use this refusal as a
+claim that the old gateway was stopped or that in-place migration is complete.
+Current source routing is not installed-device or all-writer acceptance.
+
+`make test-picoclaw-native-routing` checks fixed routing and error propagation
+using synthetic ctl responses; historical launcher bodies are never executed.
+This complements real native ownership/root fixtures, not target acceptance.
 
 ## Durable native broker admission
 
@@ -343,7 +382,8 @@ own request to the same live owner's home and retained writer/service admission,
 not treat this short-lived ctl query as a transferable capability.
 
 The daemon requests KVM/hwmon/backend roles and retains any explicitly enrolled
-optional Pico scope. Pico ensure/stop routing is not activated yet. `EnsureKvm`
+optional Pico scope. Current API/S96 route Pico ensure/stop with the separate
+fresh-boot/current-helper gates described above. `EnsureKvm`
 and `EnsureHwmon` request admission, not health acceptance. Pause consumes all
 launch capability before draining and durably records Maintenance. Only that
 same live connection may explicitly resume after proven closure. Caller EOF,

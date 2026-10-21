@@ -32,10 +32,12 @@ the caller's full path fingerprint with the live broker and prints the caller's
 path only on a matching Running reply. It cannot set a home or submit a path.
 It is a point-in-time identity query, not a writer/native lease, configuration
 generation receipt or permission for a later start/capture on another connection.
-No filesystem trust check is supplied by this fingerprint. Existing S96 still
-uses the local selector, not this broker check. Independent legacy launchers
-and different service-user layouts remain un-migrated; service routing and
-configuration-generation binding are still required.
+No filesystem trust check is supplied by this fingerprint. Current S96 start/
+stop probe `picoclaw-control-ready` and use fixed home-bound broker operations;
+only its separate legacy onboard setup uses the local selector/chdir. API
+control additionally checks exact current support before default preparation.
+Independent legacy launchers and different service-user layouts remain
+un-migrated; complete all-writer/configuration handoff is still required.
 
 Existing credential files must be root-owned regular single-link files with
 mode 0600. Reads are bounded to 4 MiB per file and compare inode/metadata revision,
@@ -129,7 +131,8 @@ and the installed-runtime/fallback acceptance checks remain separate gates.
 The two canonical names still change separately. Independent native readers
 that ignore the directory lock/journal can observe an intermediate pair.
 Native stop/join/enrollment and start-after-recovery integration therefore remain
-mandatory. Raw capture must settle or reject a pending journal under the effective
+mandatory for every writer, beyond the new fixed API/S96 start/stop routing.
+Raw capture must settle or reject a pending journal under the effective
 home/service barrier before reading canonical files. The journal is not silently
 added to the preserved archive schema, nor is a Rust Config permit proof that
 native writers are stopped. All writers must be enrolled or stopped/joined.

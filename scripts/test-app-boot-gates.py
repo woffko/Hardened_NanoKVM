@@ -146,14 +146,17 @@ def main():
     else:
         api = (ROOT / api_path).read_text()
     prefix = api.split("async fn run_script(", 1)[1].split("let (command, display)", 1)[0]
-    stop = prefix.split("// Gate before selecting", 1)[0]
+    stop = api.split("async fn stop_runtime_inner()", 1)[1].split("async fn run_install_runtime()", 1)[0]
+    native = api.split("async fn run_native_control(", 1)[-1].split("async fn run_script(", 1)[0]
     check("picoclaw Stop is independent of app gate and script selection",
-          'if action == "stop"' in stop and "AllowedCommand::PicoclawStop" in stop
-          and '["killall", "picoclaw"]' in stop and "return Ok(" in stop
-          and "AllowedCommand::AppSlotGate" not in stop)
-    check("picoclaw API gates before selecting even an older installed script",
+          "run_native_control(PicoControl::Stop, support)" in stop
+          and "AllowedCommand::NativePicoclawControl" in native
+          and "output.status == 0" in native and "run_allowed_owned(" in native
+          and "AllowedCommand::AppSlotGate" not in stop and 'run_script("stop"' not in stop
+          and "killall" not in api)
+    check("picoclaw onboard API gates before selecting even an older installed script",
           "AllowedCommand::AppSlotGate" in prefix and '["gate"]' in prefix
-          and "gate.status != 0" in prefix)
+          and "gate.status != 0" in prefix and 'action != "onboard"' in prefix)
     if not args.baseline_ref:
         s02 = source("S02apprecover", None)
         with tempfile.TemporaryDirectory(prefix="nanokvm-early-app-gate-") as temporary:

@@ -40,7 +40,12 @@ fn main() -> ExitCode {
     }
     let query = args.len() == 1 && args[0] == "kvm-running";
     let running_query = args.len() == 1 && args[0] == "running";
-    let home_check = args.len() == 1 && args[0] == "picoclaw-home-check";
+    let control_ready = args.len() == 1 && args[0] == "picoclaw-control-ready";
+    let home_check = args.len() == 1
+        && matches!(
+            args[0].to_str(),
+            Some("picoclaw-home-check" | "picoclaw-control-ready")
+        );
     let pico_service = args.len() == 1
         && matches!(
             args[0].to_str(),
@@ -57,6 +62,21 @@ fn main() -> ExitCode {
     } else {
         None
     };
+    // The new S96 probes this entrypoint so an older ctl that understands only
+    // the original service verbs cannot report an empty scope as legacy Stop.
+    // Each actual operation also rechecks/retains the current boot profile;
+    // this separate probe is not a lease for a later connection.
+    let _pico_boot = if pico_service || control_ready {
+        match boot::require_ready() {
+            Ok(permit) => Some(permit),
+            Err(error) => {
+                eprintln!("picoclaw native boot: {error}");
+                return ExitCode::from(78);
+            }
+        }
+    } else {
+        None
+    };
     let op = if args.len() == 1 {
         match args[0].to_str() {
             Some("status" | "running" | "kvm-running") => Some(Operation::Observe),
@@ -68,7 +88,9 @@ fn main() -> ExitCode {
             Some("restart-backend") => Some(Operation::RestartBackend),
             Some("restart-backend-safe") => Some(Operation::RestartBackendSafe),
             Some("retry-app-retirement") => Some(Operation::RetryAppRetirement),
-            Some("picoclaw-home-check") => Some(Operation::CheckPicoclawHome),
+            Some("picoclaw-home-check" | "picoclaw-control-ready") => {
+                Some(Operation::CheckPicoclawHome)
+            }
             Some("ensure-picoclaw") => Some(Operation::EnsurePicoclaw),
             Some("picoclaw-running") => Some(Operation::PicoclawRunning),
             Some("stop-picoclaw") => Some(Operation::StopPicoclaw),
@@ -80,7 +102,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|picoclaw-control-ready|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -150,7 +172,9 @@ fn main() -> ExitCode {
                     continue;
                 }
                 if let Some(home) = &selected_home {
-                    println!("{}", home.path().display());
+                    if !control_ready {
+                        println!("{}", home.path().display());
+                    }
                     return ExitCode::SUCCESS;
                 }
                 if backend_control {

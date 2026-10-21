@@ -13,8 +13,8 @@ fn app_slot_gate_uses_only_the_fixed_independent_executable() {
         OsStr::new("/usr/libexec/nanokvm-app-recovery")
     );
     assert_eq!(
-        AllowedCommand::PicoclawStop.program(),
-        OsStr::new("/bin/busybox")
+        AllowedCommand::NativePicoclawControl.program(),
+        OsStr::new("/usr/libexec/nanokvm-native-ctl")
     );
 }
 

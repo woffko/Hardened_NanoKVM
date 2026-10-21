@@ -152,6 +152,11 @@ fn actual_startup_defaults_reject_malformed_local_policy_before_publication() {
     run_private_root("startup-invalid-policy");
 }
 
+#[test]
+fn actual_api_control_without_current_support_preserves_config_and_uninstall_state() {
+    run_private_root("native-control-unavailable");
+}
+
 fn put_private(path: &Path, data: &[u8]) {
     fs::write(path, data).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -182,6 +187,52 @@ fn private_root_child() {
     fs::write(sentinel, b"synthetic-sentinel-unchanged").unwrap();
     fs::set_permissions(sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     match case.as_str() {
+        "native-control-unavailable" => {
+            startup_fixture(directory, json!({}));
+            fs::create_dir_all("/usr/bin").unwrap();
+            let binary = Path::new(PICOCLAW_BINARY_PATH);
+            put_private(binary, b"synthetic, never executed runtime\n");
+            let config = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let blocker = crate::update::operation_lock::ProcessLock::acquire().unwrap();
+                assert!(matches!(
+                    native_control_ready().await,
+                    Err(AppError::Conflict(message))
+                        if message == "picoclaw native control admission unavailable"
+                ));
+                drop(blocker);
+                assert!(start_runtime_inner().await.is_err());
+                assert_eq!(
+                    [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
+                    before,
+                    "native refusal must precede startup/default publication"
+                );
+                assert!(stop_runtime_inner().await.is_err());
+                assert_ne!(runtime_status().status, "stopped");
+                let response = uninstall_runtime().await.unwrap();
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let body: JsonValue = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["code"], CODE_RUNTIME_START_FAILED);
+            });
+            assert_eq!(
+                [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
+                before,
+                "unverified Stop must not delete either configuration file"
+            );
+            assert_eq!(
+                fs::read(binary).unwrap(),
+                b"synthetic, never executed runtime\n"
+            );
+            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+        }
         "startup-noop" => {
             startup_fixture(directory, json!({}));
             write_startup_defaults(&permit).unwrap();
