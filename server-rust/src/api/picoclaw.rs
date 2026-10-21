@@ -641,7 +641,7 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
     let result = crate::update::state_writers::StateWriters::default()
         .configuration()?
         .blocking(move |permit| {
-            let model_name = update_model_config_file(&api_base, &api_key, &model)?;
+            let model_name = update_model_config_file(permit, &api_base, &api_key, &model)?;
             write_startup_defaults(permit)?;
             Ok(model_name)
         })
@@ -2359,15 +2359,17 @@ async fn ensure_runtime_ready() -> std::result::Result<RuntimeStatus, RuntimeSta
         });
     }
 
-    if resolve_config_path()
+    let prepared = if resolve_config_path()
         .ok()
         .filter(|path| path.exists())
         .is_none()
     {
-        let _ = run_script("onboard", PICOCLAW_ONBOARD_TIMEOUT).await;
-    }
+        onboard_runtime_config().await
+    } else {
+        Ok(())
+    };
 
-    let settings = match load_gateway_settings() {
+    let settings = match prepared.and_then(|()| load_gateway_settings()) {
         Ok(settings) => settings,
         Err(err) => {
             return Err(RuntimeStatus {
@@ -2912,21 +2914,25 @@ struct ConfigDocument {
 
 fn load_config_document() -> Result<ConfigDocument> {
     let config_path = resolve_config_path()?;
-    let data = fs::read(&config_path)?;
+    load_config_document_at(config_path)
+}
+
+fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
+    let crate::update::picoclaw_config::RawDocuments {
+        config: data,
+        security: security_data,
+    } = crate::update::picoclaw_config::read_pair(&config_path)?;
     let raw: JsonValue = serde_json::from_slice(&data)
         .map_err(|err| AppError::Internal(format!("failed to parse picoclaw config: {err}")))?;
     let security_path = config_path
         .parent()
         .unwrap_or_else(|| Path::new("/root/.picoclaw"))
         .join(".security.yml");
-    let security = match fs::read(&security_path) {
-        Ok(data) => serde_yaml::from_slice(&data).map_err(|err| {
+    let security = match security_data {
+        Some(data) => serde_yaml::from_slice(&data).map_err(|err| {
             AppError::Internal(format!("failed to parse picoclaw security config: {err}"))
         })?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-        }
-        Err(err) => return Err(err.into()),
+        None => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
     };
 
     Ok(ConfigDocument {
@@ -2935,6 +2941,31 @@ fn load_config_document() -> Result<ConfigDocument> {
         raw,
         security,
     })
+}
+
+async fn onboard_runtime_config() -> Result<()> {
+    crate::update::state_writers::StateWriters::default()
+        .configuration()?
+        .run(|permit| async move {
+            let needed = permit
+                .blocking(|permit| {
+                    crate::update::picoclaw_config::needs_onboard(permit, &resolve_config_path()?)
+                })
+                .await?;
+            let result = if needed {
+                run_script("onboard", PICOCLAW_ONBOARD_TIMEOUT).await?;
+                // Native success is not a protected-config receipt. Validate
+                // its output before releasing this Rust-initiated writer.
+                permit
+                    .blocking(|_| load_config_document().map(|_| ()))
+                    .await
+            } else {
+                Ok(())
+            };
+            drop(permit);
+            result
+        })
+        .await
 }
 
 fn resolve_config_path() -> Result<PathBuf> {
@@ -3014,7 +3045,12 @@ fn security_has_model_key(security: &serde_yaml::Value, model_name: &str, index:
     })
 }
 
-fn update_model_config_file(api_base: &str, api_key: &str, model: &str) -> Result<String> {
+fn update_model_config_file(
+    permit: &crate::update::state_writers::ConfigPermit,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<String> {
     let mut doc = load_config_document()?;
     let model_name = extract_model_name(model)
         .ok_or_else(|| AppError::Internal("model identifier is required".to_string()))?;
@@ -3095,8 +3131,9 @@ fn update_model_config_file(api_base: &str, api_key: &str, model: &str) -> Resul
     );
     defaults.remove("model");
 
-    save_json(&doc.config_path, &doc.raw)?;
+    save_json(permit, &doc.config_path, &doc.raw)?;
     save_model_secret(
+        permit,
         &mut doc.security,
         &doc.security_path,
         &model_name,
@@ -3121,26 +3158,28 @@ fn extract_model_name(model: &str) -> Option<String> {
     )
 }
 
-fn save_json(path: &Path, value: &JsonValue) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let data = serde_json::to_vec_pretty(value)
-        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw config: {err}")))?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+fn save_json(
+    permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
+    value: &JsonValue,
+) -> Result<()> {
+    let data =
+        zeroize::Zeroizing::new(serde_json::to_vec_pretty(value).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw config: {err}"))
+        })?);
+    crate::update::picoclaw_config::replace(permit, path, &data)
 }
 
-fn save_yaml(path: &Path, value: &serde_yaml::Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let data = serde_yaml::to_string(value)
-        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw security: {err}")))?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+fn save_yaml(
+    permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
+    value: &serde_yaml::Value,
+) -> Result<()> {
+    let data =
+        zeroize::Zeroizing::new(serde_yaml::to_string(value).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw security: {err}"))
+        })?);
+    crate::update::picoclaw_config::replace(permit, path, data.as_bytes())
 }
 
 fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> String {
@@ -3237,6 +3276,7 @@ fn set_pico_security_token(security: &mut serde_yaml::Value, token: &str) {
 }
 
 fn save_model_secret(
+    permit: &crate::update::state_writers::ConfigPermit,
     security: &mut serde_yaml::Value,
     path: &Path,
     model_name: &str,
@@ -3270,10 +3310,7 @@ fn save_model_secret(
         serde_yaml::Value::Mapping(entry),
     );
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    save_yaml(path, security)
+    save_yaml(permit, path, security)
 }
 
 async fn ensure_startup_defaults() -> Result<()> {
@@ -3332,9 +3369,13 @@ fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -
     );
     let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
     headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
-    save_json(&doc.config_path, &doc.raw)?;
-    save_yaml(&doc.security_path, &doc.security)
+    save_json(permit, &doc.config_path, &doc.raw)?;
+    save_yaml(permit, &doc.security_path, &doc.security)
 }
+
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+#[path = "picoclaw_config_publication_tests.rs"]
+mod config_publication_tests;
 
 fn ensure_object_path<'a>(
     root: &'a mut JsonMap<String, JsonValue>,

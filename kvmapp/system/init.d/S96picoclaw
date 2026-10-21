@@ -1,5 +1,7 @@
 #!/bin/sh
 
+umask 077
+
 BIN_PATH="${PICOCLAW_BIN_PATH:-/usr/bin/picoclaw}"
 LOG_FILE="${PICOCLAW_LOG_FILE:-/tmp/picoclaw.log}"
 BIN_NAME="$(basename "$BIN_PATH")"

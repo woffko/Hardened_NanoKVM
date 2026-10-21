@@ -12,7 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
-| PicoClaw model configuration and startup defaults/internal token | Config permit retained through blocking file work; request authentication only reads the protected token | Other profile/workspace/onboard/runtime writers, effective home, service closure and multi-file recovery remain unenrolled |
+| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work and owned onboard command/output validation; checked per-file Rust config I/O | Profile/workspace/session/installer and independent runtime/onboard writers, effective home, service closure and multi-file recovery remain open |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -59,6 +59,10 @@ create or replace it. The fixed-root store rejects malformed files and unsafe
 metadata rather than silently repairing a live authority. Coordinated runtime
 configuration/regeneration across raw restore and optional-home migration still
 needs end-to-end acceptance; this enrollment does not close C1 or H2.
+Rust JSON/YAML credential copies use the
+[checked per-file protocol](security-picoclaw-config-io.md). Pair recovery,
+coherent readers, native publication, stale-temporary GC and all external
+producer/service closure are separate prerequisites; no runtime drain is proven.
 
 A [dedicated native process owner](security-native-owner.md) now provides a
 host-tested subreaper/pidfd scope for fresh launches. It is not packaged or wired

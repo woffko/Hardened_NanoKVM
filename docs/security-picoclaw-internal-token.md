@@ -34,12 +34,13 @@ The token is a derived local capability, not a new raw-preserved schema field.
 Runtime MCP headers are rewritten by startup/default configuration. Coherence
 across raw restore, effective/custom homes and optional-runtime migration still
 needs integration and device acceptance. This does not make multi-file PicoClaw
-configuration crash-transactional or enroll its profile/workspace/onboard/service
-writers. See [state writer inventory](security-state-writers.md).
-The runtime JSON/YAML files contain credential copies; their existing
-path-based write-then-chmod publication also needs a checked private-file
-protocol. Hardening the dedicated token inode does not protect every copy or
-establish a filesystem boundary against PicoClaw's still-privileged local tools.
+configuration crash-transactional or enroll its remaining profile/workspace,
+independent-onboard and service writers. See [state writer inventory](security-state-writers.md).
+Runtime JSON/YAML credential copies now use a
+[checked private-file protocol](security-picoclaw-config-io.md) for Rust I/O.
+Their pair transaction/recovery, external writer lifecycle and effective-home
+coherence remain open. This does not establish a filesystem boundary against
+PicoClaw's still-privileged local tools or protect every native-runtime copy.
 
 ## Shell bridge transport
 
