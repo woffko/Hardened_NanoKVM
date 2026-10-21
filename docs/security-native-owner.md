@@ -141,8 +141,8 @@ retaining the backend. Full shutdown/install joins every enrolled slot. The
 backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
-native lifecycle compatibility epoch is now 5; epoch-1/2/3/4 transitions are refused,
-and `support_transition=0` still refuses even a matching epoch-5 live transition.
+native lifecycle compatibility epoch is now 6; epoch-1/2/3/4/5 transitions are refused,
+and `support_transition=0` still refuses even a matching epoch-6 live transition.
 The separate boot receipt now has a generation-bound v2 format; the native
 Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
 was introduced.
@@ -153,13 +153,14 @@ receipt loss, and four-role app install/trial/rollback. These establish the
 controller/retained-session behavior, not execution or health of the installed
 PicoClaw program.
 
-The ordinary API/S96 still starts the gateway directly and uses legacy stop;
-there is no production Pico ensure/stop IPC operation yet. Do not interpret
-the new role primitive as a service migration or C1/H2 closure. Before activation,
-bind configuration generation to the broker-retained home, settle the pending pair
-journal under retained writer/native admission, cover onboard/install/profile
-writers and replace legacy stop/start without process-name adoption. Preserve
-the separate enforceable local-tool privilege boundary and target GUI/HID autonomy.
+The ordinary API/S96 still starts the gateway directly and uses legacy stop.
+Fixed broker ensure/stop IPC and root-only ctl commands now exist, but these
+legacy entrypoints are not routed through them yet. Do not interpret the new
+operations as adoption of an already running legacy process or C1/H2 closure.
+Before routing those entrypoints, finish all-writer/configuration generation
+enrollment, cover onboard/install/profile writers and replace legacy stop/start
+without process-name adoption. Preserve the separate enforceable local-tool
+privilege boundary and target GUI/HID autonomy.
 The broker now freezes its lexical home before opening the native journal and
 uses the same absolute selection for backend, trial and optional Pico launches
 through drain/resume/rollback. A malformed explicit home refuses broker startup
@@ -197,6 +198,53 @@ adopting or restarting a running legacy gateway. It cannot grant same-boot
 Ready, does not add a fifth framed support-catalog entry, and does not enable
 the still-unsupported live helper/support transaction. Actual S96/API routing,
 all Pico writers, pending-pair settlement and H2 remain required.
+
+### Fixed optional-scope service operations
+
+The NKC2/NKR2 frames remain 48 bytes. Each operation below carries the full
+32-byte home fingerprint in its own request; a prior home query grants nothing.
+The ctl accepts no alternate executable, pathname, environment map or arguments.
+
+| Operation | Opcode | Fixed ctl command | Meaning |
+| --- | --- | --- | --- |
+| EnsurePicoclaw | 14 | ensure-picoclaw | Admit one exact owned launch or verify its unchanged pair generation |
+| PicoclawRunning | 15 | picoclaw-running | Observe owned-scope readiness, not gateway/application health |
+| StopPicoclaw | 16 | stop-picoclaw | Admit Stop, then ctl waits for the separate Stopped query |
+| PicoclawStopped | 17 | picoclaw-stopped | Observe receipt + owner reap + EOF, or absence of an enrolled scope |
+
+Home mismatch refuses before any lifecycle tick. Read-only queries do not launch
+pending wanted work. Exact serial+frame replay returns the prior response and
+cannot start/stop a later generation. Non-home operations still require a zero
+reserved tail, and all replies retain the zero tail and existing two-role view.
+
+Ensure retains UpdateEX then Config through the coherent generation check and
+fixed spawn. An absent/closed scope requires app-slot admission before stopped
+pair recovery. The generation hashes exact bounded JSON/security bytes, lengths
+and explicit security absence; it is in-memory only and must not be logged.
+Running generation mismatch refuses without adoption or an implicit restart.
+Generic broker role startup refuses Pico, so it cannot skip this operation.
+Readiness means native owner startup, not a successful upstream gateway session.
+
+Rust config readers may expose a coherent committed-intent view from a pending
+pair journal. Native readers consume canonical files instead: their generation
+comparison refuses any pending journal without mutation. Only stopped launch
+preparation under Config may settle that journal, then fingerprint installed
+bytes. A crash test verifies the actual mixed on-disk intermediate state.
+
+Stop acquires only UpdateEX: an API caller already holding Config must not
+self-conflict on that same permit. The engine retains Update through caller
+disconnect and polls the existing owned Pico cell until its full closure proof.
+KVM/hwmon/backend scopes continue running. Pending Stop blocks maintenance,
+backend restart, full shutdown and app-install admission; uncertainty pins the
+same guard even after a childless protocol fixture has exited. The global Active
+journal stays conservative; Pico Stop is not whole-broker Stopping or proof that
+all external/configuration writers are gone. No PID lookup, killall, journal
+reset, owner adoption or automatic restart is offered.
+
+These commands concern the enrolled optional scope only. They do not prove an
+independently launched legacy gateway is stopped. API/S96 migration must first
+exclude those legacy launchers and bind every writer, including gateway default
+refresh, onboard, binary install/uninstall and profile/workspace changes.
 
 ## Durable native broker admission
 

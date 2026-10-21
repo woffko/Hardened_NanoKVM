@@ -85,6 +85,18 @@ fn start_roles(broker: &mut Broker, root: &Path, missing: bool) {
         if role == Role::Backend {
             let admission = broker.runtime_permit().unwrap();
             broker.start_backend(command, &admission).unwrap();
+        } else if role == Role::Picoclaw {
+            let admission = broker.runtime_permit().unwrap();
+            // This scope fixture has no credential files. Root pair provenance
+            // is tested separately; use an explicit synthetic generation while
+            // retaining the same Update/Config launch admission as production.
+            broker
+                .start_picoclaw(
+                    command,
+                    &admission,
+                    crate::update::picoclaw_config::Generation::fixture([0x31; 32]),
+                )
+                .unwrap();
         } else {
             broker.start_owned(role, command).unwrap();
         }
@@ -718,7 +730,18 @@ async fn published_trial_retains_freeze_and_commits_durably_before_backend_autho
             .env("NANOKVM_APP_NATIVE_RECEIPT", "complete")
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
-        broker.start_owned(role, command).unwrap();
+        if role == Role::Picoclaw {
+            let admission = broker.runtime_permit().unwrap();
+            broker
+                .start_picoclaw(
+                    command,
+                    &admission,
+                    crate::update::picoclaw_config::Generation::fixture([0x31; 32]),
+                )
+                .unwrap();
+        } else {
+            broker.start_owned(role, command).unwrap();
+        }
     }
     until(|| broker.group.poll() == [Some(ScopeStatus::Running); 4]);
     let admission = broker.runtime_permit().unwrap();

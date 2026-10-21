@@ -498,6 +498,14 @@ impl Group {
             cell.stop();
         }
     }
+
+    /// Stop only the optional owned scope. Retain the Group and keep polling
+    /// its receipt/owner/EOF; this call itself is not closure evidence.
+    pub(super) fn stop_picoclaw(&mut self) {
+        if let Some(cell) = self.cells[Role::Picoclaw.index()].as_mut() {
+            cell.stop();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

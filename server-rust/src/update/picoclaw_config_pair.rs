@@ -166,6 +166,28 @@ pub(super) fn read(directory: &Directory) -> Result<RawDocuments> {
     }
 }
 
+/// Native readers consume canonical files, not Rust's committed intent view.
+/// Directory SH/EX is retained; pending intent refuses without applying it.
+pub(super) fn read_installed(directory: &Directory) -> Result<RawDocuments> {
+    if pending(directory)?.is_some() {
+        return Err(AppError::Conflict(
+            "picoclaw pair requires stopped recovery".into(),
+        ));
+    }
+    let mut current = snapshot(directory)?;
+    if pending(directory)?.is_some() {
+        return Err(AppError::Conflict(
+            "picoclaw pair changed during native read".into(),
+        ));
+    }
+    Ok(RawDocuments {
+        config: current[0]
+            .take()
+            .ok_or_else(|| AppError::Config("picoclaw config is missing".into()))?,
+        security: current[1].take(),
+    })
+}
+
 pub(super) fn recover(directory: &Directory) -> Result<()> {
     if let Some(journal) = pending(directory)? {
         // Visibility does not prove the interrupted publisher synced its

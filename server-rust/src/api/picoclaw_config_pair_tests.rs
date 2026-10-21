@@ -188,6 +188,16 @@ fn actual_pair_recovery_refuses_corrupt_unsafe_and_foreign_state_without_repair(
 }
 
 #[test]
+fn launch_preparation_settles_a_real_interrupted_pair_but_live_comparison_never_does() {
+    let root = fixture(false);
+    kill(stopped_at_with(
+        command(root.path(), "pair-write"),
+        "config-published",
+    ));
+    finish(command(root.path(), "generation-pending"));
+}
+
+#[test]
 fn actual_pair_retirement_refuses_a_replaced_journal_inode() {
     use std::io::Write;
     let root = fixture(false);

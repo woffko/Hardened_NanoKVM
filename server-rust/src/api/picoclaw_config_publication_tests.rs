@@ -132,6 +132,11 @@ fn actual_model_pair_keeps_custom_fields_and_publishes_the_matching_secret() {
     run_private_root("pair-model");
 }
 
+#[test]
+fn actual_launch_generation_binds_both_documents_and_explicit_security_absence() {
+    run_private_root("generation");
+}
+
 fn put_private(path: &Path, data: &[u8]) {
     fs::write(path, data).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -162,6 +167,53 @@ fn private_root_child() {
     fs::write(sentinel, b"synthetic-sentinel-unchanged").unwrap();
     fs::set_permissions(sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     match case.as_str() {
+        "generation" => {
+            use crate::update::picoclaw_config::{
+                current_generation, prepare_launch, replace_pair,
+            };
+            let config = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            assert!(prepare_launch(&permit, &config).is_err());
+            assert!(!config.exists());
+            put_private(&config, br#"{"synthetic":1}"#);
+            let absent = current_generation(&config).unwrap();
+            let inode = config.metadata().unwrap().ino();
+            assert!(prepare_launch(&permit, &config).unwrap() == absent);
+            assert_eq!(config.metadata().unwrap().ino(), inode);
+            put_private(&security, b"");
+            let empty = current_generation(&config).unwrap();
+            assert!(empty != absent);
+            replace_pair(
+                &permit,
+                &config,
+                br#"{"synthetic":2}"#,
+                Some(b"key: synthetic\n"),
+            )
+            .unwrap();
+            let changed = current_generation(&config).unwrap();
+            assert!(changed != empty && changed != absent);
+            assert!(prepare_launch(&permit, &config).unwrap() == changed);
+            fs::set_permissions(&security, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(current_generation(&config).is_err());
+            assert!(prepare_launch(&permit, &config).is_err());
+            assert_eq!(fs::read(&security).unwrap(), b"key: synthetic\n");
+        }
+        "generation-pending" => {
+            use crate::update::picoclaw_config::{current_generation, prepare_launch};
+            let config = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
+            assert!(current_generation(&config).is_err());
+            assert_eq!(
+                [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
+                before
+            );
+            let generation = prepare_launch(&permit, &config).unwrap();
+            assert!(current_generation(&config).unwrap() == generation);
+            assert!(!directory.join(".picoclaw-config-pair").exists());
+            assert_eq!(load_config_document_at(config).unwrap().raw["epoch"], "new");
+            assert_eq!(fs::read(security).unwrap(), b"epoch: new\n");
+        }
         "pair-write" => pair::write(&permit, directory),
         "pair-recover" => pair::recover(&permit, directory),
         "pair-refuse" => pair::refuse(&permit, directory, sentinel),

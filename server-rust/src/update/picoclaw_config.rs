@@ -7,6 +7,7 @@ use rustix::fs::{
     AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, mkdirat, openat2, renameat, renameat_with,
     unlinkat,
 };
+use sha2::{Digest, Sha256};
 use std::{
     fs::{File, Metadata},
     io::{Read, Write},
@@ -298,6 +299,59 @@ pub(crate) struct RawDocuments {
     pub security: Option<Zeroizing<Vec<u8>>>,
 }
 
+/// In-memory identity of the exact coherent credential-bearing pair. Never
+/// print/serialize it or treat it as proof that an external writer is stopped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Generation([u8; 32]);
+
+impl Generation {
+    fn from_documents(documents: &RawDocuments) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"NanoKVM picoclaw configuration generation v1\0");
+        hash.update((documents.config.len() as u64).to_le_bytes());
+        hash.update(documents.config.as_slice());
+        hash.update([u8::from(documents.security.is_some())]);
+        if let Some(security) = &documents.security {
+            hash.update((security.len() as u64).to_le_bytes());
+            hash.update(security.as_slice());
+        }
+        Self(hash.finalize().into())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// Read-only comparison while a native scope may still be using this pair.
+/// Pending publication refuses; it must never be recovered under a live reader.
+pub(crate) fn current_generation(path: &Path) -> Result<Generation> {
+    if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
+        return Err(invalid());
+    }
+    let (directory, _) = destination(path)?;
+    directory.lock(true)?;
+    Ok(Generation::from_documents(&pair::read_installed(
+        &directory,
+    )?))
+}
+
+/// Caller has proved its owned Pico scope absent/closed and retains Config.
+/// This settles an interrupted pair before the new fixed launch is submitted.
+/// It does not create a missing home/config or parse upstream runtime policy.
+pub(crate) fn prepare_launch(_permit: &ConfigPermit, path: &Path) -> Result<Generation> {
+    if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
+        return Err(invalid());
+    }
+    let (directory, _) = destination(path)?;
+    directory.lock(false)?;
+    pair::recover(&directory)?;
+    Ok(Generation::from_documents(&pair::read_installed(
+        &directory,
+    )?))
+}
+
 pub(crate) fn read_pair(path: &Path) -> Result<RawDocuments> {
     if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
         return Err(invalid());
@@ -361,5 +415,43 @@ pub(crate) fn replace(_permit: &ConfigPermit, path: &Path, bytes: &[u8]) -> Resu
             Some(bytes),
         ),
         _ => Err(invalid()),
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn independent_generation_vector_and_presence_length_boundaries_are_exact() {
+        let documents = RawDocuments {
+            config: Zeroizing::new(br#"{"v":1}"#.to_vec()),
+            security: None,
+        };
+        let first = Generation::from_documents(&documents);
+        assert_eq!(
+            first.0,
+            [
+                0x8e, 0x61, 0xbc, 0xe7, 0x2a, 0x35, 0x54, 0xe6, 0x3a, 0xe3, 0x58, 0x1f, 0x31, 0xbf,
+                0x6c, 0x23, 0x76, 0xfb, 0xf0, 0x68, 0x9d, 0x09, 0x02, 0xb8, 0xd6, 0x47, 0x99, 0xa5,
+                0xc8, 0xe3, 0xf6, 0x10,
+            ]
+        );
+        let mut changed = documents;
+        changed.security = Some(Zeroizing::new(Vec::new()));
+        assert!(Generation::from_documents(&changed) != first);
+        changed.security = Some(Zeroizing::new(b"synthetic".to_vec()));
+        let second = Generation::from_documents(&changed);
+        changed.config.push(0);
+        assert!(Generation::from_documents(&changed) != second);
+        let left = RawDocuments {
+            config: Zeroizing::new(b"ab".to_vec()),
+            security: Some(Zeroizing::new(b"c".to_vec())),
+        };
+        let right = RawDocuments {
+            config: Zeroizing::new(b"a".to_vec()),
+            security: Some(Zeroizing::new(b"bc".to_vec())),
+        };
+        assert!(Generation::from_documents(&left) != Generation::from_documents(&right));
     }
 }

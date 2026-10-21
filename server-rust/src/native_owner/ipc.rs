@@ -18,6 +18,9 @@ const IDLE: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(2);
 const INSTALL_OFFERS: usize = 4;
 
+#[path = "ipc_picoclaw.rs"]
+mod picoclaw;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
     Observe = 1,
@@ -33,8 +36,23 @@ pub enum Operation {
     CancelAppInstall = 11,
     RetryAppRetirement = 12,
     CheckPicoclawHome = 13,
+    EnsurePicoclaw = 14,
+    PicoclawRunning = 15,
+    StopPicoclaw = 16,
+    PicoclawStopped = 17,
 }
 impl Operation {
+    fn binds_picoclaw_home(self) -> bool {
+        matches!(
+            self,
+            Self::CheckPicoclawHome
+                | Self::EnsurePicoclaw
+                | Self::PicoclawRunning
+                | Self::StopPicoclaw
+                | Self::PicoclawStopped
+        )
+    }
+
     fn decode(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Self::Observe),
@@ -50,6 +68,10 @@ impl Operation {
             11 => Some(Self::CancelAppInstall),
             12 => Some(Self::RetryAppRetirement),
             13 => Some(Self::CheckPicoclawHome),
+            14 => Some(Self::EnsurePicoclaw),
+            15 => Some(Self::PicoclawRunning),
+            16 => Some(Self::StopPicoclaw),
+            17 => Some(Self::PicoclawStopped),
             _ => None,
         }
     }
@@ -92,7 +114,7 @@ fn parse_request(bytes: &[u8; FRAME]) -> Option<(Operation, u64)> {
         return None;
     }
     let operation = Operation::decode(bytes[4])?;
-    if operation != Operation::CheckPicoclawHome && bytes[16..] != [0; 32] {
+    if !operation.binds_picoclaw_home() && bytes[16..] != [0; 32] {
         return None;
     }
     Some((operation, u64::from_be_bytes(bytes[8..16].try_into().ok()?)))
@@ -175,7 +197,7 @@ impl Channel {
         })
     }
     pub fn begin(&mut self, op: Operation) -> io::Result<()> {
-        if op == Operation::CheckPicoclawHome {
+        if op.binds_picoclaw_home() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         self.begin_frame(op, None)
@@ -185,6 +207,21 @@ impl Channel {
     /// a pathname, launching a service or changing its selected configuration.
     pub fn check_picoclaw_home(&mut self, home: &Home) -> io::Result<()> {
         self.begin_frame(Operation::CheckPicoclawHome, Some(home.fingerprint()))
+    }
+
+    /// Fixed owned-scope service requests, each bound to this caller's home.
+    /// A successful Stop reply is admission only; query Stopped for join proof.
+    pub fn picoclaw_service(&mut self, op: Operation, home: &Home) -> io::Result<()> {
+        if !matches!(
+            op,
+            Operation::EnsurePicoclaw
+                | Operation::PicoclawRunning
+                | Operation::StopPicoclaw
+                | Operation::PicoclawStopped
+        ) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.begin_frame(op, Some(home.fingerprint()))
     }
 
     fn begin_frame(&mut self, op: Operation, home: Option<[u8; 32]>) -> io::Result<()> {
@@ -241,7 +278,7 @@ impl Channel {
                 Ok(None)
             } else {
                 let reply = Reply::parse(&f.reply, f.serial)?;
-                if f.bytes[4] == Operation::CheckPicoclawHome as u8
+                if Operation::decode(f.bytes[4]).is_some_and(Operation::binds_picoclaw_home)
                     && reply.code == Code::Ok
                     && reply.mode != Mode::Running
                 {
@@ -323,6 +360,10 @@ struct Engine {
     backend_status: Option<Status>,
     backend_retry: Instant,
     backend_restart: Option<BackendRestart>,
+    picoclaw_status: Option<Status>,
+    picoclaw_generation: Option<crate::update::picoclaw_config::Generation>,
+    // Retained until receipt + owner reap + EOF, even if the caller disconnects.
+    picoclaw_stop: Option<crate::update::operation_lock::ProcessLock>,
     #[cfg(test)]
     fixture: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -355,6 +396,9 @@ impl Engine {
             backend_status: None,
             backend_retry: Instant::now(),
             backend_restart: None,
+            picoclaw_status: None,
+            picoclaw_generation: None,
+            picoclaw_stop: None,
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -385,6 +429,7 @@ impl Engine {
         };
         self.owner = Some(match owner {
             Owner::Running(mut broker) => {
+                self.tick_picoclaw(&mut broker);
                 self.backend_status = broker.backend_status();
                 let states = broker.poll();
                 self.roles = states.map(role_status);
@@ -469,6 +514,7 @@ impl Engine {
                 if broker.group.uncertainty_latched() {
                     self.mode = Mode::Uncertain;
                 }
+                self.tick_picoclaw(&mut broker);
                 Owner::Running(broker)
             }
             Owner::Paused(mut drain) => {
@@ -742,6 +788,7 @@ impl Engine {
             || self.lease.is_some()
             || self.abandoned
             || self.backend_restart.is_some()
+            || self.picoclaw_stop.is_some()
             || !matches!(self.owner, Some(Owner::Running(_)))
         {
             return Code::Busy;
@@ -900,7 +947,11 @@ impl Engine {
         let mut code = Code::Ok;
         match op {
             Operation::Observe => {}
-            Operation::CheckPicoclawHome => code = Code::Invalid,
+            Operation::CheckPicoclawHome
+            | Operation::EnsurePicoclaw
+            | Operation::PicoclawRunning
+            | Operation::StopPicoclaw
+            | Operation::PicoclawStopped => code = Code::Invalid,
             Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
@@ -921,7 +972,10 @@ impl Engine {
                 }
             }
             Operation::RestartBackend | Operation::RestartBackendSafe => {
-                if self.mode != Mode::Running || self.backend_restart.is_some() {
+                if self.mode != Mode::Running
+                    || self.backend_restart.is_some()
+                    || self.picoclaw_stop.is_some()
+                {
                     code = Code::Busy;
                 } else if let Some(Owner::Running(broker)) = self.owner.as_mut() {
                     match broker.runtime_permit() {
@@ -960,7 +1014,7 @@ impl Engine {
                 }
             }
             Operation::Pause => {
-                if self.backend_restart.is_some() {
+                if self.backend_restart.is_some() || self.picoclaw_stop.is_some() {
                     code = Code::Busy;
                 } else if self.lease == Some(key) && !self.abandoned {
                 } else {
@@ -1003,7 +1057,11 @@ impl Engine {
                 }
             }
             Operation::Shutdown => {
-                if self.lease.is_some() || self.abandoned || self.backend_restart.is_some() {
+                if self.lease.is_some()
+                    || self.abandoned
+                    || self.backend_restart.is_some()
+                    || self.picoclaw_stop.is_some()
+                {
                     code = Code::Busy;
                 } else {
                     match self.owner.take() {
@@ -1050,17 +1108,21 @@ impl Engine {
     }
 
     fn request_frame(&mut self, key: u64, op: Operation, bytes: &[u8; FRAME]) -> Reply {
-        if op != Operation::CheckPicoclawHome {
+        if !op.binds_picoclaw_home() {
             return self.request(key, op);
         }
         // Identity observation is not another lifecycle tick. Pending wanted
         // work belongs to the broker loop, not a caller's read-only query.
+        if bytes[16..] != self.home {
+            return self.reply(Code::Invalid);
+        }
+        if op != Operation::CheckPicoclawHome {
+            return self.picoclaw_request(op);
+        }
         self.reply(if self.mode == Mode::Uncertain {
             Code::Uncertain
         } else if self.mode != Mode::Running {
             Code::Busy
-        } else if bytes[16..] != self.home {
-            Code::Invalid
         } else {
             Code::Ok
         })

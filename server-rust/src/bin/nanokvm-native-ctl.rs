@@ -41,7 +41,12 @@ fn main() -> ExitCode {
     let query = args.len() == 1 && args[0] == "kvm-running";
     let running_query = args.len() == 1 && args[0] == "running";
     let home_check = args.len() == 1 && args[0] == "picoclaw-home-check";
-    let selected_home = if home_check {
+    let pico_service = args.len() == 1
+        && matches!(
+            args[0].to_str(),
+            Some("ensure-picoclaw" | "picoclaw-running" | "stop-picoclaw" | "picoclaw-stopped")
+        );
+    let selected_home = if home_check || pico_service {
         match nanokvm_rust_server::native_owner::picoclaw_home::Home::resolve() {
             Ok(home) => Some(home),
             Err(_) => {
@@ -64,6 +69,10 @@ fn main() -> ExitCode {
             Some("restart-backend-safe") => Some(Operation::RestartBackendSafe),
             Some("retry-app-retirement") => Some(Operation::RetryAppRetirement),
             Some("picoclaw-home-check") => Some(Operation::CheckPicoclawHome),
+            Some("ensure-picoclaw") => Some(Operation::EnsurePicoclaw),
+            Some("picoclaw-running") => Some(Operation::PicoclawRunning),
+            Some("stop-picoclaw") => Some(Operation::StopPicoclaw),
+            Some("picoclaw-stopped") => Some(Operation::PicoclawStopped),
             _ => None,
         }
     } else {
@@ -71,7 +80,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -83,7 +92,11 @@ fn main() -> ExitCode {
         return ExitCode::from(70);
     };
     let begin = if let Some(home) = &selected_home {
-        channel.check_picoclaw_home(home)
+        if pico_service {
+            channel.picoclaw_service(op, home)
+        } else {
+            channel.check_picoclaw_home(home)
+        }
     } else {
         channel.begin(op)
     };
@@ -96,15 +109,45 @@ fn main() -> ExitCode {
         Operation::EnsureBackend | Operation::RestartBackend | Operation::RestartBackendSafe
     );
     let mut backend_wait = false;
+    let mut pico_wait = false;
     while start.elapsed() < Duration::from_secs(15) {
         match channel.poll() {
             Ok(Some(reply)) => {
-                if op == Operation::BackendRunning && reply.code == Code::Unavailable {
+                if matches!(
+                    op,
+                    Operation::BackendRunning
+                        | Operation::PicoclawRunning
+                        | Operation::PicoclawStopped
+                ) && reply.code == Code::Unavailable
+                {
                     return ExitCode::from(1);
                 }
-                if reply.code != Code::Ok && !(backend_wait && reply.code == Code::Unavailable) {
+                if reply.code != Code::Ok
+                    && !((backend_wait || pico_wait) && reply.code == Code::Unavailable)
+                {
                     eprintln!("broker: {:?} {:?}", reply.code, reply.mode);
                     return ExitCode::from(71);
+                }
+                if pico_service {
+                    if matches!(op, Operation::PicoclawRunning | Operation::PicoclawStopped)
+                        || (pico_wait && reply.code == Code::Ok)
+                    {
+                        return ExitCode::SUCCESS;
+                    }
+                    let query = if op == Operation::StopPicoclaw {
+                        Operation::PicoclawStopped
+                    } else {
+                        Operation::PicoclawRunning
+                    };
+                    let Some(home) = &selected_home else {
+                        return ExitCode::from(71);
+                    };
+                    pico_wait = true;
+                    if channel.picoclaw_service(query, home).is_err() {
+                        return ExitCode::from(71);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
                 }
                 if let Some(home) = &selected_home {
                     println!("{}", home.path().display());

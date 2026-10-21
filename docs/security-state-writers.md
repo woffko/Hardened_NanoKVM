@@ -12,7 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
-| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work/onboard validation; private pair journal/coherent Rust reads, broker-retained absolute home and optional native-owner slot | Profile/workspace/session/installer and independent runtime/onboard writers, configuration-generation binding, actual native start/recovery/stop-join routing and pending-capture settlement remain open |
+| PicoClaw model/default/token and Rust-initiated onboard | Config-owned Rust pair/onboard; fixed broker operations bind retained home and installed pair generation, recover only before stopped launch, retain Update-only Stop through join | Ordinary API/S96 still legacy; profile/workspace/session/installer and independent native/onboard writers, full routing and pending-capture settlement remain open |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -78,8 +78,14 @@ and optional Pico commands inherit that selection. Malformed explicit selection
 refuses broker startup without falling back to the default. A fixed read-only
 IPC query compares a caller's full home fingerprint with the live broker; it
 does not tick lifecycle work, select a home, validate filesystem trust or grant
-future start/capture authority. Configuration-generation binding, provenance of
-installed optional scripts and independent launcher migration remain open.
+future start/capture authority. Separate fixed ensure/stop service operations
+bind that fingerprint in each actual request. Ensure retains Update/Config,
+settles the pair only for a closed owned scope, and compares the installed
+generation before a fixed launch. Live generation checks refuse pending intent
+instead of reading Rust's virtual committed view. Stop retains only Update until
+receipt/reap/EOF and does not reacquire a caller's Config. These operations do
+not stop or adopt an independent legacy process; API/S96/all-writer migration,
+complete helper/script transition and raw capture acceptance remain open.
 It therefore does not
 upgrade any source group to runtime-quiescent. The broker's fixed local IPC and
 explicit new-boot native journal recovery are host-tested components, not raw

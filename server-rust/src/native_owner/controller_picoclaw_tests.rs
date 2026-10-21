@@ -150,3 +150,34 @@ fn optional_pico_loss_latches_uncertainty_and_never_becomes_an_empty_drain() {
     assert!(drain.all_owner_processes_reaped());
     assert!(matches!(drain.try_resume(), Resume::Retained(_)));
 }
+
+#[test]
+fn selective_pico_stop_joins_its_real_tree_without_stopping_a_real_backend_tree() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = root.path().join("backend");
+    let pico = root.path().join("pico");
+    fs::create_dir(&backend).unwrap();
+    fs::create_dir(&pico).unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::Backend, command(&backend, "tree"))
+        .unwrap();
+    group
+        .start_command(Role::Picoclaw, command(&pico, "tree"))
+        .unwrap();
+    until(|| {
+        let states = group.poll();
+        states[2] == Some(Status::Running) && states[3] == Some(Status::Running)
+    });
+    let backend_leaf = leaf(&backend);
+    let pico_leaf = leaf(&pico);
+    group.stop_picoclaw();
+    until(|| matches!(group.poll()[3], Some(Status::Closed(Completion::Stopped))));
+    assert!(exited(&pico_leaf));
+    assert!(!exited(&backend_leaf));
+    assert_eq!(group.poll()[2], Some(Status::Running));
+    let mut drain = group.begin_drain();
+    until(|| drain.poll() == DrainStatus::Drained);
+    assert!(exited(&backend_leaf));
+    assert!(drain.all_owner_processes_reaped());
+}

@@ -110,7 +110,11 @@ impl Broker {
     }
 
     pub fn start(&mut self, role: Role) -> Result<(), StartFailure> {
-        if role == Role::Backend {
+        if role == Role::Picoclaw {
+            // Only the generation-bound fixed service operation owns optional
+            // start/stop policy. Generic native-role startup is insufficient.
+            Err(StartFailure::Journal(JournalError::Unsafe))
+        } else if role == Role::Backend {
             let admission = self.runtime_permit().map_err(StartFailure::Journal)?;
             self.start_backend(role.command(&self.group.home), &admission)
         } else {
@@ -123,7 +127,7 @@ impl Broker {
         role: Role,
         command: std::process::Command,
     ) -> Result<(), StartFailure> {
-        if role == Role::Backend {
+        if matches!(role, Role::Backend | Role::Picoclaw) {
             return Err(StartFailure::Journal(JournalError::Unsafe));
         }
         self.launch(role, command)
@@ -160,6 +164,38 @@ impl Broker {
         self.group
             .start_command(role, command)
             .map_err(StartFailure::Scope)
+    }
+
+    fn start_picoclaw(
+        &mut self,
+        command: std::process::Command,
+        _admission: &RuntimePermit,
+        _generation: crate::update::picoclaw_config::Generation,
+    ) -> Result<(), StartFailure> {
+        self.check_picoclaw_launch()
+            .map_err(StartFailure::Journal)?;
+        self.launch(Role::Picoclaw, command)
+    }
+
+    /// Gate before any stopped-pair recovery as well as before native spawn.
+    fn check_picoclaw_launch(&self) -> Result<(), JournalError> {
+        #[cfg(test)]
+        let fixture = self.update_parent.is_some();
+        #[cfg(not(test))]
+        let fixture = false;
+        if !fixture
+            && !matches!(
+                crate::update::app_slot::status(),
+                Ok(crate::update::app_slot::Status::NoTransaction
+                    | crate::update::app_slot::Status::Transaction(
+                        crate::update::app_slot::Phase::Committed
+                            | crate::update::app_slot::Phase::RolledBack
+                    ))
+            )
+        {
+            return Err(JournalError::Unsafe);
+        }
+        Ok(())
     }
 
     pub fn poll(&mut self) -> [Option<Status>; 2] {

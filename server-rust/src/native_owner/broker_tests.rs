@@ -72,6 +72,21 @@ fn running_broker_uses_own_compiled_support_epochs_and_refuses_transition_zero()
 }
 
 #[test]
+fn generic_native_start_cannot_bypass_the_fixed_pico_generation_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = acquire(root.path()).unwrap();
+    assert!(matches!(
+        broker.start(Role::Picoclaw),
+        Err(StartFailure::Journal(JournalError::Unsafe))
+    ));
+    assert!(matches!(
+        broker.start_owned(Role::Picoclaw, Command::new("/bin/true")),
+        Err(StartFailure::Journal(JournalError::Unsafe))
+    ));
+    assert!(!root.path().join("native-runtime-owner/state").exists());
+}
+
+#[test]
 fn boot_enrollment_is_retained_across_native_maintenance_resume_and_final_drain() {
     use rustix::fs::{FlockOperation, flock};
     let root = tempfile::tempdir().unwrap();

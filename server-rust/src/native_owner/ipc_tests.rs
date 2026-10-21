@@ -13,6 +13,8 @@ mod delivery;
 mod home;
 #[path = "app_engine_tests.rs"]
 mod install_engine;
+#[path = "ipc_picoclaw_tests.rs"]
+mod picoclaw;
 fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
@@ -223,6 +225,9 @@ fn owner_probe() {
         fs::write(root.join(format!("{role}-stopping")), b"stopping").unwrap();
         until(|| !hold.exists());
     }
+    if root.join(format!("{role}-missing-receipt")).exists() {
+        return;
+    }
     s.write_all(b"D\0").unwrap();
 }
 
@@ -245,7 +250,7 @@ fn native_pause_keeps_backend_and_resume_never_publishes_false_closed() {
         panic!("no serving broker")
     };
     broker
-        .start_owned(Role::Picoclaw, owner_command(root.path(), Role::Picoclaw))
+        .launch(Role::Picoclaw, owner_command(root.path(), Role::Picoclaw))
         .unwrap();
     until(|| {
         let Some(Owner::Running(broker)) = e.owner.as_mut() else {
@@ -306,7 +311,7 @@ fn optional_pico_owner_loss_blocks_ipc_admission_without_a_public_role_failure()
         panic!("no serving broker")
     };
     broker
-        .start_owned(Role::Picoclaw, Command::new("/bin/true"))
+        .launch(Role::Picoclaw, Command::new("/bin/true"))
         .unwrap();
     until(|| {
         e.tick();
