@@ -104,6 +104,26 @@ The bundled S96 script uses umask 077 for new files/directories. Its independent
 invoked lifecycle, an older installed script and the external binary's own
 publication/forking semantics are not made safe merely by this enrollment.
 
+## Startup defaults and connection-time publication
+
+The ordinary API startup/default path first refuses an unresolved pair journal;
+it cannot roll forward a native reader's canonical files as a side effect of a
+gateway connection. It compares zeroizing canonical JSON/YAML encodings before
+and after preparing defaults. If the document values are unchanged, it does not
+publish either file: existing bytes, comments/formatting, inodes, timestamps and
+the exact installed-pair generation are retained. A real settings/token change
+still uses the checked pair publisher. This is not a native stop/join barrier;
+configuration changes and independent writers still need lifecycle integration.
+
+Explicit boolean `restrict_to_workspace` and `allow_read_outside_workspace`
+values are retained. Missing values default to `true` and `false`, respectively,
+instead of forcibly enabling unrestricted local filesystem access. Malformed
+policy fields/containers fail before pair publication or internal-token
+provisioning. Existing explicitly unrestricted installations are **not** silently
+migrated or described as isolated: these upstream settings alone do not enforce
+the required NanoKVM privilege boundary. Target GUI/HID/BIOS/terminal autonomy
+and the installed-runtime/fallback acceptance checks remain separate gates.
+
 ## Remaining transaction/lifecycle work
 
 The two canonical names still change separately. Independent native readers
@@ -140,3 +160,12 @@ read-only coherent journal views, busy readers during mixed canonical state,
 idempotent roll-forward, exact journal retirement, corrupt/unsafe/foreign-state
 refusal and preservation/non-adoption of private orphan temporaries. These are
 SIGKILL tests, not physical power-cut or kernel-fault-injection evidence.
+
+Connection/default cases additionally verify three repeated no-op preparations
+retain exact file bytes/metadata and generation even with user formatting/YAML
+comments; a real gateway-setting correction still publishes. Local policy cases
+cover missing/explicit booleans, retained custom fields/token/MCP enablement and
+malformed-policy refusal before provisioning. An actual interrupted-pair case
+refuses connection-time preparation without changing the canonical pair, then
+recovers only through stopped-launch preparation. These host fixtures do not
+execute the installed PicoClaw binary or prove OS-level tool isolation.

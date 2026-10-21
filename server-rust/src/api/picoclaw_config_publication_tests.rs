@@ -137,6 +137,21 @@ fn actual_launch_generation_binds_both_documents_and_explicit_security_absence()
     run_private_root("generation");
 }
 
+#[test]
+fn actual_startup_defaults_do_not_republish_an_unchanged_pair() {
+    run_private_root("startup-noop");
+}
+
+#[test]
+fn actual_startup_defaults_preserve_explicit_local_tool_restrictions() {
+    run_private_root("startup-policy");
+}
+
+#[test]
+fn actual_startup_defaults_reject_malformed_local_policy_before_publication() {
+    run_private_root("startup-invalid-policy");
+}
+
 fn put_private(path: &Path, data: &[u8]) {
     fs::write(path, data).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -167,6 +182,126 @@ fn private_root_child() {
     fs::write(sentinel, b"synthetic-sentinel-unchanged").unwrap();
     fs::set_permissions(sentinel, fs::Permissions::from_mode(0o600)).unwrap();
     match case.as_str() {
+        "startup-noop" => {
+            startup_fixture(directory, json!({}));
+            write_startup_defaults(&permit).unwrap();
+            let config = directory.join("config.json");
+            let security = directory.join(".security.yml");
+            // Formatting/comments are not a reason to replace either inode.
+            let doc = load_config_document().unwrap();
+            put_private(&config, &serde_json::to_vec(&doc.raw).unwrap());
+            let yaml = format!(
+                "# synthetic user comment\n{}",
+                serde_yaml::to_string(&doc.security).unwrap()
+            );
+            put_private(&security, yaml.as_bytes());
+            let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
+            let identity = |path: &Path| {
+                let metadata = path.metadata().unwrap();
+                (
+                    metadata.ino(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            };
+            let revisions = [identity(&config), identity(&security)];
+            let generation = crate::update::picoclaw_config::current_generation(&config).unwrap();
+            for _ in 0..3 {
+                write_startup_defaults(&permit).unwrap();
+                assert_eq!(
+                    [identity(&config), identity(&security)],
+                    revisions,
+                    "a gateway connection must not republish an unchanged pair"
+                );
+                assert_eq!(
+                    [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
+                    before
+                );
+                assert!(
+                    crate::update::picoclaw_config::current_generation(&config).unwrap()
+                        == generation
+                );
+            }
+            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+            let mut changed = load_config_document().unwrap();
+            changed.raw["gateway"]["port"] = json!(1);
+            put_private(&config, &serde_json::to_vec(&changed.raw).unwrap());
+            let changed_generation =
+                crate::update::picoclaw_config::current_generation(&config).unwrap();
+            write_startup_defaults(&permit).unwrap();
+            let restored = load_config_document().unwrap();
+            assert_eq!(restored.raw["gateway"]["port"], DEFAULT_GATEWAY_PORT);
+            assert_eq!(restored.raw["custom"], "retained");
+            assert_eq!(
+                resolved_pico_token(&restored.raw, &restored.security),
+                "synthetic-gateway-token"
+            );
+            assert!(
+                crate::update::picoclaw_config::current_generation(&config).unwrap()
+                    != changed_generation
+            );
+        }
+        "startup-policy" => {
+            for (policy, expected) in [
+                (json!({}), (true, false)),
+                (json!({"restrict_to_workspace": true}), (true, false)),
+                (
+                    json!({"allow_read_outside_workspace": false}),
+                    (true, false),
+                ),
+                (
+                    json!({"restrict_to_workspace": true, "allow_read_outside_workspace": false}),
+                    (true, false),
+                ),
+                (
+                    json!({"restrict_to_workspace": false, "allow_read_outside_workspace": true}),
+                    (false, true),
+                ),
+            ] {
+                startup_fixture(directory, json!({"agents": {"defaults": policy}}));
+                write_startup_defaults(&permit).unwrap();
+                let doc = load_config_document().unwrap();
+                assert_eq!(
+                    doc.raw
+                        .pointer("/agents/defaults/restrict_to_workspace")
+                        .and_then(JsonValue::as_bool),
+                    Some(expected.0)
+                );
+                assert_eq!(
+                    doc.raw
+                        .pointer("/agents/defaults/allow_read_outside_workspace")
+                        .and_then(JsonValue::as_bool),
+                    Some(expected.1)
+                );
+                assert_eq!(doc.raw["custom"], "retained");
+                assert_eq!(doc.raw["tools"]["mcp"]["enabled"], true);
+            }
+        }
+        "startup-invalid-policy" => {
+            for raw in [
+                json!({"agents": {"defaults": {"restrict_to_workspace": "true"}}}),
+                json!({"agents": {"defaults": {"restrict_to_workspace": null}}}),
+                json!({"agents": {"defaults": {"allow_read_outside_workspace": 1}}}),
+                json!({"agents": {"defaults": {"allow_read_outside_workspace": []}}}),
+                json!({"agents": false}),
+                json!({"agents": {"defaults": []}}),
+            ] {
+                startup_fixture(directory, raw);
+                fs::remove_file("/etc/kvm/.picoclaw_internal_token").unwrap();
+                let config = directory.join("config.json");
+                let security = directory.join(".security.yml");
+                let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
+                assert!(write_startup_defaults(&permit).is_err());
+                assert_eq!(
+                    [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
+                    before
+                );
+                assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+                assert!(!Path::new("/etc/kvm/.picoclaw_internal_token").exists());
+            }
+        }
         "generation" => {
             use crate::update::picoclaw_config::{
                 current_generation, prepare_launch, replace_pair,
@@ -203,6 +338,8 @@ fn private_root_child() {
             let config = directory.join("config.json");
             let security = directory.join(".security.yml");
             let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
+            seed_internal_token();
+            assert!(write_startup_defaults(&permit).is_err());
             assert!(current_generation(&config).is_err());
             assert_eq!(
                 [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
@@ -445,4 +582,25 @@ fn private_root_child() {
         _ => panic!("unknown fixture case"),
     }
     println!("pico-config-fixture-ran");
+}
+
+fn startup_fixture(directory: &Path, mut raw: JsonValue) {
+    seed_internal_token();
+    raw["custom"] = json!("retained");
+    put_private(
+        &directory.join("config.json"),
+        &serde_json::to_vec(&raw).unwrap(),
+    );
+    put_private(
+        &directory.join(".security.yml"),
+        b"channel_list:\n  pico:\n    settings:\n      token: synthetic-gateway-token\n",
+    );
+}
+
+fn seed_internal_token() {
+    fs::create_dir_all("/etc/kvm").unwrap();
+    put_private(
+        Path::new("/etc/kvm/.picoclaw_internal_token"),
+        b"synthetic-internal-token\n",
+    );
 }

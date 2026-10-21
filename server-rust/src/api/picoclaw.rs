@@ -3144,6 +3144,25 @@ fn save_config_document(
     permit: &crate::update::state_writers::ConfigPermit,
     doc: &ConfigDocument,
 ) -> Result<()> {
+    let encoded = encode_config_document(doc)?;
+    crate::update::picoclaw_config::replace_pair(
+        permit,
+        &doc.config_path,
+        &encoded.config,
+        Some(encoded.security.as_bytes()),
+    )
+}
+
+// Never Debug/log these credential-bearing buffers. Startup comparison uses
+// canonical encodings, not the on-disk formatting/comments; unchanged inputs
+// must not replace the pair or change a running scope's exact-byte generation.
+#[derive(PartialEq, Eq)]
+struct ConfigEncoding {
+    config: zeroize::Zeroizing<Vec<u8>>,
+    security: zeroize::Zeroizing<String>,
+}
+
+fn encode_config_document(doc: &ConfigDocument) -> Result<ConfigEncoding> {
     let config =
         zeroize::Zeroizing::new(serde_json::to_vec_pretty(&doc.raw).map_err(|err| {
             AppError::Internal(format!("failed to encode picoclaw config: {err}"))
@@ -3152,12 +3171,7 @@ fn save_config_document(
         zeroize::Zeroizing::new(serde_yaml::to_string(&doc.security).map_err(|err| {
             AppError::Internal(format!("failed to encode picoclaw security: {err}"))
         })?);
-    crate::update::picoclaw_config::replace_pair(
-        permit,
-        &doc.config_path,
-        &config,
-        Some(security.as_bytes()),
-    )
+    Ok(ConfigEncoding { config, security })
 }
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
@@ -3322,17 +3336,48 @@ async fn ensure_startup_defaults() -> Result<()> {
 
 fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -> Result<()> {
     let mut doc = load_config_document()?;
+    // A virtual committed-intent read is not evidence that upstream is using a
+    // coherent installed pair. A connection must not settle a pending journal;
+    // only stopped native preparation can establish that boundary.
+    crate::update::picoclaw_config::current_generation(&doc.config_path)?;
+    for path in ["/agents", "/agents/defaults"] {
+        if doc
+            .raw
+            .pointer(path)
+            .is_some_and(|value| !value.is_object())
+        {
+            return Err(AppError::Config(
+                "invalid picoclaw local tool policy".into(),
+            ));
+        }
+    }
+    for path in [
+        "/agents/defaults/restrict_to_workspace",
+        "/agents/defaults/allow_read_outside_workspace",
+    ] {
+        if doc
+            .raw
+            .pointer(path)
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(AppError::Config(
+                "invalid picoclaw local tool policy".into(),
+            ));
+        }
+    }
+    let before = encode_config_document(&doc)?;
     let _ = ensure_pico_security_token(&mut doc)?;
     let raw = doc
         .raw
         .as_object_mut()
         .ok_or_else(|| AppError::Internal("picoclaw config root is not an object".to_string()))?;
-    ensure_object_path(raw, &["agents", "defaults"])
-        .insert("restrict_to_workspace".to_string(), JsonValue::Bool(false));
-    ensure_object_path(raw, &["agents", "defaults"]).insert(
-        "allow_read_outside_workspace".to_string(),
-        JsonValue::Bool(true),
-    );
+    let defaults = ensure_object_path(raw, &["agents", "defaults"]);
+    defaults
+        .entry("restrict_to_workspace".to_string())
+        .or_insert(JsonValue::Bool(true));
+    defaults
+        .entry("allow_read_outside_workspace".to_string())
+        .or_insert(JsonValue::Bool(false));
     ensure_object_path(raw, &["gateway"]).insert(
         "host".to_string(),
         JsonValue::String(DEFAULT_GATEWAY_HOST.to_string()),
@@ -3369,7 +3414,16 @@ fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -
     );
     let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
     headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
-    save_config_document(permit, &doc)
+    let after = encode_config_document(&doc)?;
+    if before != after {
+        crate::update::picoclaw_config::replace_pair(
+            permit,
+            &doc.config_path,
+            &after.config,
+            Some(after.security.as_bytes()),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
