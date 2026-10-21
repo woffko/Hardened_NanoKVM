@@ -5,6 +5,8 @@ pub mod app_trial_wire;
 
 #[path = "../src/native_owner/controller.rs"]
 mod controller;
+#[path = "../src/native_owner/picoclaw_home.rs"]
+pub mod picoclaw_home;
 
 use controller::{Drain, DrainStatus, Group, Resume, Role, StartError, Status};
 use std::{
@@ -356,7 +358,7 @@ fn immediate_drain_can_close_before_the_owner_announces_readiness() {
 
 #[test]
 fn production_start_has_no_arbitrary_command_selector() {
-    let trial = controller::backend_trial_command();
+    let trial = controller::backend_trial_command(&picoclaw_home::Home::default());
     assert_eq!(trial.get_program(), "/usr/libexec/nanokvm-native-owner");
     assert_eq!(
         trial.get_args().collect::<Vec<_>>(),

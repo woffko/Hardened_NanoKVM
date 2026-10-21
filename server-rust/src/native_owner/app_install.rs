@@ -277,7 +277,8 @@ impl Session {
     }
 
     pub fn start_trial(self) -> BeginTrial {
-        self.start_trial_command(controller::backend_trial_command())
+        let command = controller::backend_trial_command(self.group.home());
+        self.start_trial_command(command)
     }
 
     pub(super) fn start_trial_command(mut self, command: std::process::Command) -> BeginTrial {

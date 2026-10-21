@@ -24,9 +24,18 @@ parent traversal, control characters, non-UTF-8 or overlong effective paths fail
 explicitly, without fallback. `HOME`/passwd do not select a second default.
 Existing non-root/passwd-selected layouts need an explicit compatible
 `PICOCLAW_HOME`, not discovery or reset. Missing/old ctl support refuses setup.
-This is not a persistent broker home/generation binding: independent launchers
-with different overrides/cwds can still select different homes. Absolute,
-consistent service configuration and the retained migration remain required.
+The broker freezes one selected absolute home in its retained process group;
+backend, trial and optional Pico commands inherit that exact value. Absolute or
+default selection does not require a cwd lookup, so a later unavailable cwd
+cannot reinterpret it. The separate `picoclaw-home-check` ctl command compares
+the caller's full path fingerprint with the live broker and prints the caller's
+path only on a matching Running reply. It cannot set a home or submit a path.
+It is a point-in-time identity query, not a writer/native lease, configuration
+generation receipt or permission for a later start/capture on another connection.
+No filesystem trust check is supplied by this fingerprint. Existing S96 still
+uses the local selector, not this broker check. Independent legacy launchers
+and different service-user layouts remain un-migrated; service routing and
+configuration-generation binding are still required.
 
 Existing credential files must be root-owned regular single-link files with
 mode 0600. Reads are bounded to 4 MiB per file and compare inode/metadata revision,
@@ -106,7 +115,7 @@ added to the preserved archive schema, nor is a Rust Config permit proof that
 native writers are stopped. All writers must be enrolled or stopped/joined.
 
 Profile/workspace/session/installer and independent service/local-tool writers,
-broker-frozen effective-home alignment and non-root service-user migration, stale-temporary recovery,
+independent service-home/configuration-generation alignment and non-root service-user migration, stale-temporary recovery,
 fault-injected kernel I/O/fsync outcomes, native onboard acceptance, device tests
 and raw migration remain open. PicoClaw local tools still need H2 isolation.
 Target GUI/HID/BIOS/terminal autonomy is unchanged by this file protocol.

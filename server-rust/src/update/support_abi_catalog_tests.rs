@@ -1,21 +1,23 @@
 use super::*;
 
 #[test]
-fn lifecycle_epoch_one_cannot_authorize_the_optional_pico_runtime_transition() {
-    assert_eq!(abi::CURRENT.native_lifecycle, 2);
+fn prior_lifecycle_epochs_cannot_authorize_the_home_bound_control_transition() {
+    assert_eq!(abi::CURRENT.native_lifecycle, 3);
     let current = catalog_fixture();
-    let mut old = catalog_fixture();
-    for member in &mut old.members {
-        member.declaration.epochs.native_lifecycle = 1;
+    for epoch in [1, 2] {
+        let mut old = catalog_fixture();
+        for member in &mut old.members {
+            member.declaration.epochs.native_lifecycle = epoch;
+        }
+        assert_eq!(
+            check_transition(&old, &current),
+            Err(CompatibilityError::UnknownOrIncompatible)
+        );
+        assert_eq!(
+            check_transition(&current, &old),
+            Err(CompatibilityError::UnknownOrIncompatible)
+        );
     }
-    assert_eq!(
-        check_transition(&old, &current),
-        Err(CompatibilityError::UnknownOrIncompatible)
-    );
-    assert_eq!(
-        check_transition(&current, &old),
-        Err(CompatibilityError::UnknownOrIncompatible)
-    );
     assert_eq!(
         check_transition(&current, &current),
         Err(CompatibilityError::UnsupportedTransition)

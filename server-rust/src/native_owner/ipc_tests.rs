@@ -9,6 +9,8 @@ const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
 const FIXTURE_WAIT: Duration = Duration::from_secs(6);
 #[path = "app_delivery_tests.rs"]
 mod delivery;
+#[path = "ipc_home_tests.rs"]
+mod home;
 #[path = "app_engine_tests.rs"]
 mod install_engine;
 fn broker(root: &Path) -> Broker {
@@ -661,7 +663,7 @@ fn pending_reply_idle_budget_starts_after_request_work_not_before_it() {
     peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let mut reply = [0; FRAME];
     peer.read_exact(&mut reply).unwrap();
-    assert_eq!(&reply[..4], b"NKR1");
+    assert_eq!(&reply[..4], b"NKR2");
     engine.request(12, Operation::Shutdown);
     until(|| {
         engine.tick();
@@ -952,7 +954,7 @@ fn forged_frames_and_serial_gaps_do_not_launch_work() {
     let root = tempfile::tempdir().unwrap();
     let uid = nix::unistd::geteuid().as_raw();
     serve(root.path(), uid, || {
-        for which in 0..4 {
+        for which in 0..6 {
             let mut client = connect(root.path());
             client.stream.set_nonblocking(false).unwrap();
             client
@@ -964,7 +966,9 @@ fn forged_frames_and_serial_gaps_do_not_launch_work() {
                 0 => bytes[0] = 0,
                 1 => bytes[5] = 1,
                 2 => bytes[4] = 99,
-                _ => bytes[15] = 2,
+                3 => bytes[15] = 2,
+                4 => bytes[16] = 1,
+                _ => bytes[..4].copy_from_slice(b"NKC1"),
             };
             client.stream.write_all(&bytes).unwrap();
             let mut byte = [0];

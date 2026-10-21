@@ -12,7 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
-| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work/onboard validation; private pair journal/coherent Rust reads, shared lexical home selector and optional native-owner slot | Profile/workspace/session/installer and independent runtime/onboard writers, broker-frozen home/generation, actual native start/recovery/stop-join routing and pending-capture settlement remain open |
+| PicoClaw model/default/token and Rust-initiated onboard | Config permit retained through blocking file work/onboard validation; private pair journal/coherent Rust reads, broker-retained absolute home and optional native-owner slot | Profile/workspace/session/installer and independent runtime/onboard writers, configuration-generation binding, actual native start/recovery/stop-join routing and pending-capture settlement remain open |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -72,7 +72,15 @@ and current S95 routes KVM/hwmon/backend through the broker after fresh-boot
 enrollment; this is not deployed device acceptance or capture integration. An
 optional Pico slot now participates in native/all-role drains when enrolled,
 but ordinary API/S96 does not route its lifecycle through that slot yet. It does
-not adopt existing services. It therefore does not
+not adopt existing services. The broker freezes one lexical absolute home before
+opening the native journal and retains it across drain/trial/rollback; backend
+and optional Pico commands inherit that selection. Malformed explicit selection
+refuses broker startup without falling back to the default. A fixed read-only
+IPC query compares a caller's full home fingerprint with the live broker; it
+does not tick lifecycle work, select a home, validate filesystem trust or grant
+future start/capture authority. Configuration-generation binding, provenance of
+installed optional scripts and independent launcher migration remain open.
+It therefore does not
 upgrade any source group to runtime-quiescent. The broker's fixed local IPC and
 explicit new-boot native journal recovery are host-tested components, not raw
 restore authority. Watchdog/init/recovery integration and actual target support

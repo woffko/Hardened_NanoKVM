@@ -141,8 +141,8 @@ retaining the backend. Full shutdown/install joins every enrolled slot. The
 backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
-native lifecycle compatibility epoch is now 2; epoch-1 transitions are refused,
-and `support_transition=0` still refuses even a matching epoch-2 live transition.
+native lifecycle compatibility epoch is now 3; epoch-1/2 transitions are refused,
+and `support_transition=0` still refuses even a matching epoch-3 live transition.
 No journal format or automatic legacy adoption was introduced.
 
 Host fixtures include a SIGSTOP-held Pico owner, a daemonized setsid descendant
@@ -154,11 +154,17 @@ PicoClaw program.
 The ordinary API/S96 still starts the gateway directly and uses legacy stop;
 there is no production Pico ensure/stop IPC operation yet. Do not interpret
 the new role primitive as a service migration or C1/H2 closure. Before activation,
-bind the broker-selected effective home/generation, settle the pending pair
+bind configuration generation to the broker-retained home, settle the pending pair
 journal under retained writer/native admission, cover onboard/install/profile
 writers and replace legacy stop/start without process-name adoption. Preserve
 the separate enforceable local-tool privilege boundary and target GUI/HID autonomy.
-Different launcher environments/cwds are not unified by a shared lexical resolver.
+The broker now freezes its lexical home before opening the native journal and
+uses the same absolute selection for backend, trial and optional Pico launches
+through drain/resume/rollback. A malformed explicit home refuses broker startup
+before any native intent or launch; it is not silently replaced by the root
+default. This is a deliberately fail-closed launch configuration, not Pico-only
+error isolation or validation of filesystem trust. Independent legacy launchers
+are not automatically migrated by this in-memory binding.
 
 ## Durable native broker admission
 
@@ -184,7 +190,8 @@ Before the first possible native launch, Active is written to an exclusive
 temporary member, file-synced, renamed, and directory-synced. The journal lease
 stays owned while native work and the retained drain exist. Closed is published
 only after every controller scope proves complete closure. Native-only
-Maintenance drains KVM/hwmon but retains backend and its update jobs. Only
+Maintenance drains KVM/hwmon and any enrolled Pico scope but retains backend and
+its update jobs. Only
 explicit resume from the retained owner publishes Active and reopens native
 admission; it must never publish Closed while the backend tree remains alive.
 `Resume::Retained` keeps ownership when closure/publication is incomplete or
@@ -230,8 +237,13 @@ ownership. The endpoint is mode 0600, opened through the pinned parent directory
 cleanup checks its exact device/inode and preserves a replacement member.
 Listener and accepted/client descriptors are CLOEXEC.
 
-Both ends verify kernel `SO_PEERCRED` root UID. Requests have fixed 16-byte frames
-with a closed operation set, reserved-byte validation and connection-local serials.
+Both ends verify kernel `SO_PEERCRED` root UID. Requests and replies have fixed
+48-byte `NKC2`/`NKR2` frames with a closed operation set, reserved-byte validation
+and connection-local serials in bytes8..16. The last32 bytes must be zero except
+for the fixed `CheckPicoclawHome` request, which carries the full domain-separated
+SHA-256 fingerprint of the selected absolute UTF-8 path. Replies always require
+that reserved tail to be zero. Old version-1 or malformed frames are rejected;
+there is no protocol fallback or shortening of a fingerprint to a status byte.
 At most 16 clients are retained; I/O is nonblocking with bounded work per loop.
 An exact duplicate of the last request returns its cached response without
 executing again; conflicting replay, gaps and invalid frames close the connection.
@@ -239,7 +251,19 @@ There is no generic shell, path, environment, raw writer or settings import opco
 Root peer identity is **not** executable attestation or a hostile-root sandbox.
 The later unprivileged picoclaw/admin capability split remains separate work.
 
-The daemon owns all three sibling roles and desired-role retries. `EnsureKvm`
+`nanokvm-native-ctl picoclaw-home-check` sends only that32-byte fingerprint and
+prints the caller's already-selected absolute path on a matching Running reply.
+The query cannot select/change a home, create state, onboard or launch a service;
+it performs no extra lifecycle tick even when the broker has pending wanted
+work. Mismatch returns Invalid, non-Running ownership Busy/Uncertain. This is a
+point-in-time comparison, not a lease, a config-file generation, filesystem
+validation or permission for a later start/capture/reconnect. An exact cached
+reply can describe the earlier observation. Future Pico commands must bind their
+own request to the same live owner's home and retained writer/service admission,
+not treat this short-lived ctl query as a transferable capability.
+
+The daemon requests KVM/hwmon/backend roles and retains any explicitly enrolled
+optional Pico scope. Pico ensure/stop routing is not activated yet. `EnsureKvm`
 and `EnsureHwmon` request admission, not health acceptance. Pause consumes all
 launch capability before draining and durably records Maintenance. Only that
 same live connection may explicitly resume after proven closure. Caller EOF,

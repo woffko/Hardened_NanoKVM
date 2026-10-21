@@ -3,6 +3,7 @@ use super::{
     Broker, Resume, RetainedDrain, RuntimePermit, Shutdown, StartFailure, app_install, journal,
 };
 use crate::native_owner::controller::{Completion, DrainStatus, Role, StartError, Status};
+use crate::native_owner::picoclaw_home::Home;
 use crate::update::{app_install_lease, app_slot};
 use std::{
     io::{self, Read, Write},
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const FRAME: usize = 16;
+const FRAME: usize = 48;
 const CLIENTS: usize = 16;
 const STEP: Duration = Duration::from_millis(20);
 const IDLE: Duration = Duration::from_secs(5);
@@ -31,6 +32,7 @@ pub enum Operation {
     RestartBackendSafe = 10,
     CancelAppInstall = 11,
     RetryAppRetirement = 12,
+    CheckPicoclawHome = 13,
 }
 impl Operation {
     fn decode(byte: u8) -> Option<Self> {
@@ -47,6 +49,7 @@ impl Operation {
             10 => Some(Self::RestartBackendSafe),
             11 => Some(Self::CancelAppInstall),
             12 => Some(Self::RetryAppRetirement),
+            13 => Some(Self::CheckPicoclawHome),
             _ => None,
         }
     }
@@ -79,34 +82,36 @@ pub struct Reply {
 
 fn request(op: Operation, serial: u64) -> [u8; FRAME] {
     let mut bytes = [0; FRAME];
-    bytes[..4].copy_from_slice(b"NKC1");
+    bytes[..4].copy_from_slice(b"NKC2");
     bytes[4] = op as u8;
-    bytes[8..].copy_from_slice(&serial.to_be_bytes());
+    bytes[8..16].copy_from_slice(&serial.to_be_bytes());
     bytes
 }
 fn parse_request(bytes: &[u8; FRAME]) -> Option<(Operation, u64)> {
-    if &bytes[..4] != b"NKC1" || bytes[5..8] != [0; 3] {
+    if &bytes[..4] != b"NKC2" || bytes[5..8] != [0; 3] {
         return None;
     }
-    Some((
-        Operation::decode(bytes[4])?,
-        u64::from_be_bytes(bytes[8..].try_into().ok()?),
-    ))
+    let operation = Operation::decode(bytes[4])?;
+    if operation != Operation::CheckPicoclawHome && bytes[16..] != [0; 32] {
+        return None;
+    }
+    Some((operation, u64::from_be_bytes(bytes[8..16].try_into().ok()?)))
 }
 impl Reply {
     fn bytes(self, serial: u64) -> [u8; FRAME] {
         let mut bytes = [0; FRAME];
-        bytes[..4].copy_from_slice(b"NKR1");
+        bytes[..4].copy_from_slice(b"NKR2");
         bytes[4] = self.code as u8;
         bytes[5] = self.mode as u8;
         bytes[6..8].copy_from_slice(&self.roles);
-        bytes[8..].copy_from_slice(&serial.to_be_bytes());
+        bytes[8..16].copy_from_slice(&serial.to_be_bytes());
         bytes
     }
     fn parse(bytes: &[u8; FRAME], serial: u64) -> io::Result<Self> {
         let invalid = || io::Error::from(io::ErrorKind::InvalidData);
-        if &bytes[..4] != b"NKR1"
-            || bytes[8..] != serial.to_be_bytes()
+        if &bytes[..4] != b"NKR2"
+            || bytes[8..16] != serial.to_be_bytes()
+            || bytes[16..] != [0; 32]
             || bytes[6..8].iter().any(|b| *b > 6)
         {
             return Err(invalid());
@@ -170,6 +175,19 @@ impl Channel {
         })
     }
     pub fn begin(&mut self, op: Operation) -> io::Result<()> {
+        if op == Operation::CheckPicoclawHome {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.begin_frame(op, None)
+    }
+
+    /// Compare the caller's selection with this live broker, without submitting
+    /// a pathname, launching a service or changing its selected configuration.
+    pub fn check_picoclaw_home(&mut self, home: &Home) -> io::Result<()> {
+        self.begin_frame(Operation::CheckPicoclawHome, Some(home.fingerprint()))
+    }
+
+    fn begin_frame(&mut self, op: Operation, home: Option<[u8; 32]>) -> io::Result<()> {
         if self.broken {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
@@ -181,8 +199,12 @@ impl Channel {
             .next
             .checked_add(1)
             .ok_or(io::ErrorKind::InvalidInput)?;
+        let mut bytes = request(op, serial);
+        if let Some(home) = home {
+            bytes[16..].copy_from_slice(&home);
+        }
         self.flight = Some(Flight {
-            bytes: request(op, serial),
+            bytes,
             sent: 0,
             reply: [0; FRAME],
             read: 0,
@@ -218,7 +240,14 @@ impl Channel {
             if f.read < FRAME {
                 Ok(None)
             } else {
-                Reply::parse(&f.reply, f.serial).map(Some)
+                let reply = Reply::parse(&f.reply, f.serial)?;
+                if f.bytes[4] == Operation::CheckPicoclawHome as u8
+                    && reply.code == Code::Ok
+                    && reply.mode != Mode::Running
+                {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                Ok(Some(reply))
             }
         })();
         match &result {
@@ -280,6 +309,7 @@ struct Install {
     stage: InstallStage,
 }
 struct Engine {
+    home: [u8; 32],
     owner: Option<Owner>,
     install: Option<Install>,
     wanted: [bool; 2],
@@ -311,6 +341,7 @@ struct BackendRestart {
 impl Engine {
     fn new(broker: Broker) -> Self {
         Self {
+            home: broker.group.home.fingerprint(),
             owner: Some(Owner::Running(broker)),
             install: None,
             wanted: [false; 2],
@@ -336,12 +367,12 @@ impl Engine {
             fixture_allow_unsupported_support: false,
         }
     }
-    fn command(&self, role: Role) -> std::process::Command {
+    fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
         #[cfg(test)]
         if let Some(root) = &self.fixture {
             return tests::owner_command(root, role);
         }
-        role.command()
+        role.command(&broker.group.home)
     }
     fn tick(&mut self) {
         if let Some(install) = self.install.take() {
@@ -367,7 +398,7 @@ impl Engine {
                             && matches!(states[index], None | Some(Status::Closed(_)))
                         {
                             self.retry[index] = Instant::now() + RETRY;
-                            let command = self.command(role);
+                            let command = self.command(&broker, role);
                             #[cfg(test)]
                             let started_at = Instant::now();
                             let result = broker.start_owned(role, command);
@@ -399,7 +430,7 @@ impl Engine {
                             } else {
                                 Ok(())
                             };
-                            let command = self.command(Role::Backend);
+                            let command = self.command(&broker, Role::Backend);
                             if policy.is_err()
                                 || broker.start_backend(command, &restart._admission).is_err()
                                 || broker.finish_backend_restart().is_err()
@@ -416,7 +447,7 @@ impl Engine {
                         self.backend_retry = Instant::now() + RETRY;
                         match broker.runtime_permit() {
                             Ok(admission) => {
-                                let command = self.command(Role::Backend);
+                                let command = self.command(&broker, Role::Backend);
                                 if matches!(
                                     broker.start_backend(command, &admission),
                                     Err(StartFailure::Journal(_))
@@ -869,6 +900,7 @@ impl Engine {
         let mut code = Code::Ok;
         match op {
             Operation::Observe => {}
+            Operation::CheckPicoclawHome => code = Code::Invalid,
             Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
@@ -1016,6 +1048,23 @@ impl Engine {
         }
         self.reply(code)
     }
+
+    fn request_frame(&mut self, key: u64, op: Operation, bytes: &[u8; FRAME]) -> Reply {
+        if op != Operation::CheckPicoclawHome {
+            return self.request(key, op);
+        }
+        // Identity observation is not another lifecycle tick. Pending wanted
+        // work belongs to the broker loop, not a caller's read-only query.
+        self.reply(if self.mode == Mode::Uncertain {
+            Code::Uncertain
+        } else if self.mode != Mode::Running {
+            Code::Busy
+        } else if bytes[16..] != self.home {
+            Code::Invalid
+        } else {
+            Code::Ok
+        })
+    }
     fn disconnected(&mut self, key: u64) {
         if self.lease == Some(key) {
             self.lease = None;
@@ -1091,12 +1140,16 @@ impl Client {
             if serial == old && prior == self.input {
                 reply
             } else if old.checked_add(1) == Some(serial) {
-                engine.request(self.key, op).bytes(serial)
+                engine
+                    .request_frame(self.key, op, &self.input)
+                    .bytes(serial)
             } else {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         } else if serial == 1 {
-            engine.request(self.key, op).bytes(serial)
+            engine
+                .request_frame(self.key, op, &self.input)
+                .bytes(serial)
         } else {
             return Err(io::ErrorKind::InvalidData.into());
         };

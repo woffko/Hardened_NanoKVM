@@ -555,7 +555,8 @@ migration and complete target acceptance remain required before release.
 
 Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
 protected lifecycle channel. This is the fixed `RetryAppRetirement` opcode in
-the same closed 16-byte protocol, not a new unauthenticated endpoint. It accepts
+the same closed lifecycle protocol (now 48-byte NKC2/NKR2 frames), not a new
+unauthenticated endpoint. It accepts
 no path, transaction selector, phase, force option, archive or executable.
 It addresses only the **current retained live** Committed/RolledBack owner;
 it does not recreate an owner after daemon death or from a journal snapshot.

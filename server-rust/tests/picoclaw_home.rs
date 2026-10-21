@@ -57,6 +57,32 @@ fn cli_home_resolution_is_read_only_and_matches_library_selection() {
 }
 
 #[test]
+fn invalid_home_check_refuses_before_contacting_a_broker_or_creating_state() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = tempfile::tempdir().unwrap();
+    for home in [
+        OsString::from("../other"),
+        OsString::from("/bad\nname"),
+        OsString::from_vec(b"/bad\xff".to_vec()),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-ctl"))
+            .arg("picoclaw-home-check")
+            .current_dir(root.path())
+            .env_clear()
+            .env("PICOCLAW_HOME", home)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"invalid picoclaw home; no runtime action taken\n"
+        );
+    }
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn actual_s96_setup_exports_the_same_absolute_home_before_chdir() {
     let source = if let Some(reference) = std::env::var_os("NANOKVM_PICO_HOME_SOURCE_REF") {
         let output = Command::new("git")

@@ -80,7 +80,9 @@ impl Broker {
     pub fn acquire() -> Result<Self, JournalError> {
         let enrollment = boot::require_ready()?;
         Ok(Self {
-            group: Group::default(),
+            group: Group::new(
+                super::picoclaw_home::Home::resolve().map_err(|_| JournalError::Unsafe)?,
+            ),
             journal: journal::Store::open()?,
             enrollment,
             #[cfg(test)]
@@ -110,9 +112,9 @@ impl Broker {
     pub fn start(&mut self, role: Role) -> Result<(), StartFailure> {
         if role == Role::Backend {
             let admission = self.runtime_permit().map_err(StartFailure::Journal)?;
-            self.start_backend(role.command(), &admission)
+            self.start_backend(role.command(&self.group.home), &admission)
         } else {
-            self.start_owned(role, role.command())
+            self.start_owned(role, role.command(&self.group.home))
         }
     }
 

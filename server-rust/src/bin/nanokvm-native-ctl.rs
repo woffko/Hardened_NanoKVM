@@ -40,6 +40,18 @@ fn main() -> ExitCode {
     }
     let query = args.len() == 1 && args[0] == "kvm-running";
     let running_query = args.len() == 1 && args[0] == "running";
+    let home_check = args.len() == 1 && args[0] == "picoclaw-home-check";
+    let selected_home = if home_check {
+        match nanokvm_rust_server::native_owner::picoclaw_home::Home::resolve() {
+            Ok(home) => Some(home),
+            Err(_) => {
+                eprintln!("invalid picoclaw home; no runtime action taken");
+                return ExitCode::from(64);
+            }
+        }
+    } else {
+        None
+    };
     let op = if args.len() == 1 {
         match args[0].to_str() {
             Some("status" | "running" | "kvm-running") => Some(Operation::Observe),
@@ -51,6 +63,7 @@ fn main() -> ExitCode {
             Some("restart-backend") => Some(Operation::RestartBackend),
             Some("restart-backend-safe") => Some(Operation::RestartBackendSafe),
             Some("retry-app-retirement") => Some(Operation::RetryAppRetirement),
+            Some("picoclaw-home-check") => Some(Operation::CheckPicoclawHome),
             _ => None,
         }
     } else {
@@ -58,7 +71,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -69,7 +82,12 @@ fn main() -> ExitCode {
         eprintln!("cannot connect to protected native broker");
         return ExitCode::from(70);
     };
-    if channel.begin(op).is_err() {
+    let begin = if let Some(home) = &selected_home {
+        channel.check_picoclaw_home(home)
+    } else {
+        channel.begin(op)
+    };
+    if begin.is_err() {
         return ExitCode::from(71);
     }
     let start = Instant::now();
@@ -87,6 +105,10 @@ fn main() -> ExitCode {
                 if reply.code != Code::Ok && !(backend_wait && reply.code == Code::Unavailable) {
                     eprintln!("broker: {:?} {:?}", reply.code, reply.mode);
                     return ExitCode::from(71);
+                }
+                if let Some(home) = &selected_home {
+                    println!("{}", home.path().display());
+                    return ExitCode::SUCCESS;
                 }
                 if backend_control {
                     if backend_wait && reply.code == Code::Ok {

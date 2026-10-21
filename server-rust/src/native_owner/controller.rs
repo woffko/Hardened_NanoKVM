@@ -8,6 +8,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
 };
 
+use super::picoclaw_home::Home;
 pub use crate::app_trial_wire as trial_wire;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,22 +31,22 @@ impl Role {
         }
     }
 
-    pub(super) fn command(self) -> Command {
+    pub(super) fn command(self, home: &Home) -> Command {
         let role = match self {
             Self::KvmSystem => "kvm-system",
             Self::Hwmon => "hwmon",
             Self::Backend => "backend",
             Self::Picoclaw => "picoclaw",
         };
-        owner_command(role)
+        owner_command(role, home)
     }
 }
 
-pub(super) fn backend_trial_command() -> Command {
-    owner_command("backend-trial")
+pub(super) fn backend_trial_command(home: &Home) -> Command {
+    owner_command("backend-trial", home)
 }
 
-fn owner_command(role: &'static str) -> Command {
+fn owner_command(role: &'static str, home: &Home) -> Command {
     let mut command = Command::new("/usr/libexec/nanokvm-native-owner");
     command
         .args(["--scope", role])
@@ -55,13 +56,10 @@ fn owner_command(role: &'static str) -> Command {
         .env("LANG", "C")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    // This is one named configuration input, not a generic environment API.
-    // The fresh owner resolves it before chdir; backend/Pico must not silently
-    // disagree merely because the controller clears unrelated environment.
-    if matches!(role, "backend" | "backend-trial" | "picoclaw")
-        && let Some(home) = std::env::var_os("PICOCLAW_HOME")
-    {
-        command.env("PICOCLAW_HOME", home);
+    // Freeze the containing Group's selection, not this launcher's later cwd
+    // or environment. No caller-controlled environment map is accepted.
+    if matches!(role, "backend" | "backend-trial" | "picoclaw") {
+        command.env("PICOCLAW_HOME", home.path());
     }
     command
 }
@@ -366,13 +364,24 @@ impl Drop for Cell {
 pub struct Group {
     cells: [Option<Cell>; 4],
     uncertain: bool,
+    pub(super) home: Home,
 }
 
 impl Group {
+    /// Select once, before any launch. Default Groups use the fixed root home;
+    /// the production broker supplies its explicitly resolved configuration.
+    pub fn new(home: Home) -> Self {
+        Self {
+            cells: Default::default(),
+            uncertain: false,
+            home,
+        }
+    }
+
     /// Fixed production roles only. Runtime provenance and protected installation
     /// of this fixed owner path are requirements of the future broker integration.
     pub fn start(&mut self, role: Role) -> Result<(), StartError> {
-        self.start_command(role, role.command())
+        self.start_command(role, role.command(&self.home))
     }
 
     pub(super) fn start_command(&mut self, role: Role, command: Command) -> Result<(), StartError> {
@@ -511,6 +520,9 @@ pub enum Resume {
 }
 
 impl Drain {
+    pub(super) fn home(&self) -> &Home {
+        &self.group.home
+    }
     pub(super) fn backend_status(&mut self) -> Option<Status> {
         self.group.poll()[2]
     }
@@ -558,6 +570,33 @@ mod picoclaw_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_backend_and_pico_launch_uses_the_same_retained_absolute_home() {
+        let home = Home::fixture("relative home", "/selected");
+        let fingerprint = home.fingerprint();
+        let group = Group::new(home);
+        let mut drain = group.begin_drain();
+        assert_eq!(drain.home().fingerprint(), fingerprint);
+        assert_eq!(drain.poll(), DrainStatus::Drained);
+        let Resume::Running(group) = drain.try_resume() else {
+            panic!("empty proven drain must resume")
+        };
+        assert_eq!(group.home.fingerprint(), fingerprint);
+        for command in [
+            Role::Backend.command(&group.home),
+            Role::Picoclaw.command(&group.home),
+            backend_trial_command(&group.home),
+        ] {
+            let selected = command
+                .get_envs()
+                .find(|(name, _)| *name == "PICOCLAW_HOME")
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(selected, "/selected/relative home");
+        }
+    }
 
     #[test]
     fn uncertainty_snapshot_does_not_consume_pending_owner_protocol() {
@@ -655,11 +694,18 @@ mod tests {
             (Role::Backend, "backend"),
             (Role::Picoclaw, "picoclaw"),
         ] {
-            let command = role.command();
+            let command = role.command(&Home::default());
             assert_eq!(command.get_program(), "/usr/libexec/nanokvm-native-owner");
             assert_eq!(command.get_args().collect::<Vec<_>>(), ["--scope", name]);
             let env = command.get_envs().collect::<Vec<_>>();
-            assert!(matches!(env.len(), 3 | 4));
+            assert_eq!(
+                env.len(),
+                if matches!(role, Role::Backend | Role::Picoclaw) {
+                    4
+                } else {
+                    3
+                }
+            );
             for (name, value) in env {
                 assert!(matches!(
                     name.to_str(),
