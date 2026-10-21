@@ -468,10 +468,44 @@ fn linked_six_scoped_declarations_match_independent_actual_helper_images() {
 
 #[test]
 #[ignore = "requires retained support-ABI development app archives"]
-fn packaged_abi_survives_private_candidate_preflight_without_support_publication() {
+fn historical_packaged_abi_survives_preflight_but_never_matches_current_lifecycle() {
     use crate::{api::application::manual_candidate_fixture, update::app_stage::AppStage};
     use std::{fs, path::Path};
 
+    // These exact-hash retained archives predate the Pico lifecycle protocol.
+    // They are historical fixtures, not current-source packaging acceptance.
+    // Keep their independently pinned contract instead of relabelling them
+    // with CURRENT whenever the executing source's lifecycle epoch changes.
+    const ARCHIVED_EPOCHS: abi::Epochs = abi::Epochs {
+        app_storage: 1,
+        native_lifecycle: 1,
+        helper_framing: 1,
+        boot_script_framing: 1,
+        support_transition: 0,
+    };
+    const ARCHIVED_SCRIPTS: [(boot_script_catalog::Role, u64, &str); 4] = [
+        (
+            boot_script_catalog::Role::AppRecovery,
+            430,
+            "55d3da11e753a73989e4aeb68046f0af8d184ff80ed72052ab7795cb21ca3abb",
+        ),
+        (
+            boot_script_catalog::Role::Ethernet,
+            8586,
+            "875de81875aa53bfdbe0c976f1876f1314d1a2e495a8623b08b479508c0b717c",
+        ),
+        (
+            boot_script_catalog::Role::Wifi,
+            4725,
+            "b73af15f74c830137d507e0e7693b97b6d8e42b9219311dd95d9b70592587092",
+        ),
+        (
+            boot_script_catalog::Role::NanoKvm,
+            18189,
+            "a64e20557759bbfc4541da2eb55e140bcd8068e13a7f2a39ede4e3787ba6a0be",
+        ),
+    ];
+    let current = catalog_fixture();
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (generation, size, sha256) in [
         (
@@ -526,23 +560,31 @@ fn packaged_abi_survives_private_candidate_preflight_without_support_publication
                     member.declaration(),
                     abi::Declaration {
                         role,
-                        epochs: abi::CURRENT
+                        epochs: ARCHIVED_EPOCHS
                     }
                 );
             }
-            assert_eq!(
-                check_transition(&catalog, &catalog),
-                Err(CompatibilityError::UnsupportedTransition)
-            );
-            let scripts = boot_script_catalog::inspect(&backend).unwrap();
-            for (member, role) in scripts.members().iter().zip(boot_script_catalog::ROLES) {
-                let expected =
-                    fs::read(project.join("kvmapp/system/init.d").join(role.filename())).unwrap();
-                assert_eq!(member.size(), expected.len() as u64);
+            for (predecessor, successor) in [
+                (&catalog, &catalog),
+                (&catalog, &current),
+                (&current, &catalog),
+            ] {
                 assert_eq!(
-                    *member.sha256(),
-                    <[u8; 32]>::from(Sha256::digest(&expected))
+                    check_transition(predecessor, successor),
+                    Err(CompatibilityError::UnknownOrIncompatible)
                 );
+            }
+            let scripts = boot_script_catalog::inspect(&backend).unwrap();
+            for (member, (role, size, digest)) in scripts.members().iter().zip(ARCHIVED_SCRIPTS) {
+                assert_eq!(member.role(), role);
+                assert_eq!(member.size(), size);
+                let mut payload = vec![0; size as usize];
+                backend
+                    .read_exact_at(&mut payload, member.payload_range().start)
+                    .unwrap();
+                let actual = Sha256::digest(&payload);
+                assert_eq!(*member.sha256(), <[u8; 32]>::from(actual));
+                assert_eq!(format!("{actual:x}"), digest);
                 assert_eq!(
                     fs::read(root.path().join("etc/init.d").join(role.filename())).unwrap(),
                     b"old gate unchanged"
