@@ -35,11 +35,11 @@ def verify(image):
         raise ValueError("unsafe native authority backend metadata")
     with tempfile.TemporaryDirectory(prefix="nanokvm-native-rootfs-", dir="/tmp") as temporary:
         state = "/etc/kvm/native-runtime-boot/state"
-        if rootfs.metadata(image, state, "regular", 80) != (0o600, 0, 0, 1):
+        if rootfs.metadata(image, state, "regular", 112) != (0o600, 0, 0, 1):
             raise ValueError("unsafe native boot enrollment record")
         destination = Path(temporary) / "boot-state"
         rootfs.debugfs(image, f"dump {state} {destination}")
-        prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+        prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
         if destination.read_bytes() != prefix + hashlib.sha256(prefix).digest():
             raise ValueError("full image must contain exact Factory native boot enrollment")
         backend_dump = Path(temporary) / "backend"

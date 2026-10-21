@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn prior_lifecycle_epochs_cannot_authorize_the_home_bound_control_transition() {
-    assert_eq!(abi::CURRENT.native_lifecycle, 3);
+fn prior_lifecycle_epochs_cannot_authorize_the_generation_bound_boot_transition() {
+    assert_eq!(abi::CURRENT.native_lifecycle, 4);
     let current = catalog_fixture();
-    for epoch in [1, 2] {
+    for epoch in [1, 2, 3] {
         let mut old = catalog_fixture();
         for member in &mut old.members {
             member.declaration.epochs.native_lifecycle = epoch;

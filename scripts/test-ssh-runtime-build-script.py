@@ -105,7 +105,7 @@ def main():
                 scripts = Path(__file__).resolve().parent.parent / "kvmapp/system/init.d"
                 assert (output / "native-boot-digests").read_bytes() == b"".join(
                     hashlib.sha256((scripts / name).read_bytes()).digest()
-                    for name in ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"]), name
+                    for name in ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm", "S96picoclaw"]), name
                 assert bound.read_bytes() == (valid if value is not None else b""), name
                 assert bound_app.read_bytes() == (valid_app if app_value is not None else b""), name
                 for role, path in bound_native.items():
@@ -119,7 +119,7 @@ def main():
         # Real build.rs must fail before publishing ANY frame if a source boot
         # identity is unavailable. Host-only success must not mask this gate.
         trusted = Path(__file__).resolve().parent.parent / "kvmapp/system/init.d"
-        names = ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm"]
+        names = ["S02apprecover", "S30eth", "S30wifi", "S95nanokvm", "S96picoclaw"]
         for name in names:
             for fault in ["missing", "empty", "oversized"]:
                 source_root = work / (name + "-" + fault)

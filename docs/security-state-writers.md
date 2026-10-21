@@ -86,6 +86,12 @@ explicit new-boot native journal recovery are host-tested components, not raw
 restore authority. Watchdog/init/recovery integration and actual target support
 remain required.
 
+The boot receipt now binds the compiled five-script generation and exact
+optional S96 presence/content. Same-boot add/remove cannot reuse Ready; malformed
+or foreign script state is refused without repair. This is provenance checking,
+not process ownership or a cooperative writer lease: the current S96 path is
+still legacy and optional installer/native-service migration remains open.
+
 Run `make test-state-writer-inventory`. The source security-policy check also
 runs the coverage validator. Missing/new/wrong-kind/duplicate members, unknown
 schema syntax, empty tables, missing evidence and false runtime-authority claims

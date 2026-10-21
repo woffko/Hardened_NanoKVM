@@ -34,7 +34,7 @@
     "All groups inherit cross-cutting writers; enrolled means only the named API domain has a permit, not that every producer for those paths has stopped.",
     "Stop respawners first, close new writer admission, finish or phase-aware cancel/join existing work, join service/helper owners, then capture; retain ownership through capsule sealing and raw handoff.",
     "Do not assume cgroups/freezer/PID namespaces from a Linux version number; verify exact deployed kernel capabilities before choosing a maintenance mechanism. No kernel change is authorized by this inventory.",
-    "S96picoclaw and S98tailscaled are conditional optional runtime services, not default Buildroot-installed init entries. Presence in source is not evidence they run on a device.",
+    "S96picoclaw and S98tailscaled are conditional optional runtime services, not default Buildroot-installed init entries. The v2 native boot receipt binds the five-script generation and S96 exact presence/content; it neither installs/adopts that service nor proves writer closure. Presence in source is not evidence they run on a device.",
     "Rust hwmon writes tmp telemetry, not the preserved allowlist; syslog/klogd log output and file-backed media data are not preserved configuration. They may still need lifecycle stop for raw overwrite.",
     "Native vendor-library side effects and arbitrary privileged local code are not proven bounded by lexical path searches. Unknown ownership aborts capture; do not claim process-tree closure from pidfile removal or killall success."
   ]

@@ -9,7 +9,7 @@ import tempfile
 
 
 def factory_record():
-    prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+    prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
     return prefix + hashlib.sha256(prefix).digest()
 
 

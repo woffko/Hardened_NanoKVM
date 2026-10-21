@@ -174,7 +174,7 @@ class BindingTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, fault is None, result.stderr)
                 if fault is None:
                     seed = target / "etc/kvm/native-runtime-boot/state"
-                    prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+                    prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
                     self.assertEqual(seed.read_bytes(), prefix + hashlib.sha256(prefix).digest())
                     self.assertEqual(seed.stat().st_mode & 0o7777, 0o600)
                     self.assertEqual(seed.parent.stat().st_mode & 0o7777, 0o700)

@@ -141,9 +141,11 @@ retaining the backend. Full shutdown/install joins every enrolled slot. The
 backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
-native lifecycle compatibility epoch is now 3; epoch-1/2 transitions are refused,
-and `support_transition=0` still refuses even a matching epoch-3 live transition.
-No journal format or automatic legacy adoption was introduced.
+native lifecycle compatibility epoch is now 4; epoch-1/2/3 transitions are refused,
+and `support_transition=0` still refuses even a matching epoch-4 live transition.
+The separate boot receipt now has a generation-bound v2 format; the native
+Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
+was introduced.
 
 Host fixtures include a SIGSTOP-held Pico owner, a daemonized setsid descendant
 which ignores TERM, maintenance retaining a real backend tree, hidden-role
@@ -354,11 +356,19 @@ also remain open. No package/image from this intermediate state may be released.
 ## Fresh-boot init enrollment
 
 The separate protected `/etc/kvm/native-runtime-boot` directory is root-owned
-0700 on the rootfs. Its single-link root:root 0600 `state` is 80 bytes:
-`NKBOOT01`, 36-byte epoch (all zero only for Factory), phase at byte44, three
-zero reserved bytes and SHA-256 of the first48 bytes. The checksum detects
-corruption; the protected producer/location is the authority, not this hash.
-Unknown/unsafe records are preserved and rejected, not reset or upgraded.
+0700 on the rootfs. Its single-link root:root 0600 `state` is 112 bytes:
+`NKBOOT02`, 36-byte epoch (all zero only for Factory), phase at byte44, optional
+S96 presence at byte45, two zero reserved bytes, a 32-byte consumer generation
+at bytes48..80 and SHA-256 of the first80 bytes. Ready binds the full generation
+and exact optional presence; Factory/Armed must have an all-zero profile. The
+generation hashes a fixed domain plus the five compile-bound script digests,
+including the trusted optional S96 source even when it is not installed.
+The checksum detects corruption; the protected producer/location is the
+authority, not this hash. Unknown/unsafe records, including historical 80-byte
+`NKBOOT01`, are preserved
+and rejected, not reset or promoted. Old development-format installations need
+an explicit compatible migration or trusted reflash; live support transition
+is not implemented. Historical images keep their own historical verifiers.
 
 | Entry state | Authorized transition |
 | --- | --- |
@@ -366,7 +376,9 @@ Unknown/unsafe records are preserved and rejected, not reset or upgraded.
 | Absent on a legacy install | Compile-bound backend bootstrap may publish Armed(current epoch), never Factory/Ready |
 | Armed(current epoch) | No activation; reboot required even after manually rerunning S02 |
 | Armed/Ready from an earlier epoch | Early S02 may publish Ready(current epoch) |
-| Ready(current epoch) | Read-only current-backend restart; no legacy adoption |
+| Ready(current epoch), exact generation/presence | Read-only current-backend restart; no legacy adoption |
+| Ready(current epoch), safe but changed optional presence/generation | Bootstrap may only arm this epoch; direct early activation refuses; fresh boot required |
+| Malformed/foreign/unsafe installed script | Refuse without replacing the script or authorizing Ready |
 
 Factory is **not** a mandatory predecessor for a legacy installation: the
 intentional compatibility path is absent -> Armed -> new kernel boot -> Ready.
@@ -376,13 +388,28 @@ Factory. The app archive contains neither that record nor its directory.
 S02 first runs the independent app recovery gate. Native activation then checks
 all four installed critical consumer scripts against compile-bound SHA-256
 digests with protected same-rootfs parents/regular single-link root-owned0755
-files. Digests avoid embedding a second complete script copy in helpers. Main
-arms **before** publishing scripts, retaining its exclusive boot guard through
+files. Optional `/etc/init.d/S96picoclaw` must be absent or have the exact trusted
+source bytes and the same safe metadata. The installed name is rechecked after
+hashing; absence is rechecked after the scan. This is a protected-input snapshot,
+not a sandbox against arbitrary root writers. Enrolled installers still need
+the retained boot/native/writer barriers before changing these inputs.
+Digests avoid embedding a second complete script copy in helpers. Build-time
+validation reads all five trusted sources before publishing any generated
+binding; optional deployment does not permit missing/empty/oversize source.
+Main arms **before** publishing scripts, retaining its exclusive boot guard through
 publication; a partial repair cannot activate legacy processes in that same boot.
 Already Ready main startup takes a shared guard after checking exact scripts.
 The broker retains a shared guard through running, drain, maintenance and resume,
 so a live broker prevents re-arming. Native journal Active/Maintenance/Stopping/recovery
 still independently blocks startup: Ready never clears or overrides it.
+
+S96 is still optional and is not auto-installed by this check. Its current
+legacy direct gateway/onboard/stop paths are not routed through the broker.
+Exact provenance/presence does not adopt that process, establish configuration
+generation or authorize Pico service activation/capture. Fixed native routing,
+all writer closure and a supported optional-script/helper migration remain
+required. The four framed critical-script support entries do not silently gain
+an optional fifth executable transition entry.
 
 State publication uses fresh exclusive random hidden names, file sync, rename
 and directory sync. Hidden orphans are retained evidence and never selected.

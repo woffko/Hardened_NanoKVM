@@ -17,7 +17,7 @@ class FactorySeedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "native-runtime-boot/state"
             seed.seed(output)
-            expected = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+            expected = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
             self.assertEqual(output.read_bytes(), expected + hashlib.sha256(expected).digest())
             self.assertEqual(output.stat().st_mode & 0o7777, 0o600)
             self.assertEqual(output.parent.stat().st_mode & 0o7777, 0o700)
@@ -27,7 +27,7 @@ class FactorySeedTests(unittest.TestCase):
             self.assertEqual(list(output.parent.iterdir()), [output])
 
     def test_runtime_or_corrupt_state_is_not_reset(self):
-        for fault in ["armed", "ready", "corrupt", "truncated", "trailing", "mode", "hardlink", "symlink", "parent-mode"]:
+        for fault in ["armed", "ready", "profile", "old-format", "corrupt", "truncated", "trailing", "mode", "hardlink", "symlink", "parent-mode"]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "native-runtime-boot/state"
                 seed.seed(output)
@@ -40,7 +40,13 @@ class FactorySeedTests(unittest.TestCase):
                     if fault in ["armed", "ready"]:
                         data[8:44] = b"12345678-1234-1234-1234-123456789abc"
                         data[44] = 2 if fault == "armed" else 3
-                        data[48:] = hashlib.sha256(data[:48]).digest()
+                        data[80:] = hashlib.sha256(data[:80]).digest()
+                    elif fault == "profile":
+                        data[48] = 1
+                        data[80:] = hashlib.sha256(data[:80]).digest()
+                    elif fault == "old-format":
+                        prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+                        data = prefix + hashlib.sha256(prefix).digest()
                     elif fault == "corrupt": data[-1] ^= 1
                     elif fault == "truncated": data.pop()
                     elif fault == "trailing": data.append(0)

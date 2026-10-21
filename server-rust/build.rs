@@ -59,6 +59,22 @@ fn read_runtime(runtime: Runtime, required: bool) -> Vec<u8> {
     }
 }
 
+fn read_boot_script(manifest: &std::path::Path, name: &str) -> Vec<u8> {
+    let path = manifest.join("../kvmapp/system/init.d").join(name);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let mut bytes = Vec::new();
+    File::open(path)
+        .expect("open trusted boot script")
+        .take(boot_script_binding::MAX_SCRIPT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .expect("read trusted boot script");
+    assert!(
+        !bytes.is_empty() && bytes.len() <= boot_script_binding::MAX_SCRIPT,
+        "invalid boot script size"
+    );
+    bytes
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=src/update/support_abi.rs");
     let target = env::var("TARGET").unwrap_or_default();
@@ -74,6 +90,11 @@ fn main() {
     // Carry identities, not duplicate complete consumer scripts in the helper.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // Validate every required source before publishing any binding. Optional
+    // deployment does not make its trusted source optional at build time.
+    let scripts =
+        boot_script_binding::ROLES.map(|role| read_boot_script(&manifest_dir, role.filename()));
+    let picoclaw_script = read_boot_script(&manifest_dir, "S96picoclaw");
     for role in support_abi::ROLES {
         let frame = support_abi::encode(role);
         let declaration = support_abi::decode(&frame).expect("invalid generated support ABI");
@@ -85,21 +106,9 @@ fn main() {
         )
         .expect("write support ABI declaration");
     }
-    let mut boot_digests = Vec::with_capacity(128);
-    for role in boot_script_binding::ROLES {
+    let mut boot_digests = Vec::with_capacity(160);
+    for (role, bytes) in boot_script_binding::ROLES.into_iter().zip(scripts) {
         let name = role.filename();
-        let path = manifest_dir.join("../kvmapp/system/init.d").join(name);
-        println!("cargo:rerun-if-changed={}", path.display());
-        let mut bytes = Vec::new();
-        File::open(path)
-            .expect("open trusted boot script")
-            .take(boot_script_binding::MAX_SCRIPT as u64 + 1)
-            .read_to_end(&mut bytes)
-            .expect("read trusted boot script");
-        assert!(
-            !bytes.is_empty() && bytes.len() <= boot_script_binding::MAX_SCRIPT,
-            "invalid boot script size"
-        );
         let digest = Sha256::digest(&bytes);
         boot_digests.extend_from_slice(&digest);
         let mut frame = Vec::with_capacity(boot_script_binding::HEADER + bytes.len());
@@ -111,6 +120,7 @@ fn main() {
         std::fs::write(output.join(format!("boot-script-{name}.binding")), frame)
             .expect("write framed boot script");
     }
+    boot_digests.extend_from_slice(&Sha256::digest(&picoclaw_script));
     std::fs::write(output.join("native-boot-digests"), boot_digests).expect("write boot digests");
     std::fs::write(output.join("ssh-runtime.binding"), ssh).expect("write embedded SSH runtime");
     std::fs::write(output.join("app-recovery.binding"), app).expect("write embedded app recovery");

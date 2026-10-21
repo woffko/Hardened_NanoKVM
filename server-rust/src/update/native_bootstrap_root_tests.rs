@@ -45,6 +45,20 @@ impl Fixture {
             .join("usr/libexec")
             .join(restore_binding::NATIVE_RUNTIMES[index].filename())
     }
+    fn seed_factory(&self) -> std::path::PathBuf {
+        let parent = self.root.path().join("etc/kvm/native-runtime-boot");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut bytes = [0; 112];
+        bytes[..8].copy_from_slice(b"NKBOOT02");
+        bytes[44] = 1;
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&bytes[..80]);
+        bytes[80..].copy_from_slice(&hash);
+        fs::write(parent.join("state"), bytes).unwrap();
+        fs::set_permissions(parent.join("state"), fs::Permissions::from_mode(0o600)).unwrap();
+        parent
+    }
     fn command(&self, expected: &str) -> Command {
         let mut command = Command::new("/usr/bin/unshare");
         command
@@ -153,7 +167,7 @@ fn fixed_root_child() {
         "ready" | "ready-failure" => crate::native_owner::broker::boot::require_ready()
             .map(drop)
             .map_err(io::Error::other),
-        "chain" | "hold-ready" => prepare_boot_support().and_then(|support| {
+        "chain" | "hold-ready" | "chain-failure" => prepare_boot_support().and_then(|support| {
             if expected == "hold-ready" {
                 checkpoint("boot-ready");
             }
@@ -171,7 +185,7 @@ fn fixed_root_child() {
         }
         "activate" | "ready" | "update-fence" => result.unwrap(),
         "activate-failure" | "ready-failure" => assert!(result.is_err()),
-        "failure" | "legacy-refusal" => assert!(result.is_err()),
+        "failure" | "legacy-refusal" | "chain-failure" => assert!(result.is_err()),
         "busy" => {
             let error = result.unwrap_err();
             assert!(matches!(
@@ -330,7 +344,7 @@ fn fixed_root_live_transition_only_arms_and_cannot_activate_in_same_boot() {
         .path()
         .join("etc/kvm/native-runtime-boot/state");
     let bytes = fs::read(&state).unwrap();
-    assert_eq!(&bytes[..8], b"NKBOOT01");
+    assert_eq!(&bytes[..8], b"NKBOOT02");
     assert_eq!(bytes[44], 2);
     fixture.run("ready-failure");
     fixture.run("activate-failure");
@@ -341,17 +355,7 @@ fn fixed_root_live_transition_only_arms_and_cannot_activate_in_same_boot() {
 fn fixed_root_factory_activates_only_with_exact_consumer_scripts() {
     for fault in [false, true] {
         let fixture = Fixture::new();
-        let parent = fixture.root.path().join("etc/kvm/native-runtime-boot");
-        fs::create_dir(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut bytes = [0; 80];
-        bytes[..8].copy_from_slice(b"NKBOOT01");
-        bytes[44] = 1;
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(&bytes[..48]);
-        bytes[48..].copy_from_slice(&hash);
-        fs::write(parent.join("state"), bytes).unwrap();
-        fs::set_permissions(parent.join("state"), fs::Permissions::from_mode(0o600)).unwrap();
+        let parent = fixture.seed_factory();
         if fault {
             fs::write(
                 fixture.root.path().join("etc/init.d/S30wifi"),
@@ -376,6 +380,53 @@ fn fixed_root_factory_activates_only_with_exact_consumer_scripts() {
             fs::read(parent.join("state")).unwrap()[44],
             if fault { 1 } else { 3 }
         );
+    }
+}
+
+#[test]
+fn fixed_root_optional_script_change_never_inherits_same_boot_ready() {
+    let source = include_bytes!("../../../kvmapp/system/init.d/S96picoclaw");
+    for change in ["add", "remove", "replace", "symlink", "hardlink"] {
+        let fixture = Fixture::new();
+        let parent = fixture.seed_factory();
+        let script = fixture.root.path().join("etc/init.d/S96picoclaw");
+        if change != "add" {
+            fs::write(&script, source).unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fixture.run("activate");
+        fixture.run("ready");
+        let before = fs::read(parent.join("state")).unwrap();
+        assert_eq!(before[45], u8::from(change != "add"));
+        assert_ne!(&before[48..80], &[0; 32]);
+        match change {
+            "add" => {
+                fs::write(&script, source).unwrap();
+                fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            "remove" => fs::remove_file(&script).unwrap(),
+            "replace" => fs::write(&script, b"legacy independent gateway launcher").unwrap(),
+            "symlink" => {
+                fs::remove_file(&script).unwrap();
+                std::os::unix::fs::symlink("S95nanokvm", &script).unwrap();
+            }
+            "hardlink" => fs::hard_link(&script, script.with_file_name("alias")).unwrap(),
+            _ => unreachable!(),
+        }
+        fixture.run("ready-failure");
+        fixture.run("activate-failure");
+        assert_eq!(fs::read(parent.join("state")).unwrap(), before);
+        if matches!(change, "add" | "remove") {
+            fixture.run("chain");
+            let armed = fs::read(parent.join("state")).unwrap();
+            assert_eq!(armed[44], 2);
+            assert_eq!(&armed[45..80], &[0; 35]);
+            fixture.run("activate-failure");
+            fixture.run("ready-failure");
+        } else {
+            fixture.run("chain-failure");
+            assert_eq!(fs::read(parent.join("state")).unwrap(), before);
+        }
     }
 }
 

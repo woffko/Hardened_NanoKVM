@@ -28,7 +28,7 @@ class NativeRootfsTests(unittest.TestCase):
             (root / parent.lstrip("/")).mkdir(parents=True, exist_ok=True)
         state = root / "etc/kvm/native-runtime-boot/state"
         state.parent.chmod(0o700)
-        prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+        prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
         state.write_bytes(prefix + hashlib.sha256(prefix).digest())
         state.chmod(0o600)
         if fault and fault.startswith("boot-"):
@@ -44,10 +44,14 @@ class NativeRootfsTests(unittest.TestCase):
                 elif fault == "boot-epoch": data[8] = 1
                 elif fault == "boot-phase": data[44] = 3
                 elif fault == "boot-reserved": data[45] = 1
-                elif fault == "boot-hash": data[79] ^= 1
+                elif fault == "boot-profile": data[48] = 1
+                elif fault == "boot-hash": data[111] ^= 1
+                elif fault == "boot-old-format":
+                    prefix = b"NKBOOT01" + bytes(36) + b"\x01" + bytes(3)
+                    data = prefix + hashlib.sha256(prefix).digest()
                 else: raise ValueError(fault)
-                if fault not in ["boot-size", "boot-hash"]:
-                    data[48:80] = hashlib.sha256(data[:48]).digest()
+                if fault not in ["boot-size", "boot-hash", "boot-old-format"]:
+                    data[80:112] = hashlib.sha256(data[:80]).digest()
                 state.write_bytes(data)
         if helpers is None:
             helpers = {name: native_tests.ssh_tests.image() + name.encode() for name in binding.NATIVE_MAGICS}
@@ -144,7 +148,7 @@ class NativeRootfsTests(unittest.TestCase):
 
     def test_only_exact_protected_factory_seed_is_accepted_in_full_image(self):
         for fault in ["boot-missing", "boot-size", "boot-magic", "boot-epoch", "boot-phase",
-                      "boot-reserved", "boot-hash", "boot-mode", "boot-parent-mode",
+                      "boot-reserved", "boot-profile", "boot-old-format", "boot-hash", "boot-mode", "boot-parent-mode",
                       "boot-symlink", "boot-hardlink", "boot-owner", "boot-parent-owner"]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="nanokvm-native-boot-ext4-") as temporary:
                 image = self.fixture(Path(temporary), fault)
