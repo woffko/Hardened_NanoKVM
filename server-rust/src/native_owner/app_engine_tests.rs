@@ -585,99 +585,145 @@ fn receipt_gc_failure_retains_engine_ownership_until_explicit_root_retry() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("receipt-engine-retained-and-retried")
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("receipt-engine-retained-and-retried"));
+    assert!(stdout.contains("receipt-engine-held-completion="));
     assert!(!fault.exists());
 }
 
-#[tokio::test]
-async fn receipt_gc_engine_child() {
+#[test]
+fn receipt_gc_engine_child() {
     let Ok(root) = std::env::var("NANOKVM_RECEIPT_ENGINE_ROOT") else {
         return;
     };
-    let root = Path::new(&root);
-    let mut engine = engine(root);
-    engine.fixture_trace_starts = true;
-    start_all(&mut engine);
-    let mut transactions = Vec::with_capacity(34);
-    for sequence in 1..=34 {
-        let (_, transaction) = accept(&mut engine, root).await;
-        transactions.push(transaction);
-        if sequence < 34 {
-            receipt_engine_until(&mut engine, sequence, "retired/running", |engine| {
-                engine.install.is_none()
-                    && engine.mode == Mode::Running
-                    && engine.roles == [2; 2]
-                    && engine.backend_status == Some(Status::Running)
-            });
-        } else {
-            receipt_engine_until(&mut engine, sequence, "retained uncertainty", |engine| {
-                engine.mode == Mode::Uncertain
-            });
-        }
-    }
-    let transaction = transactions[33];
-    let current = root.join("application-slot/current");
-    assert!(current.join("receipt-manifest").exists());
-    assert!(
-        root.join("application-slot/history/.receipts-pruning")
-            .exists()
-    );
-    assert!(!root.join("receipt-fault-once").exists());
-    for _ in 0..3 {
-        engine.tick();
-        assert!(matches!(
-            engine.install.as_ref().unwrap().owner,
-            InstallOwner::Committed(_)
-        ));
-        assert_excluded(root);
-        assert_eq!(engine.mode, Mode::Uncertain);
-        assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
-        assert!(matches!(
-            app_slot::job_status_fixture(root, transactions[1]),
-            Err(app_slot::SlotError::Busy)
-        ));
-        assert_eq!(
-            engine.request(2, Operation::EnsureKvm).code,
-            Code::Uncertain
-        );
-        assert!(current.join("receipt-manifest").exists());
-    }
-    assert_eq!(
-        engine.request(2, Operation::RetryAppRetirement).code,
-        Code::Ok
-    );
-    receipt_engine_until(
-        &mut engine,
-        34,
-        "explicit retry retired/running",
-        |engine| {
-            engine.install.is_none()
-                && engine.mode == Mode::Running
-                && engine.roles == [2; 2]
-                && engine.backend_status == Some(Status::Running)
-        },
-    );
-    assert!(
-        app_slot::job_status_fixture(root, transactions[1])
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        app_slot::job_status_fixture(root, transactions[0])
-            .unwrap()
-            .unwrap()
-            .inactive_payload_retained
-    );
-    let latest = app_slot::job_status_fixture(root, transaction)
-        .unwrap()
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
-    assert!(latest.archived && latest.inactive_payload_retained);
-    assert_eq!(latest.phase, app_slot::Phase::Committed);
-    assert!(!current.exists());
-    shutdown(&mut engine);
-    println!("receipt-engine-retained-and-retried");
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let release = scope.spawn(move || {
+            loop {
+                if !matches!(
+                    cancelled.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ) {
+                    return None;
+                }
+                match entering.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                }
+            }
+            // Cross the former completion budget while the broker must keep
+            // serving control. This is not a filesystem throughput assertion.
+            let start = Instant::now();
+            let complete_hold = matches!(
+                cancelled.recv_timeout(Duration::from_secs(31)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            let held = start.elapsed();
+            resume.send(()).ok()?;
+            complete_hold.then_some(held)
+        });
+        runtime.block_on(async {
+            let root = Path::new(&root);
+            let mut engine = engine(root);
+            // Declared after Engine: cancellation drops BEFORE its joining
+            // teardown, so a panic releases a held worker without waiting 31s.
+            let _cancel_on_drop = cancel;
+            engine.fixture_trace_starts = true;
+            engine.fixture_retirement = Some(app_install::InstallIoFixture::BlockAfterIo {
+                entered,
+                resume: resumed,
+            });
+            start_all(&mut engine);
+            let mut transactions = Vec::with_capacity(34);
+            for sequence in 1..=34 {
+                let (_, transaction) = accept(&mut engine, root).await;
+                transactions.push(transaction);
+                if sequence < 34 {
+                    receipt_engine_until(&mut engine, sequence, "retired/running", |engine| {
+                        engine.install.is_none()
+                            && engine.mode == Mode::Running
+                            && engine.roles == [2; 2]
+                            && engine.backend_status == Some(Status::Running)
+                    });
+                } else {
+                    receipt_engine_until(&mut engine, sequence, "retained uncertainty", |engine| {
+                        engine.mode == Mode::Uncertain
+                    });
+                }
+            }
+            let transaction = transactions[33];
+            let current = root.join("application-slot/current");
+            assert!(current.join("receipt-manifest").exists());
+            assert!(
+                root.join("application-slot/history/.receipts-pruning")
+                    .exists()
+            );
+            assert!(!root.join("receipt-fault-once").exists());
+            for _ in 0..3 {
+                engine.tick();
+                assert!(matches!(
+                    engine.install.as_ref().unwrap().owner,
+                    InstallOwner::Committed(_)
+                ));
+                assert_excluded(root);
+                assert_eq!(engine.mode, Mode::Uncertain);
+                assert_eq!(phase(root, transaction), app_slot::Phase::Committed as u8);
+                assert!(matches!(
+                    app_slot::job_status_fixture(root, transactions[1]),
+                    Err(app_slot::SlotError::Busy)
+                ));
+                assert_eq!(
+                    engine.request(2, Operation::EnsureKvm).code,
+                    Code::Uncertain
+                );
+                assert!(current.join("receipt-manifest").exists());
+            }
+            assert_eq!(
+                engine.request(2, Operation::RetryAppRetirement).code,
+                Code::Ok
+            );
+            receipt_engine_until(
+                &mut engine,
+                34,
+                "explicit retry retired/running",
+                |engine| {
+                    engine.install.is_none()
+                        && engine.mode == Mode::Running
+                        && engine.roles == [2; 2]
+                        && engine.backend_status == Some(Status::Running)
+                },
+            );
+            assert!(
+                app_slot::job_status_fixture(root, transactions[1])
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                app_slot::job_status_fixture(root, transactions[0])
+                    .unwrap()
+                    .unwrap()
+                    .inactive_payload_retained
+            );
+            let latest = app_slot::job_status_fixture(root, transaction)
+                .unwrap()
+                .unwrap();
+            assert!(latest.archived && latest.inactive_payload_retained);
+            assert_eq!(latest.phase, app_slot::Phase::Committed);
+            assert!(!current.exists());
+            shutdown(&mut engine);
+            println!("receipt-engine-retained-and-retried");
+        });
+        let held = release.join().unwrap().expect("retirement gate completed");
+        assert!(held >= Duration::from_secs(31));
+        println!("receipt-engine-held-completion={held:?}");
+    });
 }
 
 fn receipt_engine_until(
@@ -686,16 +732,35 @@ fn receipt_engine_until(
     expected: &str,
     mut ready: impl FnMut(&Engine) -> bool,
 ) {
-    // This34-install durability fixture competes with real fsync/SIGKILL
-    // matrices in the full suite. Its observation budget is not a production
-    // protocol deadline. Keep every exact state assertion and diagnose a stall
-    // with its sequence/stage, rather than a context-free6s harness panic.
+    // Keep all 34 durable installs and an explicit 31s held completion. The 60s
+    // watchdog is only a deadlock observation bound, not a product deadline.
+    // Every actual Observe separately checks control responsiveness.
     let start = Instant::now();
     loop {
         let was_installing = engine.install.is_some();
         let tick_started = Instant::now();
-        engine.tick();
+        let observation = engine.request(2, Operation::Observe);
         let tick_duration = tick_started.elapsed();
+        assert_eq!(
+            observation.code,
+            if observation.mode == Mode::Uncertain {
+                Code::Uncertain
+            } else {
+                Code::Ok
+            },
+            "sequence={sequence}, expected={expected}"
+        );
+        assert_eq!(observation.mode, engine.mode);
+        if engine.install.is_some() {
+            assert!(matches!(
+                observation.mode,
+                Mode::Installing | Mode::Uncertain
+            ));
+        }
+        assert!(
+            tick_duration < Duration::from_millis(250),
+            "sequence={sequence}, expected={expected}, control_response={tick_duration:?}"
+        );
         if ready(engine) {
             return;
         }
@@ -712,7 +777,7 @@ fn receipt_engine_until(
             InstallStage::Failed => "failed",
         });
         assert!(
-            start.elapsed() < Duration::from_secs(30),
+            start.elapsed() < Duration::from_secs(60),
             "sequence={sequence}, expected={expected}, mode={:?}, stage={stage:?}, roles={:?}, backend={:?}, was_installing={was_installing}, tick_duration={tick_duration:?}, wanted={:?}, retry_remaining={:?}",
             engine.mode,
             engine.roles,
