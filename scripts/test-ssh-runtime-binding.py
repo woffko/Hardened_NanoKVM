@@ -178,6 +178,10 @@ class BindingTests(unittest.TestCase):
                     self.assertEqual(seed.read_bytes(), prefix + hashlib.sha256(prefix).digest())
                     self.assertEqual(seed.stat().st_mode & 0o7777, 0o600)
                     self.assertEqual(seed.parent.stat().st_mode & 0o7777, 0o700)
+                    pico = target / "etc/kvm/picoclaw-enrollment"
+                    pico_prefix = b"NKPENR01\x01" + bytes(55)
+                    self.assertEqual(pico.read_bytes(), pico_prefix + hashlib.sha256(b"NanoKVM Pico enrollment v1\0" + pico_prefix).digest())
+                    self.assertEqual(pico.stat().st_mode & 0o7777, 0o600)
                     self.assertEqual((target / "kvmapp/server/NanoKVM-Server").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/backends/NanoKVM-Server.rust").read_bytes(), backend)
                     self.assertEqual((target / "kvmapp/system/bin/nanokvm-app-recovery").read_bytes(), image())

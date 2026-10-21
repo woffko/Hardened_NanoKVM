@@ -31,6 +31,28 @@ class NativeRootfsTests(unittest.TestCase):
         prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
         state.write_bytes(prefix + hashlib.sha256(prefix).digest())
         state.chmod(0o600)
+        pico = root / "etc/kvm/picoclaw-enrollment"
+        prefix = b"NKPENR01\x01" + bytes(55)
+        pico.write_bytes(prefix + hashlib.sha256(b"NanoKVM Pico enrollment v1\0" + prefix).digest())
+        pico.chmod(0o600)
+        if fault and fault.startswith("pico-"):
+            if fault == "pico-missing": pico.unlink()
+            elif fault == "pico-mode": pico.chmod(0o644)
+            elif fault == "pico-symlink": pico.unlink(); pico.symlink_to("/outside")
+            elif fault == "pico-hardlink": os.link(pico, pico.with_name("alias"))
+            elif fault == "pico-store": (pico.parent / "picoclaw-operations").mkdir()
+            elif fault == "pico-next": (pico.parent / ".picoclaw-enrollment.next").write_bytes(b"unknown")
+            elif fault != "pico-owner":
+                data = bytearray(pico.read_bytes())
+                if fault == "pico-size": data.append(0)
+                elif fault == "pico-phase": data[8] = 3
+                elif fault == "pico-epoch": data[16] = 1
+                elif fault == "pico-reserved": data[32] = 1
+                elif fault == "pico-hash": data[-1] ^= 1
+                else: raise ValueError(fault)
+                if fault not in ["pico-size", "pico-hash"]:
+                    data[64:] = hashlib.sha256(b"NanoKVM Pico enrollment v1\0" + data[:64]).digest()
+                pico.write_bytes(data)
         if fault and fault.startswith("boot-"):
             if fault == "boot-missing": state.unlink()
             elif fault == "boot-mode": state.chmod(0o644)
@@ -101,7 +123,7 @@ class NativeRootfsTests(unittest.TestCase):
         subprocess.run(["mkfs.ext4", "-F", "-q", "-d", str(root), str(image)],
                        check=True, capture_output=True, timeout=30)
         commands = []
-        for path in parents + payloads + ["/kvmapp/server/NanoKVM-Server", "/etc/kvm/native-runtime-boot/state"]:
+        for path in parents + payloads + ["/kvmapp/server/NanoKVM-Server", "/etc/kvm/native-runtime-boot/state", "/etc/kvm/picoclaw-enrollment"]:
             for field in ["uid", "gid"]:
                 commands.append(f"sif {path} {field} 0")
         if fault in ["independent-owner", "bundled-owner"]:
@@ -119,6 +141,8 @@ class NativeRootfsTests(unittest.TestCase):
             commands.append("sif /etc/kvm/native-runtime-boot/state uid 1")
         elif fault == "boot-parent-owner":
             commands.append("sif /etc/kvm/native-runtime-boot uid 1")
+        elif fault == "pico-owner":
+            commands.append("sif /etc/kvm/picoclaw-enrollment uid 1")
         subprocess.run(["debugfs", "-w", "-f", "-", str(image)], input="\n".join(commands) + "\n",
                        text=True, check=True, capture_output=True, timeout=30)
         return image
@@ -155,6 +179,17 @@ class NativeRootfsTests(unittest.TestCase):
                 result = subprocess.run([sys.executable, "-B", str(TOOL), str(image)],
                                         capture_output=True, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
+
+    def test_pico_factory_seed_refuses_runtime_corrupt_unsafe_or_existing_store(self):
+        for fault in ["pico-missing", "pico-mode", "pico-symlink", "pico-hardlink", "pico-owner",
+                      "pico-size", "pico-phase", "pico-epoch", "pico-reserved", "pico-hash", "pico-store", "pico-next"]:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="nanokvm-pico-ext4-") as temporary:
+                image = self.fixture(Path(temporary), fault)
+                result = subprocess.run([sys.executable, "-B", str(TOOL), str(image)],
+                                        capture_output=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_invalid_filesystems_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="nanokvm-native-invalid-ext4-") as temporary:
             invalid = Path(temporary) / "invalid"
             invalid.write_bytes(b"not ext4")

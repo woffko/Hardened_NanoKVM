@@ -57,6 +57,17 @@ impl Fixture {
         bytes[80..].copy_from_slice(&hash);
         fs::write(parent.join("state"), bytes).unwrap();
         fs::set_permissions(parent.join("state"), fs::Permissions::from_mode(0o600)).unwrap();
+        // Full-image factory input is separate from native process enrollment.
+        let mut pico = [0; 96];
+        pico[..8].copy_from_slice(b"NKPENR01");
+        pico[8] = 1;
+        let mut hash = Sha256::new();
+        hash.update(b"NanoKVM Pico enrollment v1\0");
+        hash.update(&pico[..64]);
+        pico[64..].copy_from_slice(&hash.finalize());
+        let anchor = self.root.path().join("etc/kvm/picoclaw-enrollment");
+        fs::write(&anchor, pico).unwrap();
+        fs::set_permissions(anchor, fs::Permissions::from_mode(0o600)).unwrap();
         parent
     }
     fn command(&self, expected: &str) -> Command {

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn record(sequence: u64, phase: Phase) -> Record {
+pub(super) fn record(sequence: u64, phase: Phase) -> Record {
     Record {
         sequence,
         nonce: [1; 16],
@@ -56,6 +56,18 @@ fn hash_again(bytes: &mut [u8]) {
 }
 
 fn save(root: &Path, state: &Snapshot) -> std::path::PathBuf {
+    // Explicit synthetic enrollment, not a production initializer.
+    let mut anchor = [0; 96];
+    anchor[..8].copy_from_slice(b"NKPENR01");
+    anchor[8] = 3;
+    anchor[16..32].copy_from_slice(&state.epoch);
+    let mut hash = Sha256::new();
+    hash.update(b"NanoKVM Pico enrollment v1\0");
+    hash.update(&anchor[..64]);
+    anchor[64..].copy_from_slice(&hash.finalize());
+    let enrollment = root.join("picoclaw-enrollment");
+    fs::write(&enrollment, anchor).unwrap();
+    fs::set_permissions(enrollment, fs::Permissions::from_mode(0o600)).unwrap();
     let directory = root.join(DIRECTORY);
     fs::create_dir_all(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
@@ -369,7 +381,7 @@ fn unsafe_state_links_types_modes_sizes_and_pending_evidence_are_preserved_and_r
     }
 }
 
-struct OwnedChild(Option<Child>);
+pub(super) struct OwnedChild(pub(super) Option<Child>);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         if let Some(child) = self.0.as_mut() {

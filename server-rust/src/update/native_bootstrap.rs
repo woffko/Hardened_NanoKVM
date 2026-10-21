@@ -32,7 +32,7 @@ pub fn prepare_boot_support() -> io::Result<BootSupport> {
     let native = embedded_images()?;
     let admission = ProcessLock::acquire().map_err(io::Error::other)?;
     let configuration = StateWriters::default()
-        .configuration()
+        .configuration_for_bootstrap(&admission)
         .map_err(io::Error::other)?;
     app_bootstrap::ensure_with_admission(app, &admission)?;
     ensure_locked(native, &admission)?;

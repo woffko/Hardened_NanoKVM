@@ -65,6 +65,8 @@ done
 
 mkdir -p "$OUT_DIR"
 python3 -B "$ROOT/scripts/native-boot-record.py" "$NATIVE_BOOT_SEED"
+PICO_ENROLLMENT_SEED="$OUT_DIR/$OUTPUT_BASENAME.pico-factory/picoclaw-enrollment"
+python3 -B "$ROOT/scripts/picoclaw-enrollment-record.py" "$PICO_ENROLLMENT_SEED"
 
 read -r ROOTFS_START ROOTFS_SECTORS <<EOF
 $(partx -g -o NR,START,SECTORS "$BASE_IMAGE" | awk '$1 == 2 { print $2, $3; exit }')
@@ -226,6 +228,12 @@ fi
   printf 'sif /etc/kvm/native-runtime-boot/state mode 0100600\n'
   printf 'sif /etc/kvm/native-runtime-boot/state uid 0\n'
   printf 'sif /etc/kvm/native-runtime-boot/state gid 0\n'
+
+  printf 'rm /etc/kvm/picoclaw-enrollment\n'
+  printf 'write %s /etc/kvm/picoclaw-enrollment\n' "$PICO_ENROLLMENT_SEED"
+  printf 'sif /etc/kvm/picoclaw-enrollment mode 0100600\n'
+  printf 'sif /etc/kvm/picoclaw-enrollment uid 0\n'
+  printf 'sif /etc/kvm/picoclaw-enrollment gid 0\n'
 
   for script in "${BOOT_INIT_SCRIPTS[@]}"; do
     script_path="$KVMAPP_DIR/system/init.d/$script"

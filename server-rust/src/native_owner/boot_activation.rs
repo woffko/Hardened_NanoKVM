@@ -316,6 +316,20 @@ pub fn prepare() -> Result<Permit, Error> {
 /// same epoch, even after manually invoking S02 with the new scripts installed.
 pub fn activate_early() -> Result<(), Error> {
     crate::update::app_slot::boot_gate().map_err(|_| Error::Unsafe)?;
+    // Enroll explicit factory input before any broker operation needs Config.
+    // Waiting for backend startup here would deadlock the new image's first
+    // boot: the backend is itself started under that configuration admission.
+    let admission =
+        crate::update::operation_lock::ProcessLock::acquire().map_err(|error| match error {
+            crate::update::operation_lock::LockError::Busy => Error::Busy,
+            _ => Error::Unsafe,
+        })?;
+    let _configuration = crate::update::state_writers::StateWriters::default()
+        .configuration_for_bootstrap(&admission)
+        .map_err(|error| match error {
+            crate::AppError::Conflict(_) => Error::Busy,
+            _ => Error::Unsafe,
+        })?;
     let parent = parent()?;
     let permit = lock(&parent, false, true, 0)?;
     let epoch = Epoch::current()?;

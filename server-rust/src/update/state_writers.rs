@@ -42,6 +42,25 @@ impl StateWriters {
         Ok(permit)
     }
 
+    /// Fixed boot-support path only: an image Factory record may enroll an
+    /// empty Pico store. Absence, active jobs or foreign evidence never grant
+    /// this exception, and the returned permit passes the final normal fence.
+    pub(crate) fn configuration_for_bootstrap(&self, update: &ProcessLock) -> Result<ConfigPermit> {
+        let permit = self.enroll(
+            Domain::Configuration,
+            "configuration change already in progress",
+        )?;
+        #[cfg(test)]
+        if let Some(parent) = &self.parent {
+            super::picoclaw_config::jobs::prepare_fixture(parent)?;
+            self.check_picoclaw_fence()?;
+            return Ok(permit);
+        }
+        super::picoclaw_config::jobs::prepare(&permit, update)?;
+        self.check_picoclaw_fence()?;
+        Ok(permit)
+    }
+
     fn check_picoclaw_fence(&self) -> Result<()> {
         #[cfg(test)]
         if let Some(parent) = &self.parent {

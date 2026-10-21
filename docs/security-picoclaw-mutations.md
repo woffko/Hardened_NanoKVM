@@ -2,10 +2,10 @@
 
 This is the protocol selected for the stopped-mutation handoff. It is not an
 activation or acceptance report. The ordinary model/profile/install/uninstall
-writers, durable store, new transport and recovery path are not yet migrated.
+writers, accepted-job producer, new transport and recovery path are not yet migrated.
 The legacy onboarding completion boolean is not a durable job receipt.
 
-## Current connected reader/fence slice
+## Current connected reader, fence and factory bootstrap
 
 The fixed-root reader recognizes an 8,608-byte private `NKPJOB01` metadata
 snapshot: store epoch, monotonic head, at most one active job and a contiguous
@@ -21,15 +21,35 @@ Reads do not initialize, rewrite, settle, resume or prune a job. Producers must
 own Update then Config before taking the store's exclusive lock; this short
 read-side shared lock is not a substitute for their lifetime ownership.
 
-This slice deliberately has NO production initializer, accepted-job writer,
-phase-transition API, payload store, retirement or recovery bypass. An absent
-directory is still the legacy preactivation state, not proof of an empty or
-previously initialized store. Store-loss protection needs a separately enrolled
-bootstrap anchor: the current native boot marker cannot establish it alone.
-Existing onboarding does not publish these records yet. The SIGKILL and root
-tests create synthetic records only in disposable fixtures; they do not prove
-durable acceptance or a replay-safe producer. Ordinary unmanaged Pico writers
-and OS-level H2 isolation remain outside this connected cooperative fence.
+A separate protected 96-byte `/etc/kvm/picoclaw-enrollment` anchor now records
+Factory, Pending(epoch) or Ready(epoch). Only offline full-image producers seed
+the deterministic Factory input; it is not an app-archive member. Early S02
+activation takes Update then Config and performs this explicit bootstrap before
+the broker/backend can need Config. Backend boot-support preparation validates
+the same path. Neither ordinary API/status calls nor missing files create it.
+
+Factory requires an absent store, selects a nonzero random epoch and durably
+publishes Pending before creating the empty store. The exact empty state and
+its directory are synced before Ready publication. Pending retry retains the
+same epoch and refuses anything except that exact empty store. Ready requires
+the matching state and cannot recreate a missing store or reset its sequence.
+An existing store without its anchor also refuses. A staged anchor, partial
+file, corrupt or foreign member is preserved and fenced, not automatically
+adopted or cleaned. Explicit recovery of ambiguous bootstrap staging remains
+to be implemented. This bootstrap supplies no native closure authority.
+
+Only absence of BOTH anchor and store remains legacy preactivation, not an
+enrolled empty store. Future job acceptance must require Ready even in that
+legacy case; old installations still need explicit trusted migration rather
+than factory seeding from an app archive. Raw preservation/recovery must carry
+anchor and store together, and is not implemented by this bootstrap.
+
+There is still NO accepted-job writer, phase-transition API, private payload
+publisher, retirement or job recovery bypass. Existing onboarding does not
+publish these records yet. SIGKILL/root tests exercise bootstrap and synthetic
+job records in disposable fixtures, not durable job acceptance or target power
+cuts. Ordinary unmanaged Pico writers and OS-level H2 isolation remain outside
+this connected cooperative fence.
 
 ## Authority and scope
 

@@ -1,4 +1,4 @@
-//! Read-only admission fence for the durable mutation protocol.
+//! Admission reader/fence and explicit image-factory empty-store bootstrap.
 //! No query initializes/repairs state or supplies native closure authority.
 //! Production acceptance, payload publication and typed recovery are not wired.
 use super::{Directory, Revision};
@@ -7,6 +7,12 @@ use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, os::unix::fs::MetadataExt, path::Path};
 use zeroize::Zeroizing;
+
+#[path = "picoclaw_jobs_bootstrap.rs"]
+mod bootstrap;
+pub(crate) use bootstrap::prepare;
+#[cfg(test)]
+pub(crate) use bootstrap::prepare_fixture;
 
 const DIRECTORY: &str = "picoclaw-operations";
 const STATE: &str = "state";
@@ -337,15 +343,30 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o7022 != 0 {
         return Err(invalid());
     }
+    bootstrap::check_next_absent(parent)?;
+    let enrollment = bootstrap::read_anchor(parent, uid)?;
+    if enrollment
+        .as_ref()
+        .is_some_and(|(anchor, _)| !matches!(anchor, bootstrap::Anchor::Ready(_)))
+    {
+        return Err(fenced());
+    }
     let directory = match restore_fs::open_beneath(
         parent,
         DIRECTORY,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NONBLOCK,
     ) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && enrollment.is_none() => {
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     };
+    // No shipped version has an unanchored store. Preserve/refuse such data;
+    // it cannot downgrade a lost enrollment to the legacy absence exception.
+    if enrollment.is_none() {
+        return Err(invalid());
+    }
     let m = directory.metadata()?;
     if m.uid() != uid || m.dev() != metadata.dev() || m.mode() & 0o7777 != 0o700 {
         return Err(invalid());
@@ -397,10 +418,19 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
         return Err(invalid());
     }
     let snapshot = Snapshot::decode(bytes.as_slice())?;
+    if let Some((bootstrap::Anchor::Ready(epoch), _)) = enrollment
+        && epoch != snapshot.epoch
+    {
+        return Err(invalid());
+    }
     if Revision::from(&directory.metadata()?) != directory_before
         || Revision::from(&restore_fs::open_beneath(parent, DIRECTORY, OFlags::PATH)?.metadata()?)
             != directory_before
     {
+        return Err(invalid());
+    }
+    bootstrap::check_next_absent(parent)?;
+    if bootstrap::read_anchor(parent, uid)? != enrollment {
         return Err(invalid());
     }
     if snapshot.active.is_some() {
@@ -412,8 +442,8 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
 pub(crate) fn check_writer_admission() -> Result<()> {
     let parent = match Directory::open(Path::new("/etc/kvm"), false) {
         Ok(parent) => parent,
-        // Only legacy absence is allowed at this preactivation stage. Once
-        // bootstrap enrolls a store, its separate anchor must require presence.
+        // Legacy absence only; a future producer must independently require
+        // Ready enrollment. No submission may synthesize it from absence.
         Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };

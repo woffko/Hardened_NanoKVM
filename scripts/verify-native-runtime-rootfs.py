@@ -42,6 +42,19 @@ def verify(image):
         prefix = b"NKBOOT02" + bytes(36) + b"\x01" + bytes(35)
         if destination.read_bytes() != prefix + hashlib.sha256(prefix).digest():
             raise ValueError("full image must contain exact Factory native boot enrollment")
+        pico_anchor = "/etc/kvm/picoclaw-enrollment"
+        if rootfs.metadata(image, pico_anchor, "regular", 96) != (0o600, 0, 0, 1):
+            raise ValueError("unsafe Pico enrollment factory record")
+        destination = Path(temporary) / "pico-enrollment"
+        rootfs.debugfs(image, f"dump {pico_anchor} {destination}")
+        prefix = b"NKPENR01\x01" + bytes(55)
+        if destination.read_bytes() != prefix + hashlib.sha256(b"NanoKVM Pico enrollment v1\0" + prefix).digest():
+            raise ValueError("full image must contain exact Factory Pico enrollment")
+        # Factory input cannot be used to reset a previously accepted store.
+        if "Inode:" in rootfs.debugfs(image, "stat /etc/kvm/picoclaw-operations"):
+            raise ValueError("Factory Pico enrollment beside an existing store")
+        if "Inode:" in rootfs.debugfs(image, "stat /etc/kvm/.picoclaw-enrollment.next"):
+            raise ValueError("unknown staged Pico enrollment in full image")
         backend_dump = Path(temporary) / "backend"
         rootfs.debugfs(image, f"dump {backend} {backend_dump}")
         with binding.regular(backend_dump, binding.MAX_BACKEND) as source:

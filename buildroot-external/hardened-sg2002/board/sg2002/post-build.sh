@@ -97,6 +97,8 @@ done
 # arms a new boot and must never synthesize an already-fresh installation.
 "${HOST_DIR:-}/bin/python3" -B "$ROOT/scripts/native-boot-record.py" \
 	"$TARGET_DIR/etc/kvm/native-runtime-boot/state"
+"${HOST_DIR:-}/bin/python3" -B "$ROOT/scripts/picoclaw-enrollment-record.py" \
+	"$TARGET_DIR/etc/kvm/picoclaw-enrollment"
 
 if [ -n "$RUNTIME_SYSTEM_VERSION" ] || [ -n "$RUNTIME_KERNEL_VERSION" ] || [ -n "$RUNTIME_SECURITY_PATCH_LEVEL" ]; then
 	case "$RUNTIME_SYSTEM_VERSION$RUNTIME_KERNEL_VERSION$RUNTIME_SECURITY_PATCH_LEVEL" in
