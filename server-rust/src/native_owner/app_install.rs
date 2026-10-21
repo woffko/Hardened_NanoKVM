@@ -6,11 +6,21 @@ use crate::update::app_slot::{
     AcceptedInstall, Phase, SlotError, Status, support::support_operation,
 };
 
+#[path = "app_support_prepare.rs"]
+mod preparation;
 #[path = "app_retirement.rs"]
 mod retirement;
-#[cfg(test)]
-pub(super) use retirement::Fixture as RetirementFixture;
+#[path = "app_install_work.rs"]
+mod work;
+pub(super) use preparation::{Poll as PreparationPoll, PreparingSupport};
 pub(super) use retirement::{Poll as RetirementPoll, Retirement};
+#[cfg(test)]
+pub(super) use work::Fixture as InstallIoFixture;
+
+pub(super) enum BeginSupport {
+    Started(PreparingSupport),
+    Retained(Session),
+}
 
 /// Only the fixed protected broker endpoint, never a caller-selected address.
 pub(crate) fn connect_peer() -> std::io::Result<std::os::fd::OwnedFd> {
@@ -263,6 +273,7 @@ impl Session {
     /// Retain this whole drained session while preparing independent support.
     /// Epoch zero currently refuses before namespace mutation. This does not
     /// publish the app, resume native work or establish trial health.
+    #[cfg(test)]
     pub fn prepare_support(
         &mut self,
     ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
@@ -278,6 +289,36 @@ impl Session {
         // fixture bypasses only epoch0, never the native ownership boundary.
         let closed = self.closed()?;
         crate::update::app_slot::support::prepare_retained_fixture(&mut self.install, closed)
+    }
+
+    pub(super) fn start_support(mut self) -> BeginSupport {
+        let Ok(closed) = self.closed() else {
+            return BeginSupport::Retained(self);
+        };
+        let work = work::InstallWork::support(self.install, closed);
+        BeginSupport::Started(PreparingSupport::new(
+            self.group,
+            self.journal,
+            self.enrollment,
+            #[cfg(test)]
+            self.update_parent,
+            work,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_support_fixture(mut self) -> BeginSupport {
+        let Ok(closed) = self.closed() else {
+            return BeginSupport::Retained(self);
+        };
+        let work = work::InstallWork::support_fixture(self.install, closed);
+        BeginSupport::Started(PreparingSupport::new(
+            self.group,
+            self.journal,
+            self.enrollment,
+            self.update_parent,
+            work,
+        ))
     }
 
     /// Preserve only the fixed mutable data allowlist and journal the two live

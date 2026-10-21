@@ -819,9 +819,11 @@ read-only method is a prerequisite, not a `ClosedRuntime` capability.
 The complete nine-entry protocol and its acceptance remain required before
 enabling canonical publication; the source boundaries below are not activation.
 
-The initial nine-file preparation core now lives inside the retained app-slot
-owner. `Session::prepare_support` first requires the same native drain and
-keeps the whole session borrowed. The internal closure token remains private.
+The initial nine-file preparation core lives inside the retained app-slot owner.
+`Session::start_support` first requires the same native drain. It transfers the
+accepted install to a retained worker owner while keeping Drain/journal/enrollment
+in the broker. Only the private transaction-bound closure proof reaches the
+fixed support operation; the worker cannot resume or supervise native processes.
 It pins both recorded app roots and the fixed support parents, checks both
 catalogs against the executing build, and allocates all successors anonymously
 before publishing a bounded, transaction-bound plan in the private rootfs
@@ -852,18 +854,29 @@ support; other supported app states restore predecessor. Terminal support cleanu
 precedes app archival, native `Closed` and intent removal. An empty support store
 is synced and rechecked without requiring an already archived `current` name.
 
-The retained Engine now calls preparation and exchange itself before publishing
-the app. Its explicit stages separate complete all-owned-scope drain, support
-preparation/exchange, app publication and frozen trial. Preparation borrows the
-same drained `Session`; the guard is not stored as a self-reference across
-daemon ticks. A failed or ambiguous prepare/exchange/publication attempt keeps
-that session and its exclusions, enters uncertainty and is not retried by
-observation. Explicit cancellation still uses joined rollback and terminal
-settlement. With the current epoch0 the production Engine therefore refuses
-before support or app publication; it no longer skips directly to app publish.
-This wiring does not enable the ordinary update API or assert complete service
-closure. The synchronous bounded filesystem phase does not promise a hard IPC
-response deadline during slow I/O.
+The retained Engine orchestrates preparation/exchange before app publication.
+One fixed I/O worker executes that filesystem work while the broker continues
+polling native closure and serving control requests. The accepted store/update/
+writer exclusions stay with the retained owner through caller loss, worker
+failure and unknown I/O. The worker guard borrows the accepted install only
+inside its stack; there is no self-reference across daemon ticks. Conversion
+back to Session requires a finished/joined worker, unique accepted ownership
+and fresh main-thread closure checks. Native uncertainty remains distinct from
+a filesystem failure and cannot be cleared by a queued cancellation.
+
+Cancel during support I/O acknowledges a queued rollback, not completed
+cancellation. It never starts a concurrent filesystem operation: after join,
+rollback must obtain a fresh closed-runtime proof and validate the actual
+support/app layout. Native uncertainty prevents that transition. Observation,
+reconnect and path repair never retry failed preparation. Spawn failure, caught
+unwind and panic-after-I/O fixtures retain the same accepted owner; production
+panic=abort still requires durable process recovery. Teardown joins before
+releasing admission, so kernel-blocked I/O can delay teardown.
+
+With the current epoch0 the production Engine still refuses before support or
+app publication. This does not enable the ordinary update API, establish all
+writer quiescence or make the remaining synchronous publication/commit/rollback
+steps nonblocking. No whole-install hard latency or target acceptance is claimed.
 
 Host tests compose real retained `Session` drain and terminal owners with
 synthetic protected payloads and child protocol probes. They cover successful

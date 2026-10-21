@@ -1,0 +1,100 @@
+//! Main-thread closed-runtime proof plus one retained support I/O operation.
+use super::work::{InstallWork, Status};
+use super::{Session, controller, journal};
+
+pub(crate) enum Poll {
+    Pending {
+        owner: PreparingSupport,
+        uncertain: bool,
+    },
+    Ready(Session),
+    Failed {
+        session: Session,
+        uncertain: bool,
+    },
+    Retained(PreparingSupport),
+}
+
+pub(crate) struct PreparingSupport {
+    group: controller::Drain,
+    journal: journal::Store,
+    enrollment: super::super::boot::Permit,
+    #[cfg(test)]
+    update_parent: Option<std::fs::File>,
+    uncertain: bool,
+    // Native handles drop first; worker joins before accepted admission LAST.
+    work: InstallWork,
+}
+
+impl PreparingSupport {
+    pub(super) fn new(
+        group: controller::Drain,
+        journal: journal::Store,
+        enrollment: super::super::boot::Permit,
+        #[cfg(test)] update_parent: Option<std::fs::File>,
+        work: InstallWork,
+    ) -> Self {
+        Self {
+            group,
+            journal,
+            enrollment,
+            #[cfg(test)]
+            update_parent,
+            uncertain: false,
+            work,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fixture(&mut self, fixture: super::work::Fixture) {
+        self.work.set_fixture(fixture);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_failed_stopping_publication(&mut self) {
+        // A real EXCL publication failure poisons the live journal; no fake
+        // closure receipt or reset of the native group is introduced.
+        assert!(self.journal.stopping().is_err());
+    }
+
+    pub(crate) fn poll(mut self) -> Poll {
+        // Keep supervision/proof checks in the broker, never the filesystem
+        // worker. Once uncertainty is seen, later I/O success cannot clear it.
+        self.observe_closed();
+        let status = self.work.poll(!self.uncertain);
+        if status == Status::Pending {
+            return Poll::Pending {
+                uncertain: self.uncertain,
+                owner: self,
+            };
+        }
+        self.observe_closed();
+        let install = match self.work.into_install() {
+            Ok(install) => install,
+            Err(work) => return Poll::Retained(Self { work, ..self }),
+        };
+        let session = Session {
+            group: self.group,
+            journal: self.journal,
+            enrollment: self.enrollment,
+            #[cfg(test)]
+            update_parent: self.update_parent,
+            install,
+        };
+        if status == Status::Failed || self.uncertain {
+            Poll::Failed {
+                session,
+                uncertain: self.uncertain,
+            }
+        } else {
+            Poll::Ready(session)
+        }
+    }
+
+    fn observe_closed(&mut self) {
+        let scopes = self.group.poll();
+        if self.journal.ready().is_err() || !matches!(scopes, controller::DrainStatus::Drained) {
+            self.uncertain = true;
+        }
+    }
+}

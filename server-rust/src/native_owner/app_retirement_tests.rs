@@ -1,4 +1,4 @@
-use super::app_install::RetirementFixture;
+use super::app_install::InstallIoFixture as RetirementFixture;
 use super::*;
 use std::sync::mpsc;
 

@@ -553,6 +553,16 @@ migration and complete target acceptance remain required before release.
 
 ### Explicit live-terminal archival retry
 
+Before app publication, support preparation/exchange uses a separate retained
+closed-runtime owner and the same fixed worker machinery as terminal retirement.
+The broker retains native supervision; filesystem work borrows, never consumes,
+accepted admission. Cancel while support I/O is active queues rollback until
+the worker has joined and closure/layout are revalidated. It cannot overlap a
+support exchange or override native uncertainty. Failed preparation is not
+implicitly replayed by observation/reconnect; terminal retry below does not
+address this nonterminal stage. Remaining publication/commit/rollback steps are
+still synchronous and require separate responsiveness acceptance.
+
 Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
 protected lifecycle channel. This is the fixed `RetryAppRetirement` opcode in
 the same closed lifecycle protocol (now 48-byte NKC2/NKR2 frames), not a new

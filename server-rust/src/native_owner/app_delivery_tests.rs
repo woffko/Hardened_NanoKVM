@@ -454,16 +454,95 @@ fn expired_offer_slots_are_closed_and_reusable_for_a_valid_install() {
         drop(owner);
         let mut control = connect(root.path());
         observed(&mut control, Mode::Installing);
+        // The responsive server can expire this200ms fixture channel while
+        // support I/O runs. Close it at a known complete Observe boundary;
+        // never retry an ambiguous Cancel after a transport failure.
+        drop(control);
         until(|| {
             fs::read(root.path().join("application-slot/current/state")).unwrap()[8]
                 == app_slot::Phase::Published as u8
         });
         assert_excluded(root.path());
+        let mut control = connect(root.path());
         assert_eq!(
             exchange(&mut control, Operation::CancelAppInstall).code,
             Code::Ok
         );
         observed(&mut control, Mode::Running);
+        until(|| {
+            let reply = exchange(&mut control, Operation::Shutdown);
+            assert!(matches!(reply.code, Code::Ok | Code::Busy));
+            reply.mode == Mode::Stopped
+        });
+    });
+}
+
+#[test]
+fn actual_idle_control_eof_during_held_support_io_retains_install_for_fresh_client_cancel() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path();
+    let uid = nix::unistd::geteuid().as_raw();
+    let mut server = Server::new(broker(path), uid).unwrap();
+    server.engine.fixture = Some(path.to_path_buf());
+    server.engine.fixture_allow_unsupported_support = true;
+    server.idle = Duration::from_millis(200);
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    server.engine.fixture_support = Some(app_install::InstallIoFixture::Block {
+        entered,
+        resume: resumed,
+    });
+    // Capture the release sender by value: assertion unwind drops it before
+    // serve_prepared joins the server/worker, so a failure cannot deadlock.
+    serve_prepared(server, move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (owner, prepared) = runtime.block_on(prepared_fixture(path));
+        let transaction = prepared.transaction();
+        let old = path.join("kvmapp").metadata().unwrap().ino();
+        let directory = File::open(path.join("native-runtime-owner")).unwrap();
+        let socket = journal::socket::connect_install(&directory, uid).unwrap();
+        app_install_lease::Sender::fixture(socket, uid)
+            .unwrap()
+            .send(prepared.into_handoff())
+            .unwrap();
+        drop(owner);
+        let mut idle = connect(path);
+        observed(&mut idle, Mode::Installing);
+        until(|| entering.try_recv().is_ok());
+        until(|| {
+            matches!(
+                rustix::net::recv(
+                    &idle.stream,
+                    &mut [0_u8; 1],
+                    rustix::net::RecvFlags::DONTWAIT
+                ),
+                Ok((0, _))
+            )
+        });
+        drop(idle);
+        assert_excluded(path);
+        assert!(!path.join("etc/kvm/application-support").exists());
+        assert_eq!(path.join("kvmapp").metadata().unwrap().ino(), old);
+        let mut control = connect(path);
+        let observation = exchange(&mut control, Operation::Observe);
+        assert_eq!(observation.code, Code::Ok);
+        assert_eq!(observation.mode, Mode::Installing);
+        let cancellation = exchange(&mut control, Operation::CancelAppInstall);
+        assert_eq!(cancellation.code, Code::Ok);
+        assert_eq!(cancellation.mode, Mode::Installing);
+        assert_excluded(path);
+        resume.send(()).unwrap();
+        observed(&mut control, Mode::Running);
+        let status = app_slot::job_status_fixture(path, transaction)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, app_slot::Phase::RolledBack);
+        assert!(status.archived);
+        assert_eq!(path.join("kvmapp").metadata().unwrap().ino(), old);
+        assert!(!path.join("trial-owner-started").exists());
         until(|| {
             let reply = exchange(&mut control, Operation::Shutdown);
             assert!(matches!(reply.code, Code::Ok | Code::Busy));

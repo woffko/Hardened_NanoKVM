@@ -75,6 +75,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
         };
         let owner = match &install.owner {
             InstallOwner::Draining(_) => "draining",
+            InstallOwner::PreparingSupport { .. } => "preparing-support",
             InstallOwner::Trial(_) => "trial",
             InstallOwner::Committed(_) => "committed",
             InstallOwner::RolledBack(_) => "rolled-back",

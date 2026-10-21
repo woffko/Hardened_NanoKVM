@@ -330,6 +330,10 @@ enum Owner {
 
 enum InstallOwner {
     Draining(app_install::Session),
+    PreparingSupport {
+        owner: app_install::PreparingSupport,
+        cancel_requested: bool,
+    },
     Trial(app_install::TrialSession),
     Committed(app_install::Retirement),
     RolledBack(app_install::Retirement),
@@ -386,7 +390,9 @@ struct Engine {
     #[cfg(test)]
     fixture_allow_unsupported_support: bool,
     #[cfg(test)]
-    fixture_retirement: Option<app_install::RetirementFixture>,
+    fixture_retirement: Option<app_install::InstallIoFixture>,
+    #[cfg(test)]
+    fixture_support: Option<app_install::InstallIoFixture>,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -426,6 +432,8 @@ impl Engine {
             fixture_allow_unsupported_support: false,
             #[cfg(test)]
             fixture_retirement: None,
+            #[cfg(test)]
+            fixture_support: None,
         }
     }
     fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
@@ -674,22 +682,40 @@ impl Engine {
                                 stage = InstallStage::PreparingSupport;
                             }
                             InstallStage::PreparingSupport => {
-                                // This code executes in the retained broker, not
-                                // a freshly installed helper or an ABI probe.
-                                // The guard borrows the SAME drained Session;
-                                // never store a self-reference across ticks.
                                 #[cfg(test)]
-                                let prepared = if self.fixture_allow_unsupported_support {
-                                    session.prepare_support_fixture()
+                                let started = if self.fixture_allow_unsupported_support {
+                                    session.start_support_fixture()
                                 } else {
-                                    session.prepare_support()
+                                    session.start_support()
                                 };
                                 #[cfg(not(test))]
-                                let prepared = session.prepare_support();
-                                stage = match prepared.and_then(|mut support| support.exchange()) {
-                                    Ok(()) => InstallStage::SupportReady,
-                                    Err(_) => InstallStage::Failed,
-                                };
+                                let started = session.start_support();
+                                return Some(match started {
+                                    app_install::BeginSupport::Started(owner) => {
+                                        #[cfg(test)]
+                                        let owner = {
+                                            let mut owner = owner;
+                                            if let Some(fixture) = self.fixture_support.take() {
+                                                owner.set_fixture(fixture);
+                                            }
+                                            owner
+                                        };
+                                        Install {
+                                            owner: InstallOwner::PreparingSupport {
+                                                owner,
+                                                cancel_requested: false,
+                                            },
+                                            stage: InstallStage::PreparingSupport,
+                                        }
+                                    }
+                                    app_install::BeginSupport::Retained(session) => {
+                                        self.mode = Mode::Uncertain;
+                                        Install {
+                                            owner: InstallOwner::Draining(session),
+                                            stage: InstallStage::Failed,
+                                        }
+                                    }
+                                });
                             }
                             InstallStage::SupportReady => {
                                 // Exactly one publication attempt. Unknown I/O
@@ -759,6 +785,53 @@ impl Engine {
                     }
                 }
                 InstallOwner::Draining(session)
+            }
+            InstallOwner::PreparingSupport {
+                owner,
+                cancel_requested,
+            } => {
+                self.roles = [4; 2];
+                self.backend_status = Some(Status::Closed(Completion::Stopped));
+                match owner.poll() {
+                    app_install::PreparationPoll::Pending { owner, uncertain } => {
+                        if uncertain {
+                            self.roles = [6; 2];
+                            self.backend_status = Some(Status::Uncertain);
+                            stage = InstallStage::Failed;
+                        }
+                        InstallOwner::PreparingSupport {
+                            owner,
+                            cancel_requested,
+                        }
+                    }
+                    app_install::PreparationPoll::Ready(session) => {
+                        stage = if cancel_requested {
+                            InstallStage::Rollback
+                        } else {
+                            InstallStage::SupportReady
+                        };
+                        InstallOwner::Draining(session)
+                    }
+                    app_install::PreparationPoll::Failed { session, uncertain } => {
+                        if uncertain {
+                            self.roles = [6; 2];
+                            self.backend_status = Some(Status::Uncertain);
+                        }
+                        stage = if cancel_requested && !uncertain {
+                            InstallStage::Rollback
+                        } else {
+                            InstallStage::Failed
+                        };
+                        InstallOwner::Draining(session)
+                    }
+                    app_install::PreparationPoll::Retained(owner) => {
+                        stage = InstallStage::Failed;
+                        InstallOwner::PreparingSupport {
+                            owner,
+                            cancel_requested,
+                        }
+                    }
+                }
             }
             InstallOwner::Trial(mut trial) => {
                 let status = trial.poll();
@@ -901,6 +974,22 @@ impl Engine {
         };
         let Install { owner, stage } = install;
         match owner {
+            InstallOwner::PreparingSupport { owner, .. } => {
+                // A cancel request owns the eventual rollback, never a second
+                // concurrent filesystem operation. Join first, recheck closure.
+                self.install = Some(Install {
+                    owner: InstallOwner::PreparingSupport {
+                        owner,
+                        cancel_requested: true,
+                    },
+                    stage,
+                });
+                if stage == InstallStage::Failed {
+                    Code::Uncertain
+                } else {
+                    Code::Ok
+                }
+            }
             InstallOwner::Draining(session) => {
                 self.install = Some(Install {
                     owner: InstallOwner::Draining(session),
