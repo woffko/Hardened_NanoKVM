@@ -331,8 +331,8 @@ enum Owner {
 enum InstallOwner {
     Draining(app_install::Session),
     Trial(app_install::TrialSession),
-    Committed(app_install::Committed),
-    RolledBack(app_install::RolledBack),
+    Committed(app_install::Retirement),
+    RolledBack(app_install::Retirement),
     Refused {
         broker: Broker,
         _install: app_slot::AcceptedInstall,
@@ -347,6 +347,7 @@ enum InstallStage {
     Trial,
     CommitPending,
     Rollback,
+    Retiring,
     Failed,
 }
 struct Install {
@@ -384,6 +385,8 @@ struct Engine {
     fixture_trace_starts: bool,
     #[cfg(test)]
     fixture_allow_unsupported_support: bool,
+    #[cfg(test)]
+    fixture_retirement: Option<app_install::RetirementFixture>,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -421,6 +424,8 @@ impl Engine {
             fixture_trace_starts: false,
             #[cfg(test)]
             fixture_allow_unsupported_support: false,
+            #[cfg(test)]
+            fixture_retirement: None,
         }
     }
     fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
@@ -586,6 +591,73 @@ impl Engine {
         self.backend_retry = Instant::now();
     }
 
+    fn begin_retirement(
+        &mut self,
+        retirement: app_install::Retirement,
+        committed: bool,
+    ) -> Install {
+        #[cfg(test)]
+        let retirement = {
+            let mut retirement = retirement;
+            if let Some(fixture) = self.fixture_retirement.take() {
+                retirement.set_fixture(fixture);
+            }
+            retirement
+        };
+        Install {
+            owner: if committed {
+                InstallOwner::Committed(retirement)
+            } else {
+                InstallOwner::RolledBack(retirement)
+            },
+            stage: InstallStage::Retiring,
+        }
+    }
+
+    fn tick_retirement(
+        &mut self,
+        mut retirement: app_install::Retirement,
+        committed: bool,
+        mut stage: InstallStage,
+    ) -> Option<Install> {
+        let (roles, backend) = retirement.observe();
+        self.roles = roles.map(role_status);
+        self.backend_status = backend;
+        let retirement = if stage == InstallStage::Retiring {
+            match retirement.poll() {
+                app_install::RetirementPoll::Pending(retirement) => retirement,
+                app_install::RetirementPoll::Failed(retirement) => {
+                    stage = InstallStage::Failed;
+                    retirement
+                }
+                app_install::RetirementPoll::Released(broker) => {
+                    if committed {
+                        self.backend_wanted = true;
+                    }
+                    self.finish_install(*broker);
+                    return None;
+                }
+            }
+        } else {
+            // Observation, reconnect and path repair never restart failed I/O.
+            stage = InstallStage::Failed;
+            retirement
+        };
+        self.mode = if stage == InstallStage::Retiring {
+            Mode::Installing
+        } else {
+            Mode::Uncertain
+        };
+        Some(Install {
+            owner: if committed {
+                InstallOwner::Committed(retirement)
+            } else {
+                InstallOwner::RolledBack(retirement)
+            },
+            stage,
+        })
+    }
+
     fn tick_install(&mut self, install: Install) -> Option<Install> {
         let Install { owner, mut stage } = install;
         self.mode = Mode::Installing;
@@ -663,19 +735,9 @@ impl Engine {
                             }
                             InstallStage::Rollback => match session.rollback() {
                                 app_install::Rollback::Restored(restored) => {
-                                    match restored.release() {
-                                        app_install::Release::Released(broker) => {
-                                            self.finish_install(*broker);
-                                            return None;
-                                        }
-                                        app_install::Release::Retained(restored) => {
-                                            self.mode = Mode::Uncertain;
-                                            return Some(Install {
-                                                owner: InstallOwner::RolledBack(restored),
-                                                stage: InstallStage::Failed,
-                                            });
-                                        }
-                                    }
+                                    return Some(
+                                        self.begin_retirement(restored.begin_retirement(), false),
+                                    );
                                 }
                                 app_install::Rollback::Retained(retained) => {
                                     session = retained;
@@ -719,17 +781,9 @@ impl Engine {
                         app_install::TrialStatus::Starting => InstallOwner::Trial(trial),
                         app_install::TrialStatus::Ready => match trial.commit() {
                             app_install::CommitTrial::Committed(committed) => {
-                                match committed.release() {
-                                    app_install::Release::Released(broker) => {
-                                        self.backend_wanted = true;
-                                        self.finish_install(*broker);
-                                        return None;
-                                    }
-                                    app_install::Release::Retained(committed) => {
-                                        stage = InstallStage::Failed;
-                                        InstallOwner::Committed(committed)
-                                    }
-                                }
+                                return Some(
+                                    self.begin_retirement(committed.begin_retirement(), true),
+                                );
                             }
                             app_install::CommitTrial::Pending(trial) => {
                                 stage = InstallStage::CommitPending;
@@ -755,19 +809,11 @@ impl Engine {
                     }
                 }
             }
-            InstallOwner::Committed(mut committed) => {
-                let (roles, backend) = committed.observe();
-                self.roles = roles.map(role_status);
-                self.backend_status = backend;
-                stage = InstallStage::Failed;
-                InstallOwner::Committed(committed)
+            InstallOwner::Committed(committed) => {
+                return self.tick_retirement(committed, true, stage);
             }
-            InstallOwner::RolledBack(mut restored) => {
-                let (roles, backend) = restored.observe();
-                self.roles = roles.map(role_status);
-                self.backend_status = backend;
-                stage = InstallStage::Failed;
-                InstallOwner::RolledBack(restored)
+            InstallOwner::RolledBack(restored) => {
+                return self.tick_retirement(restored, false, stage);
             }
             InstallOwner::Refused {
                 mut broker,
@@ -909,50 +955,29 @@ impl Engine {
         }
     }
     fn retry_app_retirement(&mut self) -> Code {
-        let Some(install) = self.install.take() else {
+        let Some(mut install) = self.install.take() else {
             return Code::Busy;
         };
         // This operation addresses only the current retained live terminal
         // owner. It cannot publish, commit, cancel or recover a journal-only
         // transaction. Observe/reconnect never performs this retry implicitly.
-        match install.owner {
-            InstallOwner::Committed(committed) => match committed.release() {
-                app_install::Release::Released(broker) => {
-                    self.backend_wanted = true;
-                    self.finish_install(*broker);
+        let code = match &mut install.owner {
+            InstallOwner::Committed(retirement) | InstallOwner::RolledBack(retirement)
+                if install.stage == InstallStage::Failed =>
+            {
+                if retirement.retry() {
+                    install.stage = InstallStage::Retiring;
+                    self.mode = Mode::Installing;
                     Code::Ok
-                }
-                app_install::Release::Retained(committed) => {
-                    self.install = Some(Install {
-                        owner: InstallOwner::Committed(committed),
-                        stage: InstallStage::Failed,
-                    });
+                } else {
                     self.mode = Mode::Uncertain;
                     Code::Uncertain
                 }
-            },
-            InstallOwner::RolledBack(restored) => match restored.release() {
-                app_install::Release::Released(broker) => {
-                    self.finish_install(*broker);
-                    Code::Ok
-                }
-                app_install::Release::Retained(restored) => {
-                    self.install = Some(Install {
-                        owner: InstallOwner::RolledBack(restored),
-                        stage: InstallStage::Failed,
-                    });
-                    self.mode = Mode::Uncertain;
-                    Code::Uncertain
-                }
-            },
-            owner => {
-                self.install = Some(Install {
-                    owner,
-                    stage: install.stage,
-                });
-                Code::Busy
             }
-        }
+            _ => Code::Busy,
+        };
+        self.install = Some(install);
+        code
     }
 
     fn request(&mut self, key: u64, op: Operation) -> Reply {

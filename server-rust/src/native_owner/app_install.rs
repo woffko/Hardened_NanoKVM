@@ -6,6 +6,12 @@ use crate::update::app_slot::{
     AcceptedInstall, Phase, SlotError, Status, support::support_operation,
 };
 
+#[path = "app_retirement.rs"]
+mod retirement;
+#[cfg(test)]
+pub(super) use retirement::Fixture as RetirementFixture;
+pub(super) use retirement::{Poll as RetirementPoll, Retirement};
+
 /// Only the fixed protected broker endpoint, never a caller-selected address.
 pub(crate) fn connect_peer() -> std::io::Result<std::os::fd::OwnedFd> {
     journal::Store::connect_install()
@@ -103,6 +109,7 @@ pub enum CommitTrial {
     Retained(TrialSession),
 }
 
+#[cfg(test)]
 pub enum Release<T> {
     // One explicit cold-path allocation at successful terminal retirement,
     // not in native supervision or the frozen backend's request hot path.
@@ -130,8 +137,17 @@ pub struct Committed {
     install: AcceptedInstall,
 }
 impl Committed {
-    /// Archive the exact terminal receipt/old slot before ending the freeze.
-    /// Unknown rename/sync results retain the complete owner for inspection.
+    pub(super) fn begin_retirement(self) -> Retirement {
+        let boundary = TerminalBoundary {
+            transaction: self.install.transaction(),
+            phase: Phase::Committed,
+        };
+        Retirement::new(self.broker, self.install, boundary)
+    }
+
+    // Direct proof fixtures exercise retirement primitives synchronously;
+    // the production broker uses begin_retirement and the retained worker.
+    #[cfg(test)]
     pub fn release(mut self) -> Release<Self> {
         #[cfg(test)]
         let _elapsed = crate::update::app_slot::support::diagnostics::Elapsed::start(
@@ -168,19 +184,21 @@ impl Committed {
         support_operation!("native.release.drop-install", None, drop(install));
         Release::Released(broker)
     }
-
-    pub(super) fn observe(
-        &mut self,
-    ) -> ([Option<controller::Status>; 2], Option<controller::Status>) {
-        let roles = self.broker.poll();
-        (roles, self.broker.backend_status())
-    }
 }
 impl RolledBack {
     pub fn transaction(&self) -> [u8; 16] {
         self.install.transaction()
     }
 
+    pub(super) fn begin_retirement(self) -> Retirement {
+        let boundary = TerminalBoundary {
+            transaction: self.install.transaction(),
+            phase: Phase::RolledBack,
+        };
+        Retirement::new(self.broker, self.install, boundary)
+    }
+
+    #[cfg(test)]
     pub fn release(mut self) -> Release<Self> {
         if self.broker.group.ownership_uncertain() {
             return Release::Retained(self);
@@ -196,13 +214,6 @@ impl RolledBack {
         let broker = Box::new(broker);
         drop(install);
         Release::Released(broker)
-    }
-
-    pub(super) fn observe(
-        &mut self,
-    ) -> ([Option<controller::Status>; 2], Option<controller::Status>) {
-        let roles = self.broker.poll();
-        (roles, self.broker.backend_status())
     }
 }
 

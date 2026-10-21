@@ -5,6 +5,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[path = "app_engine_support_tests.rs"]
 mod support;
 
+#[path = "app_retirement_tests.rs"]
+mod retirement;
+
 fn start_all(engine: &mut Engine) {
     for operation in [
         Operation::EnsureKvm,
@@ -67,6 +70,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
             InstallStage::Trial => "trial",
             InstallStage::CommitPending => "commit-pending",
             InstallStage::Rollback => "rollback",
+            InstallStage::Retiring => "retiring",
             InstallStage::Failed => "failed",
         };
         let owner = match &install.owner {
@@ -119,6 +123,19 @@ fn normal_install_until(engine: &mut Engine, root: &Path, transaction: [u8; 16],
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn retry_with_unrepaired_fault(engine: &mut Engine, root: &Path) {
+    let reply = engine.request(2, Operation::RetryAppRetirement);
+    assert_eq!(reply.code, Code::Ok);
+    assert_eq!(reply.mode, Mode::Installing);
+    assert_excluded(root);
+    until(|| {
+        engine.tick();
+        engine.mode == Mode::Uncertain
+    });
+    assert_excluded(root);
+    assert!(engine.install.is_some());
 }
 
 #[test]
@@ -416,10 +433,7 @@ async fn payload_prune_failure_retains_full_terminal_owner_until_explicit_root_r
             Code::Uncertain
         );
     }
-    assert_eq!(
-        engine.request(2, Operation::RetryAppRetirement).code,
-        Code::Uncertain
-    );
+    retry_with_unrepaired_fault(&mut engine, root);
     fs::remove_file(&collision).unwrap();
     engine.tick();
     assert_excluded(root);
@@ -505,10 +519,7 @@ async fn rollback_retirement_collision_retains_engine_exclusions_and_never_resta
         );
         assert!(!root.join("backend").exists());
     }
-    assert_eq!(
-        engine.request(2, Operation::RetryAppRetirement).code,
-        Code::Uncertain
-    );
+    retry_with_unrepaired_fault(&mut engine, root);
     assert_excluded(root);
     fs::remove_file(collision.join("foreign")).unwrap();
     fs::remove_dir(&collision).unwrap();
@@ -519,8 +530,12 @@ async fn rollback_retirement_collision_retains_engine_exclusions_and_never_resta
     }
     let reply = engine.request(2, Operation::RetryAppRetirement);
     assert_eq!(reply.code, Code::Ok);
-    assert_eq!(reply.mode, Mode::Running);
-    assert!(engine.install.is_none());
+    assert_eq!(reply.mode, Mode::Installing);
+    assert_excluded(root);
+    until(|| {
+        engine.tick();
+        engine.install.is_none() && engine.mode == Mode::Running
+    });
     let snapshot = app_slot::job_status_fixture(root, transaction)
         .unwrap()
         .unwrap();
@@ -675,6 +690,7 @@ fn receipt_engine_until(
             InstallStage::Trial => "trial",
             InstallStage::CommitPending => "commit-pending",
             InstallStage::Rollback => "rollback",
+            InstallStage::Retiring => "retiring",
             InstallStage::Failed => "failed",
         });
         assert!(
@@ -754,10 +770,7 @@ async fn committed_retirement_collision_keeps_terminal_owner_without_retry_rever
         assert!(!root.join("kvm").exists());
         assert!(!root.join("hwmon").exists());
     }
-    assert_eq!(
-        engine.request(2, Operation::RetryAppRetirement).code,
-        Code::Uncertain
-    );
+    retry_with_unrepaired_fault(&mut engine, root);
     assert_excluded(root);
     fs::remove_file(collision.join("foreign")).unwrap();
     fs::remove_dir(&collision).unwrap();
@@ -767,11 +780,13 @@ async fn committed_retirement_collision_keeps_terminal_owner_without_retry_rever
     }
     let reply = engine.request(2, Operation::RetryAppRetirement);
     assert_eq!(reply.code, Code::Ok);
-    assert_eq!(reply.mode, Mode::Running);
-    assert!(engine.install.is_none());
+    assert_eq!(reply.mode, Mode::Installing);
+    assert_excluded(root);
     until(|| {
         engine.tick();
-        engine.backend_status == Some(Status::Running)
+        engine.install.is_none()
+            && engine.mode == Mode::Running
+            && engine.backend_status == Some(Status::Running)
     });
     let snapshot = app_slot::job_status_fixture(root, transaction)
         .unwrap()

@@ -450,6 +450,20 @@ group's latched uncertainty, including owner loss while waiting for I/O repair.
 Its Ok/Running is release/admission, not service health. See
 [live-terminal retry](security-app-slot-recovery.md#explicit-live-terminal-archival-retry).
 
+Terminal filesystem settlement runs in one retained worker, not in the broker's
+supervision/request loop. The broker keeps the native group and polls ownership
+while the worker borrows the accepted install. The main owner retains the
+update/store/writer exclusions through spawn failure, caught unwind, caller EOF
+and uncertain I/O. The release profile uses panic=abort: a production panic
+terminates the daemon and requires durable recovery, not a live retry. A failed
+attempt requires explicit retry; an in-flight one
+cannot be replaced or cancelled. Retry's Ok/Installing acknowledges only a new
+attempt; the CLI observes until Running and treats uncertainty/deadline as
+non-success. The worker is joined before its successful result can release
+admission, and teardown joins rather than detaches it. Kernel-blocked I/O can
+still delay teardown. This does not move every other install stage off-loop or
+establish whole-install latency/target acceptance.
+
 Host private-directory fixtures cover real Unix socket exchange, fragmented I/O,
 serial/replay rejection, actual peer UID mismatch, foreign-client denial,
 maintenance EOF and durable reopening refusal, and safe endpoint cleanup.

@@ -277,8 +277,9 @@ fn independent_daemon_retries_only_explicit_complete_frames_and_caches_terminal_
     assert_excluded(root);
     assert_eq!(
         exchange(&mut observer, Operation::RetryAppRetirement).code,
-        Code::Uncertain
+        Code::Ok
     );
+    observed(&mut observer, Mode::Uncertain);
     assert_eq!(
         fs::read(archive.join("foreign")).unwrap(),
         b"retained foreign bytes"
@@ -307,14 +308,21 @@ fn independent_daemon_retries_only_explicit_complete_frames_and_caches_terminal_
     client.stream.read_exact(&mut first).unwrap();
     let reply = Reply::parse(&first, 1).unwrap();
     assert_eq!(reply.code, Code::Ok);
-    assert_eq!(reply.mode, Mode::Running);
-    let inode = archive.metadata().unwrap().ino();
+    assert_eq!(reply.mode, Mode::Installing);
     client.stream.write_all(&retry).unwrap();
     let mut second = [0; FRAME];
     client.stream.read_exact(&mut second).unwrap();
     assert_eq!(
         first, second,
         "lost-reply replay is cached, not re-executed"
+    );
+    observed(&mut observer, Mode::Running);
+    let inode = archive.metadata().unwrap().ino();
+    client.stream.write_all(&retry).unwrap();
+    client.stream.read_exact(&mut second).unwrap();
+    assert_eq!(
+        first, second,
+        "completed work cannot rewrite the cached admission reply"
     );
     assert_eq!(archive.metadata().unwrap().ino(), inode);
     assert_eq!(fs::read(archive.join("state")).unwrap(), record);
@@ -607,13 +615,15 @@ fn fixed_root_delivery_child() {
         fs::set_permissions(&collision, fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             exchange(&mut control, Operation::CancelAppInstall).code,
-            Code::Uncertain
+            Code::Ok
         );
+        observed(&mut control, Mode::Uncertain);
         assert_eq!(fs::read("/kvmapp/identity").unwrap(), b"fixed-root old app");
         assert_eq!(
             exchange(&mut control, Operation::RetryAppRetirement).code,
-            Code::Uncertain
+            Code::Ok
         );
+        observed(&mut control, Mode::Uncertain);
         assert!(
             app_slot::job_status(id).is_err(),
             "foreign archive is not a valid status source"
@@ -623,7 +633,8 @@ fn fixed_root_delivery_child() {
         assert!(!app_slot::job_status(id).unwrap().unwrap().archived);
         let reply = exchange(&mut control, Operation::RetryAppRetirement);
         assert_eq!(reply.code, Code::Ok);
-        assert_eq!(reply.mode, Mode::Running);
+        assert_eq!(reply.mode, Mode::Installing);
+        observed(&mut control, Mode::Running);
         let snapshot = app_slot::job_status(id).unwrap().unwrap();
         assert_eq!(snapshot.phase, app_slot::Phase::RolledBack);
         assert!(snapshot.archived);

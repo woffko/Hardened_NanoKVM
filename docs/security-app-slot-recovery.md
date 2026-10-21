@@ -570,6 +570,15 @@ retained, during a nonterminal trial or pending Commit acknowledgement, and afte
 an earlier failed commit.
 Connection EOF, observation and repairing a path do not implicitly retry it.
 
+Terminal retirement is asynchronous: one broker-retained worker performs the
+same exact filesystem operations, including all durability syncs. The broker
+retains its native group for supervision, and separately retains the accepted
+install while the worker only borrows it. Spawn failure, caught unwind or failed
+I/O keeps the owner and exclusions. The release profile is panic=abort: a
+production panic kills the daemon and requires durable recovery, not live retry.
+An active attempt is not replaceable by retry
+or cancellation. Ordinary caller loss does not drop or detach the worker.
+
 Both ordinary terminal release and retry poll the group's latched ownership
 uncertainty before archival and again before release after successful I/O.
 They do not turn later owner loss into Running simply because the earlier app
@@ -578,10 +587,20 @@ This is the same guard used by ordinary scope launch admission; it is not a
 health receipt or a reset of the group. PID disappearance/direct reap alone
 cannot clear it.
 
-Ok/Running from this operation means exact retirement, archival and release completed and
+Ok/Installing acknowledges a new retry attempt, not completed archival. The
+fixed CLI waits by observation rather than repeating the opcode. Exact frame
+replay returns the cached admission reply, even after completion; use a fresh
+observation for current state. Ok/Running means exact retirement, archival and release completed and
 ordinary supervision may proceed; it does not mean native/backend health or
 device acceptance. The action is current-owner administration, not a per-ID
 durable HTTP job API. No S02/S95/watchdog path automatically invokes it.
+
+The worker must finish and join, with known success and a fresh ownership check,
+before exclusions are released. Successful filesystem retirement after native
+owner loss does not authorize Running. Daemon teardown joins the worker before
+dropping accepted admission; genuinely blocked kernel I/O can therefore delay
+teardown. Process death still requires durable recovery, not PID adoption or
+reconstruction of this live proof from a terminal status snapshot.
 The future HTTP control path needs transaction-bound authority; checking a job
 snapshot and then calling this current-owner action is not an atomic ID binding.
 An exact request replay on the same connection returns the cached result;
