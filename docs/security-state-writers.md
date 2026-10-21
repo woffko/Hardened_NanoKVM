@@ -12,6 +12,7 @@ the cross-cutting producers, even when their own API domain is enrolled.
 | Firewall set/confirm/TLS downgrade and rollback timer | Typed follow-up permit, retained task stop/join, composed admission-first drain | Durable crash recovery and target firewall/service acceptance; integrate capture |
 | Time set/sync and syslog set APIs | Whole-operation Config admission, owned file/service chains | Multi-file recovery, native init/daemon closure and canonical legacy-state capture |
 | DNS/IPv6/Wi-Fi APIs and WOL cache | Whole-operation Config ownership, post-service publication and serialized cache RMW | Independent native clients/hooks/AP consumer, pending Wi-Fi resolution and multi-file recovery |
+| PicoClaw model configuration and startup defaults/internal token | Config permit retained through blocking file work; request authentication only reads the protected token | Other profile/workspace/onboard/runtime writers, effective home, service closure and multi-file recovery remain unenrolled |
 | Other persisted settings APIs | Source paths assigned to groups | Enroll full operations and owned callbacks/commands, not just writes |
 | Other backend timers/installers/restart tasks | Named in inventory | Close admission; finish or phase-aware cancel and join every owner |
 | S95 watchdogs and service supervisors | Start/stop source inspected | Stop and join respawners before producers; no restart race |
@@ -50,6 +51,14 @@ Unknown/unjoined producers must abort before the first partition write. Stopping
 the backend alone does not establish this condition for daemonized descendants.
 Limits on local NanoKVM administration do not gate autonomous HID/BIOS/terminal
 work on the target computer during ordinary operation.
+
+The internal PicoClaw token is a derived local capability, not an extra preserved
+schema member or a raw restore receipt. Creation is limited to startup/default
+configuration under the Config permit. Missing/invalid request credentials never
+create or replace it. The fixed-root store rejects malformed files and unsafe
+metadata rather than silently repairing a live authority. Coordinated runtime
+configuration/regeneration across raw restore and optional-home migration still
+needs end-to-end acceptance; this enrollment does not close C1 or H2.
 
 A [dedicated native process owner](security-native-owner.md) now provides a
 host-tested subreaper/pidfd scope for fresh launches. It is not packaged or wired

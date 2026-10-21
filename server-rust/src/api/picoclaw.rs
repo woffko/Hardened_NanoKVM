@@ -72,7 +72,6 @@ const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(60);
 const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
-const INTERNAL_TOKEN_FILE: &str = "/etc/kvm/.picoclaw_internal_token";
 const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
 const CODE_PICOCLAW_LOCK_HELD: &str = "AI_LOCK_HELD";
@@ -100,7 +99,6 @@ const DEFAULT_SCROLL_STEP: Duration = Duration::from_millis(20);
 
 static RUNTIME_STATUS: LazyLock<RwLock<RuntimeStatus>> =
     LazyLock::new(|| RwLock::new(RuntimeStatus::checking()));
-static INTERNAL_TOKEN_CACHE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 static SESSION_LOCK: LazyLock<Mutex<PicoSessionLock>> =
     LazyLock::new(|| Mutex::new(PicoSessionLock::default()));
 
@@ -639,9 +637,17 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
         ));
     }
 
-    match update_model_config_file(api_base, api_key, model) {
+    let (api_base, api_key, model) = (api_base.to_string(), api_key.to_string(), model.to_string());
+    let result = crate::update::state_writers::StateWriters::default()
+        .configuration()?
+        .blocking(move |permit| {
+            let model_name = update_model_config_file(&api_base, &api_key, &model)?;
+            write_startup_defaults(permit)?;
+            Ok(model_name)
+        })
+        .await;
+    match result {
         Ok(model_name) => {
-            let _ = ensure_startup_defaults();
             let status = refresh_runtime_status().await;
             Ok(Json(ApiResponse::ok(json!({
                 "model_name": model_name,
@@ -842,7 +848,7 @@ pub async fn gateway_ws(
         ));
     }
 
-    if let Err(err) = ensure_startup_defaults() {
+    if let Err(err) = ensure_startup_defaults().await {
         release_session_lock(&session_id);
         update_runtime_gateway_state(false, "config_error", Some(err.to_string()), None);
         return Ok(picoclaw_error_with_session(
@@ -915,18 +921,37 @@ pub fn has_valid_loopback_internal_token(
     headers: &axum::http::HeaderMap,
     remote: Option<SocketAddr>,
 ) -> bool {
+    authorize_loopback_internal_token(headers, remote, crate::update::picoclaw_token::read)
+}
+
+fn authorize_loopback_internal_token(
+    headers: &HeaderMap,
+    remote: Option<SocketAddr>,
+    load: impl FnOnce() -> Result<String>,
+) -> bool {
     if !remote.map(|addr| addr.ip().is_loopback()).unwrap_or(false) {
         return false;
     }
-    let Ok(token) = internal_token() else {
+    let mut values = headers.get_all(INTERNAL_TOKEN_HEADER).iter();
+    let Some(provided) = values.next().and_then(|value| value.to_str().ok()) else {
         return false;
     };
-    let provided = headers
-        .get(INTERNAL_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    if values.next().is_some() || !crate::update::picoclaw_token::valid_token(provided) {
+        return false;
+    }
+    let Ok(token) = load() else {
+        return false;
+    };
+    let token = zeroize::Zeroizing::new(token);
+    if !crate::update::picoclaw_token::valid_token(&token) {
+        return false;
+    }
     constant_time_eq(provided, &token)
 }
+
+#[cfg(test)]
+#[path = "picoclaw_internal_auth_tests.rs"]
+mod internal_auth_tests;
 
 fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, PicoclawErrorData> {
     let session_id = headers
@@ -2458,7 +2483,9 @@ async fn start_runtime_inner() -> std::result::Result<(String, String), String> 
         return Err("picoclaw is not installed".to_string());
     }
 
-    ensure_startup_defaults().map_err(|err| err.to_string())?;
+    ensure_startup_defaults()
+        .await
+        .map_err(|err| err.to_string())?;
     let (command, output) = run_script("start", PICOCLAW_START_TIMEOUT)
         .await
         .map_err(|err| err.to_string())?;
@@ -3249,7 +3276,14 @@ fn save_model_secret(
     save_yaml(path, security)
 }
 
-fn ensure_startup_defaults() -> Result<()> {
+async fn ensure_startup_defaults() -> Result<()> {
+    crate::update::state_writers::StateWriters::default()
+        .configuration()?
+        .blocking(write_startup_defaults)
+        .await
+}
+
+fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -> Result<()> {
     let mut doc = load_config_document()?;
     let _ = ensure_pico_security_token(&mut doc)?;
     let raw = doc
@@ -3288,7 +3322,7 @@ fn ensure_startup_defaults() -> Result<()> {
         JsonValue::Number(serde_json::Number::from(DEFAULT_WRITE_TIMEOUT_MS / 1000)),
     );
     ensure_object_path(raw, &["tools", "mcp"]).insert("enabled".to_string(), JsonValue::Bool(true));
-    let token = internal_token()?;
+    let token = crate::update::picoclaw_token::ensure(permit)?;
     let server = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm"]);
     server.insert("enabled".to_string(), JsonValue::Bool(true));
     server.insert("type".to_string(), JsonValue::String("http".to_string()));
@@ -3454,34 +3488,6 @@ fn picoclaw_error_with_session(
         }),
     )
         .into_response()
-}
-
-fn internal_token() -> Result<String> {
-    if let Ok(guard) = INTERNAL_TOKEN_CACHE.read() {
-        if let Some(token) = guard.as_ref() {
-            return Ok(token.clone());
-        }
-    }
-
-    let path = Path::new(INTERNAL_TOKEN_FILE);
-    let token = match fs::read_to_string(path) {
-        Ok(value) => value.trim().to_string(),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let token = random_token(32);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, format!("{token}\n"))?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            token
-        }
-        Err(err) => return Err(err.into()),
-    };
-
-    if let Ok(mut guard) = INTERNAL_TOKEN_CACHE.write() {
-        *guard = Some(token.clone());
-    }
-    Ok(token)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {

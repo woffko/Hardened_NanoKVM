@@ -1,6 +1,9 @@
 #!/bin/sh
 
 set -u
+umask 077
+LC_ALL=C
+export LC_ALL
 
 BASE_URL="${NANOKVM_BRIDGE_BASE_URL:-http://127.0.0.1}"
 API_PREFIX="${NANOKVM_BRIDGE_API_PREFIX:-/api/picoclaw}"
@@ -9,6 +12,8 @@ CONNECT_TIMEOUT_SECONDS="${NANOKVM_BRIDGE_CONNECT_TIMEOUT_SECONDS:-5}"
 SCREENSHOT_WIDTH="${NANOKVM_BRIDGE_SCREENSHOT_WIDTH:-640}"
 SCREENSHOT_QUALITY="${NANOKVM_BRIDGE_SCREENSHOT_QUALITY:-50}"
 INTERNAL_TOKEN="${NANOKVM_BRIDGE_INTERNAL_TOKEN:-${NANOKVM_INTERNAL_TOKEN:-}}"
+# Legacy overrides are consumed by this shell, never inherited by curl/tools.
+unset NANOKVM_BRIDGE_INTERNAL_TOKEN NANOKVM_INTERNAL_TOKEN
 INTERNAL_TOKEN_FILE="${NANOKVM_BRIDGE_INTERNAL_TOKEN_FILE:-/etc/kvm/.picoclaw_internal_token}"
 SESSION_ID=""
 
@@ -61,40 +66,149 @@ cleanup_file() {
   fi
 }
 
-base_url_uses_loopback() {
-  host_port="${BASE_URL#*://}"
-  host_port="${host_port%%/*}"
-
-  case "$host_port" in
-    127.0.0.1|127.0.0.1:*|localhost|localhost:*|\[::1\]|\[::1\]:*|::1|::1:*)
-      return 0
+prepare_control_url() {
+  # Only this management endpoint is constrained; target HID text/URLs are not.
+  case "$BASE_URL" in
+    *[![:graph:]]*|*\\*|*\?*|*\#*)
+      die "INVALID_ARGUMENT" "invalid bridge control base URL" ;;
+  esac
+  CONTROL_SCHEME="$(printf '%s' "${BASE_URL%%://*}" | tr '[:upper:]' '[:lower:]')"
+  case "$CONTROL_SCHEME" in
+    http) CONTROL_PORT=80 ;;
+    https) CONTROL_PORT=443 ;;
+    *) die "INVALID_ARGUMENT" "bridge control URL must use http or https" ;;
+  esac
+  case "$BASE_URL" in
+    *://*) ;;
+    *) die "INVALID_ARGUMENT" "invalid bridge control base URL" ;;
+  esac
+  CONTROL_REST="${BASE_URL#*://}"
+  CONTROL_AUTHORITY="${CONTROL_REST%%/*}"
+  CONTROL_PATH=""
+  case "$CONTROL_REST" in
+    */*) CONTROL_PATH="/${CONTROL_REST#*/}" ;;
+  esac
+  case "$CONTROL_AUTHORITY" in
+    ''|*@*|*%*) die "INVALID_ARGUMENT" "bridge control URL must not contain userinfo or encoded authority" ;;
+  esac
+  CONTROL_EXPLICIT_PORT=""
+  case "$CONTROL_AUTHORITY" in
+    \[*\]*)
+      CONTROL_HOST="${CONTROL_AUTHORITY#\[}"
+      CONTROL_HOST="${CONTROL_HOST%%\]*}"
+      case "$CONTROL_HOST" in
+        ''|*[!0-9a-fA-F:.]*) die "INVALID_ARGUMENT" "invalid bridge IPv6 host" ;;
+      esac
+      case "$CONTROL_HOST" in
+        *:*) ;;
+        *) die "INVALID_ARGUMENT" "invalid bridge IPv6 host" ;;
+      esac
+      CONTROL_HOST="[$(printf '%s' "$CONTROL_HOST" | tr '[:upper:]' '[:lower:]')]"
+      CONTROL_SUFFIX="${CONTROL_AUTHORITY#*\]}"
+      case "$CONTROL_SUFFIX" in
+        '') ;;
+        :*) CONTROL_EXPLICIT_PORT="${CONTROL_SUFFIX#:}" ;;
+        *) die "INVALID_ARGUMENT" "invalid bridge control authority" ;;
+      esac
       ;;
     *)
-      return 1
+      CONTROL_HOST="${CONTROL_AUTHORITY%%:*}"
+      CONTROL_HOST="$(printf '%s' "$CONTROL_HOST" | tr '[:upper:]' '[:lower:]')"
+      case "$CONTROL_HOST" in
+        ''|*[!a-z0-9._-]*) die "INVALID_ARGUMENT" "invalid bridge control host" ;;
+      esac
+      case "$CONTROL_AUTHORITY" in
+        *:*) CONTROL_EXPLICIT_PORT="${CONTROL_AUTHORITY#*:}" ;;
+      esac
       ;;
   esac
-}
-
-run_curl() {
-  if base_url_uses_loopback; then
-    curl -L -k "$@"
-    return $?
+  # Reject an explicitly empty port, too, without overflowing shell arithmetic.
+  case "$CONTROL_AUTHORITY" in
+    *:) die "INVALID_ARGUMENT" "invalid bridge control port" ;;
+  esac
+  if [ -n "$CONTROL_EXPLICIT_PORT" ]; then
+    case "$CONTROL_EXPLICIT_PORT" in
+      *[!0-9]*) die "INVALID_ARGUMENT" "invalid bridge control port" ;;
+    esac
+    while [ "${CONTROL_EXPLICIT_PORT#0}" != "$CONTROL_EXPLICIT_PORT" ]; do
+      CONTROL_EXPLICIT_PORT="${CONTROL_EXPLICIT_PORT#0}"
+    done
+    [ -n "$CONTROL_EXPLICIT_PORT" ] && [ "${#CONTROL_EXPLICIT_PORT}" -le 5 ] &&
+      [ "$CONTROL_EXPLICIT_PORT" -le 65535 ] || die "INVALID_ARGUMENT" "invalid bridge control port"
+    CONTROL_PORT="$CONTROL_EXPLICIT_PORT"
+    CONTROL_EXPLICIT_PORT=":$CONTROL_PORT"
   fi
-
-  curl -L "$@"
+  case "$API_PREFIX" in
+    /*) ;;
+    *) die "INVALID_ARGUMENT" "bridge API prefix must be an absolute path" ;;
+  esac
+  case "$API_PREFIX" in
+    //*|*[![:graph:]]*|*\\*|*\?*|*\#*) die "INVALID_ARGUMENT" "invalid bridge API prefix" ;;
+  esac
+  CONTROL_LOOPBACK=0
+  case "$CONTROL_HOST" in
+    127.0.0.1|localhost|\[::1\]) CONTROL_LOOPBACK=1 ;;
+  esac
+  url="${CONTROL_SCHEME}://${CONTROL_HOST}${CONTROL_EXPLICIT_PORT}${CONTROL_PATH%/}${API_PREFIX}${1-}"
 }
 
 resolve_internal_token() {
-  if [ -n "$INTERNAL_TOKEN" ]; then
-    return 0
+  if [ -z "$INTERNAL_TOKEN" ] && [ -r "$INTERNAL_TOKEN_FILE" ]; then
+    # Numeric byte validation rejects NUL and embedded whitespace before shell
+    # command substitution can discard bytes. The file/decoded value is bounded.
+    INTERNAL_TOKEN="$(head -c 1025 "$INTERNAL_TOKEN_FILE" 2>/dev/null | od -An -v -tu1 | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          count++
+          byte = $i + 0
+          if (count > 1024) { bad = 1; exit 1 }
+          if (byte == 9 || byte == 10 || byte == 11 || byte == 12 || byte == 13 || byte == 32) {
+            if (started) trailing = 1
+            continue
+          }
+          if (byte < 33 || byte > 126 || trailing || length(token) >= 256) { bad = 1; exit 1 }
+          token = token sprintf("%c", byte)
+          started = 1
+        }
+      }
+      END {
+        if (bad || !started) exit 1
+        printf "%s", token
+      }
+    ')" || return 1
   fi
-
-  if [ -r "$INTERNAL_TOKEN_FILE" ]; then
-    INTERNAL_TOKEN="$(tr -d '\r\n' < "$INTERNAL_TOKEN_FILE")"
-  fi
-
-  [ -n "$INTERNAL_TOKEN" ]
+  [ -n "$INTERNAL_TOKEN" ] && [ "${#INTERNAL_TOKEN}" -le 256 ] || return 1
+  case "$INTERNAL_TOKEN" in
+    *[![:graph:]]*) return 1 ;;
+  esac
 }
+
+run_curl() (
+  # A subshell owns this short-lived private file on normal exit and signals.
+  request_headers="$(mktemp_file)" || return 1
+  trap 'cleanup_file "$request_headers"' 0
+  trap 'exit 1' HUP INT TERM
+  chmod 600 "$request_headers" || return 1
+  if [ -n "$SESSION_ID" ]; then
+    [ "${#SESSION_ID}" -le 256 ] || return 1
+    case "$SESSION_ID" in
+      *[![:graph:]]*) return 1 ;;
+    esac
+    printf 'X-PicoClaw-Session-ID: %s\n' "$SESSION_ID" >"$request_headers" || return 1
+  fi
+  if [ "$CONTROL_LOOPBACK" -eq 1 ]; then
+    resolve_internal_token || return 1
+    printf 'X-NanoKVM-Internal-Token: %s\n' "$INTERNAL_TOKEN" >>"$request_headers" || return 1
+    if [ "$CONTROL_HOST" = "localhost" ]; then
+      set -- --resolve "localhost:$CONTROL_PORT:127.0.0.1" "$@"
+    fi
+    set -- -k --noproxy '*' "$@"
+  fi
+  # Redirects, curlrc, URL globbing, DNS for localhost and loopback proxies must
+  # not move a local capability to a different service. Remote TLS stays strict.
+  curl --disable --proto '=http,https' --proto-redir '=http,https' \
+    --max-redirs 0 --globoff -H "@$request_headers" "$@"
+)
 
 normalize_session_hint() {
   value="${1-}"
@@ -192,36 +306,17 @@ resolve_session() {
 }
 
 resolve_session_from_runtime() {
-  url="${BASE_URL%/}${API_PREFIX}/runtime/session"
+  prepare_control_url "/runtime/session"
   response_file="$(mktemp_file)" || return 1
-
-  internal_token_header=""
-  if base_url_uses_loopback && resolve_internal_token; then
-    internal_token_header="X-NanoKVM-Internal-Token: $INTERNAL_TOKEN"
-  fi
-
-  if [ -n "$internal_token_header" ]; then
-    status="$(
-      run_curl -sS \
-        -X GET \
-        --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-        -m "$TIMEOUT_SECONDS" \
-        -H "$internal_token_header" \
-        -o "$response_file" \
-        -w '%{http_code}' \
-        "$url" 2>/dev/null
-    )"
-  else
-    status="$(
-      run_curl -sS \
-        -X GET \
-        --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-        -m "$TIMEOUT_SECONDS" \
-        -o "$response_file" \
-        -w '%{http_code}' \
-        "$url" 2>/dev/null
-    )"
-  fi
+  status="$(
+    run_curl -sS \
+      -X GET \
+      --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
+      -m "$TIMEOUT_SECONDS" \
+      -o "$response_file" \
+      -w '%{http_code}' \
+      --url "$url" 2>/dev/null
+  )"
   curl_exit=$?
 
   if [ "$curl_exit" -ne 0 ]; then
@@ -307,68 +402,31 @@ request_json() {
   method="$1"
   endpoint="$2"
   body="${3-}"
-  url="${BASE_URL%/}${API_PREFIX}${endpoint}"
+  prepare_control_url "$endpoint"
   response_file="$(mktemp_file)" || die "TEMPFILE_FAILED" "failed to create temporary response file"
-  internal_token_header=""
-
-  if base_url_uses_loopback && resolve_internal_token; then
-    internal_token_header="X-NanoKVM-Internal-Token: $INTERNAL_TOKEN"
-  fi
 
   if [ "$method" = "GET" ]; then
-    if [ -n "$internal_token_header" ]; then
-      status="$(
-        run_curl -sS \
-          -X GET \
-          --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-          -m "$TIMEOUT_SECONDS" \
-          -H "$internal_token_header" \
-          -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-          -o "$response_file" \
-          -w '%{http_code}' \
-          "$url"
-      )"
-    else
-      status="$(
-        run_curl -sS \
-          -X GET \
-          --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-          -m "$TIMEOUT_SECONDS" \
-          -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-          -o "$response_file" \
-          -w '%{http_code}' \
-          "$url"
-      )"
-    fi
+    status="$(
+      run_curl -sS \
+        -X GET \
+        --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
+        -m "$TIMEOUT_SECONDS" \
+        -o "$response_file" \
+        -w '%{http_code}' \
+        --url "$url"
+    )"
   else
-    if [ -n "$internal_token_header" ]; then
-      status="$(
-        run_curl -sS \
-          -X "$method" \
-          --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-          -m "$TIMEOUT_SECONDS" \
-          -H "Content-Type: application/json" \
-          -H "$internal_token_header" \
-          -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-          --data "$body" \
-          -o "$response_file" \
-          -w '%{http_code}' \
-          "$url"
-      )"
-    else
-      status="$(
-        run_curl -sS \
-          -X "$method" \
-          --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-          -m "$TIMEOUT_SECONDS" \
-          -H "Content-Type: application/json" \
-          -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-          --data "$body" \
-          -o "$response_file" \
-          -w '%{http_code}' \
-          "$url"
-      )"
-    fi
+    status="$(
+      run_curl -sS \
+        -X "$method" \
+        --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
+        -m "$TIMEOUT_SECONDS" \
+        -H "Content-Type: application/json" \
+        --data "$body" \
+        -o "$response_file" \
+        -w '%{http_code}' \
+        --url "$url"
+    )"
   fi
   curl_exit=$?
 
@@ -419,35 +477,19 @@ request_json() {
 
 request_binary() {
   endpoint="$1"
-  url="${BASE_URL%/}${API_PREFIX}${endpoint}"
+  prepare_control_url "$endpoint"
   response_file="$(mktemp_file)" || die "TEMPFILE_FAILED" "failed to create temporary response file"
-  header_file="$(mktemp_file)" || die "TEMPFILE_FAILED" "failed to create temporary header file"
-  internal_token_header=""
-
-  if base_url_uses_loopback && resolve_internal_token; then
-    internal_token_header="X-NanoKVM-Internal-Token: $INTERNAL_TOKEN"
-  fi
-
-  if [ -n "$internal_token_header" ]; then
-    run_curl -sS \
-      -X GET \
-      --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-      -m "$TIMEOUT_SECONDS" \
-      -H "$internal_token_header" \
-      -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-      -D "$header_file" \
-      -o "$response_file" \
-      "$url"
-  else
-    run_curl -sS \
-      -X GET \
-      --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
-      -m "$TIMEOUT_SECONDS" \
-      -H "X-PicoClaw-Session-ID: $SESSION_ID" \
-      -D "$header_file" \
-      -o "$response_file" \
-      "$url"
-  fi
+  header_file="$(mktemp_file)" || {
+    cleanup_file "$response_file"
+    die "TEMPFILE_FAILED" "failed to create temporary header file"
+  }
+  run_curl -sS \
+    -X GET \
+    --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
+    -m "$TIMEOUT_SECONDS" \
+    -D "$header_file" \
+    -o "$response_file" \
+    --url "$url"
   curl_exit=$?
 
   if [ "$curl_exit" -ne 0 ]; then

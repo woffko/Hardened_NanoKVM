@@ -201,6 +201,10 @@ test-state-writer-inventory:
 	@python3 scripts/validate-state-writer-inventory.py
 	@python3 scripts/test-state-writer-inventory.py
 
+.PHONY: test-picoclaw-bridge-boundary
+test-picoclaw-bridge-boundary:
+	@node scripts/test-picoclaw-bridge-boundary.cjs
+
 # Build hardware support libraries
 support: check-root builder-image
 	@echo "Building support..."
