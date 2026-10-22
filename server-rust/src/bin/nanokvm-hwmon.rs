@@ -1,11 +1,15 @@
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
+use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs, io,
+    env,
+    fs::{self, OpenOptions},
+    io::{self, Write},
     net::{Ipv4Addr, Ipv6Addr},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
-    process, thread,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -133,10 +137,37 @@ fn write_snapshot(path: &str) -> io::Result<()> {
     let snapshot = collect_snapshot();
     let data = serde_json::to_vec_pretty(&snapshot)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let tmp_path = format!("{path}.{}.tmp", process::id());
-    fs::write(&tmp_path, data)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
+    write_replacing(Path::new(path), &data)
+}
+
+/// Replace `path` through a fresh temporary file beside it. `/tmp` is
+/// world-writable, so the temporary name is random and the file is created
+/// exclusively without following links: a planted file or link is never
+/// written through. The rename replaces a link at `path`; it never follows it.
+fn write_replacing(path: &Path, data: &[u8]) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid snapshot path"))?;
+    let mut random = [0_u8; 8];
+    OsRng
+        .try_fill_bytes(&mut random)
+        .map_err(io::Error::other)?;
+    let temp = path.with_file_name(format!(".{name}.{:016x}.tmp", u64::from_le_bytes(random)));
+    let written = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&temp)?;
+        file.write_all(data)?;
+        fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written
 }
 
 fn collect_snapshot() -> Snapshot {
@@ -482,6 +513,37 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_snapshot_never_writes_through_a_planted_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nanokvm-hwmon-state.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"unrelated").unwrap();
+        // RC12 used a predictable "<path>.<pid>.tmp" and followed links.
+        symlink(
+            &victim,
+            dir.path().join(format!(
+                "nanokvm-hwmon-state.json.{}.tmp",
+                std::process::id()
+            )),
+        )
+        .unwrap();
+        symlink(&victim, &path).unwrap();
+        super::write_replacing(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated");
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                name.to_string_lossy().ends_with(".tmp") && name.to_string_lossy().starts_with('.')
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
     use super::{
         parse_ipv4_default_routes, parse_ipv4_route_gateway, parse_ipv6_default_routes,
         parse_ipv6_route_gateway, parse_vi_fps, route_state,
