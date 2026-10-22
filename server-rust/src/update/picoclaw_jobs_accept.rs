@@ -420,13 +420,146 @@ pub(super) fn decode_removal(record: &Record, bytes: &[u8]) -> Result<Removal> {
     })
 }
 
+const PROFILE_MAGIC: &[u8; 8] = b"NKPPRF01";
+const PROFILE_HEADER: usize = 112;
+
+/// The workspace AGENT.md a Profile job replaces: the digest of the document
+/// it found (or its absence) and the exact shipped bytes it installs.
+pub(super) struct ProfilePlan {
+    pub(super) before: Option<[u8; 32]>,
+    pub(super) desired: Vec<u8>,
+}
+
+fn profile_digest(bytes: &[u8]) -> [u8; 32] {
+    private_digest(b"NanoKVM Pico profile document v1\0", bytes)
+}
+
+fn encode_profile(record: &Record, plan: &ProfilePlan) -> Result<Vec<u8>> {
+    if plan.desired.len() > crate::update::picoclaw_profile::MAX_PROFILE_BYTES {
+        return Err(invalid());
+    }
+    let mut bytes = vec![0; PROFILE_HEADER];
+    bytes[..8].copy_from_slice(PROFILE_MAGIC);
+    bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[16..32].copy_from_slice(&record.nonce);
+    bytes[32..64].copy_from_slice(&record.source);
+    if let Some(before) = plan.before {
+        bytes[64] = 1;
+        bytes[72..104].copy_from_slice(&before);
+    }
+    bytes[104..108].copy_from_slice(&(plan.desired.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&plan.desired);
+    let hash = private_digest(b"NanoKVM Pico profile plan v1\0", &bytes);
+    bytes.extend_from_slice(&hash);
+    Ok(bytes)
+}
+
+pub(super) fn decode_profile(record: &Record, bytes: &[u8]) -> Result<ProfilePlan> {
+    if bytes.len() < PROFILE_HEADER + 32 || &bytes[..8] != PROFILE_MAGIC {
+        return Err(invalid());
+    }
+    let (body, hash) = bytes.split_at(bytes.len() - 32);
+    let length = u32::from_le_bytes(bytes[104..108].try_into().map_err(|_| invalid())?) as usize;
+    if private_digest(b"NanoKVM Pico profile plan v1\0", body) != hash
+        || bytes[8..16] != record.sequence.to_le_bytes()
+        || bytes[16..32] != record.nonce
+        || bytes[32..64] != record.source
+        || bytes[64] > 1
+        || bytes[65..72].iter().any(|byte| *byte != 0)
+        || (bytes[64] == 0 && bytes[72..104].iter().any(|byte| *byte != 0))
+        || bytes[108..PROFILE_HEADER].iter().any(|byte| *byte != 0)
+        || length > crate::update::picoclaw_profile::MAX_PROFILE_BYTES
+        || PROFILE_HEADER + length != body.len()
+    {
+        return Err(invalid());
+    }
+    Ok(ProfilePlan {
+        before: (bytes[64] == 1)
+            .then(|| bytes[72..104].try_into().map_err(|_| invalid()))
+            .transpose()?,
+        desired: body[PROFILE_HEADER..].to_vec(),
+    })
+}
+
 // The plan member of a job, by the job's kind.
 fn check_plan(record: &Record, bytes: &[u8]) -> Result<()> {
-    if record.kind == Kind::Remove {
-        decode_removal(record, bytes).map(|_| ())
-    } else {
-        decode_plan(record, bytes).map(|_| ())
+    match record.kind {
+        Kind::Remove => decode_removal(record, bytes).map(|_| ()),
+        Kind::Profile => decode_profile(record, bytes).map(|_| ()),
+        _ => decode_plan(record, bytes).map(|_| ()),
     }
+}
+
+// The workspace an accepted source's config selects.
+fn source_workspace(view: &SourceView<'_>) -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let config = view.config.ok_or_else(invalid)?;
+    let documents = crate::update::picoclaw_startup::decode(config, view.security)?;
+    crate::update::picoclaw_profile::workspace(
+        &documents.config,
+        Path::new(std::ffi::OsStr::from_bytes(view.home)),
+    )
+    .ok_or_else(invalid)
+}
+
+// Both shipped profile documents, from the fixed application directory.
+fn read_shipped() -> Result<[Vec<u8>; 2]> {
+    use crate::update::picoclaw_profile::{MAX_PROFILE_BYTES, SHIPPED, shipped_name};
+    let directory = Directory::open(Path::new(SHIPPED), false)?;
+    let read = |kvm: bool| -> Result<Vec<u8>> {
+        Ok(directory
+            .read_document(shipped_name(kvm), MAX_PROFILE_BYTES)?
+            .ok_or_else(invalid)?
+            .to_vec())
+    };
+    Ok([read(false)?, read(true)?])
+}
+
+// The workspace's current AGENT.md; a missing workspace holds none.
+fn read_workspace_agent(workspace: &Path) -> Result<Option<Vec<u8>>> {
+    use crate::update::picoclaw_profile::{AGENT, MAX_PROFILE_BYTES};
+    let directory = match Directory::open(workspace, false) {
+        Ok(directory) => directory,
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(directory
+        .read_document(AGENT, MAX_PROFILE_BYTES)?
+        .map(|bytes| bytes.to_vec()))
+}
+
+// Install the planned document exactly once: the workspace AGENT.md is the
+// planned prior one (replaced atomically), already the desired one (done), or
+// anything else (false: nothing written).
+fn install_profile(workspace: &Path, plan: &ProfilePlan) -> Result<bool> {
+    use crate::update::picoclaw_profile::{AGENT, MAX_PROFILE_BYTES};
+    use std::io::Write as _;
+    let directory = Directory::open(workspace, true)?;
+    let before = directory.inspect_document(AGENT, MAX_PROFILE_BYTES)?;
+    let current = directory.read_document(AGENT, MAX_PROFILE_BYTES)?;
+    if current.as_deref().map(Vec::as_slice) == Some(plan.desired.as_slice()) {
+        directory.file.sync_all()?;
+        return Ok(true);
+    }
+    if current.as_deref().map(|bytes| profile_digest(bytes)) != plan.before {
+        return Ok(false);
+    }
+    let mut staged = directory.temporary(MAX_PROFILE_BYTES)?;
+    staged.file.write_all(&plan.desired)?;
+    staged.file.sync_all()?;
+    staged.publish_document(AGENT, before)?;
+    directory.file.sync_all()?;
+    if directory
+        .read_document(AGENT, MAX_PROFILE_BYTES)?
+        .as_deref()
+        .map(Vec::as_slice)
+        != Some(plan.desired.as_slice())
+    {
+        return Err(invalid());
+    }
+    Ok(true)
 }
 
 pub(super) struct Store {
@@ -955,6 +1088,60 @@ fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<T
     Ok(TransitionStatus::Refused)
 }
 
+/// Profile: replace the workspace AGENT.md with the requested shipped profile,
+/// but only an absent document or an exact shipped one; a customized document
+/// is kept and the request refused. An equal document is a no-op.
+fn settle_profile(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    use crate::update::picoclaw_profile::{Decision, classify};
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    let kvm = match payload.request.as_ref() {
+        Some(Request::Profile(Profile::Kvm)) => true,
+        Some(Request::Profile(Profile::Default)) => false,
+        _ => return Err(invalid()),
+    };
+    let view = decode_source(source.bytes.as_slice())?;
+    if !view.home_present || view.config.is_none() {
+        // The workspace is chosen by the config; Profile never creates it.
+        return refuse(store, record, &mut payload.touched);
+    }
+    let (Ok(workspace), Ok(shipped)) = (source_workspace(&view), read_shipped()) else {
+        return refuse(store, record, &mut payload.touched);
+    };
+    let Ok(current) = read_workspace_agent(&workspace) else {
+        return refuse(store, record, &mut payload.touched);
+    };
+    let desired = shipped[usize::from(kvm)].clone();
+    match classify(
+        current.as_deref(),
+        &desired,
+        [shipped[0].as_slice(), shipped[1].as_slice()],
+    ) {
+        Decision::Custom => refuse(store, record, &mut payload.touched),
+        Decision::Noop => {
+            record.phase = Phase::Completed;
+            record.outcome = Outcome::Noop;
+            record.runtime = if record.was_running && !record.resume_allowed {
+                Runtime::Suppressed
+            } else {
+                Runtime::Unchanged
+            };
+            store.publish_terminal(record, &mut payload.touched)?;
+            store.retire()?;
+            Ok(TransitionStatus::Completed)
+        }
+        Decision::Replace => {
+            let plan = ProfilePlan {
+                before: current.as_deref().map(profile_digest),
+                desired,
+            };
+            store.write_plan(&encode_profile(&record, &plan)?, &mut payload.touched)?;
+            payload.profile = Some(plan);
+            Ok(TransitionStatus::Planned)
+        }
+    }
+}
+
 /// Remove: delete exactly the managed executable, NanoKVM's internal
 /// credential and the accepted pair; the workspace and the rest of Home stay.
 /// Nothing managed left is a no-op that never stops a live runtime.
@@ -1003,6 +1190,9 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     }
     if record.kind == Kind::Remove {
         return settle_removal(payload, record);
+    }
+    if record.kind == Kind::Profile {
+        return settle_profile(payload, record);
     }
     if !matches!(record.kind, Kind::Startup | Kind::Model) {
         // The other fixed operations have no settlement executor yet.
@@ -1083,13 +1273,19 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.boot != payload.facts.boot
         || record.home != payload.facts.home_fingerprint
         || record.phase != Phase::Closed
-        || !matches!(record.kind, Kind::Startup | Kind::Model | Kind::Remove)
+        || !matches!(
+            record.kind,
+            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile
+        )
         || store.members[3].is_none()
     {
         return Err(fenced());
     }
     if record.kind == Kind::Remove {
         return apply_removal(payload, record);
+    }
+    if record.kind == Kind::Profile {
+        return apply_profile(payload, record);
     }
     let plan = payload.plan.as_ref().ok_or_else(invalid)?;
     let source = payload.source.as_ref().ok_or_else(invalid)?;
@@ -1129,6 +1325,48 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     {
         return Err(invalid());
     }
+    record.phase = Phase::Committed;
+    store.publish(record, &mut payload.touched, Publication::Committed)?;
+    Ok(TransitionStatus::Committed(
+        super::super::super::Generation::from_documents(&installed),
+    ))
+}
+
+/// Install the planned profile of a quiesced Profile job. Under the job's
+/// exclusive Home lease the pair (which selects the workspace) and the prior
+/// document are revalidated; any difference ends the job as a terminal
+/// failure with nothing changed. Applying is durable before the document is
+/// replaced, and Committed binds the unchanged pair's generation.
+fn apply_profile(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let plan = payload.profile.as_ref().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    source.lock_exclusive()?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let current = super::super::super::pair::read_source(&source.directory)?;
+    let workspace = source_workspace(&view)?;
+    let unchanged = current[0].as_deref().map(Vec::as_slice) == view.config
+        && current[1].as_deref().map(Vec::as_slice) == view.security
+        && read_workspace_agent(&workspace)?
+            .as_deref()
+            .map(profile_digest)
+            == plan.before;
+    if !unchanged {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Failed;
+        record.runtime = Runtime::NotRequested;
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Superseded);
+    }
+    record.phase = Phase::Applying;
+    store.publish(record, &mut payload.touched, Publication::Applying)?;
+    if !install_profile(&workspace, plan)? {
+        return Err(invalid());
+    }
+    #[cfg(test)]
+    checkpoint("profile", "published")?;
+    let installed = super::super::super::pair::read_installed(&source.directory)?;
     record.phase = Phase::Committed;
     store.publish(record, &mut payload.touched, Publication::Committed)?;
     Ok(TransitionStatus::Committed(
@@ -1211,7 +1449,10 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
     let mut record = store.snapshot.active.ok_or_else(invalid)?;
     if record.uncertain
         || record.boot != payload.facts.boot
-        || !matches!(record.kind, Kind::Startup | Kind::Model | Kind::Remove)
+        || !matches!(
+            record.kind,
+            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile
+        )
     {
         return Err(fenced());
     }
@@ -1571,6 +1812,23 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
+        (Phase::Applying, Kind::Profile) => {
+            let source = contents[2].take();
+            let (Some(plan), Some(source)) = (&contents[3], source) else {
+                return Ok(false);
+            };
+            let plan = decode_profile(&record, plan)?;
+            let Some(source) = reopen_source(source)? else {
+                return Ok(false);
+            };
+            source.lock_exclusive()?;
+            let workspace = source_workspace(&decode_source(source.bytes.as_slice())?)?;
+            if !install_profile(&workspace, &plan)? {
+                return Ok(false);
+            }
+            record.outcome = Outcome::Changed;
+            startup_runtime(&mut record);
+        }
         (Phase::Applying, Kind::Remove) => {
             let source = contents[2].take();
             let (Some(plan), Some(source)) = (&contents[3], source) else {
@@ -1587,12 +1845,12 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.outcome = Outcome::Changed;
             record.runtime = Runtime::Removed;
         }
-        (Phase::Committed, Kind::Startup | Kind::Model) => {
+        (Phase::Committed, Kind::Startup | Kind::Model | Kind::Profile) => {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
         // The relaunched scope did not survive this boot.
-        (Phase::Activating, Kind::Startup | Kind::Model) => {
+        (Phase::Activating, Kind::Startup | Kind::Model | Kind::Profile) => {
             record.outcome = Outcome::Changed;
             record.runtime = Runtime::ResumeFailed;
         }

@@ -14,6 +14,7 @@ pub mod operation;
 pub(crate) mod operation_lock;
 pub(crate) mod picoclaw_config;
 pub(crate) mod picoclaw_model;
+pub(crate) mod picoclaw_profile;
 pub(crate) mod picoclaw_runtime;
 pub(crate) mod picoclaw_startup;
 pub(crate) mod picoclaw_token;

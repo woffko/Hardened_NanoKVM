@@ -23,6 +23,16 @@ fn job_frames_round_trip_and_refuse_every_unfixed_field() {
             nonce: [9; 16],
             kind: JobKind::Remove,
         },
+        JobRequest::Submit {
+            cursor,
+            nonce: [9; 16],
+            kind: JobKind::Profile { kvm: false },
+        },
+        JobRequest::Submit {
+            cursor,
+            nonce: [9; 16],
+            kind: JobKind::Profile { kvm: true },
+        },
         JobRequest::Observe(id),
     ] {
         let bytes = encode_request(&request);
@@ -67,6 +77,21 @@ fn job_frames_round_trip_and_refuse_every_unfixed_field() {
     );
     wrapping[9] = 1;
     assert_eq!(decode_request(&wrapping), None, "no other kind is wired");
+    // The profile flag is one typed byte, never another value.
+    let mut profile = encode_request(&JobRequest::Submit {
+        cursor,
+        nonce: [9; 16],
+        kind: JobKind::Profile { kvm: true },
+    })
+    .to_vec();
+    assert_eq!((profile[9], profile[56]), (4, 1));
+    profile[56] = 2;
+    assert_eq!(decode_request(&profile), None);
+    assert_ne!(
+        JobKind::Profile { kvm: true }.digest(),
+        JobKind::Profile { kvm: false }.digest(),
+        "the submission digest tells the two profiles apart"
+    );
 
     let reply = JobReply {
         code: JobCode::Ok,
@@ -206,6 +231,7 @@ mod endpoint {
             "settle-change-absent",
             "settle-model-change-absent",
             "settle-remove-absent",
+            "settle-profile-change-absent",
         ] {
             let root = fixture::root();
             let output = command(root.path(), case).output().unwrap();
@@ -240,6 +266,8 @@ mod endpoint {
             fixture::model_kind()
         } else if case.starts_with("settle-remove-") {
             JobKind::Remove
+        } else if case.starts_with("settle-profile-") {
+            JobKind::Profile { kvm: true }
         } else {
             JobKind::Startup
         };
@@ -247,6 +275,7 @@ mod endpoint {
         let reply = match &kind {
             JobKind::Startup => run_startup_job(Duration::from_secs(30)).unwrap(),
             JobKind::Remove => run_remove_job(Duration::from_secs(30)).unwrap(),
+            JobKind::Profile { kvm } => run_profile_job(*kvm, Duration::from_secs(30)).unwrap(),
             JobKind::Model {
                 model,
                 api_base,
@@ -265,6 +294,14 @@ mod endpoint {
             assert_eq!(reply.receipt, [6, 8, 1, 5], "Completed Changed/Removed");
             assert_eq!(fixture::managed_present(), [false; 4]);
             fixture::assert_workspace_kept();
+        } else if let JobKind::Profile { .. } = kind {
+            assert_eq!(
+                reply.receipt,
+                [4, 8, 1, 2],
+                "Completed Changed/NotRequested"
+            );
+            fixture::assert_profile_installed();
+            fixture::assert_pair_unchanged(pair);
         } else {
             assert_eq!(
                 reply.receipt,

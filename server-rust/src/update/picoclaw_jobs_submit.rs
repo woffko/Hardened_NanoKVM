@@ -130,6 +130,7 @@ struct Payload {
     request: Option<Request>,
     plan: Option<accept::Plan>,
     removal: Option<accept::Removal>,
+    profile: Option<accept::ProfilePlan>,
     touched: bool,
 }
 
@@ -246,6 +247,7 @@ impl Submission {
                 request: None,
                 plan: None,
                 removal: None,
+                profile: None,
                 touched: false,
             })),
         }

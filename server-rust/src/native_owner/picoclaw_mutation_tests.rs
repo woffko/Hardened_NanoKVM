@@ -54,6 +54,7 @@ fn command(root: &Path, case: &str) -> Command {
         .strip_prefix("settle-fail:")
         .or_else(|| change_failure(case))
         .or_else(|| case.strip_prefix("settle-remove-fail:"))
+        .or_else(|| case.strip_prefix("settle-profile-fail:"))
     {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
@@ -238,6 +239,28 @@ fn model_settlement_shares_the_executor_with_its_own_change_before_the_defaults(
     }
     for point in ["applying-renamed", "pair-published", "committed-renamed"] {
         run(&format!("settle-model-change-fail:{point}"));
+    }
+}
+
+#[test]
+fn profile_replaces_only_an_absent_or_shipped_agent_document() {
+    for case in [
+        "settle-profile-noop-absent",
+        "settle-profile-change-absent",
+        "settle-profile-create-absent",
+        "settle-profile-custom-absent",
+        "settle-profile-change-live",
+    ] {
+        run(case);
+    }
+    for point in [
+        "plan-durable",
+        "closed-renamed",
+        "applying-renamed",
+        "profile-published",
+        "committed-renamed",
+    ] {
+        run(&format!("settle-profile-fail:{point}"));
     }
 }
 
@@ -521,7 +544,8 @@ fn mutation_child() {
         && !case.starts_with("settle-change-fail:")
         && !case.starts_with("settle-internal-fail:")
         && !case.starts_with("settle-model-change-fail:")
-        && !case.starts_with("settle-remove-fail:");
+        && !case.starts_with("settle-remove-fail:")
+        && !case.starts_with("settle-profile-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -885,6 +909,9 @@ fn request(case: &str) -> PicoRequest {
     if case.starts_with("settle-remove-") {
         return PicoRequest::Remove;
     }
+    if case.starts_with("settle-profile-") {
+        return PicoRequest::Profile(crate::native_owner::broker::PicoProfile::Kvm);
+    }
     if case.starts_with("settle-model-") {
         PicoRequest::Model {
             model: zeroize::Zeroizing::new(MODEL.into()),
@@ -898,7 +925,10 @@ fn request(case: &str) -> PicoRequest {
 
 // Cases whose change relaunches a real fixture scope.
 fn relaunched(case: &str) -> bool {
-    matches!(case, "settle-change-live" | "settle-model-change-live")
+    matches!(
+        case,
+        "settle-change-live" | "settle-model-change-live" | "settle-profile-change-live"
+    )
 }
 const GATEWAY: &str = "synthetic-gateway-fixture";
 pub(crate) const INTERNAL: &str = "synthetic-internal-fixture";
@@ -997,6 +1027,9 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
     if case.starts_with("settle-remove-") {
         remove_fixture(case);
     }
+    if case.starts_with("settle-profile-") {
+        profile_fixture(case);
+    }
     let inode = |name: &str| fs::metadata(Path::new(HOME).join(name)).unwrap().ino();
     SettlePair {
         config: (config_bytes, inode("config.json")),
@@ -1037,6 +1070,39 @@ fn remove_fixture(case: &str) {
     let workspace = Path::new(HOME).join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     private_write(&workspace.join("AGENT.md"), AGENT);
+}
+
+const SHIPPED_DEFAULT: &[u8] = b"---\nname: pico\n---\nsynthetic default profile\n";
+const SHIPPED_KVM: &[u8] = b"---\nname: pico-kvm\n---\nsynthetic kvm profile\n";
+const CUSTOM_AGENT: &[u8] = b"---\nname: pico\n---\nmy own customized notes\n";
+
+fn agent_path() -> std::path::PathBuf {
+    Path::new(HOME).join("workspace/AGENT.md")
+}
+
+pub(crate) fn assert_profile_installed() {
+    assert!(fs::read(agent_path()).unwrap() == SHIPPED_KVM);
+}
+
+fn public_write(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+// The shipped profiles and the workspace document a case starts from. The
+// workspace document is 0644 as the legacy writer left it.
+fn profile_fixture(case: &str) {
+    fs::create_dir_all("/kvmapp/picoclaw").unwrap();
+    public_write(Path::new("/kvmapp/picoclaw/AGENT.md"), SHIPPED_DEFAULT);
+    public_write(Path::new("/kvmapp/picoclaw/AGENT_KVM.md"), SHIPPED_KVM);
+    let current = match case {
+        "settle-profile-create-absent" => return,
+        "settle-profile-noop-absent" => SHIPPED_KVM,
+        "settle-profile-custom-absent" => CUSTOM_AGENT,
+        _ => SHIPPED_DEFAULT,
+    };
+    fs::create_dir_all(Path::new(HOME).join("workspace")).unwrap();
+    public_write(&agent_path(), current);
 }
 
 // Which managed files are present: executable, credential, config, security.
@@ -1227,6 +1293,54 @@ fn settle_case(
         assert_eq!(settled[RECEIPT + 169], 8, "Completed");
         assert_pair_unchanged(pair);
         drop(StateWriters::default().configuration().unwrap());
+        return;
+    }
+    if let Some(point) = case.strip_prefix("settle-profile-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        for _ in 0..3 {
+            assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
+        }
+        let state = record();
+        let phase = match point {
+            "plan-durable" => 1,
+            "closed-renamed" => 3,
+            "committed-renamed" => 5,
+            _ => 4,
+        };
+        assert_eq!(state[128 + 169], phase);
+        assert_eq!(state[128 + 168], 4, "Profile");
+        assert_eq!(members_present(), [true; 3]);
+        assert!(plan_present(), "the profile change stays bound to its plan");
+        let installed = matches!(point, "profile-published" | "committed-renamed");
+        assert!(
+            fs::read(agent_path()).unwrap()
+                == if installed {
+                    SHIPPED_KVM
+                } else {
+                    SHIPPED_DEFAULT
+                }
+        );
+        assert_pair_unchanged(pair);
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain profile change returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+        if phase < 4 {
+            assert_eq!(settled[RECEIPT + 172], 4, "Cancelled");
+            assert!(fs::read(agent_path()).unwrap() == SHIPPED_DEFAULT);
+        } else {
+            assert_eq!(settled[RECEIPT + 172], 1, "Changed");
+            assert!(fs::read(agent_path()).unwrap() == SHIPPED_KVM);
+        }
+        assert_pair_unchanged(pair);
         return;
     }
     if let Some(point) = case.strip_prefix("settle-remove-fail:") {
@@ -1436,6 +1550,70 @@ fn settle_case(
             );
             assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
             drop(assert_released(mutation));
+        }
+        "settle-profile-noop-absent" => {
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 168], 4, "Profile");
+            assert_eq!(state[RECEIPT + 172], 2, "Noop");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert!(fs::read(agent_path()).unwrap() == SHIPPED_KVM);
+            assert!(!plan_present());
+            assert_pair_unchanged(pair);
+            drop(assert_released(mutation));
+        }
+        "settle-profile-custom-absent" => {
+            // The user's own document is kept and nothing is stopped.
+            let MutationStatus::SettlementRefused(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert!(fs::read(agent_path()).unwrap() == CUSTOM_AGENT);
+            assert_pair_unchanged(pair);
+            drop(assert_released(mutation));
+        }
+        "settle-profile-change-absent"
+        | "settle-profile-create-absent"
+        | "settle-profile-change-live" => {
+            let MutationStatus::Completed(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::Completed(id));
+            }
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 168], 4, "Profile");
+            assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            assert_eq!(
+                state[RECEIPT + 173],
+                if live { 3 } else { 2 },
+                "runtime result"
+            );
+            assert_eq!(state[RECEIPT + 174], u8::from(live));
+            assert!(fs::read(agent_path()).unwrap() == SHIPPED_KVM);
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
+            // Only the workspace document changed; the pair kept its bytes and inodes.
+            assert_pair_unchanged(pair);
+            let mut broker = assert_released(mutation);
+            if live {
+                // Relaunched with the generation of the SAME unchanged pair.
+                let security = pair.security.as_ref().unwrap().0.as_slice();
+                assert_eq!(broker.group.poll()[3], Some(Status::Running));
+                assert!(
+                    broker.group.picoclaw_generation()
+                        == Some(crate::update::picoclaw_config::Generation::from_pair(
+                            &pair.config.0,
+                            Some(security),
+                        ))
+                );
+                shutdown(broker);
+            }
         }
         "settle-remove-noop-absent" => {
             // Nothing managed is left: a no-op that changes and stops nothing.

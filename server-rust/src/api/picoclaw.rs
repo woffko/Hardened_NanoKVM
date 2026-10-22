@@ -673,11 +673,18 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
 
 pub async fn update_agent_profile(Json(req): Json<AgentProfileUpdateRequest>) -> Result<Response> {
     let profile = req.profile.trim();
-    if profile != "default" && profile != "kvm" {
-        return Ok(picoclaw_error(CODE_INVALID_ACTION, "invalid agent profile"));
-    }
-
-    match apply_agent_profile(profile) {
+    let kvm = match profile {
+        "default" => false,
+        "kvm" => true,
+        _ => return Ok(picoclaw_error(CODE_INVALID_ACTION, "invalid agent profile")),
+    };
+    // The broker replaces the workspace AGENT.md only when it is absent or an
+    // exact shipped profile; a customized one is kept and reported.
+    match run_config_job(PROFILE_JOB_KIND, move || {
+        crate::native_owner::broker::ipc::run_profile_job(kvm, CONFIG_JOB_TIMEOUT)
+    })
+    .await
+    {
         Ok(()) => {
             let status = refresh_runtime_status().await;
             Ok(Json(ApiResponse::ok(json!({
@@ -3085,6 +3092,7 @@ fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> Stri
 const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_JOB_KIND: u8 = 2;
 const STARTUP_JOB_KIND: u8 = 3;
+const PROFILE_JOB_KIND: u8 = 4;
 const REMOVE_JOB_KIND: u8 = 6;
 
 enum JobDone {
@@ -3102,7 +3110,12 @@ fn job_outcome(reply: crate::native_owner::broker::ipc::JobReply, kind: u8) -> R
         (JobCode::Ok, [code, 8, 1 | 2, _]) if code == kind => Ok(JobDone::Done),
         (JobCode::Ok, [code, 8, 3, 2]) if code == kind => Ok(JobDone::Superseded),
         (JobCode::Ok, [code, 8, 3, _]) if code == kind => Err(AppError::Config(
-            "picoclaw configuration cannot take this change".into(),
+            if kind == PROFILE_JOB_KIND {
+                "the workspace AGENT.md is customized or unavailable and was kept"
+            } else {
+                "picoclaw configuration cannot take this change"
+            }
+            .into(),
         )),
         (JobCode::Busy, _) => Err(AppError::Conflict(
             "configuration change already in progress".into(),
@@ -3154,37 +3167,6 @@ mod config_job_tests;
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 #[path = "picoclaw_config_publication_tests.rs"]
 mod config_publication_tests;
-
-fn apply_agent_profile(profile: &str) -> Result<()> {
-    let source = resolve_agent_profile_source(profile)?;
-    let workspace = resolve_workspace_path()?;
-    fs::create_dir_all(&workspace)?;
-    let content = fs::read(source)?;
-    fs::write(workspace.join("AGENT.md"), content)?;
-    Ok(())
-}
-
-fn resolve_agent_profile_source(profile: &str) -> Result<PathBuf> {
-    let filename = match profile {
-        "default" => "AGENT.md",
-        "kvm" => "AGENT_KVM.md",
-        _ => return Err(AppError::BadRequest("invalid agent profile".to_string())),
-    };
-    let candidates = [
-        PathBuf::from("/kvmapp/picoclaw").join(filename),
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.parent()
-                    .map(|parent| parent.join("../picoclaw").join(filename))
-            })
-            .unwrap_or_else(|| PathBuf::from("/nonexistent")),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .ok_or_else(|| AppError::Internal(format!("agent profile source not found: {filename}")))
-}
 
 fn detect_agent_profile() -> String {
     let Ok(workspace) = resolve_workspace_path() else {

@@ -5,7 +5,8 @@
 //! each job; a client's disconnect never cancels or settles it.
 use super::*;
 use crate::native_owner::broker::{
-    PicoCursor, PicoJobId, PicoMutation, PicoMutationAdmission, PicoMutationStatus, PicoRequest,
+    PicoCursor, PicoJobId, PicoMutation, PicoMutationAdmission, PicoMutationStatus, PicoProfile,
+    PicoRequest,
 };
 use crate::update::picoclaw_config::jobs::{self, Observed};
 use crate::update::picoclaw_model;
@@ -26,6 +27,7 @@ const REPLY_MAGIC: &[u8; 8] = b"NKPJS001";
 // The executors wired to this transport; the store's kind codes.
 const MODEL: u8 = 2;
 const STARTUP: u8 = 3;
+const PROFILE: u8 = 4;
 const REMOVE: u8 = 6;
 
 /// What a submission asks the broker to settle.
@@ -34,6 +36,10 @@ pub enum JobKind {
     Startup,
     /// Exactly the managed executable, credential and pair; user data stays.
     Remove,
+    /// The shipped default or KVM agent profile for the workspace.
+    Profile {
+        kvm: bool,
+    },
     /// Bounded, trimmed fields; see `picoclaw_model::check_request`.
     Model {
         model: Zeroizing<String>,
@@ -48,6 +54,8 @@ impl std::fmt::Debug for JobKind {
         formatter.write_str(match self {
             Self::Startup => "Startup",
             Self::Remove => "Remove",
+            Self::Profile { kvm: false } => "Profile { kvm: false }",
+            Self::Profile { kvm: true } => "Profile { kvm: true }",
             Self::Model { .. } => "Model { .. }",
         })
     }
@@ -58,13 +66,14 @@ impl JobKind {
         match self {
             Self::Startup => STARTUP,
             Self::Remove => REMOVE,
+            Self::Profile { .. } => PROFILE,
             Self::Model { .. } => MODEL,
         }
     }
 
     fn fields(&self) -> [&str; 3] {
         match self {
-            Self::Startup | Self::Remove => ["", "", ""],
+            Self::Startup | Self::Remove | Self::Profile { .. } => ["", "", ""],
             Self::Model {
                 model,
                 api_base,
@@ -75,10 +84,18 @@ impl JobKind {
 
     // In-memory identity of one submission, so a replay of the same job id
     // with a different request is refused. Never stored or sent.
+    // The one typed byte a fixed-frame kind carries: the KVM profile flag.
+    fn flag(&self) -> u8 {
+        match self {
+            Self::Profile { kvm } => u8::from(*kvm),
+            _ => 0,
+        }
+    }
+
     fn digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"NanoKVM Pico job submission v1\0");
-        hash.update([self.code()]);
+        hash.update([self.code(), self.flag()]);
         for field in self.fields() {
             hash.update((field.len() as u64).to_le_bytes());
             hash.update(field.as_bytes());
@@ -90,6 +107,11 @@ impl JobKind {
         match self {
             Self::Startup => PicoRequest::Startup,
             Self::Remove => PicoRequest::Remove,
+            Self::Profile { kvm } => PicoRequest::Profile(if kvm {
+                PicoProfile::Kvm
+            } else {
+                PicoProfile::Default
+            }),
             Self::Model {
                 model,
                 api_base,
@@ -205,6 +227,7 @@ pub(super) fn encode_request(request: &JobRequest) -> Zeroizing<Vec<u8>> {
     bytes[40..56].copy_from_slice(&nonce);
     if let Some(kind) = kind {
         bytes[9] = kind.code();
+        bytes[56] = kind.flag();
         if let JobKind::Model { .. } = kind {
             for (index, field) in kind.fields().into_iter().enumerate() {
                 let offset = 56 + index * 2;
@@ -269,6 +292,14 @@ pub(super) fn decode_request(bytes: &[u8]) -> Option<JobRequest> {
     };
     if (bytes[8], bytes[9]) == (2, MODEL) {
         return submit(decode_model(bytes)?);
+    }
+    if (bytes[8], bytes[9]) == (2, PROFILE) {
+        if bytes.len() != PACKET || bytes[56] > 1 || bytes[57..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        return submit(JobKind::Profile {
+            kvm: bytes[56] == 1,
+        });
     }
     if bytes.len() != PACKET || bytes[56..].iter().any(|byte| *byte != 0) {
         return None;
@@ -651,6 +682,11 @@ fn nonce() -> io::Result<[u8; 16]> {
 /// Run one broker-owned Startup job to its durable end within `timeout`.
 pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
     run_job(JobKind::Startup, timeout)
+}
+
+/// Run one broker-owned Profile job to its durable end within `timeout`.
+pub fn run_profile_job(kvm: bool, timeout: Duration) -> io::Result<JobReply> {
+    run_job(JobKind::Profile { kvm }, timeout)
 }
 
 /// Run one broker-owned Remove job to its durable end within `timeout`.

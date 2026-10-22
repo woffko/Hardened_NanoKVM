@@ -286,6 +286,46 @@ Applying, after the pair and after Committed, each settled at a later boot.
 
 The backend's model update runs this job over the job transport (below).
 
+## Current Profile settlement
+
+The Profile job selects the shipped default or KVM agent profile for the
+workspace that the accepted config chooses. That workspace is
+`agents.defaults.workspace` with `~` standing for /root, or `<Home>/workspace`;
+a relative choice refuses.
+
+The shipped documents come only from the fixed `/kvmapp/picoclaw`. They and the
+workspace `AGENT.md` are read through checked descriptors: a regular,
+single-link, root-owned file that is not group- or world-writable and is at
+most 64 KiB. A link or any other file refuses. Unlike the credential-bearing
+pair, a workspace document may be 0644, as the legacy writer left it.
+
+The current document decides what happens:
+
+- **Equal to the requested profile.** A no-op that never stops a live
+  runtime.
+- **Absent, or exactly one of the shipped profiles.** It is replaced.
+- **Anything else.** It is the user's own: it is kept and the request refused
+  (Failed, runtime Unchanged). An older shipped version counts as customized.
+
+A replacement records the prior document's digest and the exact shipped bytes
+in a protected profile plan, bound to the job, before anything is stopped. The
+SAME owned runtime is quiesced with resume kept. Under the job's exclusive
+Home lease, the pair (which selects the workspace) and the prior document are
+revalidated; any difference ends the job as a terminal failure with nothing
+changed. Applying is durable before the document is replaced. The replacement
+is atomic: a private temporary in the workspace (created 0700 if missing) is
+renamed over exactly the revalidated revision. Committed binds the unchanged
+pair's generation, so a previously running runtime is relaunched as usual.
+
+An interrupted replacement settles at a later boot with the SAME plan. A
+document that is already the desired one is done; one that is still the
+planned prior one is replaced; anything else keeps the fence.
+
+Chroot fixtures cover the no-op, a shipped-to-shipped replacement, a missing
+workspace, a customized document, a live runtime relaunched with the same
+generation, and failures after the plan, Closed, Applying, the publication
+and Committed, each settled at a later boot.
+
 ## Current Remove settlement
 
 The Remove job deletes exactly the managed runtime assets:
@@ -366,6 +406,8 @@ Settlement by durable phase:
   boot: Changed with ResumeFailed.
 - **Applying or Committed (Remove).** The SAME removal plan completes, as
   described in Current Remove settlement: Changed with Removed.
+- **Applying (Profile).** The SAME profile plan completes, as described in
+  Current Profile settlement; Committed and Activating settle as for Startup.
 - **Any other phase or kind.** No executor exists; the fence remains.
 
 Each settled job then retires payload, source and plan, syncs, and retires the
@@ -403,9 +445,10 @@ with matching peer credentials. Each datagram is one request with a fixed
 64-byte header:
 
 - Cursor: the next submission cursor of an idle store.
-- Submit(cursor, nonce, kind): Startup, Remove, or Model with its three
-  bounded fields after the header. Their lengths must account for the
-  datagram exactly, and the fields must pass the model request check.
+- Submit(cursor, nonce, kind): Startup, Remove, Profile with its one profile
+  byte, or Model with its three bounded fields after the header. Model field
+  lengths must account for the datagram exactly, and the fields must pass the
+  model request check.
 - Observe(job id).
 
 Each reply is one fixed 64-byte frame: a result code, the cursor or job
@@ -445,9 +488,10 @@ client nonce, so it is known before acceptance.
 **Backend callers.** `ensure_startup_defaults` (gateway session start and
 runtime start) runs a Startup job through `run_startup_job`, and the model
 update runs a Model job through `run_model_job`, after the same field check.
-The uninstall runs a Remove job through `run_remove_job` and reports any
-failure instead of ignoring it. No handler writes or deletes the pair, the
-credential or the executable. A lost reply re-observes the same job; only
+The uninstall runs a Remove job through `run_remove_job` and the profile
+selector a Profile job through `run_profile_job`; both report any failure
+instead of ignoring it. No handler writes or deletes the pair, the
+credential, the executable or the workspace profile document. A lost reply re-observes the same job; only
 an explicit non-acceptance leads to a fresh submission. A Changed or Noop
 receipt of the job's own kind is success, and a superseded change is retried
 once. Refusal, Busy and RecoveryRequired are errors with fixed text.
@@ -456,15 +500,14 @@ The legacy in-handler writers are removed. The direct pair writer and the
 token provisioning helper remain only as test fixtures.
 
 A chroot fixture runs the real daemon loop over its real endpoint for Startup,
-Model and Remove jobs. It covers no-op and change jobs with their exact receipts, the
+Model, Profile and Remove jobs. It covers no-op and change jobs with their exact receipts, the
 broker's return, identical resubmission, a different request with the same
 identity, a stale cursor, an unknown id, a malformed datagram, and free
 admissions afterwards.
 
 Still open:
 
-- the profile, onboarding and install executors, and their API and S96
-  callers;
+- the onboarding and install executors, and their API and S96 callers;
 - a pending pair journal still refuses acceptance, as it refused the legacy
   writer. Stopped recovery of that journal inside the job is not implemented.
 

@@ -148,6 +148,16 @@ impl Directory {
     }
 
     fn inspect_bounded(&self, name: &str, limit: usize) -> Result<Option<Revision>> {
+        self.inspect_with(name, limit, false)
+    }
+
+    /// A workspace document: root-owned and not group/world writable, but not
+    /// necessarily private 0600 like the credential-bearing pair.
+    fn inspect_document(&self, name: &str, limit: usize) -> Result<Option<Revision>> {
+        self.inspect_with(name, limit, true)
+    }
+
+    fn inspect_with(&self, name: &str, limit: usize, document: bool) -> Result<Option<Revision>> {
         self.check()?;
         let pinned = match restore_fs::open_beneath(&self.file, name, OFlags::PATH) {
             Ok(file) => file,
@@ -155,10 +165,15 @@ impl Directory {
             Err(error) => return Err(error.into()),
         };
         let metadata = pinned.metadata()?;
+        let mode = metadata.mode() & 0o7777;
         if !metadata.is_file()
             || metadata.uid() != 0
             || metadata.dev() != self.device
-            || metadata.mode() & 0o7777 != 0o600
+            || if document {
+                mode & 0o7022 != 0
+            } else {
+                mode != 0o600
+            }
             || metadata.nlink() != 1
             || metadata.len() > limit as u64
         {
@@ -172,7 +187,21 @@ impl Directory {
     }
 
     fn read_bounded(&self, name: &str, limit: usize) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        let Some(before) = self.inspect_bounded(name, limit)? else {
+        self.read_with(name, limit, false)
+    }
+
+    /// A workspace document's exact bytes; see `inspect_document`.
+    fn read_document(&self, name: &str, limit: usize) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.read_with(name, limit, true)
+    }
+
+    fn read_with(
+        &self,
+        name: &str,
+        limit: usize,
+        document: bool,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let Some(before) = self.inspect_with(name, limit, document)? else {
             return Ok(None);
         };
         let mut file =
@@ -237,12 +266,21 @@ struct Temporary<'a> {
 }
 impl Temporary<'_> {
     fn publish(&mut self, name: &str, before: Option<Revision>) -> Result<()> {
+        self.publish_with(name, before, false)
+    }
+
+    /// Replace exactly the `before` revision of a workspace document.
+    fn publish_document(&mut self, name: &str, before: Option<Revision>) -> Result<()> {
+        self.publish_with(name, before, true)
+    }
+
+    fn publish_with(&mut self, name: &str, before: Option<Revision>, document: bool) -> Result<()> {
         let named = self
             .parent
             .inspect_bounded(&self.name, self.limit)?
             .ok_or_else(invalid)?;
         if named != Revision::from(&self.file.metadata()?)
-            || self.parent.inspect_bounded(name, self.limit)? != before
+            || self.parent.inspect_with(name, self.limit, document)? != before
         {
             return Err(AppError::Conflict(
                 "picoclaw configuration changed during publication".into(),

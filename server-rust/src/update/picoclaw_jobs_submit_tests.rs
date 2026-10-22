@@ -765,6 +765,10 @@ fn a_dropped_source_releases_its_home_lease_even_when_an_alias_survives() {
     let alias = plain.file.try_clone().unwrap();
     drop(plain);
     assert_eq!(exclusive(&open()), Err(rustix::io::Errno::WOULDBLOCK));
+    // End the control lease explicitly too: a child forked by a parallel test
+    // may still hold this description until its exec, so closing the last
+    // local descriptor alone does not prove the lease is gone.
+    flock(&alias, FlockOperation::Unlock).unwrap();
     drop(alias);
     // The job's Source ends its lease explicitly, so the same alias situation
     // no longer extends it, while a live Source still excludes writers.
