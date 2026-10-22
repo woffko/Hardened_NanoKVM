@@ -193,6 +193,8 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
         .run(move |job| async move {
             let config = job.blocking("read app update policy", Config::read).await?;
             let verified = get_latest(is_preview_enabled(), &config).await?;
+            // Refuse before the download, and again for the reauthenticated metadata.
+            check_forward(&current_app_version(), &verified.latest.version)?;
             let (stage, archive) = job
                 .blocking("prepare private app staging", || {
                     let stage = AppStage::prepare()?;
@@ -210,6 +212,7 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                 .await?;
             let verified =
                 authenticate_app_metadata(verified.metadata, verified.signature, &config).await?;
+            check_forward(&current_app_version(), &verified.latest.version)?;
             job.blocking("verify and install app", move || {
                 let archive = archive
                     .finish_online(
@@ -301,6 +304,22 @@ fn newer_release(left: VerifiedAppMetadata, right: VerifiedAppMetadata) -> Verif
     match compare_application_versions(&left.latest.version, &right.latest.version) {
         Some(std::cmp::Ordering::Less) => right,
         _ => left,
+    }
+}
+
+/// An online update only moves forward. Signed metadata for an older release,
+/// or for the installed version with another archive, is refused: it would roll
+/// the device back to known bugs. A manual import stays the explicit way to
+/// install an older release.
+fn check_forward(installed: &str, offered: &str) -> Result<()> {
+    match compare_application_versions(offered, installed) {
+        Some(std::cmp::Ordering::Greater) => Ok(()),
+        Some(_) => Err(AppError::Conflict(format!(
+            "the offered app {offered} is not newer than the installed app {installed}"
+        ))),
+        None => Err(AppError::BadRequest(
+            "the installed and offered app versions cannot be compared".to_string(),
+        )),
     }
 }
 
@@ -1107,6 +1126,25 @@ pub(crate) fn manual_candidate_fixture(stage: AppStage, bytes: &[u8]) -> Result<
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn an_online_update_only_moves_forward() {
+        check_forward("2.0.42", "2.0.43").unwrap();
+        check_forward("2.0.42", "2.1.0").unwrap();
+        check_forward("2.0.9", "2.0.10").unwrap();
+        for offered in ["2.0.42", "2.0.41", "1.9.99"] {
+            assert!(
+                matches!(check_forward("2.0.42", offered), Err(AppError::Conflict(_))),
+                "{offered}"
+            );
+        }
+        for (installed, offered) in [("2.0.42", "2.0.43-rc1"), ("unknown", "2.0.43")] {
+            assert!(matches!(
+                check_forward(installed, offered),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+    }
 
     async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
         use axum::{body::Body, extract::FromRequest, http::Request};
