@@ -413,3 +413,65 @@ fn pending_read_is_bounded_and_rejects_links_modes_and_special_files() {
     .unwrap();
     assert!(read_pending_at(&path).is_err());
 }
+
+/// The same files after a backend restart: no timer and no in-memory state.
+fn restarted(state: &AppState) -> FirewallController {
+    FirewallController {
+        control: Arc::new(Mutex::new(ControlState::default())),
+        paths: Arc::clone(&state.firewall.paths),
+        rollback_delay: Duration::from_secs(60),
+        command: state.firewall.command.clone(),
+    }
+}
+
+/// The backend stops while a change is unconfirmed: its timer goes with it.
+async fn stop_backend(state: &AppState) {
+    let pending = state.firewall.control.lock().await.pending.take().unwrap();
+    pending.task.abort();
+    assert!(pending.task.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn an_unconfirmed_change_left_by_a_stopped_backend_is_rolled_back_at_start() {
+    let (_dir, state) = fixture(Duration::from_secs(60)).await;
+    set(&state, MODE_RESTRICTED).await;
+    stop_backend(&state).await;
+    assert_eq!(mode(&state), MODE_RESTRICTED);
+    assert!(state.firewall.paths.pending.exists());
+
+    let controller = restarted(&state);
+    assert!(
+        controller
+            .roll_back_unconfirmed_at_start(&state.writers)
+            .await
+            .unwrap()
+    );
+    assert_eq!(mode(&state), MODE_MODERATE);
+    assert!(!state.firewall.paths.pending.exists());
+    // Nothing is left to recover, and the next start leaves the mode alone.
+    assert!(
+        !controller
+            .roll_back_unconfirmed_at_start(&state.writers)
+            .await
+            .unwrap()
+    );
+    assert_eq!(mode(&state), MODE_MODERATE);
+}
+
+#[tokio::test]
+async fn an_unsafe_pending_record_is_kept_and_the_mode_left_for_recovery() {
+    let (_dir, state) = fixture(Duration::from_secs(60)).await;
+    set(&state, MODE_RESTRICTED).await;
+    stop_backend(&state).await;
+    let pending = &state.firewall.paths.pending;
+    fs::set_permissions(pending, fs::Permissions::from_mode(0o644)).unwrap();
+    let before = fs::read(pending).unwrap();
+    assert!(
+        restarted(&state)
+            .roll_back_unconfirmed_at_start(&state.writers)
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(pending).unwrap(), before);
+    assert_eq!(mode(&state), MODE_RESTRICTED);
+}

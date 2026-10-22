@@ -184,6 +184,30 @@ impl FirewallController {
         Ok(())
     }
 
+    /// Roll back a mode change that was never confirmed: the backend stopped
+    /// before its timer ran out, so only the durable record is left. Runs at
+    /// start, before any request, as that timer would have done. A record that
+    /// fails validation stays and keeps requiring recovery.
+    pub async fn roll_back_unconfirmed_at_start(&self, writers: &StateWriters) -> Result<bool> {
+        if !self.paths.pending.try_exists()? {
+            return Ok(false);
+        }
+        let config = writers.configuration()?;
+        let writer = writers.firewall(&config)?;
+        let mut control = self
+            .control
+            .try_lock()
+            .map_err(|_| AppError::Conflict("firewall operation already in progress".into()))?;
+        control.failed = true;
+        let paths = Arc::clone(&self.paths);
+        let previous = writer
+            .blocking(move |_| normalize_mode(&read_pending_at(&paths.pending)?.previous_mode))
+            .await?;
+        self.write_and_apply(&writer, previous, true).await?;
+        control.failed = false;
+        Ok(true)
+    }
+
     pub(crate) async fn force_moderate_mode(
         &self,
         writers: &StateWriters,

@@ -157,6 +157,20 @@ async fn authorize_trial(
     Ok(Some(video))
 }
 
+/// An unconfirmed firewall change left by a stopped backend is rolled back
+/// before serving. The frozen trial never writes, so it never does this.
+async fn roll_back_unconfirmed_firewall(state: &AppState) {
+    match state
+        .firewall
+        .roll_back_unconfirmed_at_start(&state.writers)
+        .await
+    {
+        Ok(true) => warn!("rolled back an unconfirmed firewall mode change"),
+        Ok(false) => {}
+        Err(error) => warn!(%error, "an unconfirmed firewall change still requires recovery"),
+    }
+}
+
 fn install_runtime_update_trust(config: &Config) {
     match install_bundled_update_trust(
         &StateWriters::default(),
@@ -326,7 +340,11 @@ async fn run_http(
     let addr = config.listen_addr()?;
     let state = match &startup {
         Some(startup) => AppState::new_trial(config, startup)?,
-        None => AppState::new(config).await?,
+        None => {
+            let state = AppState::new(config).await?;
+            roll_back_unconfirmed_firewall(&state).await;
+            state
+        }
     };
 
     let loopback = if state.config.needs_dedicated_loopback_listener() {
@@ -362,7 +380,11 @@ async fn run_https(
     };
     let state = match &startup {
         Some(startup) => AppState::new_trial(config, startup)?,
-        None => AppState::new(config).await?,
+        None => {
+            let state = AppState::new(config).await?;
+            roll_back_unconfirmed_firewall(&state).await;
+            state
+        }
     };
 
     let loopback = if state.config.needs_dedicated_loopback_listener() {
