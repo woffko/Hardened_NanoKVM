@@ -1,8 +1,9 @@
 # PicoClaw mutation jobs: protocol decision, implementation in progress
 
 This is the protocol selected for the stopped-mutation handoff. It is not an
-activation or acceptance report. The ordinary model/profile/install/uninstall
-writers, accepted-job producer, new transport and recovery path are not yet migrated.
+activation or acceptance report. A broker-library acceptance producer now exists,
+but ordinary model/profile/install/uninstall writers, new transport, execution
+and recovery paths are not yet migrated.
 The legacy onboarding completion boolean is not a durable job receipt.
 
 ## Current connected reader, fence and factory bootstrap
@@ -20,6 +21,8 @@ missing-state or extra-member evidence refuses admission and is preserved.
 Reads do not initialize, rewrite, settle, resume or prune a job. Producers must
 own Update then Config before taking the store's exclusive lock; this short
 read-side shared lock is not a substitute for their lifetime ownership.
+The temporary read lease explicitly unlocks on drop, so a pre-exec inherited
+description cannot spuriously block the admitted producer's following EX lease.
 
 A separate protected 96-byte `/etc/kvm/picoclaw-enrollment` anchor now records
 Factory, Pending(epoch) or Ready(epoch). Only offline full-image producers seed
@@ -37,6 +40,8 @@ An existing store without its anchor also refuses. A staged anchor, partial
 file, corrupt or foreign member is preserved and fenced, not automatically
 adopted or cleaned. Explicit recovery of ambiguous bootstrap staging remains
 to be implemented. This bootstrap supplies no native closure authority.
+Its owning directory lease explicitly unlocks on all exits before the normal
+read-side fence reopens it; a pre-exec inherited FD cannot prolong that lease.
 
 Only absence of BOTH anchor and store remains legacy preactivation, not an
 enrolled empty store. Future job acceptance must require Ready even in that
@@ -44,12 +49,50 @@ legacy case; old installations still need explicit trusted migration rather
 than factory seeding from an app archive. Raw preservation/recovery must carry
 anchor and store together, and is not implemented by this bootstrap.
 
-There is still NO accepted-job writer, phase-transition API, private payload
-publisher, retirement or job recovery bypass. Existing onboarding does not
-publish these records yet. SIGKILL/root tests exercise bootstrap and synthetic
-job records in disposable fixtures, not durable job acceptance or target power
-cuts. Ordinary unmanaged Pico writers and OS-level H2 isolation remain outside
-this connected cooperative fence.
+Existing onboarding does not publish these records yet. There is still NO
+phase-transition/execution API, retirement or job recovery bypass. Ordinary
+unmanaged Pico writers and OS-level H2 isolation remain outside this connected
+cooperative fence.
+
+## Current retained acceptance producer
+
+`Broker::prepare_picoclaw_submission` transfers Update and Config admission into
+an owned `PicoSubmission`. Its one-shot fixed worker retains those guards, the
+exclusive store lease, source lease and credential-bearing payload through
+errors and host unwind. Poll joins only an already finished worker; final owner
+drop joins before releasing guards. A failed spawn cannot retry that submission.
+The owning broker engine still needs integration so disconnect/shutdown retains
+the submission until settlement; this library API does not supply native closure.
+
+Acceptance requires Ready enrollment and a canonical inactive store with no
+foreign/staged members. It cannot initialize, reset or recover one. A request is
+one of six fixed operations, never a command, path, worker or callback selector.
+Model values use bounded zeroizing buffers without Debug/Serialize. The worker
+binds the actual kernel boot epoch and pinned executing producer image, then
+captures the current config/security pair (including absence) and checked Home
+or nearest existing ancestor. Missing Home is not created. This is only a base
+source snapshot: workspace/generated/install assets, after-Stop revalidation and
+operation-specific bindings are still required before execution.
+
+The fixed immutable `active` intent is published and synced first, then private
+`payload` and `source`, then `.state.next` is synced and renamed over `state`.
+Only final directory sync, reread and identity/inventory checks permit the exact
+accepted ID acknowledgement. Every newly created file is mode 0600; unknown
+write/sync/rename results retain evidence and the durable admission fence. No
+acceptance path mutates a target, stops/restarts Pico, removes evidence, advances
+a phase or clears an accepted job.
+
+The epoch/head/nonce checks reject wraparound, future/stale requests and changed
+payload or Home reuse. An exact retained terminal replay observes its old ID;
+current boot/image/source/runtime need not equal its historical receipt because
+this is observation only, not permission to execute that payload again. Active
+job observation and the correlated private transport are not wired yet.
+
+Disposable namespace/root tests exercise all six actual acceptance requests,
+default/custom absent or present Home, orphan YAML, protected source/store
+rejection, retained owner on fail/spawn/panic, ten publication error boundaries
+and real SIGKILL at five pre/post-state-rename points. They are host process-death
+checks, not physical power cuts, target execution or completed mutation recovery.
 
 ## Authority and scope
 
@@ -109,7 +152,8 @@ Unknown state-publication sync cannot remove the fence. If final fence-unlink
 sync is unknown, either the fence remains and recovery is conservative, or it
 is absent beside an already durable completed state. Recovery may retire the
 exact remaining fence; it must never repeat the mutation from observation.
-This extra intent/finalization publisher is required but not implemented yet.
+The acceptance producer implements initial intent publication only; finalization
+and exact retirement remain required and unimplemented.
 
 Credential-bearing payload and source snapshots stay in protected 0600 files
 and bounded zeroizing buffers. They are not argv, environment, log, Debug or
@@ -143,8 +187,8 @@ observation, recovery or a new boot. A previously running job whose restart was
 suppressed records the distinct runtime result `Suppressed`, not `NotRequested`
 or `Resumed`. This flag is not permission to restart: current runtime admission
 and all settlement checks are still required. The reader checks these record
-shapes, but the production producer and monotonic transition enforcement remain
-unimplemented.
+shapes and the acceptance producer writes the initial permission, but monotonic
+transition enforcement and Stop/revoke acknowledgement remain unimplemented.
 
 Failure before any mutation can become a terminal failed/cancelled receipt only
 after native closure and exact scratch/payload retirement. Once mutation may

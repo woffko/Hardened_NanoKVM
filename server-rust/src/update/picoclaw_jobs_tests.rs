@@ -1,4 +1,16 @@
 use super::*;
+
+#[test]
+fn read_fence_releases_its_description_before_a_following_exclusive_producer() {
+    let root = tempfile::tempdir().unwrap();
+    let lease = ReadLease::acquire(File::open(root.path()).unwrap()).unwrap();
+    let alias = lease.directory.try_clone().unwrap();
+    let producer = File::open(root.path()).unwrap();
+    assert!(flock(&producer, FlockOperation::NonBlockingLockExclusive).is_err());
+    drop(lease);
+    assert!(alias.metadata().unwrap().is_dir());
+    flock(&producer, FlockOperation::NonBlockingLockExclusive).unwrap();
+}
 use crate::update::{operation_lock::ProcessLock, state_writers::StateWriters};
 use std::{
     fs,

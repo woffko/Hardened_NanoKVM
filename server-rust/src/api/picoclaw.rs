@@ -177,7 +177,7 @@ struct PicoSessionLock {
     expires_at: Option<Instant>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ModelConfigUpdateRequest {
     model: String,
     api_base: String,

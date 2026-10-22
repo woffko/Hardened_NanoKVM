@@ -14,6 +14,10 @@ pub(crate) use bootstrap::prepare;
 #[cfg(test)]
 pub(crate) use bootstrap::prepare_fixture;
 
+#[path = "picoclaw_jobs_submit.rs"]
+mod submit;
+pub use submit::{Acceptance, Cursor, JobId, Profile, Request, Submission};
+
 const DIRECTORY: &str = "picoclaw-operations";
 const STATE: &str = "state";
 const MAGIC: &[u8; 8] = b"NKPJOB01";
@@ -335,6 +339,31 @@ impl Snapshot {
     }
 }
 
+struct ReadLease {
+    directory: File,
+}
+
+impl ReadLease {
+    fn acquire(directory: File) -> Result<Self> {
+        flock(&directory, FlockOperation::NonBlockingLockShared).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK {
+                fenced()
+            } else {
+                std::io::Error::from(error).into()
+            }
+        })?;
+        Ok(Self { directory })
+    }
+}
+
+impl Drop for ReadLease {
+    fn drop(&mut self) {
+        // This read-side observation never transfers its lease. A fork alias
+        // must not keep SH held when the admitted producer next opens EX.
+        let _ = flock(&self.directory, FlockOperation::Unlock);
+    }
+}
+
 fn check_parent(parent: &File, uid: u32) -> Result<()> {
     // Callers retain Config serial or WriterActivity EX across this check.
     // A future producer/settler MUST acquire Config before directory EX; the
@@ -372,15 +401,10 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
         return Err(invalid());
     }
     let directory_before = Revision::from(&m);
-    flock(&directory, FlockOperation::NonBlockingLockShared).map_err(|error| {
-        if error == rustix::io::Errno::WOULDBLOCK {
-            fenced()
-        } else {
-            std::io::Error::from(error).into()
-        }
-    })?;
+    let lease = ReadLease::acquire(directory)?;
+    let directory = &lease.directory;
     let mut found = false;
-    for entry in rustix::fs::Dir::read_from(&directory).map_err(std::io::Error::from)? {
+    for entry in rustix::fs::Dir::read_from(directory).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
         match entry.file_name().to_bytes() {
             b"." | b".." => {}
@@ -392,7 +416,7 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     if !found {
         return Err(invalid());
     }
-    let pinned = restore_fs::open_beneath(&directory, STATE, OFlags::PATH)?;
+    let pinned = restore_fs::open_beneath(directory, STATE, OFlags::PATH)?;
     let m = pinned.metadata()?;
     if !m.is_file()
         || m.uid() != uid
@@ -404,7 +428,7 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
         return Err(invalid());
     }
     let before = Revision::from(&m);
-    let mut file = restore_fs::open_beneath(&directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    let mut file = restore_fs::open_beneath(directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
     if Revision::from(&file.metadata()?) != before {
         return Err(invalid());
     }
@@ -412,7 +436,7 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     file.read_exact(bytes.as_mut())?;
     if file.read(&mut [0])? != 0
         || Revision::from(&file.metadata()?) != before
-        || Revision::from(&restore_fs::open_beneath(&directory, STATE, OFlags::PATH)?.metadata()?)
+        || Revision::from(&restore_fs::open_beneath(directory, STATE, OFlags::PATH)?.metadata()?)
             != before
     {
         return Err(invalid());

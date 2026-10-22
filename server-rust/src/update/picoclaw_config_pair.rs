@@ -169,23 +169,30 @@ pub(super) fn read(directory: &Directory) -> Result<RawDocuments> {
 /// Native readers consume canonical files, not Rust's committed intent view.
 /// Directory SH/EX is retained; pending intent refuses without applying it.
 pub(super) fn read_installed(directory: &Directory) -> Result<RawDocuments> {
-    if pending(directory)?.is_some() {
-        return Err(AppError::Conflict(
-            "picoclaw pair requires stopped recovery".into(),
-        ));
-    }
-    let mut current = snapshot(directory)?;
-    if pending(directory)?.is_some() {
-        return Err(AppError::Conflict(
-            "picoclaw pair changed during native read".into(),
-        ));
-    }
+    let mut current = read_source(directory)?;
     Ok(RawDocuments {
         config: current[0]
             .take()
             .ok_or_else(|| AppError::Config("picoclaw config is missing".into()))?,
         security: current[1].take(),
     })
+}
+
+/// Exact present/absent pair snapshot; no interpretation, recovery or mkdir.
+/// Source capture may precede native Stop, so this is not a closure proof.
+pub(super) fn read_source(directory: &Directory) -> Result<[Bytes; 2]> {
+    if pending(directory)?.is_some() {
+        return Err(AppError::Conflict(
+            "picoclaw pair requires stopped recovery".into(),
+        ));
+    }
+    let current = snapshot(directory)?;
+    if pending(directory)?.is_some() {
+        return Err(AppError::Conflict(
+            "picoclaw pair changed during native read".into(),
+        ));
+    }
+    Ok(current)
 }
 
 pub(super) fn recover(directory: &Directory) -> Result<()> {

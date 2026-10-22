@@ -8,6 +8,10 @@ use crate::update::{
 };
 #[path = "journal.rs"]
 mod journal;
+pub use crate::update::picoclaw_config::jobs::{
+    Acceptance as PicoAcceptance, Cursor as PicoCursor, JobId as PicoJobId, Profile as PicoProfile,
+    Request as PicoRequest, Submission as PicoSubmission,
+};
 pub use journal::Error as JournalError;
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 pub(crate) use journal::app_recovery::closed_fixture as app_recovery_closed_fixture;
@@ -61,6 +65,41 @@ pub(crate) fn check_update_admission() -> Result<(), JournalError> {
 }
 
 impl Broker {
+    /// Prepare an owned acceptance worker, not a native closure/execute ticket.
+    /// HTTP/S96 are not wired to this API until their correlated transport moves
+    /// together. The caller retains this owner across disconnects and errors.
+    pub fn prepare_picoclaw_submission(&mut self) -> crate::Result<PicoSubmission> {
+        let admission = self
+            .runtime_permit()
+            .map_err(|_| crate::AppError::Conflict("Pico mutation admission unavailable".into()))?;
+        self.journal.ready().map_err(|_| {
+            crate::AppError::Conflict("Pico native ownership requires settlement".into())
+        })?;
+        self.check_picoclaw_launch().map_err(|_| {
+            crate::AppError::Conflict("Pico application support unavailable".into())
+        })?;
+        let status = self.group.poll()[3];
+        if self.group.uncertainty_latched()
+            || !matches!(status, None | Some(Status::Running | Status::Closed(_)))
+        {
+            return Err(crate::AppError::Conflict(
+                "Pico native state is not stable".into(),
+            ));
+        }
+        let (boot, image) = self
+            .journal
+            .pico_submission_context()
+            .map_err(|_| crate::AppError::Conflict("Pico producer identity unavailable".into()))?;
+        Ok(PicoSubmission::new(
+            admission._configuration,
+            admission._update,
+            &self.group.home,
+            boot,
+            image,
+            status == Some(Status::Running),
+        ))
+    }
+
     /// This SAME executing broker's build, not a newly installed broker file.
     /// Diagnostics only: equal epochs do not supply install/native authority.
     pub fn support_epochs(&self) -> crate::update::support_abi::Epochs {

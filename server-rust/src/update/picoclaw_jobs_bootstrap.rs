@@ -63,7 +63,7 @@ impl Anchor {
     }
 }
 
-fn read_member<const N: usize>(
+pub(super) fn read_member<const N: usize>(
     parent: &File,
     name: &str,
     uid: u32,
@@ -161,6 +161,27 @@ pub(crate) fn prepare_fixture(parent: &File) -> Result<()> {
     prepare_at(parent, nix::unistd::geteuid().as_raw())
 }
 
+struct BootstrapLease {
+    directory: File,
+}
+
+impl BootstrapLease {
+    fn exclusive(directory: File) -> Result<Self> {
+        flock(&directory, FlockOperation::NonBlockingLockExclusive)
+            .map_err(std::io::Error::from)?;
+        Ok(Self { directory })
+    }
+}
+
+impl Drop for BootstrapLease {
+    fn drop(&mut self) {
+        // A fork child can retain the open description until exec. Bootstrap
+        // transfers no authority through this FD: unlock this owner's lease
+        // before the normal read-side fence reopens the same directory.
+        let _ = flock(&self.directory, FlockOperation::Unlock);
+    }
+}
+
 fn prepare_at(parent: &File, uid: u32) -> Result<()> {
     let m = parent.metadata()?;
     if !m.is_dir() || m.uid() != uid || m.mode() & 0o7022 != 0 {
@@ -213,22 +234,23 @@ fn prepare_at(parent: &File, uid: u32) -> Result<()> {
     if m.uid() != uid || m.dev() != parent.metadata()?.dev() || m.mode() & 0o7777 != 0o700 {
         return Err(invalid());
     }
-    flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(std::io::Error::from)?;
+    let lease = BootstrapLease::exclusive(directory)?;
+    let directory = &lease.directory;
     let identity = (m.dev(), m.ino());
-    for entry in rustix::fs::Dir::read_from(&directory).map_err(std::io::Error::from)? {
+    for entry in rustix::fs::Dir::read_from(directory).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
         match entry.file_name().to_bytes() {
             b"." | b".." | b"state" => {}
             _ => return Err(fenced()),
         }
     }
-    if let Some((bytes, _)) = read_member::<BYTES>(&directory, STATE, uid)? {
+    if let Some((bytes, _)) = read_member::<BYTES>(directory, STATE, uid)? {
         if bytes.as_slice() != empty.as_slice() {
             return Err(invalid());
         }
     } else {
         let mut state: File = openat(
-            &directory,
+            directory,
             STATE,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
@@ -241,18 +263,18 @@ fn prepare_at(parent: &File, uid: u32) -> Result<()> {
         checkpoint("state-written");
         state.sync_all()?;
     }
-    restore_fs::open_beneath(&directory, STATE, OFlags::RDONLY)?.sync_all()?;
+    restore_fs::open_beneath(directory, STATE, OFlags::RDONLY)?.sync_all()?;
     directory.sync_all()?;
     // Bind the exact name and empty bytes again before authorizing the store.
     let named = restore_fs::open_beneath(parent, DIRECTORY, OFlags::PATH)?.metadata()?;
-    let (bytes, _) = read_member::<BYTES>(&directory, STATE, uid)?.ok_or_else(invalid)?;
+    let (bytes, _) = read_member::<BYTES>(directory, STATE, uid)?.ok_or_else(invalid)?;
     if (named.dev(), named.ino()) != identity || bytes.as_slice() != empty.as_slice() {
         return Err(invalid());
     }
     #[cfg(test)]
     checkpoint("state-durable");
     publish_anchor(parent, uid, observed, Anchor::Ready(epoch))?;
-    drop(directory);
+    drop(lease);
     check_parent(parent, uid)
 }
 

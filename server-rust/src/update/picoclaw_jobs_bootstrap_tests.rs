@@ -59,6 +59,24 @@ fn factory_enrollment_is_explicit_random_bound_and_idempotent() {
 }
 
 #[test]
+fn bootstrap_lease_drops_its_lock_even_if_a_pre_exec_alias_survives() {
+    let root = tempfile::tempdir().unwrap();
+    put_anchor(root.path(), Anchor::Factory);
+    drop(enroll(root.path()).unwrap());
+    let parent = File::open(root.path()).unwrap();
+    let directory =
+        restore_fs::open_beneath(&parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY).unwrap();
+    let lease = BootstrapLease::exclusive(directory).unwrap();
+    // try_clone models the shared open description held by a fork child before
+    // exec. No unsafe fork or timing/concurrency change is needed for this proof.
+    let alias = lease.directory.try_clone().unwrap();
+    assert!(check_parent(&parent, nix::unistd::geteuid().as_raw()).is_err());
+    drop(lease);
+    assert!(alias.metadata().unwrap().is_dir());
+    check_parent(&parent, nix::unistd::geteuid().as_raw()).unwrap();
+}
+
+#[test]
 fn ready_anchor_never_recreates_lost_or_foreign_store() {
     for fault in ["missing", "epoch", "active", "next", "mode", "anchor-loss"] {
         let root = tempfile::tempdir().unwrap();

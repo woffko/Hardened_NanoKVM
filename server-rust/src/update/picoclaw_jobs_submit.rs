@@ -1,0 +1,274 @@
+//! Retained, fixed-kind acceptance work. No native execution/settlement API.
+use super::*;
+use crate::{
+    native_owner::picoclaw_home::Home,
+    update::{operation_lock::ProcessLock, state_writers::ConfigPermit},
+};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
+};
+
+#[path = "picoclaw_jobs_accept.rs"]
+mod accept;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub epoch: [u8; 16],
+    pub sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobId {
+    pub epoch: [u8; 16],
+    pub sequence: u64,
+    pub nonce: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    Default,
+    Kvm,
+}
+
+// Deliberately no Debug/Clone/Serialize. The secret survives only in owned
+// zeroizing memory and fixed private files, never in argv/env/public status.
+pub enum Request {
+    Onboard,
+    Model {
+        model: Zeroizing<String>,
+        api_base: Zeroizing<String>,
+        api_key: Zeroizing<String>,
+    },
+    Startup,
+    Profile(Profile),
+    Install,
+    Remove,
+}
+
+impl Request {
+    fn kind(&self) -> Kind {
+        match self {
+            Self::Onboard => Kind::Onboard,
+            Self::Model { .. } => Kind::Model,
+            Self::Startup => Kind::Startup,
+            Self::Profile(_) => Kind::Profile,
+            Self::Install => Kind::Install,
+            Self::Remove => Kind::Remove,
+        }
+    }
+
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>> {
+        let fields: [&[u8]; 3] = match self {
+            Self::Model {
+                model,
+                api_base,
+                api_key,
+            } => {
+                if model.trim().is_empty() {
+                    return Err(invalid());
+                }
+                [model.as_bytes(), api_base.as_bytes(), api_key.as_bytes()]
+            }
+            Self::Profile(Profile::Default) => [b"default", b"", b""],
+            Self::Profile(Profile::Kvm) => [b"kvm", b"", b""],
+            _ => [b"", b"", b""],
+        };
+        let total = fields
+            .iter()
+            .try_fold(32usize, |sum, bytes| sum.checked_add(bytes.len()))
+            .ok_or_else(invalid)?;
+        if total > super::super::MAX_FILE_BYTES {
+            return Err(invalid());
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(total));
+        bytes.extend_from_slice(&[0; 32]);
+        bytes[..8].copy_from_slice(b"NKPREQ01");
+        bytes[8] = self.kind() as u8;
+        for (index, field) in fields.into_iter().enumerate() {
+            let offset = 12 + index * 4;
+            bytes[offset..offset + 4].copy_from_slice(&(field.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(field);
+        }
+        Ok(bytes)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acceptance {
+    Idle,
+    Pending,
+    Accepted(JobId),
+    Existing(JobId),
+    Expired,
+    Rejected,
+    RecoveryRequired,
+}
+
+struct Facts {
+    home: PathBuf,
+    home_fingerprint: [u8; 32],
+    boot: [u8; 16],
+    image: File,
+    was_running: bool,
+}
+
+struct Payload {
+    // Store/home leases retire before Config and Update on final owner drop.
+    store: Option<accept::Store>,
+    source: Option<accept::Source>,
+    _configuration: ConfigPermit,
+    _update: ProcessLock,
+    facts: Facts,
+    request: Option<Request>,
+    touched: bool,
+}
+
+enum Worker {
+    Idle,
+    Running(JoinHandle<Acceptance>),
+    Settled(Acceptance),
+}
+
+/// Own across caller disconnect and every filesystem error. Acceptance is NOT
+/// a closure proof or permission to replay/mutate a target. No retry/extraction
+/// or arbitrary worker callback is available. Drop joins before guard release.
+pub struct Submission {
+    worker: Worker,
+    payload: Arc<Mutex<Payload>>,
+    #[cfg(test)]
+    fixture: Option<Fixture>,
+}
+
+#[cfg(test)]
+enum Fixture {
+    Block(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
+    Fail,
+    Panic,
+    SpawnFailure,
+}
+
+impl Submission {
+    pub(crate) fn new(
+        configuration: ConfigPermit,
+        update: ProcessLock,
+        home: &Home,
+        boot: [u8; 16],
+        image: File,
+        was_running: bool,
+    ) -> Self {
+        Self {
+            worker: Worker::Idle,
+            #[cfg(test)]
+            fixture: None,
+            payload: Arc::new(Mutex::new(Payload {
+                store: None,
+                source: None,
+                _configuration: configuration,
+                _update: update,
+                facts: Facts {
+                    home: home.path().to_path_buf(),
+                    home_fingerprint: home.fingerprint(),
+                    boot,
+                    image,
+                    was_running,
+                },
+                request: None,
+                touched: false,
+            })),
+        }
+    }
+
+    /// One fixed acceptance worker, no filesystem wait on the control loop.
+    /// Even a failed spawn consumes this submission: it cannot be silently retried.
+    pub fn submit(&mut self, cursor: Cursor, nonce: [u8; 16], request: Request) -> Result<()> {
+        if !matches!(self.worker, Worker::Idle) {
+            return Err(fenced());
+        }
+        let payload = Arc::get_mut(&mut self.payload)
+            .ok_or_else(invalid)?
+            .get_mut()
+            .map_err(|_| invalid())?;
+        payload.request = Some(request);
+        self.worker = Worker::Settled(Acceptance::Rejected);
+        #[cfg(test)]
+        let fixture = self.fixture.take();
+        #[cfg(test)]
+        if matches!(fixture, Some(Fixture::SpawnFailure)) {
+            return Err(AppError::Internal(
+                "Pico acceptance worker unavailable".into(),
+            ));
+        }
+        let owned = Arc::clone(&self.payload);
+        match thread::Builder::new()
+            .name("pico-job-accept".into())
+            .spawn(move || {
+                let Ok(mut payload) = owned.lock() else {
+                    return Acceptance::RecoveryRequired;
+                };
+                match catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    match fixture {
+                        Some(Fixture::Block(entered, resume)) => {
+                            entered.send(()).map_err(|_| invalid())?;
+                            resume.recv().map_err(|_| invalid())?;
+                        }
+                        Some(Fixture::Fail) => return Err(invalid()),
+                        Some(Fixture::Panic) => panic!("fixture Pico acceptance worker failure"),
+                        Some(Fixture::SpawnFailure) | None => {}
+                    }
+                    accept::perform(&mut payload, cursor, nonce)
+                })) {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(_)) if !payload.touched => Acceptance::Rejected,
+                    _ => Acceptance::RecoveryRequired,
+                }
+            }) {
+            Ok(worker) => {
+                self.worker = Worker::Running(worker);
+                Ok(())
+            }
+            Err(_) => Err(AppError::Internal(
+                "Pico acceptance worker unavailable".into(),
+            )),
+        }
+    }
+
+    pub fn poll(&mut self) -> Acceptance {
+        match &self.worker {
+            Worker::Idle => return Acceptance::Idle,
+            Worker::Settled(status) => return *status,
+            Worker::Running(worker) if !worker.is_finished() => return Acceptance::Pending,
+            Worker::Running(_) => {}
+        }
+        if let Worker::Running(worker) = std::mem::replace(
+            &mut self.worker,
+            Worker::Settled(Acceptance::RecoveryRequired),
+        ) {
+            self.worker = Worker::Settled(worker.join().unwrap_or(Acceptance::RecoveryRequired));
+        }
+        match self.worker {
+            Worker::Settled(status) => status,
+            _ => Acceptance::RecoveryRequired,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "picoclaw_jobs_submit_tests.rs"]
+mod tests;
+
+impl Drop for Submission {
+    fn drop(&mut self) {
+        if let Worker::Running(worker) = std::mem::replace(
+            &mut self.worker,
+            Worker::Settled(Acceptance::RecoveryRequired),
+        ) {
+            let _ = worker.join();
+        }
+        // The last Arc drops only after this join. Error/success does not remove
+        // any active intent, private snapshot or journal member from disk.
+    }
+}

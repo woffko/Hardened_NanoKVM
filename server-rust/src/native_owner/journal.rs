@@ -241,6 +241,29 @@ impl Store {
         self.previous_boot
     }
 
+    /// Pinned executing image and validated kernel epoch, not a client-supplied
+    /// ABI/hash assertion. Hashing is deferred to the retained acceptance worker.
+    pub(super) fn pico_submission_context(&self) -> Result<([u8; 16], File), Error> {
+        self.ready()?;
+        let proc = kernel_proc()?;
+        // This one fixed kernel magic link is intentional. No user path or
+        // generic symlink-following primitive is exported by this operation.
+        let executable: File = rustix::fs::openat(
+            &proc,
+            "self/exe",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| Error::Io)?
+        .into();
+        let mut hash = Sha256::new();
+        hash.update(b"NanoKVM Pico job kernel epoch v1\0");
+        hash.update(self.epoch.0);
+        let full: [u8; 32] = hash.finalize().into();
+        let boot = full[..16].try_into().map_err(|_| Error::Invalid)?;
+        Ok((boot, executable))
+    }
+
     #[cfg(test)]
     pub(super) fn fixture(parent: &File, uid: u32, boot: &str) -> Result<Self, Error> {
         Self::lease(parent, uid, Epoch::parse(boot.as_bytes())?, true)?.admit()
