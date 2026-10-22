@@ -16,7 +16,7 @@ use std::{
 };
 
 fn child(mode: &str, root: &Path) -> ! {
-    if mode != "leaf" {
+    if !matches!(mode, "leaf" | "owned-leaf") {
         fs::write(root.join("leader.pid"), std::process::id().to_string()).unwrap();
     }
     if mode == "fd-check" {
@@ -99,27 +99,38 @@ fn child(mode: &str, root: &Path) -> ! {
     if mode == "failure" {
         std::process::exit(9);
     }
-    if mode == "leaf" {
+    if mode == "leaf" || mode == "owned-leaf" {
         nix::unistd::setsid().unwrap();
+        let script = if mode == "owned-leaf" {
+            // Lifetime belongs to the test/real scope Stop, not a competing
+            // wall-clock expiry while the test is still preparing its input.
+            "trap '' TERM; printf '%s' \"$$\" > \"$1\"; while [ ! -e \"$2\" ]; do sleep 1; done"
+        } else {
+            "trap '' TERM; printf '%s' \"$$\" > \"$1\"; i=0; while [ \"$i\" -lt 10 ]; do sleep 1; i=$((i+1)); done"
+        };
         let error = Command::new("/bin/sh")
-            .args([
-                "-c",
-                "trap '' TERM; printf '%s' \"$$\" > \"$1\"; i=0; while [ \"$i\" -lt 10 ]; do sleep 1; i=$((i+1)); done",
-                "fixture-leaf",
-            ])
+            .args(["-c", script, "fixture-leaf"])
             .arg(root.join("leaf.pid"))
+            .arg(root.join("release-leaf"))
             .env_clear()
             .exec();
         panic!("fixture exec failed: {error}");
     }
-    if mode == "tree" || mode == "parent-exit" {
+    if matches!(mode, "tree" | "owned-tree" | "parent-exit") {
         let mut leaf = Command::new(std::env::current_exe().unwrap());
-        leaf.args(["child", "leaf"])
-            .arg(root)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        leaf.args([
+            "child",
+            if mode == "owned-tree" {
+                "owned-leaf"
+            } else {
+                "leaf"
+            },
+        ])
+        .arg(root)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
         let mut leaf = leaf.spawn().unwrap();
         while !root.join("leaf.pid").exists() {
             std::thread::sleep(Duration::from_millis(2));

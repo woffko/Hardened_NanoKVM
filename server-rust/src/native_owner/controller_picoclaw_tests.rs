@@ -201,3 +201,27 @@ fn invalid_picoclaw_control_proves_runtime_error_closure_only_after_joining_its_
     assert_eq!(drain.poll(), DrainStatus::Drained);
     assert!(drain.all_owner_processes_reaped());
 }
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn explicitly_owned_picoclaw_tree_outlives_legacy_ttl_and_closes_only_on_release() {
+    let root = tempfile::tempdir().unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::Picoclaw, command(root.path(), "owned-tree"))
+        .unwrap();
+    until(|| group.poll()[3] == Some(Status::Running) && root.path().join("leaf.pid").exists());
+    let descendant = leaf(root.path());
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(11) {
+        assert_eq!(group.poll()[3], Some(Status::Running));
+        assert!(!exited(&descendant));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fs::write(root.path().join("release-leaf"), b"release").unwrap();
+    until(|| group.poll()[3] == Some(Status::Closed(Completion::FailedExit)));
+    assert!(exited(&descendant));
+    let mut drain = group.begin_native_drain();
+    assert_eq!(drain.poll(), DrainStatus::Drained);
+    assert!(drain.all_owner_processes_reaped());
+}

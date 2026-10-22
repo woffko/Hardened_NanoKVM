@@ -79,8 +79,49 @@ impl Drop for Child {
     }
 }
 
+// Parent-side last resort after the test child is reaped. Never participates
+// in a Closed assertion: success already joined its tree inside the child.
+struct FixtureLeaves<'a>(&'a Path);
+impl Drop for FixtureLeaves<'_> {
+    fn drop(&mut self) {
+        for role in ["pico", "backend"] {
+            if let Some(fd) = verified_fixture_leaf(&self.0.join(role)) {
+                let _ = rustix::process::pidfd_send_signal(fd, Signal::KILL);
+            }
+        }
+    }
+}
+
+fn verified_fixture_leaf(root: &Path) -> Option<OwnedFd> {
+    let pid = fs::read_to_string(root.join("leaf.pid")).ok()?;
+    let pid = Pid::from_raw(pid.parse().ok()?)?;
+    let path = format!("/proc/{}/cmdline", pid.as_raw_nonzero());
+    let before = fs::read(&path).ok()?;
+    let mut args = before.split(|byte| *byte == 0);
+    if args.next() != Some(b"/bin/sh".as_slice()) || args.next() != Some(b"-c".as_slice()) {
+        return None;
+    }
+    args.next()?;
+    let leaf = root.join("leaf.pid");
+    let release = root.join("release-leaf");
+    if args.next() != Some(b"fixture-leaf".as_slice())
+        || args.next() != Some(leaf.as_os_str().as_encoded_bytes())
+        || args.next() != Some(release.as_os_str().as_encoded_bytes())
+        || args.next() != Some(b"".as_slice())
+        || args.next().is_some()
+    {
+        return None;
+    }
+    let fd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()?;
+    if fs::read(path).ok()? != before {
+        return None;
+    }
+    Some(fd)
+}
+
 fn run(case: &str) {
     let root = root();
+    let _cleanup = FixtureLeaves(root.path());
     let mut child = Child(Some(command(root.path(), case).spawn().unwrap()));
     until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
     let output = child.0.take().unwrap().wait_with_output().unwrap();
@@ -139,6 +180,50 @@ fn malformed_completion_or_modified_private_input_never_becomes_a_closed_job() {
     ] {
         run(case);
     }
+}
+
+#[test]
+fn parent_fixture_cleanup_rejects_foreign_pid_file_and_reaps_only_its_owned_orphan() {
+    let root = root();
+    let cleanup = FixtureLeaves(root.path());
+    let mut child = Child(Some(
+        command(root.path(), "parent-cleanup").spawn().unwrap(),
+    ));
+    until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("fixture-parent-cleanup")
+    );
+    let leaf = pidfd(&root.path().join("pico/leaf.pid"));
+    let exited = || {
+        let mut events = [rustix::event::PollFd::new(
+            &leaf,
+            rustix::event::PollFlags::IN,
+        )];
+        rustix::event::poll(
+            &mut events,
+            Some(&rustix::event::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )
+        .unwrap()
+            == 1
+    };
+    assert!(
+        !exited(),
+        "killed subreaper's leaf needs explicit test cleanup"
+    );
+    let foreign = root.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::copy(root.path().join("pico/leaf.pid"), foreign.join("leaf.pid")).unwrap();
+    assert!(verified_fixture_leaf(&foreign).is_none());
+    assert!(!exited(), "a PID file alone is not cleanup authority");
+    drop(cleanup);
+    until(exited);
 }
 
 #[test]
@@ -280,10 +365,10 @@ fn mutation_child() {
     // interpreter is available. This tests closure, not production launch order.
     if live {
         group
-            .start_command(Role::Backend, scope_command(root, "backend", "tree"))
+            .start_command(Role::Backend, scope_command(root, "backend", "owned-tree"))
             .unwrap();
         group
-            .start_command(Role::Picoclaw, scope_command(root, "pico", "tree"))
+            .start_command(Role::Picoclaw, scope_command(root, "pico", "owned-tree"))
             .unwrap();
         until(|| {
             let status = group.poll();
@@ -378,6 +463,11 @@ fn mutation_child() {
         }
         assert_eq!(mutation.broker.group.poll()[3], Some(Status::Running));
         assert!(record() == before);
+    }
+    if case == "parent-cleanup" {
+        rustix::process::pidfd_send_signal(pico_owner.as_ref().unwrap(), Signal::KILL).unwrap();
+        until(|| mutation.poll() == MutationStatus::RecoveryRequired);
+        panic!("fixture-parent-cleanup");
     }
     let mut blocked = None;
     if ["blocked-stop", "blocked-drop", "late-uncertain"].contains(&case.as_str()) {
@@ -497,6 +587,12 @@ fn mutation_child() {
             assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
         }
         drop(mutation);
+        if case == "bad-receipt" || case == "late-uncertain" {
+            // This test deliberately killed the native subreaper, forfeiting
+            // its closure proof. Clean only our exact orphan leaf afterwards;
+            // this signal cannot manufacture the already-asserted result.
+            let _ = rustix::process::pidfd_send_signal(pico_leaf.as_ref().unwrap(), Signal::KILL);
+        }
     } else {
         if paused.is_some() {
             until(|| matches!(mutation.poll(), MutationStatus::Stopping(_)));
