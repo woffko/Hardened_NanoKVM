@@ -1165,6 +1165,19 @@ fn read_live_record_at(directory: &File, device: u64, uid: u32) -> Result<Record
 
 const LIVE_RECORD_READS: usize = 8;
 
+#[cfg(test)]
+thread_local! {
+    /// Runs between pinning `state` and reopening it, where a concurrent
+    /// publish replaces the record.
+    static AFTER_RECORD_PIN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_record_pin(hook: Option<Box<dyn FnMut()>>) {
+    AFTER_RECORD_PIN.with(|cell| *cell.borrow_mut() = hook);
+}
+
 /// `None` when `state` was replaced during the read: the pinned or reopened
 /// inode was unlinked, or the name now refers to another inode.
 fn read_record_once(directory: &File, device: u64, uid: u32) -> Result<Option<Record>> {
@@ -1185,6 +1198,12 @@ fn read_record_once(directory: &File, device: u64, uid: u32) -> Result<Option<Re
     {
         return Err(SlotError::Unsafe);
     }
+    #[cfg(test)]
+    AFTER_RECORD_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
     let mut file = restore_fs::open_beneath(directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
     let reopened = file.metadata()?;
     if (reopened.dev(), reopened.ino()) != (metadata.dev(), metadata.ino()) || reopened.nlink() == 0

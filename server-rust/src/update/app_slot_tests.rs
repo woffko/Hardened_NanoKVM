@@ -206,51 +206,56 @@ fn fixed_record_roundtrip_and_every_corrupted_byte_is_rejected() {
 
 #[test]
 fn a_record_republished_during_a_status_read_is_read_again_not_refused() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::{cell::Cell, rc::Rc};
     let fixture = Fixture::new(Phase::Prepared, Position::Prepared);
     let bytes = fixture.record.encode().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let write = |name: &str| {
-        let path = dir.path().join(name);
-        fs::write(&path, bytes).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        path
+    // As `publish` does: a fresh immutable record renamed over `state`.
+    let publish = {
+        let next = dir.path().join(".state-next");
+        let state = dir.path().join(STATE);
+        move || {
+            fs::write(&next, bytes).unwrap();
+            fs::set_permissions(&next, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&next, &state).unwrap();
+        }
     };
-    write(STATE);
+    publish();
     let directory = File::open(dir.path()).unwrap();
     let device = directory.metadata().unwrap().dev();
     let uid = nix::unistd::geteuid().as_raw();
-    let done = Arc::new(AtomicBool::new(false));
-    // A publisher renames 100 fresh records over `state`, as `publish` does,
-    // 5 ms apart: far more often than an install ever publishes.
-    let publisher = std::thread::spawn({
-        let done = Arc::clone(&done);
-        let next = write(".state-next");
-        let state = dir.path().join(STATE);
-        let bytes = bytes.to_vec();
-        move || {
-            for _ in 0..100 {
-                fs::write(&next, &bytes).unwrap();
-                fs::set_permissions(&next, fs::Permissions::from_mode(0o600)).unwrap();
-                fs::rename(&next, &state).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(5));
+    // The first `times` attempts find `state` republished after the pin.
+    let republish = |times: usize| {
+        let left = Rc::new(Cell::new(times));
+        let publish = publish.clone();
+        after_record_pin(Some(Box::new(move || {
+            if left.get() > 0 {
+                left.set(left.get() - 1);
+                publish();
             }
-            done.store(true, Ordering::Relaxed);
-        }
-    });
-    let mut reads = 0_usize;
-    while !done.load(Ordering::Relaxed) {
-        match read_live_record_at(&directory, device, uid) {
-            Ok(record) => assert!(record == fixture.record),
-            Err(error) => panic!("a republished record was refused: {error:?}"),
-        }
-        reads += 1;
+        })));
+    };
+    for times in [1, LIVE_RECORD_READS - 1] {
+        republish(times);
+        let read = read_live_record_at(&directory, device, uid);
+        assert!(
+            matches!(read, Ok(record) if record == fixture.record),
+            "refused after {times} republished"
+        );
     }
-    publisher.join().unwrap();
-    assert!(reads > 100, "{reads} reads");
+    // The bound holds when every attempt finds a newer record.
+    republish(LIVE_RECORD_READS);
+    assert!(matches!(
+        read_live_record_at(&directory, device, uid),
+        Err(SlotError::Unsafe)
+    ));
+    // A reader under the store lock never expects a publish.
+    republish(1);
+    assert!(matches!(
+        read_record_at(&directory, device, uid),
+        Err(SlotError::Unsafe)
+    ));
+    after_record_pin(None);
 }
 
 #[test]
