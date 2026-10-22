@@ -1,11 +1,16 @@
 # PicoClaw mutation jobs: protocol decision, implementation in progress
 
 This is the protocol selected for the stopped-mutation handoff. It is not an
-activation or acceptance report. Broker-library acceptance, explicit Stop/Closed
-publication, the Startup executor and its prior-boot settlement now exist, but
-ordinary model/profile/install/uninstall writers, new transport, the other
-executors and same-boot recovery are not yet migrated.
-The legacy onboarding completion boolean is not a durable job receipt.
+activation or acceptance report. These now exist:
+
+- broker-library acceptance and explicit Stop/Closed publication;
+- all six executors (onboarding, model, startup defaults, profile, install and
+  removal), each with its prior-boot settlement;
+- the private job transport, used by every backend caller.
+
+Not yet migrated: S96 `onboard-picoclaw`, which still drives the older control
+frame, and same-boot recovery. The legacy onboarding completion boolean is not
+a durable job receipt.
 
 ## Current connected reader, fence and factory bootstrap
 
@@ -50,10 +55,10 @@ legacy case; old installations still need explicit trusted migration rather
 than factory seeding from an app archive. Raw preservation/recovery must carry
 anchor and store together, and is not implemented by this bootstrap.
 
-Existing onboarding does not publish these records yet. There is still NO
-target-execution API, retirement or job recovery bypass. Ordinary
-unmanaged Pico writers and OS-level H2 isolation remain outside this connected
-cooperative fence.
+The backend's onboarding publishes these records as an Onboard job; S96
+`onboard-picoclaw` does not yet. There is still NO target-execution API,
+retirement or job recovery bypass. Ordinary unmanaged Pico writers and
+OS-level H2 isolation remain outside this connected cooperative fence.
 
 ## Current retained acceptance producer
 
@@ -253,8 +258,8 @@ Chroot fixtures cover:
 - injected failures after Applying, after the credential, after the pair and
   after Committed. Each keeps the fence with its exact partial state.
 
-Settlement after a reboot is described next. Same-boot recovery, the other
-five executors and the transport/API/S96 wiring are not implemented yet.
+Settlement after a reboot is described in Current prior-boot settlement.
+Same-boot recovery is not implemented.
 
 ## Current Model settlement
 
@@ -725,20 +730,25 @@ Startup job, early boot of a later kernel performs that checked settlement
 
 ## Onboarding settlement
 
-The scratch directory is created only after durable acceptance and bound to the
-job by exact directory/file identities and a bounded manifest. Foreign scratch
-with the same name is preserved/refused. The completed one-shot is imported
-only after native closure; all generated-asset collisions are preflighted,
-existing user files preserved and the credential pair published last.
+The scratch directory is created only after a durable Applying. It is bound to
+the job by its marker and side name, as described in Current Onboard
+settlement; no manifest of file identities is recorded. Foreign scratch with
+the fixed name is preserved and refused. The completed one-shot is imported
+only after native closure. All generated-asset collisions are preflighted,
+existing user files are preserved and the credential pair is published last.
 
-The job records destination absence/identity and each owned publication before
-progress can be acknowledged. Recovery verifies the exact manifest, scratch,
-destination identities and pair-local journal under Update/Config admission.
-It settles the supported prefix or retains an explicit recovery-required fence;
-it never adopts arbitrary scratch or recursively deletes an unknown tree.
-Scratch retirement is its own checked durable phase after the complete import.
-An existing config pair does not by itself prove that scratch/job settlement
-has finished.
+The job does not record each owned publication. Recovery under Update/Config
+admission settles the pair-local journal, then decides by a durable Committed
+phase or the published pair. Because the pair is published last, its presence
+means the import completed. A partial import prefix without the pair is not
+rolled back. It stays in Home, and a later onboarding treats it as existing
+files: generated assets must match exactly and user files are preserved.
+Recovery never adopts arbitrary scratch or recursively deletes an unknown
+tree.
+
+Scratch retirement follows the durable Committed phase, and a later boot
+repeats it for whatever remains of this job's trees. An existing config pair
+therefore does not by itself prove that scratch/job settlement has finished.
 
 Fresh-boot recovery first proves no prior native scope can survive, then takes
 the same writer barriers and operation-specific recovery authority. Same-boot
@@ -747,9 +757,9 @@ does not replay the upstream onboarding command or an unknown accepted payload.
 
 ## Integration and acceptance still required
 
-The private bounded SEQPACKET request/result transport now carries the Startup
-job for its backend callers; the remaining API and S96 callers must migrate
-with their executors, with exact helper/ABI bindings. No mutation opcode
+The private bounded SEQPACKET request/result transport now carries all six
+jobs for their backend callers. S96 `onboard-picoclaw` must still migrate,
+with exact helper/ABI bindings. No mutation opcode
 is added to the old 48-byte service frame as an interim arbitrary-command path.
 The development raw-update barrier and unsupported support transition stay shut.
 
