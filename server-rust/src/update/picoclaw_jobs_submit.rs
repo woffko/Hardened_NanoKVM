@@ -113,7 +113,7 @@ struct Facts {
     home_fingerprint: [u8; 32],
     boot: [u8; 16],
     image: File,
-    was_running: bool,
+    running_generation: Option<super::super::Generation>,
 }
 
 struct Payload {
@@ -187,7 +187,7 @@ impl Submission {
         home: &Home,
         boot: [u8; 16],
         image: File,
-        was_running: bool,
+        running_generation: Option<super::super::Generation>,
     ) -> Self {
         Self {
             worker: Worker::Idle,
@@ -204,7 +204,7 @@ impl Submission {
                     home_fingerprint: home.fingerprint(),
                     boot,
                     image,
-                    was_running,
+                    running_generation,
                 },
                 request: None,
                 touched: false,

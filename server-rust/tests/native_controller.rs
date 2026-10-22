@@ -5,6 +5,8 @@ pub mod app_trial_wire;
 
 #[path = "../src/native_owner/controller.rs"]
 mod controller;
+#[path = "../src/picoclaw_generation.rs"]
+mod picoclaw_generation;
 #[path = "../src/native_owner/picoclaw_home.rs"]
 pub mod picoclaw_home;
 

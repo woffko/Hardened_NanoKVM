@@ -155,6 +155,11 @@ fn failed_and_runtime_error_receipts_prove_closure_without_claiming_task_success
 }
 
 #[test]
+fn running_scope_without_owned_launch_generation_refuses_mutation_without_stop_or_publication() {
+    run("unbound");
+}
+
+#[test]
 fn blocked_or_failed_stop_work_retains_broker_and_late_success_cannot_clear_uncertainty() {
     for case in [
         "blocked-stop",
@@ -367,9 +372,18 @@ fn mutation_child() {
         group
             .start_command(Role::Backend, scope_command(root, "backend", "owned-tree"))
             .unwrap();
-        group
-            .start_command(Role::Picoclaw, scope_command(root, "pico", "owned-tree"))
-            .unwrap();
+        if case == "unbound" {
+            group
+                .start_command(Role::Picoclaw, scope_command(root, "pico", "owned-tree"))
+                .unwrap();
+        } else {
+            group
+                .start_picoclaw(
+                    scope_command(root, "pico", "owned-tree"),
+                    crate::update::picoclaw_config::Generation::fixture([0x31; 32]),
+                )
+                .unwrap();
+        }
         until(|| {
             let status = group.poll();
             status[2] == Some(Status::Running)
@@ -399,6 +413,27 @@ fn mutation_child() {
     if live {
         broker.journal.begin().unwrap();
         broker.group = group;
+    }
+    if case == "unbound" {
+        broker = match broker.begin_picoclaw_mutation() {
+            MutationAdmission::Refused(broker) => broker,
+            MutationAdmission::Owned(_) => panic!("unbound live scope must not authorize mutation"),
+        };
+        assert_eq!(broker.group.poll()[3], Some(Status::Running));
+        assert!(broker.group.picoclaw_generation().is_none());
+        assert!(record() == initial);
+        assert!(!Path::new("/etc/kvm/picoclaw-operations/source").exists());
+        drop(ProcessLock::acquire().unwrap());
+        drop(StateWriters::default().configuration().unwrap());
+        let admission = broker.runtime_permit().unwrap();
+        let crate::native_owner::broker::Shutdown::Draining(mut drain) = broker.shutdown(admission)
+        else {
+            panic!("owned test cleanup was refused");
+        };
+        until(|| drain.poll().unwrap() == crate::native_owner::controller::DrainStatus::Drained);
+        settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
+        println!("pico-mutation-checked");
+        return;
     }
     if case == "refused" {
         let held = ProcessLock::acquire().unwrap();
@@ -448,6 +483,15 @@ fn mutation_child() {
         until(|| matches!(mutation.poll(), MutationStatus::Accepted(_)));
     }
     let before = record();
+    let source = fs::read("/etc/kvm/picoclaw-operations/source").unwrap();
+    assert_eq!(&source[..8], b"NKPSRC02");
+    assert_eq!(source[11], u8::from(live));
+    assert_eq!(&source[96..128], if live { &[0x31; 32] } else { &[0; 32] });
+    let mut digest = sha2::Sha256::new();
+    use sha2::Digest as _;
+    digest.update(b"NanoKVM Pico source v2\0");
+    digest.update(&source);
+    assert_eq!(&before[128 + 136..128 + 168], digest.finalize().as_slice());
     assert_eq!(
         before[128 + 169],
         if case == "stop-during-accept" { 3 } else { 1 }

@@ -134,10 +134,16 @@ impl Source {
         }
         let mut bytes = Zeroizing::new(Vec::with_capacity(size));
         bytes.extend_from_slice(&[0; 128]);
-        bytes[..8].copy_from_slice(b"NKPSRC01");
+        // Private source v2 additionally binds the SAME owned Pico launch.
+        // A v1 source is not silently reinterpreted as carrying this proof.
+        bytes[..8].copy_from_slice(b"NKPSRC02");
         bytes[8] = u8::from(present);
         bytes[9] = u8::from(pair[0].is_some());
         bytes[10] = u8::from(pair[1].is_some());
+        bytes[11] = u8::from(facts.running_generation.is_some());
+        if let Some(generation) = facts.running_generation {
+            bytes[96..128].copy_from_slice(generation.private_bytes());
+        }
         bytes[12..16].copy_from_slice(&depth.to_le_bytes());
         bytes[16..24].copy_from_slice(&before.dev().to_le_bytes());
         bytes[24..32].copy_from_slice(&before.ino().to_le_bytes());
@@ -450,11 +456,11 @@ pub(super) fn perform(
         home: payload.facts.home_fingerprint,
         support,
         request: request_hash,
-        source: private_digest(b"NanoKVM Pico source v1\0", source.bytes.as_slice()),
+        source: private_digest(b"NanoKVM Pico source v2\0", source.bytes.as_slice()),
         kind,
         phase: Phase::Accepted,
-        was_running: payload.facts.was_running,
-        resume_allowed: payload.facts.was_running && kind != Kind::Remove,
+        was_running: payload.facts.running_generation.is_some(),
+        resume_allowed: payload.facts.running_generation.is_some() && kind != Kind::Remove,
         uncertain: false,
         outcome: Outcome::Pending,
         runtime: Runtime::Pending,

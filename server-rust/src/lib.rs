@@ -7,6 +7,7 @@ pub mod error;
 pub mod ffi;
 pub mod http;
 pub mod native_owner;
+mod picoclaw_generation;
 pub mod security;
 pub mod state;
 pub mod system;

@@ -10,6 +10,7 @@ use std::{
 
 use super::picoclaw_home::Home;
 pub use crate::app_trial_wire as trial_wire;
+use crate::picoclaw_generation::Generation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -130,6 +131,7 @@ struct Cell {
     invalid: bool,
     guarded_eof: bool,
     trial: Option<TrialControl>,
+    pico_generation: Option<Generation>,
 }
 
 struct TrialControl {
@@ -204,6 +206,7 @@ impl Cell {
             invalid: false,
             guarded_eof: role == Role::Backend,
             trial,
+            pico_generation: None,
         })
     }
 
@@ -222,6 +225,7 @@ impl Cell {
 
     fn stop(&mut self) {
         self.stop_requested = true;
+        self.pico_generation = None;
         if self.stop_sent || self.eof || self.exit.is_some() {
             return;
         }
@@ -332,11 +336,13 @@ impl Cell {
             let _ = self.control.shutdown(Shutdown::Write);
         }
         if self.invalid || (self.eof && (self.done_prefix || self.completion.is_none())) {
+            self.pico_generation = None;
             return Status::Uncertain;
         }
         if let Some(exit) = self.exit
             && self.eof
         {
+            self.pico_generation = None;
             return match self.completion {
                 Some(done) if done.matches(exit) => Status::Closed(done),
                 _ => Status::Uncertain,
@@ -392,7 +398,33 @@ impl Group {
     }
 
     pub(super) fn start_command(&mut self, role: Role, command: Command) -> Result<(), StartError> {
-        self.start_kind(role, command, None)
+        self.start_kind(role, command, None, None)
+    }
+
+    pub(super) fn start_picoclaw(
+        &mut self,
+        command: Command,
+        generation: Generation,
+    ) -> Result<(), StartError> {
+        self.start_kind(Role::Picoclaw, command, None, Some(generation))
+    }
+
+    /// Exact owned launch association, not health/closure or a fresh file read.
+    /// No hidden poll: callers separately observe the SAME Group's status.
+    pub(super) fn picoclaw_generation(&self) -> Option<Generation> {
+        let cell = self.cells[Role::Picoclaw.index()].as_ref()?;
+        if self.uncertain
+            || cell.invalid
+            || cell.eof
+            || cell.exit.is_some()
+            || cell.stop_requested
+            || cell.done_prefix
+            || cell.completion.is_some()
+        {
+            None
+        } else {
+            cell.pico_generation
+        }
     }
 
     pub(super) fn start_trial(
@@ -400,7 +432,7 @@ impl Group {
         command: Command,
         transaction: [u8; 16],
     ) -> Result<(), StartError> {
-        self.start_kind(Role::Backend, command, Some(transaction))
+        self.start_kind(Role::Backend, command, Some(transaction), None)
     }
 
     fn start_kind(
@@ -408,7 +440,9 @@ impl Group {
         role: Role,
         command: Command,
         transaction: Option<[u8; 16]>,
+        pico_generation: Option<Generation>,
     ) -> Result<(), StartError> {
+        debug_assert!(pico_generation.is_none() || role == Role::Picoclaw);
         if self.ownership_uncertain() {
             return Err(StartError::UncertainOwnership);
         }
@@ -418,13 +452,15 @@ impl Group {
         {
             return Err(StartError::AlreadyOwned);
         }
-        self.cells[role.index()] = Some(
-            match transaction {
-                Some(transaction) => Cell::spawn_kind(command, role, Some(transaction)),
-                None => Cell::spawn(command, role),
-            }
-            .map_err(StartError::Spawn)?,
-        );
+        let mut cell = match transaction {
+            Some(transaction) => Cell::spawn_kind(command, role, Some(transaction)),
+            None => Cell::spawn(command, role),
+        }
+        .map_err(StartError::Spawn)?;
+        // Bind only the newly created cell; failed/rejected starts cannot
+        // overwrite the provenance of an earlier still-owned launch.
+        cell.pico_generation = pico_generation;
+        self.cells[role.index()] = Some(cell);
         Ok(())
     }
 
@@ -795,6 +831,7 @@ mod tests {
             invalid: false,
             guarded_eof: false,
             trial: None,
+            pico_generation: None,
         };
         peer.write_all(b"RD\x01").unwrap();
         assert_eq!(cell.poll(), Status::Running);

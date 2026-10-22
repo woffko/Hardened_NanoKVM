@@ -7,7 +7,6 @@ use rustix::fs::{
     AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, mkdirat, openat2, renameat, renameat_with,
     unlinkat,
 };
-use sha2::{Digest, Sha256};
 use std::{
     fs::{File, Metadata},
     io::{Read, Write},
@@ -305,28 +304,14 @@ pub(crate) struct RawDocuments {
     pub security: Option<Zeroizing<Vec<u8>>>,
 }
 
-/// In-memory identity of the exact coherent credential-bearing pair. Never
-/// print/serialize it or treat it as proof that an external writer is stopped.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Generation([u8; 32]);
+pub(crate) use crate::picoclaw_generation::Generation;
 
 impl Generation {
     fn from_documents(documents: &RawDocuments) -> Self {
-        let mut hash = Sha256::new();
-        hash.update(b"NanoKVM picoclaw configuration generation v1\0");
-        hash.update((documents.config.len() as u64).to_le_bytes());
-        hash.update(documents.config.as_slice());
-        hash.update([u8::from(documents.security.is_some())]);
-        if let Some(security) = &documents.security {
-            hash.update((security.len() as u64).to_le_bytes());
-            hash.update(security.as_slice());
-        }
-        Self(hash.finalize().into())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fixture(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self::from_pair(
+            documents.config.as_slice(),
+            documents.security.as_ref().map(|bytes| bytes.as_slice()),
+        )
     }
 }
 
@@ -437,8 +422,8 @@ mod generation_tests {
         };
         let first = Generation::from_documents(&documents);
         assert_eq!(
-            first.0,
-            [
+            first.private_bytes(),
+            &[
                 0x8e, 0x61, 0xbc, 0xe7, 0x2a, 0x35, 0x54, 0xe6, 0x3a, 0xe3, 0x58, 0x1f, 0x31, 0xbf,
                 0x6c, 0x23, 0x76, 0xfb, 0xf0, 0x68, 0x9d, 0x09, 0x02, 0xb8, 0xd6, 0x47, 0x99, 0xa5,
                 0xc8, 0xe3, 0xf6, 0x10,

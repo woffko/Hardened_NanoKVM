@@ -780,6 +780,31 @@ fn fixed_ensure_binds_generation_without_adoption_or_implicit_restart() {
 }
 
 #[test]
+fn launch_generation_follows_same_broker_into_a_new_engine_without_adoption_or_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = configured(root.path());
+    assert_eq!(call(&mut engine, Operation::EnsurePicoclaw).code, Code::Ok);
+    ready(&mut engine);
+    let original = fs::read(root.path().join("picoclaw")).unwrap();
+    let Some(Owner::Running(broker)) = engine.owner.take() else {
+        panic!("running fixture broker absent");
+    };
+    drop(engine);
+    let mut engine = Engine::new(broker);
+    engine.fixture = Some(root.path().to_path_buf());
+    assert_eq!(call(&mut engine, Operation::EnsurePicoclaw).code, Code::Ok);
+    assert_eq!(call(&mut engine, Operation::PicoclawRunning).code, Code::Ok);
+    assert_eq!(fs::read(root.path().join("picoclaw")).unwrap(), original);
+    fs::write(root.path().join("pico-generation"), [2; 32]).unwrap();
+    assert_eq!(
+        call(&mut engine, Operation::EnsurePicoclaw).code,
+        Code::Invalid
+    );
+    assert_eq!(fs::read(root.path().join("picoclaw")).unwrap(), original);
+    close(engine);
+}
+
+#[test]
 fn owned_stop_joins_with_config_held_and_retains_update_after_caller_loss() {
     let root = tempfile::tempdir().unwrap();
     let mut engine = configured(root.path());

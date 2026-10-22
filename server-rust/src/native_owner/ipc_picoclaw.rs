@@ -57,7 +57,6 @@ impl Engine {
             }
         }
         if matches!(self.picoclaw_status, None | Some(Status::Closed(_))) {
-            self.picoclaw_generation = None;
             // Only this proven closed owned scope releases Stop's UpdateEX.
             self.picoclaw_stop = None;
         }
@@ -112,7 +111,7 @@ impl Engine {
         if !stopped {
             // No restart/adoption on configuration mismatch. A separate Stop
             // and proven join must precede preparing a different pair.
-            return if self.picoclaw_generation == Some(generation) {
+            return if broker.group.picoclaw_generation() == Some(generation) {
                 Code::Ok
             } else {
                 Code::Invalid
@@ -121,7 +120,6 @@ impl Engine {
         let command = self.command(broker, Role::Picoclaw);
         match broker.start_picoclaw(command, &admission, generation) {
             Ok(()) => {
-                self.picoclaw_generation = Some(generation);
                 self.picoclaw_status = broker.group.poll()[3];
                 Code::Ok
             }
@@ -206,7 +204,6 @@ impl Engine {
         let command = crate::native_owner::controller::picoclaw_onboard_command(&broker.group.home);
         match broker.start_picoclaw_onboard(command, &admission) {
             Ok(()) => {
-                self.picoclaw_generation = None;
                 self.picoclaw_onboard = Some(Onboard {
                     work: ImportWork::new(admission, stage),
                     deadline: Instant::now() + Duration::from_secs(60),
@@ -253,7 +250,9 @@ impl Engine {
         let code = match op {
             Operation::PicoclawRunning => {
                 if self.picoclaw_status == Some(Status::Running)
-                    && self.picoclaw_generation.is_some()
+                    && self.owner.as_ref().is_some_and(|owner| {
+                        matches!(owner, Owner::Running(broker) if broker.group.picoclaw_generation().is_some())
+                    })
                     && self.picoclaw_stop.is_none()
                     && self.picoclaw_onboard.is_none()
                 {

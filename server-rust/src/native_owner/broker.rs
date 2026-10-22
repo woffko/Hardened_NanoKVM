@@ -101,6 +101,13 @@ impl Broker {
                 "Pico native state is not stable".into(),
             ));
         }
+        let running_generation = if status == Some(Status::Running) {
+            Some(self.group.picoclaw_generation().ok_or_else(|| {
+                crate::AppError::Conflict("Pico launch generation is not owned".into())
+            })?)
+        } else {
+            None
+        };
         let (boot, image) = self
             .journal
             .pico_submission_context()
@@ -111,7 +118,7 @@ impl Broker {
             &self.group.home,
             boot,
             image,
-            status == Some(Status::Running),
+            running_generation,
         ))
     }
 
@@ -224,11 +231,15 @@ impl Broker {
         &mut self,
         command: std::process::Command,
         _admission: &RuntimePermit,
-        _generation: crate::update::picoclaw_config::Generation,
+        generation: crate::update::picoclaw_config::Generation,
     ) -> Result<(), StartFailure> {
         self.check_picoclaw_launch()
             .map_err(StartFailure::Journal)?;
-        self.launch(Role::Picoclaw, command)
+        // Active remains durable before spawn, exactly as for other roles.
+        self.journal.begin().map_err(StartFailure::Journal)?;
+        self.group
+            .start_picoclaw(command, generation)
+            .map_err(StartFailure::Scope)
     }
 
     fn start_picoclaw_onboard(

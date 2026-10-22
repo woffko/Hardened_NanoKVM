@@ -604,6 +604,9 @@ fn private_submit_child() {
             record.was_running && record.kind != Kind::Remove
         );
         let source = fs::read(Path::new("/etc/kvm").join(DIRECTORY).join("source")).unwrap();
+        assert_eq!(&source[..8], b"NKPSRC02");
+        assert_eq!(source[11], 0, "an absent scope has no launch association");
+        assert_eq!(&source[96..128], &[0; 32]);
         assert_eq!(source[8], u8::from(!case.ends_with(":absent")));
         assert_eq!(
             &source[128..128 + home_path.as_os_str().len()],

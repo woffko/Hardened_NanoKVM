@@ -75,6 +75,24 @@ or nearest existing ancestor. Missing Home is not created. This is only a base
 source snapshot: workspace/generated/install assets, after-Stop revalidation and
 operation-specific bindings are still required before execution.
 
+The running configuration generation is attached to the exact owned Pico
+process cell, not to a separately reconstructed engine. Moving that same broker
+retains the association; a failed/rejected launch cannot replace it. Stop,
+completion or uncertain ownership makes it unavailable, and a new unbound scope
+cannot inherit its predecessor's value. This association is not a readiness or
+closure proof: acceptance separately polls the same Group and requires Running
+plus its bound generation, or a proven absent/Closed scope. A Running scope
+without that association is refused without stopping it or publishing a job.
+
+The private source snapshot is now explicitly `NKPSRC02`, with a v2 digest
+domain and a presence bit plus the exact 32-byte launch generation. The public
+`NKPJOB01` record layout is unchanged; `was_running` and initial resume intent
+are derived from the captured association. Version 1 source files are not
+reinterpreted or adopted: active/foreign state remains fenced. No source decoder,
+old-source migration, operation executor or recovery authority is supplied by
+this format change. These private values remain credential-bearing material,
+not public status fields.
+
 The fixed immutable `active` intent is published and synced first, then private
 `payload` and `source`, then `.state.next` is synced and renamed over `state`.
 Only final directory sync, reread and identity/inventory checks permit the exact

@@ -377,7 +377,6 @@ struct Engine {
     backend_retry: Instant,
     backend_restart: Option<BackendRestart>,
     picoclaw_status: Option<Status>,
-    picoclaw_generation: Option<crate::update::picoclaw_config::Generation>,
     // Retained until receipt + owner reap + EOF, even if the caller disconnects.
     picoclaw_stop: Option<crate::update::operation_lock::ProcessLock>,
     picoclaw_onboard: Option<picoclaw::Onboard>,
@@ -434,7 +433,6 @@ impl Engine {
             backend_retry: Instant::now(),
             backend_restart: None,
             picoclaw_status: None,
-            picoclaw_generation: None,
             picoclaw_stop: None,
             picoclaw_onboard: None,
             picoclaw_onboard_result: None,

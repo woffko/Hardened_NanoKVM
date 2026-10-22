@@ -139,8 +139,11 @@ fn optional_pico_loss_latches_uncertainty_and_never_becomes_an_empty_drain() {
     // A child that is not an owner exits without the mandatory D receipt.
     let command = Command::new("/bin/true");
     let mut group = Group::default();
-    group.start_command(Role::Picoclaw, command).unwrap();
+    group
+        .start_picoclaw(command, Generation::fixture([1; 32]))
+        .unwrap();
     until(|| group.poll()[3] == Some(Status::Uncertain));
+    assert!(group.picoclaw_generation().is_none());
     assert!(matches!(
         group.start_command(Role::Hwmon, Command::new("/bin/true")),
         Err(StartError::UncertainOwnership)
@@ -160,10 +163,10 @@ fn selective_pico_stop_joins_its_real_tree_without_stopping_a_real_backend_tree(
     fs::create_dir(&pico).unwrap();
     let mut group = Group::default();
     group
-        .start_command(Role::Backend, command(&backend, "tree"))
+        .start_command(Role::Backend, command(&backend, "owned-tree"))
         .unwrap();
     group
-        .start_command(Role::Picoclaw, command(&pico, "tree"))
+        .start_picoclaw(command(&pico, "owned-tree"), Generation::fixture([1; 32]))
         .unwrap();
     until(|| {
         let states = group.poll();
@@ -171,15 +174,63 @@ fn selective_pico_stop_joins_its_real_tree_without_stopping_a_real_backend_tree(
     });
     let backend_leaf = leaf(&backend);
     let pico_leaf = leaf(&pico);
+    let generation = Generation::fixture([1; 32]);
+    assert!(group.picoclaw_generation() == Some(generation));
+    assert!(matches!(
+        group.start_picoclaw(
+            Command::new("/definitely-absent-fixture-owner"),
+            Generation::fixture([2; 32])
+        ),
+        Err(StartError::AlreadyOwned)
+    ));
+    assert!(group.picoclaw_generation() == Some(generation));
+    assert!(!exited(&pico_leaf));
     group.stop_picoclaw();
+    assert!(group.picoclaw_generation().is_none());
     until(|| matches!(group.poll()[3], Some(Status::Closed(Completion::Stopped))));
     assert!(exited(&pico_leaf));
     assert!(!exited(&backend_leaf));
     assert_eq!(group.poll()[2], Some(Status::Running));
+    assert!(matches!(
+        group.start_picoclaw(
+            Command::new("/definitely-absent-fixture-owner"),
+            Generation::fixture([2; 32])
+        ),
+        Err(StartError::Spawn(_))
+    ));
+    assert!(group.picoclaw_generation().is_none());
     let mut drain = group.begin_drain();
     until(|| drain.poll() == DrainStatus::Drained);
     assert!(exited(&backend_leaf));
     assert!(drain.all_owner_processes_reaped());
+}
+
+#[test]
+fn replacing_a_closed_cell_with_an_unbound_scope_never_inherits_its_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let next = root.path().join("next");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&next).unwrap();
+    let mut group = Group::default();
+    group
+        .start_picoclaw(command(&first, "owned-tree"), Generation::fixture([1; 32]))
+        .unwrap();
+    until(|| group.poll()[3] == Some(Status::Running));
+    let first_leaf = leaf(&first);
+    assert!(group.picoclaw_generation().is_some());
+    group.stop_picoclaw();
+    until(|| matches!(group.poll()[3], Some(Status::Closed(_))));
+    assert!(exited(&first_leaf));
+    group
+        .start_command(Role::Picoclaw, command(&next, "owned-tree"))
+        .unwrap();
+    until(|| group.poll()[3] == Some(Status::Running));
+    let next_leaf = leaf(&next);
+    assert!(group.picoclaw_generation().is_none());
+    group.stop_picoclaw();
+    until(|| matches!(group.poll()[3], Some(Status::Closed(_))));
+    assert!(exited(&next_leaf));
 }
 
 #[cfg(feature = "sandbox-test-fixture")]
