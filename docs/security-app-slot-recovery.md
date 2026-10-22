@@ -1076,6 +1076,18 @@ daemon-driven trial/commit/retirement.
 `Session::start_trial` requires canonical Published state, the exact accepted
 transaction/layout and proven closure of all prior scopes. It can launch only
 the fixed owner `backend-trial` role and moves ownership into `TrialSession`.
+
+The support check before the trial runs on its own fixed joined worker
+(`app-trial-check`), like publication, commit and rollback. It verifies the
+published support namespace and syncs `application-support` and `etc/kvm`,
+which a loaded host or slow card can stretch to hundreds of milliseconds.
+Meanwhile the control loop keeps answering within its bound.
+
+Only a complete, certain check by this Session's own worker lets
+`start_trial` skip the support part; the cheap Published-phase guard always
+runs. A Session without that check runs the whole check inline. A failed or
+spawn-failed check ends Failed, and so Uncertain, as the inline failure did,
+and cancellation still rolls back.
 KVM-system/hwmon stay stopped: they may write settings without Rust permits.
 The normal post-commit broker path can restart them after the writer freeze is
 released. Native spawn receipts are not substituted for service/hardware health.
@@ -1096,7 +1108,8 @@ remain.
 The ownership order is:
 
 ```text
-Published -> frozen backend trial -> Ready -> durable app Committed
+Published -> joined support check -> frozen backend trial -> Ready
+          -> durable app Committed
           -> durable native Active -> explicit Commit relay / K
           -> exact terminal archival -> release install freeze
           -> ordinary native service starts
