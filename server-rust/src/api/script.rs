@@ -4,6 +4,10 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -11,10 +15,17 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, time};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child, Command},
+    sync::oneshot,
+    task::JoinHandle,
+    time,
+};
 
 use crate::{
     AppError, Result, auth::session::Session, error::ApiResponse, http::middleware::CurrentSession,
@@ -24,9 +35,26 @@ use crate::{
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 /// Carries a terminal unlock ticket for exactly one script upload or run.
 pub const UNLOCK_HEADER: &str = "x-nanokvm-terminal-ticket";
+/// Output kept per stream; anything beyond it is read and discarded.
 const MAX_SCRIPT_OUTPUT_BYTES: usize = 64 * 1024;
 const SCRIPT_DIRECTORY: &str = "/etc/kvm/scripts";
-const SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bounds of one foreground run.
+#[derive(Clone, Copy)]
+struct RunLimits {
+    /// Then the script's process group gets SIGTERM.
+    timeout: Duration,
+    /// Then SIGKILL.
+    grace: Duration,
+    /// How long a process left behind may keep the output pipes open.
+    drain: Duration,
+}
+
+const RUN_LIMITS: RunLimits = RunLimits {
+    timeout: Duration::from_secs(60),
+    grace: Duration::from_secs(2),
+    drain: Duration::from_secs(2),
+};
 
 #[derive(Debug, Serialize)]
 pub struct GetScriptsRsp {
@@ -161,7 +189,7 @@ pub async fn run_script(
     let path = checked_script_path(&req.name)?;
     match req.kind.as_str() {
         "foreground" => {
-            let log = run_script_foreground(&path).await?;
+            let log = run_script_foreground(script_command(&path)?, RUN_LIMITS).await?;
             Ok(Json(ApiResponse::ok(RunScriptRsp { log })))
         }
         "background" => {
@@ -233,34 +261,133 @@ fn remove_script_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run_script_foreground(path: &Path) -> Result<String> {
-    let mut child = script_command(path)?
+/// Run a script to completion in its own task: a closed browser tab does not
+/// kill a root script halfway. The run's timeout is its only cancellation.
+async fn run_script_foreground(command: Command, limits: RunLimits) -> Result<String> {
+    let (reply, result) = oneshot::channel();
+    tokio::spawn(async move {
+        drop(reply.send(run_foreground(command, limits).await));
+    });
+    result
+        .await
+        .map_err(|_| AppError::Internal("script run ended without a result".to_string()))?
+}
+
+async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<String> {
+    // Its own process group, so a timeout ends every process the script
+    // started that stayed in it; `setsid` escapes this, as in a shell.
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()?;
-
-    let mut stdout = child.stdout.take().expect("stdout piped");
-    let mut stderr = child.stderr.take().expect("stderr piped");
-    let stdout_task = tokio::spawn(async move { read_limited(&mut stdout).await });
-    let stderr_task = tokio::spawn(async move { read_limited(&mut stderr).await });
-    let status = time::timeout(SCRIPT_TIMEOUT, child.wait())
-        .await
-        .map_err(|_| AppError::Internal("script timed out".to_string()))??;
-    let stdout = stdout_task
-        .await
-        .map_err(|err| AppError::Internal(format!("script stdout task failed: {err}")))??;
-    let stderr = stderr_task
-        .await
-        .map_err(|err| AppError::Internal(format!("script stderr task failed: {err}")))??;
-
-    let mut output = stdout;
-    output.extend_from_slice(&stderr);
+    let mut stdout = Captured::drain(child.stdout.take());
+    let mut stderr = Captured::drain(child.stderr.take());
+    let status = match time::timeout(limits.timeout, child.wait()).await {
+        Ok(status) => Some(status?),
+        Err(_) => {
+            stop_group(&mut child, limits.grace).await?;
+            None
+        }
+    };
+    // A process left behind may still hold the pipes; it gets a short while.
+    let deadline = time::Instant::now() + limits.drain;
+    let stdout_complete = stdout.finish(deadline).await;
+    let complete = stderr.finish(deadline).await && stdout_complete;
+    let Some(status) = status else {
+        return Err(AppError::Internal(
+            "script timed out; its process group was stopped".to_string(),
+        ));
+    };
     if !status.success() {
         return Err(AppError::Internal("run script failed".to_string()));
     }
-    Ok(String::from_utf8_lossy(&output).to_string())
+    let mut log = stdout.text();
+    log.push_str(&stderr.text());
+    if stdout.truncated() || stderr.truncated() {
+        log.push_str("\n[output truncated: only the first 64 KiB of each stream is kept]\n");
+    }
+    if !complete {
+        log.push_str("\n[output incomplete: a process left running still held it]\n");
+    }
+    Ok(log)
+}
+
+/// SIGTERM to the script's process group, SIGKILL after `grace`, then reap.
+/// Until the leader is reaped, its ID, which names the group, cannot be reused.
+async fn stop_group(child: &mut Child, grace: Duration) -> Result<ExitStatus> {
+    let group = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .map(Pid::from_raw);
+    if let Some(group) = group {
+        let _ = killpg(group, Signal::SIGTERM);
+        time::sleep(grace).await;
+        let _ = killpg(group, Signal::SIGKILL);
+    }
+    Ok(child.wait().await?)
+}
+
+/// One output stream: the first MAX_SCRIPT_OUTPUT_BYTES are kept, the rest is
+/// read and discarded, so a chatty script never blocks on a full pipe.
+struct Captured {
+    state: Arc<Mutex<(Vec<u8>, bool)>>,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl Captured {
+    fn drain<R: AsyncRead + Unpin + Send + 'static>(reader: Option<R>) -> Self {
+        let state = Arc::new(Mutex::new((Vec::new(), false)));
+        let reader = reader.map(|mut reader| {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let mut chunk = [0_u8; 4096];
+                while let Ok(read) = reader.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    let mut state = state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let keep = MAX_SCRIPT_OUTPUT_BYTES
+                        .saturating_sub(state.0.len())
+                        .min(read);
+                    state.0.extend_from_slice(&chunk[..keep]);
+                    state.1 |= keep < read;
+                }
+            })
+        });
+        Self { state, reader }
+    }
+
+    /// Wait for EOF until `deadline`; past it, stop reading. True at EOF.
+    async fn finish(&mut self, deadline: time::Instant) -> bool {
+        let Some(reader) = self.reader.as_mut() else {
+            return true;
+        };
+        let finished = time::timeout_at(deadline, &mut *reader).await.is_ok();
+        if !finished {
+            reader.abort();
+        }
+        finished
+    }
+
+    fn text(&self) -> String {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        String::from_utf8_lossy(&state.0).into_owned()
+    }
+
+    fn truncated(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .1
+    }
 }
 
 fn run_script_background(path: &Path) -> Result<()> {
@@ -289,29 +416,133 @@ fn script_command(path: &Path) -> Result<Command> {
     }
 }
 
-async fn read_limited<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut out = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let n = reader.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        let remaining = MAX_SCRIPT_OUTPUT_BYTES.saturating_sub(out.len());
-        if remaining == 0 {
-            break;
-        }
-        out.extend_from_slice(&chunk[..n.min(remaining)]);
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    const LIMITS: RunLimits = RunLimits {
+        timeout: Duration::from_secs(1),
+        grace: Duration::from_millis(300),
+        drain: Duration::from_millis(500),
+    };
+
+    /// Run through `/bin/sh`: executing a file just written races with
+    /// parallel tests that fork while it is still open (ETXTBSY).
+    fn script(dir: &tempfile::TempDir, name: &str, body: &str) -> Command {
+        let path = dir.path().join(name);
+        fs::write(&path, format!("{body}\n")).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.arg(path);
+        command
+    }
+
+    /// Running or stopped; a zombie counts as ended.
+    fn alive(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+        })
+    }
+
+    async fn ends(pid: i32) -> bool {
+        for _ in 0..150 {
+            if !alive(pid) {
+                return true;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_chatty_script_finishes_with_its_output_cut_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1 MiB on stdout, far beyond the cap and the pipe buffer.
+        let command = script(
+            &dir,
+            "chatty.sh",
+            "head -c 1048576 /dev/zero | tr '\\000' a\necho done >&2",
+        );
+        let started = Instant::now();
+        let log = run_script_foreground(command, LIMITS).await.unwrap();
+        assert!(started.elapsed() < LIMITS.timeout);
+        let (kept, rest) = log.split_at(MAX_SCRIPT_OUTPUT_BYTES);
+        assert!(kept.bytes().all(|byte| byte == b'a'));
+        assert!(rest.starts_with("done\n"), "{rest}");
+        assert!(rest.contains("[output truncated"));
+        assert!(matches!(
+            run_script_foreground(script(&dir, "fail.sh", "exit 3"), LIMITS).await,
+            Err(AppError::Internal(ref text)) if text == "run script failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_script_and_everything_it_started_are_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let pids = dir.path().join("pids");
+        // The background job ignores SIGTERM; only the later SIGKILL ends it.
+        let body = format!(
+            "(trap '' TERM; exec sleep 300) &\necho $! > {0}\necho $$ >> {0}\nexec sleep 300",
+            pids.display()
+        );
+        let started = Instant::now();
+        let result = run_script_foreground(script(&dir, "stuck.sh", &body), LIMITS).await;
+        assert!(
+            matches!(result, Err(AppError::Internal(ref text)) if text.contains("timed out")),
+            "{result:?}"
+        );
+        assert!(started.elapsed() >= LIMITS.timeout + LIMITS.grace);
+        let pids: Vec<i32> = fs::read_to_string(&pids)
+            .unwrap()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        for pid in pids {
+            assert!(ends(pid).await, "process {pid} survived the timeout");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_client_does_not_stop_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("finished");
+        let body = format!("sleep 0.5\necho finished > {}", marker.display());
+        let request = tokio::spawn(run_script_foreground(
+            script(&dir, "slow.sh", &body),
+            LIMITS,
+        ));
+        time::sleep(Duration::from_millis(100)).await;
+        // The HTTP handler's future is dropped when its client goes away.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        for _ in 0..100 {
+            if marker.exists() {
+                break;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "finished\n");
+    }
+
+    #[tokio::test]
+    async fn a_process_left_holding_the_output_does_not_hold_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let body = format!("sleep 300 &\necho $! > {}\necho started", pid.display());
+        let started = Instant::now();
+        let log = run_script_foreground(script(&dir, "daemon.sh", &body), LIMITS)
+            .await
+            .unwrap();
+        assert!(started.elapsed() < LIMITS.timeout);
+        assert!(log.starts_with("started\n"), "{log}");
+        assert!(log.contains("[output incomplete"));
+        // A finished script's background job keeps running, as before.
+        let pid: i32 = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        assert!(alive(pid));
+        let _ = nix::sys::signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
+    }
 
     #[test]
     fn accepts_simple_script_names() {

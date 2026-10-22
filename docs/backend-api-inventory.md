@@ -122,7 +122,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST        | `/api/vm/mouse-jiggler`    | Implemented.                                                                                                       |
 | POST            | `/api/vm/tls`              | Implemented; generates self-signed certs when needed and restarts service.                                         |
 | GET/POST/DELETE | `/api/vm/autostart*`       | Implemented with basename/path validation and size limits.                                                         |
-| GET/POST/DELETE | `/api/vm/script*`          | Basename/path validation; upload and run need terminal access and a fresh terminal unlock ticket.                  |
+| GET/POST/DELETE | `/api/vm/script*`          | Basename/path validation; upload and run need terminal access and a fresh terminal unlock ticket. A foreground run survives a lost client, ends its process group after 60 s, and keeps 64 KiB per stream while draining the rest. |
 
 ### Video And HID
 

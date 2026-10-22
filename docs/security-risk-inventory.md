@@ -97,6 +97,12 @@ Known exceptions:
   gate: terminal access is enabled, and each operation consumes a fresh unlock
   ticket of the same session (header `X-NanoKVM-Terminal-Ticket`), issued after
   its password was entered again. Listing and deleting need only the session.
+  A foreground run has its own task and process group. A closed browser tab
+  does not stop it; after 60 seconds its group gets SIGTERM and, 2 seconds
+  later, SIGKILL. Each output stream keeps its first 64 KiB and the rest is
+  read and discarded, so a chatty script no longer blocks on a full pipe. The
+  reply marks truncated output, and output still held by a process left
+  running after the script ended.
 - Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
   executes these files; historical autostart uploads are never activated.
 - DNS/Wi-Fi files: strict value validation and atomic writes. A Wi-Fi SSID is
