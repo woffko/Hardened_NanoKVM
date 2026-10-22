@@ -1,12 +1,4 @@
-use std::{
-    fs::{self, File, OpenOptions},
-    io,
-    net::SocketAddr,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs::File, io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use axum::{
     extract::connect_info::Connected,
@@ -24,7 +16,7 @@ use tokio_rustls::{
 };
 use tracing::{debug, warn};
 
-use crate::{AppError, Result};
+use crate::{AppError, Result, system::files};
 
 const MAX_PENDING_TLS_HANDSHAKES: usize = 8;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -160,46 +152,31 @@ fn server_config_from_readers(
     Ok(config)
 }
 
-pub fn generate_self_signed_cert(
+/// Keeps a certificate and key that rustls loads as a matching pair, so the
+/// device keeps its TLS identity when HTTPS is enabled again and an
+/// administrator's own pair is never replaced. Otherwise publishes a new
+/// self-signed pair for `names`, key first and each file atomically, and loads
+/// it back. Returns whether a new pair was written.
+pub fn ensure_server_cert(
     cert_path: impl AsRef<Path>,
     key_path: impl AsRef<Path>,
-) -> Result<()> {
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed([
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "::1".to_string(),
-    ])
-    .map_err(|err| AppError::Internal(format!("failed to generate TLS certificate: {err}")))?;
-
-    write_file(cert_path.as_ref(), cert.pem().as_bytes(), 0o644)?;
-    write_file(
-        key_path.as_ref(),
-        key_pair.serialize_pem().as_bytes(),
-        0o600,
-    )?;
-    Ok(())
-}
-
-fn write_file(path: &Path, data: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    names: Vec<String>,
+) -> Result<bool> {
+    let (cert_path, key_path) = (cert_path.as_ref(), key_path.as_ref());
+    if load_server_config(cert_path, key_path).is_ok() {
+        return Ok(false);
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(mode)
-        .open(path)?;
-    use std::io::Write as _;
-    file.write_all(data)?;
-    file.sync_all()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    Ok(())
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(names)
+        .map_err(|err| AppError::Internal(format!("failed to generate TLS certificate: {err}")))?;
+    files::write_atomic(key_path, key_pair.serialize_pem().as_bytes(), 0o600)?;
+    files::write_atomic(cert_path, cert.pem().as_bytes(), 0o644)?;
+    load_server_config(cert_path, key_path)?;
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     use super::*;
     use tokio::{io::AsyncReadExt, net::TcpStream};
@@ -316,17 +293,86 @@ mod tests {
         );
     }
 
+    /// Whether a client that trusts exactly this certificate accepts it for `name`.
+    fn verifies_for(cert_pem: &[u8], name: &str) -> bool {
+        use tokio_rustls::rustls::{
+            client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+            pki_types::UnixTime,
+        };
+        let cert = CertificateDer::pem_slice_iter(cert_pem)
+            .next()
+            .unwrap()
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.clone()).unwrap();
+        let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let name = ServerName::try_from(name.to_string()).unwrap();
+        verifier
+            .verify_server_cert(&cert, &[], &name, &[], UnixTime::now())
+            .is_ok()
+    }
+
+    fn pair(name: &str) -> (String, String) {
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed([name.to_string()]).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
     #[test]
-    fn generated_cert_can_be_loaded_for_rustls() {
+    fn a_missing_pair_is_generated_for_the_given_names() {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let cert = dir.path().join("server.crt");
         let key = dir.path().join("server.key");
+        let names = vec!["localhost".to_string(), "kvm-test.local".to_string()];
 
-        generate_self_signed_cert(&cert, &key).unwrap();
-        let mode = fs::metadata(&key).unwrap().permissions().mode() & 0o777;
-
-        assert_eq!(mode, 0o600);
+        assert!(ensure_server_cert(&cert, &key, names).unwrap());
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&key), 0o600);
+        assert_eq!(mode(&cert), 0o644);
         assert!(load_server_config(&cert, &key).is_ok());
+        let pem = fs::read(&cert).unwrap();
+        assert!(verifies_for(&pem, "kvm-test.local"));
+        assert!(!verifies_for(&pem, "other.local"));
+    }
+
+    #[test]
+    fn a_matching_pair_is_kept_byte_for_byte() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        // An administrator's own pair, or the one an earlier enable generated.
+        let (cert_pem, key_pem) = pair("kvm.example.net");
+        fs::write(&cert, &cert_pem).unwrap();
+        fs::write(&key, &key_pem).unwrap();
+
+        assert!(!ensure_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap());
+        assert_eq!(fs::read_to_string(&cert).unwrap(), cert_pem);
+        assert_eq!(fs::read_to_string(&key).unwrap(), key_pem);
+    }
+
+    #[test]
+    fn a_mismatched_or_unreadable_pair_is_replaced() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        let (cert_pem, _) = pair("one.example.net");
+        let (_, other_key_pem) = pair("two.example.net");
+        for (cert_bytes, key_bytes) in [
+            (cert_pem.as_bytes(), other_key_pem.as_bytes()),
+            (b"not a certificate".as_slice(), other_key_pem.as_bytes()),
+        ] {
+            fs::write(&cert, cert_bytes).unwrap();
+            fs::write(&key, key_bytes).unwrap();
+            assert!(load_server_config(&cert, &key).is_err());
+
+            assert!(ensure_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap());
+            assert!(load_server_config(&cert, &key).is_ok());
+            assert_ne!(fs::read(&key).unwrap(), key_bytes);
+        }
     }
 }

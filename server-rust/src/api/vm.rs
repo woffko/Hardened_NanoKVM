@@ -1150,7 +1150,7 @@ pub async fn set_tls(
                 .blocking(move |permit| {
                     let mut config = Config::read_for(permit)?;
                     if req.enabled {
-                        tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
+                        tls::ensure_server_cert(TLS_CERT_FILE, TLS_KEY_FILE, tls_names())?;
                         config.proto = "https".to_string();
                         config.cert.crt = TLS_CERT_FILE.to_string();
                         config.cert.key = TLS_KEY_FILE.to_string();
@@ -1172,6 +1172,23 @@ pub async fn set_tls(
         .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+/// Names for a new self-signed certificate: loopback, and the device's host
+/// name with its mDNS name when the name is a valid host label.
+fn tls_names() -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if let Some(hostname) = read_trimmed(ETC_HOSTNAME_FILE)
+        && validate_hostname(&hostname).is_ok()
+    {
+        names.push(format!("{hostname}.local"));
+        names.push(hostname);
+    }
+    names
 }
 
 fn schedule_device_reboot(writer: ConfigPermit, reason: &'static str) {
