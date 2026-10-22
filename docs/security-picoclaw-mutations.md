@@ -9,8 +9,9 @@ activation or acceptance report. These now exist:
 - the private job transport, used by every backend caller and by S96
   `onboard-picoclaw`.
 
-Same-boot recovery is not implemented. The legacy onboarding frame and its
-completion boolean are gone.
+A job left by a lost owner in the same boot is settled only at a later boot,
+by design (see Current prior-boot settlement). The legacy onboarding frame
+and its completion boolean are gone.
 
 ## Current connected reader, fence and factory bootstrap
 
@@ -153,7 +154,7 @@ late uncertainty, changed private members, Stop/Closed publication failures and
 real SIGKILL during Stop publication. They do not establish production launch
 ordering, hardware execution or recovery. The executors, automatic quiescence,
 prior-boot recovery and the transport are described in the following sections;
-same-boot recovery and target acceptance remain open.
+target acceptance remains open.
 
 ## Current Startup no-op settlement
 
@@ -258,8 +259,8 @@ Chroot fixtures cover:
 - injected failures after Applying, after the credential, after the pair and
   after Committed. Each keeps the fence with its exact partial state.
 
-Settlement after a reboot is described in Current prior-boot settlement.
-Same-boot recovery is not implemented.
+Settlement after a reboot is described in Current prior-boot settlement; a
+same-boot owner loss waits for it.
 
 ## Current Model settlement
 
@@ -479,6 +480,13 @@ identity. A different tag proves that the job's native scope cannot have
 survived. A job of the SAME boot is left for its native owner: the scope may
 still exist, so nothing is settled and the fence remains. An uncertain record
 is never adopted.
+
+Same-boot owner loss is therefore settled only by a later boot, and this is
+the design, not a missing step. The native journal makes the same choice
+(see the native owner's explicit journal recovery). Without cgroups or PID
+namespaces, nothing short of a new kernel boot proves that the old owner's
+process lifetimes ended, and a lost broker cannot be readmitted in the same
+boot anyway. Until then the job keeps Update and the fence.
 
 **Exact binding.** The recovery opener takes the store's exclusive lease,
 requires a Ready anchor with the matching epoch, and reads each fixed member
