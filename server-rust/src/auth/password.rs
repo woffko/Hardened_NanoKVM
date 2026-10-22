@@ -77,14 +77,14 @@ impl AccountStore {
         write_account_0600(&self.path, &data)
     }
 
+    /// The stored hash is checked even for a wrong username, so the reply
+    /// time does not reveal whether the username exists.
     pub fn verify(&self, username: &str, password: &str) -> Result<bool> {
         let Some(account) = self.load()? else {
             return Ok(false);
         };
-        if account.username != username {
-            return Ok(false);
-        }
-        verify_password(&account.password, password)
+        let password_matches = verify_password(&account.password, password)?;
+        Ok(password_matches && account.username == username)
     }
 }
 
@@ -244,6 +244,39 @@ mod tests {
             !store
                 .verify("operator", "synthetic wrong password")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_wrong_username_still_costs_a_full_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("pwd"));
+        let hash = hash_password_unchecked("synthetic right password").unwrap();
+        store.write_account("operator", &hash).unwrap();
+        assert!(
+            store
+                .verify("operator", "synthetic right password")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .verify("intruder", "synthetic right password")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .verify("operator", "synthetic wrong password")
+                .unwrap()
+        );
+        // An unusable stored hash fails for any username: the hash is always
+        // read and verified, never skipped after a username mismatch.
+        store
+            .write_account("operator", "not-a-password-hash")
+            .unwrap();
+        assert!(
+            store
+                .verify("intruder", "synthetic right password")
+                .is_err()
         );
     }
 

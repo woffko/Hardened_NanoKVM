@@ -24,8 +24,24 @@ cargo test --manifest-path server-rust/Cargo.toml --locked --offline --lib \
   auth::password::tests
 ```
 
+## Verification and lockout
+
+Login and terminal unlock verify a password on a blocking thread, one at a
+time. Inline Argon2 on the single-core SoC would stall HID, video and every
+other request. A second verification waits up to 2 seconds for the one slot and
+is then refused with 429 rather than queued. A dropped request keeps the slot
+until its hash finishes.
+
+The stored hash is verified even when the username is wrong, so the reply time
+does not reveal whether a username exists. Only a matching username and
+password succeed.
+
+The lockout counts failures per source and username. A source is an IPv4
+address or the /64 network of an IPv6 address; an IPv4-mapped IPv6 address
+counts as its IPv4 address. One host cannot rotate out of its lockout inside
+its own /64.
+
 This is not a transaction across the root and web credential stores. Recovery
-after a partial change, recent reauthentication, atomic account-file publication,
-bounded password hashing/rate limits and complete session revocation remain
-separate remediation requirements. No real root password is changed by these
+after a partial change, recent reauthentication, atomic account-file publication
+and complete session revocation remain separate remediation requirements. No real root password is changed by these
 tests; accounts and passwords in them are synthetic temporary fixtures.

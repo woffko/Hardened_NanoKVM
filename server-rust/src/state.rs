@@ -34,6 +34,8 @@ pub fn normalize_session_lock_duration(seconds: u64) -> u64 {
 pub struct AppState {
     pub updates: Arc<UpdateCoordinator>,
     pub(crate) app_job_reads: Arc<Semaphore>,
+    /// One password verification at a time, off the async runtime.
+    pub(crate) login_hashing: Arc<Semaphore>,
     pub(crate) picoclaw_worker: Arc<crate::api::picoclaw::worker::Worker>,
     pub(crate) webrtc: Arc<crate::api::webrtc_stream::WebRtcManager>,
     #[cfg(test)]
@@ -101,6 +103,7 @@ impl AppState {
         Ok(Self {
             updates: Arc::new(UpdateCoordinator::default()),
             app_job_reads: Arc::new(Semaphore::new(4)),
+            login_hashing: Arc::new(Semaphore::new(1)),
             picoclaw_worker: Arc::new(crate::api::picoclaw::worker::Worker::default()),
             webrtc: Arc::new(webrtc),
             #[cfg(test)]

@@ -777,21 +777,29 @@ pub async fn unlock_terminal(
         return Err(AppError::InvalidCredentials);
     }
 
-    let source_ip = addr.0.ip().to_string();
+    let source = addr.0.ip();
+    let source_ip = source.to_string();
     let limiter_username = format!("terminal:{}", session.username);
     {
         let mut limiter = state.login_limiter.write().await;
-        if limiter.check(&source_ip, &limiter_username) {
+        if limiter.check(source, &limiter_username) {
             return Err(AppError::RateLimited(
                 "terminal unlock locked due to too many failed attempts".to_string(),
             ));
         }
     }
 
-    let password = decode_frontend_password(&req.password)?;
-    if !state.accounts.verify(&session.username, &password)? {
+    let password = zeroize::Zeroizing::new(decode_frontend_password(&req.password)?);
+    if !crate::api::account::verify_bounded(
+        &state.login_hashing,
+        &state.accounts,
+        &session.username,
+        password,
+    )
+    .await?
+    {
         let mut limiter = state.login_limiter.write().await;
-        let locked = limiter.record_failure(&source_ip, &limiter_username);
+        let locked = limiter.record_failure(source, &limiter_username);
         if locked {
             warn!(source_ip, username = %session.username, "terminal unlock lockout threshold reached");
         }
@@ -802,7 +810,7 @@ pub async fn unlock_terminal(
         .login_limiter
         .write()
         .await
-        .record_success(&source_ip, &limiter_username);
+        .record_success(source, &limiter_username);
     let ticket = state
         .terminal_tickets
         .issue(&session, TERMINAL_TICKET_TTL_SECS)

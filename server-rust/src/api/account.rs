@@ -5,11 +5,13 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::{
     AppError, Result,
+    auth::password::AccountStore,
     auth::{compat_crypto::decode_frontend_password, password::validate_account_credentials},
     error::ApiResponse,
     http::{
@@ -23,6 +25,32 @@ use crate::{
 };
 
 const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a verification waits for the single hashing slot.
+const VERIFY_WAIT: Duration = Duration::from_secs(2);
+
+/// Verify a password on a blocking thread, one at a time. Inline Argon2 on the
+/// single-core SoC stalls HID, video and every other request; concurrent
+/// attempts wait briefly for the one slot, then are refused rather than queued.
+pub(crate) async fn verify_bounded(
+    hashing: &Arc<Semaphore>,
+    accounts: &Arc<AccountStore>,
+    username: &str,
+    password: Zeroizing<String>,
+) -> Result<bool> {
+    let permit = tokio::time::timeout(VERIFY_WAIT, Arc::clone(hashing).acquire_owned())
+        .await
+        .map_err(|_| AppError::RateLimited("login is busy; retry shortly".to_string()))?
+        .map_err(|_| AppError::Internal("password verification unavailable".to_string()))?;
+    let accounts = Arc::clone(accounts);
+    let username = username.to_string();
+    tokio::task::spawn_blocking(move || {
+        // Held until the hash finishes, even if the request is dropped.
+        let _permit = permit;
+        accounts.verify(&username, &password)
+    })
+    .await
+    .map_err(|_| AppError::Internal("password verification failed".to_string()))?
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LoginReq {
@@ -75,10 +103,11 @@ pub async fn login(
         ));
     }
 
-    let source_ip = addr.0.ip().to_string();
+    let source = addr.0.ip();
+    let source_ip = source.to_string();
     {
         let mut limiter = state.login_limiter.write().await;
-        if limiter.check(&source_ip, &req.username) {
+        if limiter.check(source, &req.username) {
             audit::login_failure(&req.username, &source_ip, "locked");
             return Err(AppError::RateLimited(
                 "account locked due to too many failed attempts".to_string(),
@@ -86,10 +115,17 @@ pub async fn login(
         }
     }
 
-    let password = decode_frontend_password(&req.password)?;
-    if !state.accounts.verify(&req.username, &password)? {
+    let password = Zeroizing::new(decode_frontend_password(&req.password)?);
+    if !verify_bounded(
+        &state.login_hashing,
+        &state.accounts,
+        &req.username,
+        password,
+    )
+    .await?
+    {
         let mut limiter = state.login_limiter.write().await;
-        let locked = limiter.record_failure(&source_ip, &req.username);
+        let locked = limiter.record_failure(source, &req.username);
         if locked {
             tracing::warn!(source_ip, username = %req.username, "login lockout threshold reached");
             audit::login_failure(&req.username, &source_ip, "lockout");
@@ -104,7 +140,7 @@ pub async fn login(
         .login_limiter
         .write()
         .await
-        .record_success(&source_ip, &req.username);
+        .record_success(source, &req.username);
     let session_lock_duration = state.session_lock_duration();
     let session = state
         .sessions
@@ -254,5 +290,69 @@ async fn change_root_password(password: &str, writer: &AccountPermit) -> Result<
         Ok(())
     } else {
         Err(AppError::Internal("failed to change root password".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PASSWORD: &str = "synthetic right password";
+
+    fn store(dir: &tempfile::TempDir) -> Arc<AccountStore> {
+        let path = dir.path().join("pwd");
+        let hash = crate::auth::password::hash_password(PASSWORD).unwrap();
+        let account = serde_json::json!({"username": "operator", "password": hash});
+        std::fs::write(&path, account.to_string()).unwrap();
+        Arc::new(AccountStore::new(path))
+    }
+
+    fn password() -> Zeroizing<String> {
+        Zeroizing::new(PASSWORD.to_string())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verification_runs_off_the_runtime_one_at_a_time_and_refuses_after_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = store(&dir);
+        let hashing = Arc::new(Semaphore::new(1));
+        assert!(
+            verify_bounded(&hashing, &accounts, "operator", password())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !verify_bounded(&hashing, &accounts, "intruder", password())
+                .await
+                .unwrap()
+        );
+        // The only thread of this runtime keeps serving while a hash runs.
+        let verification = tokio::spawn({
+            let (hashing, accounts) = (Arc::clone(&hashing), Arc::clone(&accounts));
+            async move { verify_bounded(&hashing, &accounts, "operator", password()).await }
+        });
+        let mut ticks = 0;
+        while !verification.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ticks += 1;
+        }
+        assert!(verification.await.unwrap().unwrap());
+        assert!(
+            ticks >= 3,
+            "the runtime was blocked by the hash: {ticks} ticks"
+        );
+        // With the one slot taken, another verification waits its bound and is
+        // then refused, instead of queueing more hashing.
+        let held = Arc::clone(&hashing).acquire_owned().await.unwrap();
+        let started = std::time::Instant::now();
+        let refused = verify_bounded(&hashing, &accounts, "operator", password()).await;
+        assert!(matches!(refused, Err(AppError::RateLimited(_))));
+        assert!(started.elapsed() >= VERIFY_WAIT);
+        drop(held);
+        assert!(
+            verify_bounded(&hashing, &accounts, "operator", password())
+                .await
+                .unwrap()
+        );
     }
 }
