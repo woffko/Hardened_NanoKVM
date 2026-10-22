@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeSet,
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -409,7 +408,7 @@ fn should_skip_zone_entry(name: &str) -> bool {
 fn write_config(config: &TimeConfig, paths: &TimePaths) -> Result<()> {
     let content = serde_json::to_vec_pretty(config)
         .map_err(|err| AppError::Internal(format!("encode time config: {err}")))?;
-    write_file_atomic(&paths.config, &content, 0o644)
+    crate::system::files::write_atomic(&paths.config, &content, 0o644)
 }
 
 fn write_ntp_conf(servers: &[String], path: &Path) -> Result<()> {
@@ -424,21 +423,17 @@ fn write_ntp_conf(servers: &[String], path: &Path) -> Result<()> {
     content.push_str("\nrestrict default kod nomodify notrap nopeer noquery\n");
     content.push_str("restrict 127.0.0.1\n");
     content.push_str("restrict ::1\n");
-    write_file_atomic(path, content.as_bytes(), 0o644)
+    crate::system::files::write_atomic(path, content.as_bytes(), 0o644)
 }
 
 fn write_ntpd_default(path: &Path) -> Result<()> {
-    write_file_atomic(path, b"NTPD_ARGS=\" -g\"\n", 0o644)
+    crate::system::files::write_atomic(path, b"NTPD_ARGS=\" -g\"\n", 0o644)
 }
 
 fn set_timezone(timezone: &str, paths: &TimePaths) -> Result<()> {
     let timezone = normalize_timezone(timezone, &paths.zoneinfo)?;
     let target = Path::new("../usr/share/zoneinfo").join(timezone);
-    let tmp = paths.localtime.with_file_name(".localtime.tmp");
-    let _ = fs::remove_file(&tmp);
-    symlink(&target, &tmp)?;
-    fs::rename(&tmp, &paths.localtime)?;
-    Ok(())
+    crate::system::files::replace_symlink(&target, &paths.localtime)
 }
 
 async fn apply_ntp_state(writer: &ConfigPermit, enabled: bool) -> Result<()> {
@@ -513,24 +508,6 @@ fn ensure_subpath(base: &Path, path: &Path) -> Result<()> {
             return Err(AppError::BadRequest("invalid timezone".to_string()));
         }
     }
-    Ok(())
-}
-
-fn write_file_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Internal("path has no parent".to_string()))?;
-    fs::create_dir_all(parent)?;
-
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::Internal("path has invalid filename".to_string()))?
-    ));
-    fs::write(&tmp, content)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    fs::rename(&tmp, path)?;
     Ok(())
 }
 

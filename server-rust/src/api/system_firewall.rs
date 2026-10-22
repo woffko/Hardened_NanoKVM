@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -546,13 +546,13 @@ fn read_config_at(path: &Path) -> Result<FirewallConfig> {
 fn write_config_at(path: &Path, config: &FirewallConfig) -> Result<()> {
     let content = serde_json::to_vec_pretty(config)
         .map_err(|err| AppError::Internal(format!("encode firewall config: {err}")))?;
-    write_file_atomic(path, &content, 0o644)
+    crate::system::files::write_atomic(path, &content, 0o644)
 }
 
 fn write_pending_at(path: &Path, pending: &PendingRollback) -> Result<()> {
     let content = serde_json::to_vec_pretty(pending)
         .map_err(|err| AppError::Internal(format!("encode firewall pending state: {err}")))?;
-    write_file_atomic(path, &content, 0o600)
+    crate::system::files::write_atomic(path, &content, 0o600)
 }
 
 fn read_pending_at(path: &Path) -> Result<PendingRollback> {
@@ -616,24 +616,6 @@ fn tool_status(path: &str) -> ToolStatus {
         installed: Path::new(path).exists(),
         detail: path.to_string(),
     }
-}
-
-fn write_file_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Internal("path has no parent".to_string()))?;
-    fs::create_dir_all(parent)?;
-
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::Internal("path has invalid filename".to_string()))?
-    ));
-    fs::write(&tmp, content)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {

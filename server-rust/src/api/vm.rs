@@ -72,7 +72,6 @@ const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
 const GO_MEM_LIMIT_FILE: &str = "/etc/kvm/GOMEMLIMIT";
 const SWAP_FILE: &str = "/swapfile";
 const INITTAB_PATH: &str = "/etc/inittab";
-const TEMP_INITTAB_PATH: &str = "/etc/.inittab.tmp";
 const SWAP_INITTAB_LINE: &str = "si11::sysinit:/sbin/swapon /swapfile";
 const AVAHI_DAEMON_PID: &str = "/run/avahi-daemon/pid";
 const AVAHI_DAEMON_SCRIPT: &str = "/etc/init.d/S50avahi-daemon";
@@ -1382,9 +1381,7 @@ fn remove_swap_inittab_lines(input: &str) -> String {
 }
 
 fn write_inittab(content: &str) -> Result<()> {
-    fs::write(TEMP_INITTAB_PATH, content.as_bytes())?;
-    fs::rename(TEMP_INITTAB_PATH, INITTAB_PATH)?;
-    Ok(())
+    crate::system::files::write_atomic(Path::new(INITTAB_PATH), content.as_bytes(), 0o644)
 }
 
 #[derive(Debug, Clone)]

@@ -105,6 +105,9 @@ Known exceptions:
   running after the script ended.
 - Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
   executes these files; historical autostart uploads are never activated.
+- Settings files (syslog, time and timezone, firewall, inittab): replaced
+  through a temporary file whose name no other writer shares, created without
+  following links and fsynced, then renamed, with the directory fsynced.
 - DNS/Wi-Fi files: strict value validation and atomic writes. A Wi-Fi SSID is
   1–32 bytes and a passphrase 8–63 bytes, as the supplicant accepts, and both
   are rejected before anything is written.
