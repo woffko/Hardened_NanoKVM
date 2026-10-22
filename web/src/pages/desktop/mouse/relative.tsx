@@ -45,6 +45,28 @@ export const Relative = () => {
     target.addEventListener('wheel', handleMouseWheel, { passive: false });
     target.addEventListener('contextmenu', disableEvent);
     document.addEventListener('pointerlockchange', handlePointerLockChange);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('blur', releaseHeldButtons);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // A release outside the screen never reaches the target's own listener,
+    // which stops propagation: send it from here, or it stays held.
+    function handleWindowMouseUp(e: MouseEvent) {
+      if (!mouseRef.current.hasButtons()) return;
+      handleMouseEvent({ type: 'mouseup', button: e.button });
+    }
+
+    // Losing focus or visibility can swallow a release: release them all.
+    function releaseHeldButtons() {
+      const mouse = mouseRef.current;
+      if (!mouse.hasButtons()) return;
+      mouse.releaseButtons();
+      sendReport(mouse.buildButtonReport());
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') releaseHeldButtons();
+    }
 
     // Mouse click event
     function handleMouseClick(event: MouseEvent) {
@@ -141,6 +163,9 @@ export const Relative = () => {
       target.removeEventListener('wheel', handleMouseWheel);
       target.removeEventListener('contextmenu', disableEvent);
       document.removeEventListener('pointerlockchange', handlePointerLockChange);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', releaseHeldButtons);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [resolution, scrollDirection, scrollInterval, pointerSensitivity]);
 

@@ -130,6 +130,29 @@ export const Absolute = () => {
     touchTarget.addEventListener('touchmove', handleTouchMove, touchOptions);
     touchTarget.addEventListener('touchend', handleTouchEnd, touchOptions);
     touchTarget.addEventListener('touchcancel', handleTouchCancel, touchOptions);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('blur', releaseHeldButtons);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // A release outside the screen never reaches the target's own listener,
+    // which stops propagation: send it from here, or it stays held.
+    function handleWindowMouseUp(e: MouseEvent) {
+      if (!mouseRef.current.hasButtons()) return;
+      handleMouseEvent({ type: 'mouseup', button: e.button });
+    }
+
+    // Losing focus or visibility can swallow a release: release them all.
+    function releaseHeldButtons() {
+      const mouse = mouseRef.current;
+      pressedButtonRef.current = null;
+      if (!mouse.hasButtons()) return;
+      mouse.releaseButtons();
+      sendReport(mouse.buildButtonReport(lastPosRef.current.x, lastPosRef.current.y));
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') releaseHeldButtons();
+    }
 
     // Mouse down event
     function handleMouseDown(e: MouseEvent) {
@@ -517,6 +540,9 @@ export const Absolute = () => {
       touchTarget.removeEventListener('touchmove', handleTouchMove);
       touchTarget.removeEventListener('touchend', handleTouchEnd);
       touchTarget.removeEventListener('touchcancel', handleTouchCancel);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', releaseHeldButtons);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       for (const style of previousGestureStyles) {
         style.element.style.touchAction = style.touchAction;
         style.element.style.overscrollBehavior = style.overscrollBehavior;

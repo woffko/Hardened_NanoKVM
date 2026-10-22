@@ -45,6 +45,16 @@ export class MouseReportRelative {
     this.buttons &= ~getMouseButtonBit(button);
   }
 
+  /** Whether any button is held. */
+  hasButtons(): boolean {
+    return this.buttons !== 0;
+  }
+
+  /** Release every held button. */
+  releaseButtons(): void {
+    this.buttons = 0;
+  }
+
   /**
    * Build relative mouse report
    * @param deltaX X movement (-127 to 127)
@@ -95,6 +105,16 @@ export class MouseReportAbsolute {
 
   buttonUp(button: number): void {
     this.buttons &= ~getMouseButtonBit(button);
+  }
+
+  /** Whether any button is held. */
+  hasButtons(): boolean {
+    return this.buttons !== 0;
+  }
+
+  /** Release every held button. */
+  releaseButtons(): void {
+    this.buttons = 0;
   }
 
   /**
