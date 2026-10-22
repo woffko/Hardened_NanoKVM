@@ -68,6 +68,10 @@ the setup result is still collected and any returned peer is cleaned. An
 admitted operation/packet cannot be retracted, but no next negotiation step,
 callback enqueue, RTCP keyframe request or new media write is authorized by a
 stale client snapshot. No session lock is retained through network/native I/O.
+Keyframe requests, from RTCP PLI/FIR or a new direct viewer, are accepted at
+most once per second for all viewers together. A peer flooding PLI/FIR cannot
+make the encoder reconfigure several times a second, while loss recovery
+stays prompt.
 
 The signal queue has 64 entries. Callbacks use nonblocking enqueue; saturation
 requests local stop rather than awaiting a receiver during peer teardown. The

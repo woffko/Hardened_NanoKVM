@@ -60,6 +60,10 @@ const MJPEG_FRAME_UNCHANGED: i32 = 5;
 const H264_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const H264_FAILURE_LIMIT: usize = 3;
 const H264_KEYFRAME_REQUEST_HOLD: Duration = Duration::from_millis(250);
+/// At most one keyframe request per interval: a peer flooding RTCP PLI/FIR
+/// would otherwise reconfigure the encoder for every viewer several times a
+/// second. Loss recovery once a second is still prompt.
+const H264_KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::default()));
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
@@ -76,6 +80,7 @@ static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_CAPTURE_DISABLED: AtomicBool = AtomicBool::new(false);
 static H264_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static H264_KEYFRAME_REQUEST_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static H264_LAST_KEYFRAME_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 static CAPTURE_STATUS: LazyLock<Mutex<CaptureStatusStore>> =
     LazyLock::new(|| Mutex::new(CaptureStatusStore::default()));
 
@@ -851,11 +856,21 @@ pub fn request_h264_keyframe(reason: &'static str) {
     if h264_capture_disabled() {
         return;
     }
-    if H264_KEYFRAME_REQUEST_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
     {
-        return;
+        let mut last = H264_LAST_KEYFRAME_REQUEST
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        if !keyframe_request_due(*last, now) {
+            return;
+        }
+        if H264_KEYFRAME_REQUEST_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        *last = Some(now);
     }
 
     let gop = current_screen().gop;
@@ -870,6 +885,10 @@ pub fn request_h264_keyframe(reason: &'static str) {
         }
         H264_KEYFRAME_REQUEST_IN_PROGRESS.store(false, Ordering::Release);
     });
+}
+
+fn keyframe_request_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= H264_KEYFRAME_REQUEST_INTERVAL)
 }
 
 pub async fn read_h264_capture_frame(
@@ -1061,6 +1080,24 @@ fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyframe_requests_are_spaced_by_their_interval() {
+        use super::{H264_KEYFRAME_REQUEST_INTERVAL, keyframe_request_due};
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(keyframe_request_due(None, now));
+        // A PLI/FIR flood inside the interval gets no further keyframes.
+        for gap in [0, 125, 500, 999] {
+            let last = now.checked_sub(Duration::from_millis(gap));
+            if last.is_some() {
+                assert!(!keyframe_request_due(last, now), "{gap} ms");
+            }
+        }
+        if let Some(last) = now.checked_sub(H264_KEYFRAME_REQUEST_INTERVAL) {
+            assert!(keyframe_request_due(Some(last), now));
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_interval_restores_its_state_after_a_lost_client() {
         use super::{AppError, owned_interval};
