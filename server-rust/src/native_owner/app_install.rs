@@ -49,6 +49,9 @@ pub struct Session {
     enrollment: super::boot::Permit,
     #[cfg(test)]
     update_parent: Option<std::fs::File>,
+    /// This Session's own joined trial-check worker passed `check_trial`.
+    /// Only `PreparingInstall` sets it, for a complete, certain check.
+    support_checked: bool,
     // Drop native handles first, then release update/writer admission LAST.
     install: AcceptedInstall,
 }
@@ -257,6 +260,7 @@ impl Broker {
             enrollment: self.enrollment,
             #[cfg(test)]
             update_parent: self.update_parent,
+            support_checked: false,
             install,
         })
     }
@@ -352,6 +356,24 @@ impl Session {
         ))
     }
 
+    /// Check the published support namespace for the trial on one joined
+    /// worker: its directory syncs never run on the broker's control loop.
+    pub(super) fn start_trial_check(mut self) -> BeginPreparation {
+        let Ok(closed) = self.closed() else {
+            return BeginPreparation::Retained(self);
+        };
+        let work = work::InstallWork::check_trial(self.install, closed);
+        BeginPreparation::Started(PreparingInstall::new(
+            PreparationKind::TrialCheck,
+            self.group,
+            self.journal,
+            self.enrollment,
+            #[cfg(test)]
+            self.update_parent,
+            work,
+        ))
+    }
+
     /// Preserve only the fixed mutable data allowlist and journal the two live
     /// renames. This is publication, NOT trial health/commit or API success.
     #[cfg(test)]
@@ -369,7 +391,14 @@ impl Session {
         let Ok(closed) = self.closed() else {
             return BeginTrial::Retained(self);
         };
-        if self.install.check_trial(&closed).is_err() {
+        // After this Session's own trial-check worker, only the cheap phase
+        // guard runs here; otherwise the complete check runs inline.
+        let checked = if self.support_checked {
+            self.install.check_published(&closed)
+        } else {
+            self.install.check_trial(&closed)
+        };
+        if checked.is_err() {
             return BeginTrial::Retained(self);
         }
         let group = match self.group.try_resume() {
@@ -451,6 +480,7 @@ impl Session {
                 enrollment: self.enrollment,
                 #[cfg(test)]
                 update_parent: self.update_parent,
+                support_checked: false,
                 install: self.install,
             }),
         }
@@ -480,6 +510,7 @@ impl TrialSession {
             enrollment: self.enrollment,
             #[cfg(test)]
             update_parent: self.update_parent,
+            support_checked: false,
             install: self.install,
         })
     }

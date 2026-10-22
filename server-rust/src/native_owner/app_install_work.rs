@@ -16,6 +16,7 @@ enum Operation {
         fixture: bool,
     },
     Publish(ClosedRuntime),
+    CheckTrial(ClosedRuntime),
     Commit(TrialReady),
     Rollback(ClosedRuntime),
     Retire(TerminalBoundary),
@@ -47,6 +48,9 @@ impl Operation {
                 fixture: *fixture,
             },
             Self::Publish(closed) => Self::Publish(ClosedRuntime {
+                transaction: closed.transaction(),
+            }),
+            Self::CheckTrial(closed) => Self::CheckTrial(ClosedRuntime {
                 transaction: closed.transaction(),
             }),
             Self::Commit(ready) => Self::Commit(TrialReady {
@@ -88,6 +92,9 @@ impl Operation {
                     crate::update::app_slot::Phase::Published
                 ))
             ),
+            (Self::CheckTrial(closed), Payload::Install(install)) => {
+                install.check_trial(&closed).is_ok()
+            }
             (Self::Commit(ready), Payload::Commit(state)) => {
                 if !matches!(
                     support_operation!("native.commit.slot", None, state.install.commit(&ready)),
@@ -253,6 +260,10 @@ impl InstallWork {
 
     pub(super) fn publish(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
         Self::new(Payload::Install(install), Operation::Publish(closed))
+    }
+
+    pub(super) fn check_trial(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
+        Self::new(Payload::Install(install), Operation::CheckTrial(closed))
     }
 
     pub(super) fn commit(state: JournaledInstall, ready: TrialReady) -> Self {
@@ -441,6 +452,7 @@ impl InstallWork {
         let name = match operation {
             Operation::Support { .. } => "app-support",
             Operation::Publish(_) => "app-publication",
+            Operation::CheckTrial(_) => "app-trial-check",
             Operation::Commit(_) => "app-commit",
             Operation::Rollback(_) => "app-rollback",
             Operation::Retire(_) => "app-retirement",

@@ -283,3 +283,101 @@ async fn publication_teardown_joins_before_admission_release_and_never_claims_cl
     assert!(!root.join("trial-owner-started").exists());
     crate::update::app_slot::issuer_tests::assert_admission_released(root);
 }
+
+#[tokio::test]
+async fn the_pre_trial_support_check_runs_on_its_own_worker_and_control_stays_responsive() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut engine = engine(root);
+    let (entered, entering) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    engine.fixture_trial_check = Some(app_install::InstallIoFixture::Block {
+        entered,
+        resume: resumed,
+    });
+    let (old, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        entering.try_recv().is_ok()
+    });
+    // Published, with the support check (and its directory syncs) held in
+    // its own worker: the control loop answers within its bound meanwhile.
+    let install = engine.install.as_ref().unwrap();
+    assert!(install.stage == InstallStage::CheckingTrial);
+    assert!(matches!(
+        install.owner,
+        InstallOwner::PreparingInstall { .. }
+    ));
+    assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
+    for _ in 0..3 {
+        for (operation, code) in [
+            (Operation::Observe, Code::Ok),
+            (Operation::EnsureBackend, Code::Busy),
+            (Operation::RetryAppRetirement, Code::Busy),
+        ] {
+            let start = Instant::now();
+            let reply = engine.request(3, operation);
+            assert!(
+                start.elapsed() < Duration::from_millis(250),
+                "{operation:?}"
+            );
+            assert_eq!(reply.code, code, "{operation:?}");
+            assert_eq!(reply.mode, Mode::Installing);
+            assert!(!root.join("trial-owner-started").exists());
+            excluded(root);
+        }
+    }
+    resume.send(()).unwrap();
+    // The trial starts only after the joined check, then commits as before.
+    until(|| {
+        engine.tick();
+        engine.install.is_none() && engine.mode == Mode::Running
+    });
+    assert!(root.join("trial-owner-started").exists());
+    let status = app_slot::job_status_fixture(root, transaction)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, app_slot::Phase::Committed);
+    assert!(status.archived);
+    assert_ne!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    shutdown(&mut engine);
+}
+
+#[tokio::test]
+async fn a_failed_pre_trial_check_is_uncertain_never_starts_the_trial_and_retains_cancel() {
+    for failure in [
+        app_install::InstallIoFixture::SpawnFailure,
+        app_install::InstallIoFixture::Panic,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut engine = engine(root);
+        engine.fixture_trial_check = Some(failure);
+        let (old, transaction) = accept(&mut engine, root).await;
+        until(|| {
+            engine.tick();
+            engine.mode == Mode::Uncertain
+        });
+        let install = engine.install.as_ref().unwrap();
+        assert!(install.stage == InstallStage::Failed);
+        assert!(matches!(install.owner, InstallOwner::Draining(_)));
+        for _ in 0..3 {
+            assert_eq!(engine.request(2, Operation::Observe).mode, Mode::Uncertain);
+            assert_eq!(phase(root, transaction), app_slot::Phase::Published as u8);
+            assert!(!root.join("trial-owner-started").exists());
+            excluded(root);
+        }
+        assert_eq!(
+            engine.request(2, Operation::CancelAppInstall).code,
+            Code::Ok
+        );
+        until(|| {
+            engine.tick();
+            engine.install.is_none() && engine.mode == Mode::Running
+        });
+        assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
+        assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+        assert!(!root.join("trial-owner-started").exists());
+        shutdown(&mut engine);
+    }
+}

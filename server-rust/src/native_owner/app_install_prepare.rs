@@ -22,6 +22,8 @@ pub(crate) enum Poll {
 pub(crate) enum Kind {
     Support,
     Publication,
+    /// The pre-trial support check, with its directory syncs.
+    TrialCheck,
 }
 
 pub(crate) struct PreparingInstall {
@@ -91,6 +93,9 @@ impl PreparingInstall {
             enrollment: self.enrollment,
             #[cfg(test)]
             update_parent: self.update_parent,
+            support_checked: status == Status::Complete
+                && !self.uncertain
+                && matches!(self.kind, Kind::TrialCheck),
             install,
         };
         if status == Status::Failed || self.uncertain {

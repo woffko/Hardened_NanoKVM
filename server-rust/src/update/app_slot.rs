@@ -210,12 +210,22 @@ impl AcceptedInstall {
         &self,
         closed: &crate::native_owner::broker::app_install::ClosedRuntime,
     ) -> Result<()> {
+        self.check_published(closed)?;
+        support::before_trial(self, closed)?;
+        Ok(())
+    }
+
+    /// The phase part of `check_trial` alone: no support I/O or sync. Only
+    /// for a Session whose own joined worker already passed `check_trial`.
+    pub(crate) fn check_published(
+        &self,
+        closed: &crate::native_owner::broker::app_install::ClosedRuntime,
+    ) -> Result<()> {
         if closed.transaction() != self.transaction()
             || self.trial_record()?.phase != Phase::Published
         {
             return Err(SlotError::Invalid);
         }
-        support::before_trial(self, closed)?;
         Ok(())
     }
 

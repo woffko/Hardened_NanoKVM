@@ -88,6 +88,7 @@ impl RollingBack {
                 enrollment: self.enrollment,
                 #[cfg(test)]
                 update_parent: self.update_parent,
+                support_checked: false,
                 install: state.install,
             }
             .finish_rollback(),

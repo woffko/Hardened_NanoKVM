@@ -357,6 +357,8 @@ enum InstallStage {
     SupportReady,
     Publishing,
     Published,
+    CheckingTrial,
+    TrialChecked,
     Trial,
     CommitPending,
     Rollback,
@@ -406,6 +408,8 @@ struct Engine {
     #[cfg(test)]
     fixture_publication: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
+    fixture_trial_check: Option<app_install::InstallIoFixture>,
+    #[cfg(test)]
     fixture_commit: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
     fixture_rollback: Option<app_install::InstallIoFixture>,
@@ -452,6 +456,8 @@ impl Engine {
             fixture_support: None,
             #[cfg(test)]
             fixture_publication: None,
+            #[cfg(test)]
+            fixture_trial_check: None,
             #[cfg(test)]
             fixture_commit: None,
             #[cfg(test)]
@@ -791,6 +797,36 @@ impl Engine {
                                         stage,
                                     });
                                 }
+                                // The pre-trial support check syncs directories:
+                                // one joined worker runs it, never this loop.
+                                return Some(match session.start_trial_check() {
+                                    app_install::BeginPreparation::Started(owner) => {
+                                        #[cfg(test)]
+                                        let owner = {
+                                            let mut owner = owner;
+                                            if let Some(fixture) = self.fixture_trial_check.take() {
+                                                owner.set_fixture(fixture);
+                                            }
+                                            owner
+                                        };
+                                        Install {
+                                            owner: InstallOwner::PreparingInstall {
+                                                owner,
+                                                cancel_requested: false,
+                                            },
+                                            stage: InstallStage::CheckingTrial,
+                                        }
+                                    }
+                                    app_install::BeginPreparation::Retained(session) => {
+                                        self.mode = Mode::Uncertain;
+                                        Install {
+                                            owner: InstallOwner::Draining(session),
+                                            stage: InstallStage::Failed,
+                                        }
+                                    }
+                                });
+                            }
+                            InstallStage::TrialChecked => {
                                 #[cfg(test)]
                                 let trial = match &self.fixture {
                                     Some(root) => session
@@ -880,6 +916,9 @@ impl Engine {
                                 app_install::PreparationKind::Support => InstallStage::SupportReady,
                                 app_install::PreparationKind::Publication => {
                                     InstallStage::Published
+                                }
+                                app_install::PreparationKind::TrialCheck => {
+                                    InstallStage::TrialChecked
                                 }
                             }
                         };
