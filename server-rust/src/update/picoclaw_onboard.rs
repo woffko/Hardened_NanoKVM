@@ -272,7 +272,7 @@ impl Onboarding {
     /// An unmarked stage for the import tests; production stages come only
     /// from a broker Onboard job. An orphan scratch directory is preserved
     /// and refused, never adopted.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
     pub(crate) fn prepare(_permit: &ConfigPermit, path: &Path) -> Result<Option<Self>> {
         if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
             return Err(invalid());
@@ -442,7 +442,7 @@ impl Onboarding {
         remove_side(&self.home, &side, &self.stage)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
     pub(crate) fn fail_after_member(&mut self, count: usize) {
         assert!(count != 0);
         self.fail_after_member = Some(count);

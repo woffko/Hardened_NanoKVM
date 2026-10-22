@@ -844,8 +844,14 @@ pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
 pub async fn gateway_ws(
     State(state): State<AppState>,
     Query(query): Query<GatewayQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
+    // As for every other authenticated WebSocket: a cross-site page can take
+    // no session lock, run no Startup job and reach no upstream gateway.
+    if !crate::ws::origin::validate_ws_origin(&headers, &state.config) {
+        return Err(AppError::Forbidden("invalid websocket origin".to_string()));
+    }
     let session_id = gateway_session_id(&query);
     if let Err(err) = ensure_session_lock(&session_id) {
         return Ok(picoclaw_error_data_status(StatusCode::CONFLICT, err));
@@ -970,6 +976,10 @@ fn authorize_loopback_internal_token(
 #[cfg(test)]
 #[path = "picoclaw_internal_auth_tests.rs"]
 mod internal_auth_tests;
+
+#[cfg(test)]
+#[path = "picoclaw_gateway_origin_tests.rs"]
+mod gateway_origin_tests;
 
 fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, PicoclawErrorData> {
     let session_id = headers

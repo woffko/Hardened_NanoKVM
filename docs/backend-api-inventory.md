@@ -193,7 +193,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | `/api/vm/terminal`         | PTY shell                                     | Disabled by default, controlled by Terminal menu toggle, authenticated session, Origin validation.              |
 | `/api/stream/h264`         | WebRTC H.264 signaling                        | Authenticated session, Origin validation, slow-client handling, and firewall-mode block in Restricted/Paranoid. |
 | `/api/stream/h264/direct`  | Direct H.264 stream                           | Authenticated session, Origin validation, shared producer/fanout.                                               |
-| `/api/picoclaw/gateway/ws` | PicoClaw runtime gateway                      | Authenticated session, session lock, upstream timeout/message limits.                                           |
+| `/api/picoclaw/gateway/ws` | PicoClaw runtime gateway                      | Authenticated session, Origin validation, session lock, upstream timeout/message limits.                        |
 
 ## Config Fields
 
