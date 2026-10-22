@@ -4672,6 +4672,38 @@ const scriptUnlockExtras = keyedExtras(scriptUnlockKeys, {
   ]
 });
 
+const currentPasswordKeys = [
+  'auth.placeholderCurrentPassword',
+  'auth.wrongCurrentPassword'
+] as const;
+
+const currentPasswordExtras = keyedExtras(currentPasswordKeys, {
+  ca: ['Contrasenya actual', 'La contrasenya actual no és correcta'],
+  cz: ['Současné heslo', 'Současné heslo je nesprávné'],
+  da: ['Nuværende adgangskode', 'Den nuværende adgangskode er forkert'],
+  de: ['Aktuelles Passwort', 'Das aktuelle Passwort ist falsch'],
+  es: ['Contraseña actual', 'La contraseña actual es incorrecta'],
+  et: ['Praegune parool', 'Praegune parool on vale'],
+  fi: ['Nykyinen salasana', 'Nykyinen salasana on väärä'],
+  fr: ['Mot de passe actuel', 'Le mot de passe actuel est incorrect'],
+  hu: ['Jelenlegi jelszó', 'A jelenlegi jelszó helytelen'],
+  id: ['Kata sandi saat ini', 'Kata sandi saat ini salah'],
+  it: ['Password attuale', 'La password attuale non è corretta'],
+  ja: ['現在のパスワード', '現在のパスワードが正しくありません'],
+  ko: ['현재 비밀번호', '현재 비밀번호가 올바르지 않습니다'],
+  nb: ['Nåværende passord', 'Det nåværende passordet er feil'],
+  nl: ['Huidig wachtwoord', 'Het huidige wachtwoord is onjuist'],
+  pl: ['Obecne hasło', 'Obecne hasło jest nieprawidłowe'],
+  pt_br: ['Senha atual', 'A senha atual está incorreta'],
+  se: ['Nuvarande lösenord', 'Det nuvarande lösenordet är fel'],
+  th: ['รหัสผ่านปัจจุบัน', 'รหัสผ่านปัจจุบันไม่ถูกต้อง'],
+  tr: ['Mevcut şifre', 'Mevcut şifre yanlış'],
+  uk: ['Поточний пароль', 'Поточний пароль неправильний'],
+  vi: ['Mật khẩu hiện tại', 'Mật khẩu hiện tại không đúng'],
+  zh: ['当前密码', '当前密码不正确'],
+  zh_tw: ['目前密碼', '目前密碼不正確']
+});
+
 const hardenedCommonKeys = [
   'head.firstSetup',
   'auth.setupTitle',
@@ -7166,6 +7198,7 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(networkExtras[key] || {}),
     ...(hardenedCommonExtras[key] || {}),
     ...(scriptUnlockExtras[key] || {}),
+    ...(currentPasswordExtras[key] || {}),
     ...(legacyExtras[key] || {}),
     ...(systemUpdateExtras[key] || {}),
     ...(firewallExtras[key] || {}),

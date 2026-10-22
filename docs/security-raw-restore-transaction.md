@@ -1099,7 +1099,10 @@ This does not satisfy the complete protected writer requirements below.
 2. Stop configuration writers. Before enabling capture, maintain a finite
    producer inventory with each persistent source's owner, enrollment or explicit
    stop+join, and completion/abort boundary. Backend exit alone is not proof that
-   helper/daemon/background writers stopped. Capture the current allowlisted
+   helper/daemon/background writers stopped. A pending credential journal
+   (`/etc/kvm/pwd.journal`) refuses capture: until the next start restores it,
+   `/etc/shadow` and `/etc/kvm/pwd` may hold different passwords. Capture the
+   current allowlisted
    account, SSH, network and application state from live trusted rootfs/bootfs. Any critical
    read/copy/space error aborts before partition writes. Preserve optional app
    configuration/state, never downloaded binaries, caches or init scripts.

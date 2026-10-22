@@ -13,6 +13,8 @@ const en = {
       placeholderUsername: 'Username',
       placeholderPassword: 'Password',
       placeholderPassword2: 'Please enter password again',
+      placeholderCurrentPassword: 'Current password',
+      wrongCurrentPassword: 'The current password is incorrect',
       noEmptyUsername: 'Username required',
       noEmptyPassword: 'Password required',
       noAccount: 'Failed to get user information, please refresh web page or reset password',

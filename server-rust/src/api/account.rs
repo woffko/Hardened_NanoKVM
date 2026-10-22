@@ -5,12 +5,13 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::{
     AppError, Result,
+    auth::credential_txn::{self, Change},
     auth::password::AccountStore,
     auth::{compat_crypto::decode_frontend_password, password::validate_account_credentials},
     error::ApiResponse,
@@ -20,11 +21,11 @@ use crate::{
         tls::ClientAddr,
     },
     state::AppState,
-    system::{audit, command::AllowedCommand},
+    system::audit,
     update::state_writers::AccountPermit,
 };
 
-const ROOT_PASSWORD_TIMEOUT: Duration = Duration::from_secs(10);
+const ROOT_HASH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a verification waits for the single hashing slot.
 const VERIFY_WAIT: Duration = Duration::from_secs(2);
 
@@ -70,6 +71,10 @@ pub struct LoginRsp {
 pub struct ChangePasswordReq {
     pub username: String,
     pub password: String,
+    /// The current password, encoded like `password`. A change requires it;
+    /// first setup has none.
+    #[serde(rename = "currentPassword", default)]
+    pub current_password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +181,7 @@ pub async fn setup_first_account(
     let ChangePasswordReq {
         username,
         password: encoded,
+        ..
     } = req;
     let encoded = Zeroizing::new(encoded);
     let password = Zeroizing::new(decode_frontend_password(&encoded)?);
@@ -184,15 +190,11 @@ pub async fn setup_first_account(
         .run(move |writer| async move {
             // Recheck under the serialized permit; two first-setup requests must
             // not each change native identity and then overwrite the web account.
+            // The credential journal checks absence once more as it writes.
             if state.accounts.exists() {
                 return Err(AppError::Conflict("account already initialized".into()));
             }
-            change_root_password(&password, &writer).await?;
-            let accounts = state.accounts;
-            writer
-                .blocking(move |permit| accounts.set_account(permit, &username, &password))
-                .await?;
-            Ok(())
+            replace_credentials(&state.accounts, &writer, Change::Setup, username, password).await
         })
         .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -243,6 +245,7 @@ pub async fn is_password_updated(State(state): State<AppState>) -> Result<impl I
 
 pub async fn change_password(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
     Extension(CurrentSession(session)): Extension<CurrentSession>,
     Json(req): Json<ChangePasswordReq>,
 ) -> Result<impl IntoResponse> {
@@ -255,18 +258,24 @@ pub async fn change_password(
     let ChangePasswordReq {
         username,
         password: encoded,
+        current_password,
     } = req;
+    let current = Zeroizing::new(current_password.unwrap_or_default());
+    reauthenticate(&state, addr.0.ip(), &username, &current).await?;
     let encoded = Zeroizing::new(encoded);
     let password = Zeroizing::new(decode_frontend_password(&encoded)?);
     validate_account_credentials(&username, &password)?;
     permit
         .run(move |writer| async move {
-            change_root_password(&password, &writer).await?;
             let revoke_user = username.clone();
-            let accounts = state.accounts;
-            writer
-                .blocking(move |permit| accounts.set_account(permit, &username, &password))
-                .await?;
+            replace_credentials(
+                &state.accounts,
+                &writer,
+                Change::Replace,
+                username,
+                password,
+            )
+            .await?;
             if state.config.security.revoke_tokens_on_password_change {
                 state.sessions.revoke_user(&revoke_user).await;
             }
@@ -276,21 +285,84 @@ pub async fn change_password(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-async fn change_root_password(password: &str, writer: &AccountPermit) -> Result<()> {
-    let input = Zeroizing::new(format!("{password}\n{password}\n"));
+/// A change needs the current password, counted by the login lockout: a stolen
+/// session must not become a password-guessing oracle.
+async fn reauthenticate(
+    state: &AppState,
+    source: IpAddr,
+    username: &str,
+    encoded: &str,
+) -> Result<()> {
+    if encoded.is_empty() {
+        return Err(AppError::BadRequest(
+            "the current password is required".to_string(),
+        ));
+    }
+    if state.login_limiter.write().await.check(source, username) {
+        return Err(AppError::RateLimited(
+            "account locked due to too many failed attempts".to_string(),
+        ));
+    }
+    let current = Zeroizing::new(decode_frontend_password(encoded)?);
+    if verify_bounded(&state.login_hashing, &state.accounts, username, current).await? {
+        state
+            .login_limiter
+            .write()
+            .await
+            .record_success(source, username);
+        return Ok(());
+    }
+    state
+        .login_limiter
+        .write()
+        .await
+        .record_failure(source, username);
+    audit::login_failure(username, &source.to_string(), "password_change_reauth");
+    Err(AppError::InvalidCredentials)
+}
+
+/// Hash both passwords, then publish root's hash and the web account through
+/// one credential journal under the account permit.
+async fn replace_credentials(
+    accounts: &Arc<AccountStore>,
+    writer: &AccountPermit,
+    change: Change,
+    username: String,
+    password: Zeroizing<String>,
+) -> Result<()> {
+    let root_hash = root_password_hash(accounts, &password, writer).await?;
+    let accounts = Arc::clone(accounts);
+    writer
+        .blocking(move |permit| {
+            accounts.replace_credentials(permit, change, &username, &password, &root_hash)
+        })
+        .await
+}
+
+/// Root's SHA-512 crypt(3) hash from BusyBox `mkpasswd`, which reads the
+/// password from stdin and writes no file. Only the credential journal
+/// publishes the hash.
+async fn root_password_hash(
+    accounts: &AccountStore,
+    password: &str,
+    writer: &AccountPermit,
+) -> Result<String> {
+    let salt = credential_txn::root_salt()?;
+    let input = Zeroizing::new(format!("{password}\n"));
     let output = writer
         .command_with_stdin(
-            AllowedCommand::Passwd,
-            ["root"],
+            accounts.root_hasher(),
+            ["-m", "sha512", "-S", salt.as_str()],
             input.as_bytes(),
-            ROOT_PASSWORD_TIMEOUT,
+            ROOT_HASH_TIMEOUT,
         )
         .await?;
-    if output.status == 0 {
-        Ok(())
-    } else {
-        Err(AppError::Internal("failed to change root password".into()))
+    if output.status != 0 {
+        return Err(AppError::Internal(
+            "failed to hash the root password".into(),
+        ));
     }
+    credential_txn::parse_root_hash(&output.stdout, &salt)
 }
 
 #[cfg(test)]
@@ -354,5 +426,123 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// The image's BusyBox `mkpasswd -m sha512 -S Fx1./abcdEFGH234` output for
+    /// a synthetic password; the fixture prints it for any salt it is given.
+    const FIXTURE_DIGEST: &str =
+        "2qHO9tMVYA0mOOe16irs2YWy6hEOtOydJUoBSmIWuKej9klY2b3zcJ9B4Z.PnBDbsCrinnVBtfhfxJS6DU2vx.";
+    const NEW_PASSWORD: &str = "synthetic new password";
+
+    async fn change_fixture(
+        dir: &tempfile::TempDir,
+    ) -> (AppState, crate::auth::session::Session, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut config = crate::config::Config::default();
+        config.paths.account_file = dir.path().join("pwd");
+        let mut state = AppState::new(config).await.unwrap();
+        state.writers = Arc::new(crate::update::state_writers::StateWriters::for_test_parent(
+            std::fs::File::open(dir.path()).unwrap(),
+        ));
+        let shadow = dir.path().join("shadow");
+        std::fs::write(&shadow, b"root:$5$synthetic$old:19000:0:99999:7:::\n").unwrap();
+        let hasher = dir.path().join("mkpasswd");
+        let script = format!(
+            "#!/bin/sh\n[ \"$#\" -eq 4 ] && [ \"$1\" = -m ] && [ \"$2\" = sha512 ] && [ \"$3\" = -S ] || exit 2\n\
+             IFS= read -r password || exit 3\nprintf '%s' \"$password\" > \"${{0%/*}}/mkpasswd.stdin\"\n\
+             printf '$6$%s$%s\\n' \"$4\" '{FIXTURE_DIGEST}'\n"
+        );
+        std::fs::write(&hasher, script).unwrap();
+        std::fs::set_permissions(&hasher, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let accounts = AccountStore::fixture(dir.path().join("pwd"), shadow.clone(), hasher);
+        let hash = crate::auth::password::hash_password(PASSWORD).unwrap();
+        let account = serde_json::json!({"username": "operator", "password": hash});
+        std::fs::write(dir.path().join("pwd"), account.to_string()).unwrap();
+        state.accounts = Arc::new(accounts);
+        state.login_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::security::rate_limit::LoginRateLimiter::new(2, 600),
+        ));
+        let session = state.sessions.issue("operator", 900).await;
+        (state, session, shadow)
+    }
+
+    fn change(current: Option<&str>) -> Json<ChangePasswordReq> {
+        Json(ChangePasswordReq {
+            username: "operator".into(),
+            password: NEW_PASSWORD.into(),
+            current_password: current.map(str::to_string),
+        })
+    }
+
+    fn client() -> ConnectInfo<ClientAddr> {
+        ConnectInfo(ClientAddr("192.0.2.10:40000".parse().unwrap()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_password_change_needs_the_current_password_under_the_login_lockout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session, shadow) = change_fixture(&dir).await;
+        let attempt = |current: Option<&'static str>| {
+            let state = state.clone();
+            let session = session.clone();
+            async move {
+                change_password(
+                    State(state),
+                    client(),
+                    Extension(CurrentSession(session)),
+                    change(current),
+                )
+                .await
+                .map(|_| ())
+            }
+        };
+        let unchanged = |state: &AppState| {
+            assert!(state.accounts.verify("operator", PASSWORD).unwrap());
+            assert!(
+                std::fs::read_to_string(&shadow)
+                    .unwrap()
+                    .contains("$5$synthetic$old")
+            );
+            assert!(!dir.path().join("mkpasswd.stdin").exists());
+        };
+
+        assert!(matches!(attempt(None).await, Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            attempt(Some("")).await,
+            Err(AppError::BadRequest(_))
+        ));
+        unchanged(&state);
+        // Wrong current passwords count toward the same lockout as logins.
+        for _ in 0..2 {
+            assert!(matches!(
+                attempt(Some("synthetic wrong password")).await,
+                Err(AppError::InvalidCredentials)
+            ));
+        }
+        assert!(matches!(
+            attempt(Some(PASSWORD)).await,
+            Err(AppError::RateLimited(_))
+        ));
+        unchanged(&state);
+
+        state
+            .login_limiter
+            .write()
+            .await
+            .record_success(client().0.0.ip(), "operator");
+        attempt(Some(PASSWORD)).await.unwrap();
+        assert!(state.accounts.verify("operator", NEW_PASSWORD).unwrap());
+        assert!(!state.accounts.verify("operator", PASSWORD).unwrap());
+        let root = std::fs::read_to_string(&shadow).unwrap();
+        assert!(root.starts_with("root:$6$"), "{root}");
+        assert!(root.contains(FIXTURE_DIGEST));
+        // The password reached mkpasswd on stdin, never as an argument.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("mkpasswd.stdin")).unwrap(),
+            NEW_PASSWORD
+        );
+        assert!(!state.accounts.credential_recovery_pending());
+        // Revocation ends the session that made the change.
+        assert!(state.sessions.validate(&session.token).await.is_none());
     }
 }

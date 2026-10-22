@@ -58,6 +58,19 @@ impl AppState {
         config.webrtc_limits()?;
         let writers = Arc::new(StateWriters::default());
         let accounts = AccountStore::new(config.paths.account_file.clone());
+        // An interrupted credential change is undone before anything reads the
+        // stores. Failure keeps its journal, which refuses further changes
+        // until a later start succeeds; login keeps working meanwhile.
+        if accounts.credential_recovery_pending() {
+            match writers
+                .account()
+                .and_then(|permit| accounts.recover_credentials(&permit))
+            {
+                Ok(true) => tracing::warn!("restored the credentials of an interrupted change"),
+                Ok(false) => {}
+                Err(error) => tracing::error!(%error, "credential recovery failed"),
+            }
+        }
         if config.security.allow_default_admin {
             let permit = writers.account()?;
             if accounts.seed_legacy_default_account(&permit)? {
@@ -68,7 +81,8 @@ impl AppState {
         Self::with_identity(config, writers, accounts)
     }
 
-    /// Frozen trial never enrolls a writer or creates a default account.
+    /// Frozen trial never enrolls a writer or creates a default account. A
+    /// pending credential journal waits for the next ordinary start.
     pub fn new_trial(config: Config, startup: &crate::update::app_trial::Startup) -> Result<Self> {
         let account = startup.read_state(&config.paths.account_file, 64 * 1024)?;
         if let Some(bytes) = account {

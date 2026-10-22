@@ -13,6 +13,8 @@ const ru = {
       placeholderUsername: 'Введите имя пользователя',
       placeholderPassword: 'Введите пароль',
       placeholderPassword2: 'Введите пароль снова',
+      placeholderCurrentPassword: 'Текущий пароль',
+      wrongCurrentPassword: 'Текущий пароль неверен',
       noEmptyUsername: 'Имя пользователя не может быть пустым',
       noEmptyPassword: 'Пароль не может быть пустым',
       noAccount:

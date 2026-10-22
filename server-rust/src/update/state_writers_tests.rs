@@ -342,7 +342,15 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
         http::middleware::CurrentSession,
         state::AppState,
     };
-    use axum::{Extension, Json, extract::State};
+    use axum::{
+        Extension, Json,
+        extract::{ConnectInfo, State},
+    };
+    let client = || {
+        ConnectInfo(crate::http::tls::ClientAddr(
+            "192.0.2.10:40000".parse().unwrap(),
+        ))
+    };
     let temporary = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.paths.account_file = temporary.path().join("pwd");
@@ -355,6 +363,7 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
         Json(ChangePasswordReq {
             username: "fixture".into(),
             password: "short".into(),
+            current_password: None,
         })
     };
     assert!(
@@ -363,7 +372,7 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
     );
     let session = state.sessions.issue("fixture", 900).await;
     assert!(
-        matches!(account::change_password(State(state.clone()), Extension(CurrentSession(session)), request()).await,
+        matches!(account::change_password(State(state.clone()), client(), Extension(CurrentSession(session)), request()).await,
         Err(AppError::Conflict(ref text)) if text.contains("paused"))
     );
     assert!(!state.config.paths.account_file.exists());
@@ -382,10 +391,17 @@ fn normal_constructor_never_chooses_a_test_parent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_reply_still_publishes_the_synthetic_web_account_under_its_permit() {
-    use crate::auth::password::AccountStore;
+    use crate::auth::{credential_txn::Change, password::AccountStore};
+    const ROOT_HASH: &str = "$6$Fx1./abcdEFGH234$2qHO9tMVYA0mOOe16irs2YWy6hEOtOydJUoBSmIWuKej9klY2b3zcJ9B4Z.PnBDbsCrinnVBtfhfxJS6DU2vx.";
     let temporary = tempfile::tempdir().unwrap();
     let gate = gate(temporary.path());
-    let store = Arc::new(AccountStore::new(temporary.path().join("pwd")));
+    let shadow = temporary.path().join("shadow");
+    std::fs::write(&shadow, b"root:*:19000:0:99999:7:::\n").unwrap();
+    let store = Arc::new(AccountStore::fixture(
+        temporary.path().join("pwd"),
+        shadow.clone(),
+        temporary.path().join("unused-hasher"),
+    ));
     let accounts = Arc::clone(&store);
     let permit = gate.account().unwrap();
     let (started, start) = oneshot::channel();
@@ -395,7 +411,13 @@ async fn lost_reply_still_publishes_the_synthetic_web_account_under_its_permit()
         wait.await.unwrap();
         writer
             .blocking(move |permit| {
-                accounts.set_account(permit, "fixture", "synthetic fixture password")
+                accounts.replace_credentials(
+                    permit,
+                    Change::Setup,
+                    "fixture",
+                    "synthetic fixture password",
+                    ROOT_HASH,
+                )
             })
             .await
     }));
@@ -408,6 +430,11 @@ async fn lost_reply_still_publishes_the_synthetic_web_account_under_its_permit()
         store
             .verify("fixture", "synthetic fixture password")
             .unwrap()
+    );
+    assert!(
+        std::fs::read_to_string(&shadow)
+            .unwrap()
+            .starts_with(&format!("root:{ROOT_HASH}:"))
     );
     drop(barrier);
 }

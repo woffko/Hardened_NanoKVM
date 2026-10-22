@@ -341,9 +341,10 @@ command deadline is not a promise of bounded kernel teardown.
 The Tailscale login matcher preserves first matching URL, CRLF and final-line
 behavior. It bounds each stderr line to 256 KiB, rejects invalid UTF-8/oversized
 lines and stops/reaps the direct CLI on a match, timeout or error. EOF without a
-match still waits for the direct child under the same deadline. For `passwd`,
-an early stdin failure remains secondary to nonzero exit/status output; a zero
-exit still requires successful input delivery.
+match still waits for the direct child under the same deadline. For a stdin
+command such as `mkpasswd`, an early stdin failure remains secondary to
+nonzero exit/status output; a zero exit still requires successful input
+delivery.
 
 Loss of a command's caller signals the runtime owner to cancel and reap; dropping
 the waiting future is **not** a synchronous cleanup join. The registered update
@@ -396,8 +397,10 @@ serialization before changing native root identity. Existing authorization,
 password rules, API success shapes and default-disabled legacy seed remain.
 Unsafe/busy writer storage fails closed; no default-account recovery is added.
 
-After validation, a runtime-owned task retains the account permit through native
-`passwd`, blocking web-account hashing/publication and configured token revocation.
+After validation, a runtime-owned task retains the account permit through the
+root hash from `mkpasswd`, the blocking journaled replacement of `/etc/shadow`
+and the web account (see [security-account-preflight.md](security-account-preflight.md))
+and configured token revocation.
 Lost HTTP replies do not abandon the middle of this sequence. Blocking callbacks
 and command owners retain their own shares; dropping their waiters cannot release
 writer activity before callback/discarded-result cleanup or direct-child reap.

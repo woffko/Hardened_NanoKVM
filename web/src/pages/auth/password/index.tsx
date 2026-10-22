@@ -30,18 +30,21 @@ export const Password = () => {
       return;
     }
     if (!validateString(values.password)) {
-      setMsg('auth.illegalPassword');
+      setMsg(t('auth.illegalPassword'));
       return;
     }
 
     const username = values.username;
     const password = encrypt(values.password);
+    const currentPassword = encrypt(values.currentPassword);
 
     api
-      .changePassword(username, password)
+      .changePassword(username, password, currentPassword)
       .then((rsp: any) => {
         if (rsp.code !== 0) {
-          setMsg(t('auth.error'));
+          if (rsp.code === -2) setMsg(t('auth.wrongCurrentPassword'));
+          else if (rsp.code === -5) setMsg(t('auth.locked'));
+          else setMsg(rsp.msg || t('auth.error'));
           return;
         }
 
@@ -82,12 +85,25 @@ export const Password = () => {
           </Form.Item>
 
           <Form.Item
+            name="currentPassword"
+            rules={[{ required: true, message: t('auth.noEmptyPassword'), min: 1 }]}
+          >
+            <Input
+              prefix={<LockOutlined />}
+              type="password"
+              autoComplete="current-password"
+              placeholder={t('auth.placeholderCurrentPassword')}
+            />
+          </Form.Item>
+
+          <Form.Item
             name="password"
             rules={[{ required: true, message: t('auth.noEmptyPassword'), min: 1 }]}
           >
             <Input
               prefix={<LockOutlined />}
               type="password"
+              autoComplete="new-password"
               placeholder={t('auth.placeholderPassword')}
             />
           </Form.Item>
@@ -99,6 +115,7 @@ export const Password = () => {
             <Input
               prefix={<LockOutlined />}
               type="password"
+              autoComplete="new-password"
               placeholder={t('auth.placeholderPassword2')}
             />
           </Form.Item>

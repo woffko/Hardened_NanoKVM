@@ -1,9 +1,4 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -11,7 +6,12 @@ use argon2::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, Result, update::state_writers::AccountPermit};
+use crate::{
+    AppError, Result,
+    auth::credential_txn::{self, Change, CredentialFiles},
+    system::command::AllowedCommand,
+    update::state_writers::AccountPermit,
+};
 
 pub const LEGACY_DEFAULT_USERNAME: &str = "admin";
 pub const LEGACY_DEFAULT_PASSWORD: &str = "admin";
@@ -22,14 +22,50 @@ pub struct Account {
     pub password: String,
 }
 
+/// The web account file and root's entry in `/etc/shadow`, which change together.
 #[derive(Debug)]
 pub struct AccountStore {
     path: PathBuf,
+    shadow: PathBuf,
+    #[cfg(test)]
+    root_hasher: Option<PathBuf>,
 }
 
 impl AccountStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            shadow: PathBuf::from(credential_txn::SHADOW_FILE),
+            #[cfg(test)]
+            root_hasher: None,
+        }
+    }
+
+    /// Host fixture: a temporary shadow file and a program standing in for
+    /// `mkpasswd`.
+    #[cfg(test)]
+    pub(crate) fn fixture(path: PathBuf, shadow: PathBuf, root_hasher: PathBuf) -> Self {
+        Self {
+            path,
+            shadow,
+            root_hasher: Some(root_hasher),
+        }
+    }
+
+    fn credentials(&self) -> CredentialFiles {
+        CredentialFiles {
+            shadow: self.shadow.clone(),
+            account: self.path.clone(),
+        }
+    }
+
+    /// The program that hashes root's password: BusyBox `mkpasswd`.
+    pub(crate) fn root_hasher(&self) -> AllowedCommand {
+        #[cfg(test)]
+        if let Some(path) = &self.root_hasher {
+            return AllowedCommand::CustomForTest(path.clone());
+        }
+        AllowedCommand::Mkpasswd
     }
 
     pub fn exists(&self) -> bool {
@@ -46,16 +82,38 @@ impl AccountStore {
         Ok(Some(account))
     }
 
-    pub(crate) fn set_account(
+    /// Set root's password hash and the web account as one journaled change.
+    /// `root_hash` is the SHA-512 crypt(3) string of the same password.
+    pub(crate) fn replace_credentials(
         &self,
         _permit: &AccountPermit,
+        change: Change,
         username: &str,
         password: &str,
+        root_hash: &str,
     ) -> Result<()> {
         validate_username(username)?;
         validate_password(password)?;
         let hash = hash_password(password)?;
-        self.write_account(username, &hash)
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        credential_txn::replace(
+            &self.credentials(),
+            change,
+            &account_file(username, &hash)?,
+            root_hash,
+        )
+    }
+
+    /// A journal or scratch file of an interrupted credential change exists.
+    pub(crate) fn credential_recovery_pending(&self) -> bool {
+        self.credentials().recovery_pending()
+    }
+
+    /// Restore the stores of an interrupted change; `Ok(true)` if one was undone.
+    pub(crate) fn recover_credentials(&self, _permit: &AccountPermit) -> Result<bool> {
+        credential_txn::recover(&self.credentials())
     }
 
     pub(crate) fn seed_legacy_default_account(&self, _permit: &AccountPermit) -> Result<bool> {
@@ -68,13 +126,10 @@ impl AccountStore {
     }
 
     fn write_account(&self, username: &str, hash: &str) -> Result<()> {
-        let account = Account {
-            username: username.to_string(),
-            password: hash.to_string(),
-        };
-        let data = serde_json::to_vec(&account)
-            .map_err(|err| AppError::Internal(format!("account serialization failed: {err}")))?;
-        write_account_0600(&self.path, &data)
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        credential_txn::write_private(&self.path, &account_file(username, hash)?)
     }
 
     /// The stored hash is checked even for a wrong username, so the reply
@@ -151,21 +206,16 @@ fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_account_0600(path: &PathBuf, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+/// The complete web account file for `username` and its password hash.
+fn account_file(username: &str, hash: &str) -> Result<Vec<u8>> {
+    let account = Account {
+        username: username.to_string(),
+        password: hash.to_string(),
+    };
+    let mut data = serde_json::to_vec(&account)
+        .map_err(|err| AppError::Internal(format!("account serialization failed: {err}")))?;
+    data.push(b'\n');
+    Ok(data)
 }
 
 #[cfg(test)]
