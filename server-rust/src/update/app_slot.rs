@@ -1349,6 +1349,10 @@ pub(crate) mod issuer_tests;
 #[path = "app_slot_publication_tests.rs"]
 mod publication_tests;
 
+#[cfg(test)]
+#[path = "app_slot_test_diagnostics.rs"]
+mod test_diagnostics;
+
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 #[path = "app_slot_recovery_tests.rs"]
 mod recovery_tests;

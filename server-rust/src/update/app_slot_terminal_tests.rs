@@ -451,12 +451,13 @@ fn real_sigkill_at_each_retirement_boundary_never_loses_receipt_or_inactive_slot
                 }
             });
             let reached = receive.recv_timeout(Duration::from_secs(10)).is_ok();
+            let threads = (!reached).then(|| test_diagnostics::child_threads(child.id()));
             let _ = child.kill();
             let result = child.wait().unwrap();
             reader.join().unwrap();
             assert!(
                 reached,
-                "checkpoint {point} not reached: phase={phase:?}, subsequent={subsequent}, status={result:?}"
+                "checkpoint {point} not reached: phase={phase:?}, subsequent={subsequent}, status={result:?}, threads={threads:?}"
             );
             assert_eq!(result.signal(), Some(9));
             let snapshot = job_status_fixture(fixture.root.path(), fixture.record.transaction)

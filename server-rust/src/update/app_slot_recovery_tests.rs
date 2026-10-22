@@ -215,6 +215,7 @@ fn killed_recovery_resumes_exact_transaction_before_or_after_archival() {
                         .map(str::to_owned)
                 })
             });
+            let threads = (!reached).then(|| test_diagnostics::child_threads(child.id()));
             let killed = child.kill();
             let output = child.wait_with_output().unwrap();
             let last_stdout = reader.join().unwrap();
@@ -223,7 +224,7 @@ fn killed_recovery_resumes_exact_transaction_before_or_after_archival() {
                 reached,
                 "{committed}/{point}: elapsed={:?}, checkpoint={checkpoint:?}, kill={killed:?}, \
                  last_stdout={last_stdout:?}, stderr_dropped={dropped}, stderr_last_at={last_read:?}, \
-                 wchan={wchan:?}, process_state={process_state:?}, output={output:?}, stderr={}",
+                 wchan={wchan:?}, process_state={process_state:?}, threads={threads:?}, output={output:?}, stderr={}",
                 started.elapsed(),
                 String::from_utf8_lossy(&stderr)
             );

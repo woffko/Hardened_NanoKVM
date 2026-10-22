@@ -271,6 +271,9 @@ fn every_data_journal_and_slot_rename_crash_boundary_recovers_the_recorded_old_a
                     .map(str::to_owned)
             })
         });
+        let threads = ready
+            .is_err()
+            .then(|| test_diagnostics::child_threads(child.id()));
         child.kill().unwrap();
         let output = child.wait_with_output().unwrap();
         let last_stdout = reader.join().unwrap();
@@ -285,7 +288,7 @@ fn every_data_journal_and_slot_rename_crash_boundary_recovers_the_recorded_old_a
         }
         assert!(
             ready.is_ok(),
-            "checkpoint {stop}: wait={ready:?}, elapsed={:?}, child={}, last_stdout={last_stdout:?}, wchan={wchan:?}, state={process_state:?}; trace:\n{trace}",
+            "checkpoint {stop}: wait={ready:?}, elapsed={:?}, child={}, last_stdout={last_stdout:?}, wchan={wchan:?}, state={process_state:?}, threads={threads:?}; trace:\n{trace}",
             started.elapsed(),
             output.status,
         );
