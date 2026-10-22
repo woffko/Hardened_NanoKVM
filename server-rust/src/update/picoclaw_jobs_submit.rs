@@ -163,7 +163,8 @@ pub(crate) enum TransitionStatus {
     /// Settlement found work to do and made its once-chosen plan durable;
     /// no runtime was stopped and no target was changed.
     Planned,
-    /// Settlement cannot run for this accepted job; nothing was changed.
+    /// Settlement refused before any plan or stop: terminal Failed receipt,
+    /// nothing changed, a live runtime kept and the job retired.
     Refused,
     /// The planned change is installed; carries the installed generation.
     Committed(super::super::Generation),
@@ -398,8 +399,7 @@ impl Submission {
                 Some(
                     TransitionStatus::Stopping
                     | TransitionStatus::Closed
-                    | TransitionStatus::Planned
-                    | TransitionStatus::Refused,
+                    | TransitionStatus::Planned,
                 ),
             ) => true,
             (Advance::Apply, Some(TransitionStatus::Closed)) => true,

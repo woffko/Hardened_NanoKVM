@@ -169,7 +169,14 @@ impl Record {
                         && !self.resume_allowed
                         && self.runtime == Runtime::Suppressed)
             }
-            Outcome::Failed | Outcome::Cancelled => self.runtime == Runtime::NotRequested,
+            Outcome::Cancelled => self.runtime == Runtime::NotRequested,
+            // A refusal before any plan or stop leaves a live runtime exactly
+            // as a canonical no-op does.
+            Outcome::Failed if self.runtime == Runtime::NotRequested => true,
+            Outcome::Failed if self.was_running && !self.resume_allowed => {
+                self.runtime == Runtime::Suppressed
+            }
+            Outcome::Failed => self.runtime == Runtime::Unchanged,
             Outcome::Changed if self.kind == Kind::Remove => self.runtime == Runtime::Removed,
             Outcome::Changed if self.resume_allowed => {
                 matches!(self.runtime, Runtime::Resumed | Runtime::ResumeFailed)

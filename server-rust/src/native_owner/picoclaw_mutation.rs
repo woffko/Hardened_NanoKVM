@@ -25,7 +25,8 @@ pub enum MutationStatus {
     /// The change's plan is durable and the SAME owned scope is proven
     /// closed with resume permission kept; the change is not applied yet.
     Quiesced(PicoJobId),
-    /// Settlement cannot run for this job; it stays accepted and fenced.
+    /// Settlement refused before any plan or stop: terminal Failed receipt,
+    /// nothing changed, a live runtime kept and private members retired.
     SettlementRefused(PicoJobId),
     /// Terminal receipt published and private members retired.
     Completed(PicoJobId),
@@ -132,14 +133,22 @@ impl Mutation {
         self.settle_requested = true;
     }
 
-    /// Return this SAME broker only once the job is durably terminal and its
-    /// private members are retired. Otherwise the owner comes back unchanged.
+    /// Return this SAME broker only once no durable job is left to it: the
+    /// job is terminal with its private members retired, or this submission
+    /// never accepted one. Otherwise the owner comes back unchanged.
     /// Dropping the submission first joins its workers and releases the
     /// store, source, Config and Update leases before the broker leaves.
-    pub fn into_broker(self) -> std::result::Result<Broker, Box<Self>> {
+    pub fn into_broker(mut self) -> std::result::Result<Broker, Box<Self>> {
+        // Fresh status: an acceptance still in flight is never released.
         if !matches!(
-            self.status,
-            MutationStatus::Completed(_) | MutationStatus::Superseded(_)
+            self.poll(),
+            MutationStatus::Idle
+                | MutationStatus::Existing(_)
+                | MutationStatus::Expired
+                | MutationStatus::Rejected
+                | MutationStatus::Completed(_)
+                | MutationStatus::Superseded(_)
+                | MutationStatus::SettlementRefused(_)
         ) {
             return Err(Box::new(self));
         }
@@ -313,6 +322,7 @@ impl Mutation {
         let started = match phase {
             TransitionStatus::Pending => return MutationStatus::StopPending(id),
             TransitionStatus::Completed => return MutationStatus::Completed(id),
+            TransitionStatus::Refused => return MutationStatus::SettlementRefused(id),
             TransitionStatus::Closed if resume == Some(false) => {
                 return MutationStatus::Closed(id);
             }
@@ -320,10 +330,7 @@ impl Mutation {
                 let proof = self.proof(id);
                 self.submission.persist_closed(proof)
             }
-            TransitionStatus::Idle
-            | TransitionStatus::Planned
-            | TransitionStatus::Refused
-            | TransitionStatus::Stopping
+            TransitionStatus::Idle | TransitionStatus::Planned | TransitionStatus::Stopping
                 if closed =>
             {
                 let proof = self.proof(id);
@@ -336,7 +343,7 @@ impl Mutation {
                 self.broker.group.stop_picoclaw();
                 return MutationStatus::Stopping(id);
             }
-            TransitionStatus::Idle | TransitionStatus::Planned | TransitionStatus::Refused
+            TransitionStatus::Idle | TransitionStatus::Planned
                 if native == Some(Status::Running) =>
             {
                 self.submission.persist_stop(id)

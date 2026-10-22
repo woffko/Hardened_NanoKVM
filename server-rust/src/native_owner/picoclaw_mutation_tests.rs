@@ -226,7 +226,11 @@ fn startup_change_settlement_applies_once_and_records_the_exact_runtime_result()
 
 #[test]
 fn startup_settlement_refuses_or_supersedes_without_changing_the_pair() {
-    for case in ["settle-refused-absent", "settle-superseded-absent"] {
+    for case in [
+        "settle-refused-absent",
+        "settle-refused-live",
+        "settle-superseded-absent",
+    ] {
         run(case);
     }
 }
@@ -880,7 +884,7 @@ fn settle_home(case: &str) -> SettlePair {
             format!("{INTERNAL}\n").as_bytes(),
         );
     }
-    if case == "settle-refused-absent" {
+    if case.starts_with("settle-refused-") {
         return SettlePair {
             config: (Vec::new(), 0),
             security: None,
@@ -1198,26 +1202,39 @@ fn settle_case(
                 shutdown(broker);
             }
         }
-        "settle-refused-absent" => {
-            let MutationStatus::SettlementRefused(_) = status else {
+        "settle-refused-absent" | "settle-refused-live" => {
+            // Refused before any plan or stop: terminal at once, like a no-op.
+            let MutationStatus::SettlementRefused(id) = status else {
                 panic!("{case}: {status:?}");
             };
-            assert!(record() == accepted, "nothing was published");
-            assert_eq!(members_present(), [true; 3]);
-            assert!(!plan_present());
-            let mut mutation = match mutation.into_broker() {
-                Ok(_) => panic!("unfinished job returned its broker"),
-                Err(mutation) => *mutation,
-            };
-            assert!(StateWriters::default().configuration().is_err());
-            // The accepted job can still take the explicit Stop path.
+            assert_eq!(id.sequence, 1);
+            // A later explicit Stop cannot reopen or stop a terminal job.
             mutation.request_stop();
-            until(|| closed(&mut mutation));
-            assert_eq!(record()[128 + 169], 3);
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::SettlementRefused(id));
+            }
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 169], 8, "Completed");
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert_eq!(state[RECEIPT + 170], u8::from(live));
+            assert_eq!(state[RECEIPT + 174], u8::from(live), "resume kept");
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
             assert_pair_unchanged(pair);
-            drop(mutation);
-            drop(ProcessLock::acquire().unwrap());
-            assert!(StateWriters::default().configuration().is_err());
+            let mut broker = assert_released(mutation);
+            if live {
+                // The live scope was never stopped and keeps its generation.
+                assert_eq!(broker.group.poll()[3], Some(Status::Running));
+                assert!(
+                    broker.group.picoclaw_generation()
+                        == Some(crate::update::picoclaw_config::Generation::fixture(
+                            [0x31; 32]
+                        ))
+                );
+                shutdown(broker);
+            }
         }
         "settle-superseded-absent" => {
             let MutationStatus::Superseded(id) = status else {

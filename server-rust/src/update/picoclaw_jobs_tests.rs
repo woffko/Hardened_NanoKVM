@@ -193,9 +193,12 @@ fn terminal_outcome_and_runtime_semantics_are_checked_independently() {
                                     runtime == Runtime::Suppressed
                                 }
                                 Outcome::Noop => runtime == Runtime::Unchanged,
-                                Outcome::Failed | Outcome::Cancelled => {
-                                    runtime == Runtime::NotRequested
+                                Outcome::Cancelled => runtime == Runtime::NotRequested,
+                                Outcome::Failed if runtime == Runtime::NotRequested => true,
+                                Outcome::Failed if was_running && !resume_allowed => {
+                                    runtime == Runtime::Suppressed
                                 }
+                                Outcome::Failed => runtime == Runtime::Unchanged,
                                 Outcome::Changed if kind == Kind::Remove => {
                                     runtime == Runtime::Removed
                                 }

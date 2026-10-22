@@ -170,15 +170,21 @@ internal credential and classifies the accepted pair.
   Each member is re-checked against its owned identity and content immediately
   before its unlink. The pair's bytes, comments and inodes, its generation and a
   live runtime with its launch association are untouched.
-- **Return of the broker.** Only a Completed status lets `into_broker` return
-  the same broker. Dropping the submission first joins its workers and releases
-  the store, source, Config and Update leases.
+- **Return of the broker.** `into_broker` returns the same broker only when no
+  durable job is left to it: a terminal Completed, Superseded or
+  SettlementRefused job, or a submission that never accepted one. It polls
+  first, so an acceptance still in flight is never released. Dropping the
+  submission first joins its workers and releases the store, source, Config
+  and Update leases.
 - **Missing token or value change.** A missing gateway or internal token, or a
   changed value, continues as the change settlement below.
 - **Refused.** A missing Home or config, unparsable documents, malformed
-  local-tool policy or a different job kind reports SettlementRefused. Nothing
-  is published or changed, and the job stays accepted and fenced for an
-  explicit Stop.
+  local-tool policy or a kind without an executor reports SettlementRefused.
+  Nothing was planned, stopped or changed, so the refusal ends like the
+  canonical no-op: a terminal Failed receipt (runtime Unchanged, or Suppressed
+  when resume was already lowered), retirement, a live runtime untouched and
+  the broker returned. A later explicit Stop cannot reopen the job. Otherwise
+  a refused job would hold the Config fence until the next boot.
 - **Publication or retirement errors.** These latch RecoveryRequired. A durable
   terminal receipt with remaining members stays fenced until early boot retires
   the remainder exactly; observation never re-runs the job.
@@ -396,7 +402,8 @@ The persisted state graph is:
 
 A proven absent/Closed Pico cell can skip Stopping. A genuine no-op can finish
 from Accepted after recording its result; target bytes, inodes and generation
-remain unchanged and a live runtime is not stopped. Every other skipped,
+remain unchanged and a live runtime is not stopped. A settlement refusal before
+any plan or stop finishes the same way, as Failed. Every other skipped,
 backwards or replayed transition is refused. Filesystem work and its state
 publication run in fixed joined workers, not the broker's control loop.
 
@@ -420,7 +427,9 @@ change keeps the permission. Session revocation integration and durable HTTP
 acknowledgements remain unimplemented.
 
 Failure before any mutation can become a terminal failed/cancelled receipt only
-after native closure and exact scratch/payload retirement. Once mutation may
+after native closure and exact scratch/payload retirement. The one exception is
+that settlement refusal: it never touched the native scope, which keeps running
+as before the job. Once mutation may
 have begun, an error, worker panic, process death or unknown sync result remains
 nonterminal and fenced until operation-specific checked settlement. A returned
 Err, worker join, reconnect, timeout or new boot cannot clear that fence.

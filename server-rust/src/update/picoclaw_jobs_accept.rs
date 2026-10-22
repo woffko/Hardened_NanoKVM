@@ -844,10 +844,25 @@ pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<Transit
     Ok(status)
 }
 
+// Nothing was planned, stopped or changed: like a canonical no-op, the refusal
+// is terminal at once and a live runtime keeps running untouched.
+fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<TransitionStatus> {
+    record.phase = Phase::Completed;
+    record.outcome = Outcome::Failed;
+    record.runtime = if record.was_running && !record.resume_allowed {
+        Runtime::Suppressed
+    } else {
+        Runtime::Unchanged
+    };
+    store.publish_terminal(record, touched)?;
+    store.retire()?;
+    Ok(TransitionStatus::Refused)
+}
+
 /// Ordinary Startup settlement, entered only from Accepted without an explicit
 /// Stop. A canonical no-op records its terminal receipt and retires the job
-/// without stopping a live runtime or touching the pair; any other result
-/// leaves the accepted job exactly as it is.
+/// without stopping a live runtime or touching the pair. A refusal does the
+/// same with a Failed receipt; a change makes its plan durable.
 pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     let store = payload.store.as_mut().ok_or_else(invalid)?;
     store.check_current()?;
@@ -861,16 +876,16 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     }
     if record.kind != Kind::Startup {
         // The other fixed operations have no settlement executor yet.
-        return Ok(TransitionStatus::Refused);
+        return refuse(store, record, &mut payload.touched);
     }
     let source = payload.source.as_ref().ok_or_else(invalid)?;
     let view = decode_source(source.bytes.as_slice())?;
     let (true, Some(config)) = (view.home_present, view.config) else {
         // Startup never creates a missing Home or config.
-        return Ok(TransitionStatus::Refused);
+        return refuse(store, record, &mut payload.touched);
     };
     let Ok(documents) = crate::update::picoclaw_startup::decode(config, view.security) else {
-        return Ok(TransitionStatus::Refused);
+        return refuse(store, record, &mut payload.touched);
     };
     let internal = crate::update::picoclaw_token::observe()?;
     let decision = match crate::update::picoclaw_startup::classify(
@@ -878,7 +893,7 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         internal.as_deref().map(String::as_str),
     ) {
         Ok(decision) => decision,
-        Err(_) => return Ok(TransitionStatus::Refused),
+        Err(_) => return refuse(store, record, &mut payload.touched),
     };
     if decision != crate::update::picoclaw_startup::Decision::Noop {
         // Select missing tokens exactly once and make the whole change durable
