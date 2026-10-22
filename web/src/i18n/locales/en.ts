@@ -245,7 +245,10 @@ const en = {
       confirm: 'Yes',
       cancel: 'No',
       delete: 'Delete',
-      close: 'Close'
+      close: 'Close',
+      unlockDesc:
+        'Scripts run as root on NanoKVM. Enter your web account password to upload or run one.',
+      terminalRequired: 'Scripts need web terminal access. Enable the terminal in settings first.'
     },
     terminal: {
       title: 'Terminal',

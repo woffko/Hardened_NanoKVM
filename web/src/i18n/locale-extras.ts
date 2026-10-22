@@ -4571,6 +4571,107 @@ const timeLogExtras = keyedExtras(timeLogKeys, {
   ]
 });
 
+const scriptUnlockKeys = ['script.unlockDesc', 'script.terminalRequired'] as const;
+
+const scriptUnlockExtras = keyedExtras(scriptUnlockKeys, {
+  ca: [
+    'Els scripts s’executen com a root al NanoKVM. Introduïu la contrasenya del compte web per pujar-ne o executar-ne un.',
+    'Els scripts necessiten accés al terminal web. Activeu primer el terminal a la configuració.'
+  ],
+  cz: [
+    'Skripty běží na NanoKVM jako root. Zadejte heslo webového účtu, abyste mohli skript nahrát nebo spustit.',
+    'Skripty vyžadují přístup k webovému terminálu. Nejprve terminál zapněte v nastavení.'
+  ],
+  da: [
+    'Scripts kører som root på NanoKVM. Indtast adgangskoden til webkontoen for at uploade eller køre et script.',
+    'Scripts kræver adgang til webterminalen. Aktivér først terminalen i indstillingerne.'
+  ],
+  de: [
+    'Skripte laufen auf dem NanoKVM als root. Geben Sie das Passwort des Webkontos ein, um ein Skript hochzuladen oder auszuführen.',
+    'Skripte benötigen Zugriff auf das Web-Terminal. Aktivieren Sie zuerst das Terminal in den Einstellungen.'
+  ],
+  es: [
+    'Los scripts se ejecutan como root en el NanoKVM. Introduzca la contraseña de la cuenta web para subir o ejecutar uno.',
+    'Los scripts necesitan acceso al terminal web. Active primero el terminal en la configuración.'
+  ],
+  et: [
+    'Skriptid töötavad NanoKVM-is root-õigustes. Skripti üleslaadimiseks või käivitamiseks sisestage veebikonto parool.',
+    'Skriptid vajavad juurdepääsu veebiterminalile. Lubage esmalt terminal seadetes.'
+  ],
+  fi: [
+    'Skriptit suoritetaan NanoKVM:ssä root-oikeuksin. Anna verkkotilin salasana ladataksesi tai suorittaaksesi skriptin.',
+    'Skriptit tarvitsevat pääsyn verkkopäätteeseen. Ota pääte ensin käyttöön asetuksista.'
+  ],
+  fr: [
+    'Les scripts s’exécutent en root sur le NanoKVM. Saisissez le mot de passe du compte web pour en téléverser ou en exécuter un.',
+    'Les scripts nécessitent l’accès au terminal web. Activez d’abord le terminal dans les paramètres.'
+  ],
+  hu: [
+    'A szkriptek rootként futnak a NanoKVM-en. Szkript feltöltéséhez vagy futtatásához adja meg a webes fiók jelszavát.',
+    'A szkriptekhez webes terminálhozzáférés szükséges. Először engedélyezze a terminált a beállításokban.'
+  ],
+  id: [
+    'Skrip berjalan sebagai root di NanoKVM. Masukkan kata sandi akun web untuk mengunggah atau menjalankan skrip.',
+    'Skrip memerlukan akses terminal web. Aktifkan terminal di pengaturan terlebih dahulu.'
+  ],
+  it: [
+    'Gli script vengono eseguiti come root sul NanoKVM. Inserisci la password dell’account web per caricarne o eseguirne uno.',
+    'Gli script richiedono l’accesso al terminale web. Attiva prima il terminale nelle impostazioni.'
+  ],
+  ja: [
+    'スクリプトは NanoKVM 上で root として実行されます。スクリプトをアップロードまたは実行するには、Web アカウントのパスワードを入力してください。',
+    'スクリプトには Web ターミナルへのアクセスが必要です。先に設定でターミナルを有効にしてください。'
+  ],
+  ko: [
+    '스크립트는 NanoKVM에서 root로 실행됩니다. 스크립트를 업로드하거나 실행하려면 웹 계정 비밀번호를 입력하세요.',
+    '스크립트에는 웹 터미널 접근이 필요합니다. 먼저 설정에서 터미널을 활성화하세요.'
+  ],
+  nb: [
+    'Skript kjøres som root på NanoKVM. Skriv inn passordet til nettkontoen for å laste opp eller kjøre et skript.',
+    'Skript krever tilgang til nettterminalen. Aktiver terminalen i innstillingene først.'
+  ],
+  nl: [
+    'Scripts draaien als root op de NanoKVM. Voer het wachtwoord van het webaccount in om een script te uploaden of uit te voeren.',
+    'Scripts hebben toegang tot de webterminal nodig. Schakel eerst de terminal in bij de instellingen.'
+  ],
+  pl: [
+    'Skrypty działają na NanoKVM jako root. Wprowadź hasło konta webowego, aby przesłać lub uruchomić skrypt.',
+    'Skrypty wymagają dostępu do terminala webowego. Najpierw włącz terminal w ustawieniach.'
+  ],
+  pt_br: [
+    'Os scripts são executados como root no NanoKVM. Digite a senha da conta web para enviar ou executar um script.',
+    'Os scripts exigem acesso ao terminal web. Ative primeiro o terminal nas configurações.'
+  ],
+  se: [
+    'Skript körs som root på NanoKVM. Ange webbkontots lösenord för att ladda upp eller köra ett skript.',
+    'Skript kräver åtkomst till webbterminalen. Aktivera först terminalen i inställningarna.'
+  ],
+  th: [
+    'สคริปต์ทำงานในฐานะ root บน NanoKVM ป้อนรหัสผ่านบัญชีเว็บเพื่ออัปโหลดหรือเรียกใช้สคริปต์',
+    'สคริปต์ต้องใช้การเข้าถึงเทอร์มินัลเว็บ โปรดเปิดใช้งานเทอร์มินัลในการตั้งค่าก่อน'
+  ],
+  tr: [
+    'Betikler NanoKVM üzerinde root olarak çalışır. Bir betik yüklemek veya çalıştırmak için web hesabı parolasını girin.',
+    'Betikler web terminali erişimi gerektirir. Önce ayarlardan terminali etkinleştirin.'
+  ],
+  uk: [
+    'Скрипти виконуються на NanoKVM від root. Введіть пароль вебоблікового запису, щоб завантажити або запустити скрипт.',
+    'Для скриптів потрібен доступ до вебтерміналу. Спочатку увімкніть термінал у налаштуваннях.'
+  ],
+  vi: [
+    'Các script chạy với quyền root trên NanoKVM. Nhập mật khẩu tài khoản web để tải lên hoặc chạy script.',
+    'Script cần quyền truy cập terminal web. Hãy bật terminal trong phần cài đặt trước.'
+  ],
+  zh: [
+    '脚本在 NanoKVM 上以 root 身份运行。请输入 Web 账户密码以上传或运行脚本。',
+    '脚本需要 Web 终端访问权限。请先在设置中启用终端。'
+  ],
+  zh_tw: [
+    '腳本在 NanoKVM 上以 root 身分執行。請輸入 Web 帳戶密碼以上傳或執行腳本。',
+    '腳本需要 Web 終端機存取權限。請先在設定中啟用終端機。'
+  ]
+});
+
 const hardenedCommonKeys = [
   'head.firstSetup',
   'auth.setupTitle',
@@ -7064,6 +7165,7 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...virtualMediaExtras,
     ...(networkExtras[key] || {}),
     ...(hardenedCommonExtras[key] || {}),
+    ...(scriptUnlockExtras[key] || {}),
     ...(legacyExtras[key] || {}),
     ...(systemUpdateExtras[key] || {}),
     ...(firewallExtras[key] || {}),

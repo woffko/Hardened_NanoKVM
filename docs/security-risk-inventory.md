@@ -92,8 +92,12 @@ Known exceptions:
   `/kvmapp`, and `/root/.kvmcache`.
 - Image directory: `/data`, with resolved containment and symlink rejection.
 - Script directory: `/etc/kvm/scripts`, with basename inventory and explicit
-  execution only.
-- Autostart directory: `/etc/kvm/autostart`, with traversal rejection.
+  execution only. Scripts run as root, so upload and run pass the terminal's
+  gate: terminal access is enabled, and each operation consumes a fresh unlock
+  ticket of the same session (header `X-NanoKVM-Terminal-Ticket`), issued after
+  its password was entered again. Listing and deleting need only the session.
+- Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
+  executes these files; historical autostart uploads are never activated.
 - DNS/Wi-Fi files: strict value validation and atomic writes.
 
 ## Follow-Up For Hardening

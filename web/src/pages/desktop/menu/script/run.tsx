@@ -7,10 +7,11 @@ import * as api from '@/api/script';
 
 type RunProps = {
   script: string;
+  ticket: string;
   setIsRunning: (isRunning: boolean) => void;
 };
 
-export const Run = ({ script, setIsRunning }: RunProps) => {
+export const Run = ({ script, ticket, setIsRunning }: RunProps) => {
   const { t } = useTranslation();
   const [state, setState] = useState('');
   const [log, setLog] = useState('');
@@ -19,7 +20,7 @@ export const Run = ({ script, setIsRunning }: RunProps) => {
     setState('running');
 
     api
-      .runScript(script, 'foreground')
+      .runScript(script, 'foreground', ticket)
       .then((rsp) => {
         if (rsp.code !== 0) {
           setLog(rsp.msg);
@@ -30,8 +31,8 @@ export const Run = ({ script, setIsRunning }: RunProps) => {
         setState('success');
         setLog(rsp.data.log);
       })
-      .catch(() => {
-        setLog(t('script.runFailed'));
+      .catch((err) => {
+        setLog(err?.response?.data?.msg || t('script.runFailed'));
         setState('failed');
       });
   }, []);

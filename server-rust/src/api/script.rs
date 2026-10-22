@@ -1,4 +1,9 @@
-use axum::{Json, extract::Multipart, response::IntoResponse};
+use axum::{
+    Extension, Json,
+    extract::{Multipart, State},
+    http::HeaderMap,
+    response::IntoResponse,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -11,9 +16,14 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, time};
 
-use crate::{AppError, Result, error::ApiResponse};
+use crate::{
+    AppError, Result, auth::session::Session, error::ApiResponse, http::middleware::CurrentSession,
+    state::AppState,
+};
 
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+/// Carries a terminal unlock ticket for exactly one script upload or run.
+pub const UNLOCK_HEADER: &str = "x-nanokvm-terminal-ticket";
 const MAX_SCRIPT_OUTPUT_BYTES: usize = 64 * 1024;
 const SCRIPT_DIRECTORY: &str = "/etc/kvm/scripts";
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -68,7 +78,38 @@ pub async fn get_scripts() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetScriptsRsp { files })))
 }
 
-pub async fn upload_script(mut multipart: Multipart) -> Result<impl IntoResponse> {
+// Scripts run as root, so they pass the terminal's gate: terminal access is
+// enabled, and each upload or run consumes a fresh unlock ticket of this
+// session, issued after its password was entered again.
+async fn require_terminal_unlock(
+    state: &AppState,
+    session: Option<&Session>,
+    headers: &HeaderMap,
+) -> Result<()> {
+    let session = match session {
+        Some(session) if !state.config.auth_disabled() && state.terminal_enabled() => session,
+        _ => return Err(AppError::Forbidden("terminal is disabled".to_string())),
+    };
+    let ticket = headers
+        .get(UNLOCK_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if ticket.is_empty() || !state.terminal_tickets.consume(ticket, session).await {
+        return Err(AppError::Forbidden(
+            "terminal unlock is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn upload_script(
+    State(state): State<AppState>,
+    session: Option<Extension<CurrentSession>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse> {
+    let session = session.map(|Extension(CurrentSession(session))| session);
+    require_terminal_unlock(&state, session.as_ref(), &headers).await?;
     let mut uploaded = None;
     while let Some(field) = multipart
         .next_field()
@@ -109,7 +150,14 @@ pub async fn delete_script(Json(req): Json<DeleteScriptReq>) -> Result<impl Into
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn run_script(Json(req): Json<RunScriptReq>) -> Result<impl IntoResponse> {
+pub async fn run_script(
+    State(state): State<AppState>,
+    session: Option<Extension<CurrentSession>>,
+    headers: HeaderMap,
+    Json(req): Json<RunScriptReq>,
+) -> Result<impl IntoResponse> {
+    let session = session.map(|Extension(CurrentSession(session))| session);
+    require_terminal_unlock(&state, session.as_ref(), &headers).await?;
     let path = checked_script_path(&req.name)?;
     match req.kind.as_str() {
         "foreground" => {
@@ -280,5 +328,48 @@ mod tests {
         assert!(validate_script_name("x.txt").is_err());
         assert!(validate_script_name("bad name.sh").is_err());
         assert!(validate_script_name("x.sh/evil").is_err());
+    }
+
+    #[tokio::test]
+    async fn script_operations_need_terminal_access_and_a_fresh_unlock_of_this_session() {
+        use std::sync::atomic::Ordering;
+        let mut config = crate::config::Config {
+            stun: "disable".into(),
+            ..crate::config::Config::default()
+        };
+        config.security.allow_terminal = true;
+        let state = AppState::new(config).await.unwrap();
+        let session = state.sessions.issue("admin", 60).await;
+        let other = state.sessions.issue("admin", 60).await;
+        let header = |ticket: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(UNLOCK_HEADER, ticket.parse().unwrap());
+            headers
+        };
+        let refused = |result: Result<()>| matches!(result, Err(AppError::Forbidden(_)));
+        assert!(refused(
+            require_terminal_unlock(&state, None, &HeaderMap::new()).await
+        ));
+        assert!(refused(
+            require_terminal_unlock(&state, Some(&session), &HeaderMap::new()).await
+        ));
+        let foreign = state.terminal_tickets.issue(&other, 120).await;
+        assert!(refused(
+            require_terminal_unlock(&state, Some(&session), &header(&foreign.token)).await
+        ));
+        // A fresh ticket of this session admits exactly one operation.
+        let ticket = state.terminal_tickets.issue(&session, 120).await;
+        require_terminal_unlock(&state, Some(&session), &header(&ticket.token))
+            .await
+            .unwrap();
+        assert!(refused(
+            require_terminal_unlock(&state, Some(&session), &header(&ticket.token)).await
+        ));
+        // With terminal access off, even a fresh ticket is refused.
+        state.terminal_enabled.store(false, Ordering::SeqCst);
+        let ticket = state.terminal_tickets.issue(&session, 120).await;
+        assert!(refused(
+            require_terminal_unlock(&state, Some(&session), &header(&ticket.token)).await
+        ));
     }
 }
