@@ -286,6 +286,60 @@ Applying, after the pair and after Committed, each settled at a later boot.
 
 The backend's model update runs this job over the job transport (below).
 
+## Current Onboard settlement
+
+First configuration runs the upstream one-shot (`picoclaw onboard`) into a
+fresh stage and imports what it leaves there, as a broker-owned job.
+
+- **Settlement.** An existing configuration is a strict no-op. A security file
+  without a configuration, or any stage left from before, refuses and is kept;
+  older evidence is never adopted or deleted.
+- **Stage.** Under Applying, the job builds the stage under its exclusive Home
+  lease, creating Home first when it did not exist. The stage starts under the
+  job's side name (`<Home>/.nanokvm-onboard-<hash>`, from a hash of the
+  marker). A marker bound to the job (sequence, nonce and accepted source) is
+  made durable inside it. Only then does an atomic, no-replace rename give it
+  the fixed name (`<Home>/.nanokvm-onboard`), before the one-shot can write
+  anything. The fixed name therefore never exists without exactly this job's
+  marker.
+- **One-shot.** The broker launches it once under the job's retained Update and
+  Config. It is bounded at 60 seconds, like the legacy path, and stops on an
+  explicit Stop. Only a successful exit after receipt, reap and EOF leads to an
+  import.
+- **Import.** The checked import publishes generated assets and the user's
+  files, with the pair LAST. Committed is durable before the stage is retired.
+  Retirement first renames the fixed name back to the side name, atomically.
+  A bounded walk then removes the side tree: no link is followed, a mounted or
+  unsafe tree refuses, and the directory itself goes last.
+- **Failure.** A failed or stopped one-shot changes nothing but its own stage.
+  The stage is retired and the receipt is Failed.
+
+An interrupted onboarding settles at a later boot, since the one-shot cannot
+survive the boot. A published pair means the import completed (Changed);
+otherwise the job is Failed. Either way, only this job's own trees are
+retired:
+
+- a fixed-name stage carrying exactly this job's marker;
+- a tree under this job's side name, marked or not. A power cut can leave one
+  only while the stage is being created or retired.
+
+A fixed-name stage without exactly this marker, or both names at once, is
+never adopted: the fence remains and both trees are kept.
+
+The backend's onboarding runs this job through `run_onboard_job`. S96
+`onboard` still drives the older broker-owned path through the native control
+frame, because moving it needs a rebuilt static ctl helper and its binding.
+
+Chroot fixtures run a real one-shot fixture under the job. They cover:
+
+- a successful import;
+- a failed and a stopped one-shot;
+- the no-op, a lone security file and a leftover stage;
+- failures at each step of the stage's creation and retirement, after
+  staging, after the import and after Committed, each settled at a later boot;
+- an unmarked stage that appears beside the job's side tree before the later
+  boot, which keeps the fence and both trees.
+
 ## Current Install settlement
 
 Installation is split. The backend keeps the network part: it downloads the
@@ -450,6 +504,9 @@ Settlement by durable phase:
   Current Profile settlement; Committed and Activating settle as for Startup.
 - **Applying (Install).** The SAME install plan completes, as described in
   Current Install settlement; Committed and Activating settle as for Startup.
+- **Applying or Committed (Onboard).** As described in Current Onboard
+  settlement: Changed when the pair was published, else Failed. Only the
+  marked stage or the job's side tree is retired.
 - **Any other phase or kind.** No executor exists; the fence remains.
 
 Each settled job then retires payload, source and plan, syncs, and retires the
@@ -487,7 +544,7 @@ with matching peer credentials. Each datagram is one request with a fixed
 64-byte header:
 
 - Cursor: the next submission cursor of an idle store.
-- Submit(cursor, nonce, kind): Startup, Remove, Profile with its one profile
+- Submit(cursor, nonce, kind): Onboard, Startup, Remove, Profile with its one profile
   byte, Install with a 64-byte SHA-512 after the header, or Model with its
   three bounded fields after the header. Model field lengths must account for
   the datagram exactly, and the fields must pass the model request check.
@@ -531,9 +588,9 @@ client nonce, so it is known before acceptance.
 runtime start) runs a Startup job through `run_startup_job`, and the model
 update runs a Model job through `run_model_job`, after the same field check.
 The uninstall runs a Remove job through `run_remove_job`, the profile
-selector a Profile job through `run_profile_job`, and the installer an
-Install job through `run_install_job`; each reports any failure instead of
-ignoring it. No handler writes or deletes the pair, the credential, the
+selector a Profile job through `run_profile_job`, the installer an Install
+job through `run_install_job`, and onboarding an Onboard job through
+`run_onboard_job`; each reports any failure instead of ignoring it. No handler writes or deletes the pair, the credential, the
 executable or the workspace profile document. A lost reply re-observes the same job; only
 an explicit non-acceptance leads to a fresh submission. A Changed or Noop
 receipt of the job's own kind is success, and a superseded change is retried
@@ -550,7 +607,8 @@ admissions afterwards.
 
 Still open:
 
-- the onboarding executor and its API and S96 callers;
+- moving S96 `onboard` (and with it the native ctl) from the older control
+  frame to the job transport;
 - a pending pair journal still refuses acceptance, as it refused the legacy
   writer. Stopped recovery of that journal inside the job is not implemented.
 

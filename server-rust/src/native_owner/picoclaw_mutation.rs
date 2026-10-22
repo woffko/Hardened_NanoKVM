@@ -59,6 +59,14 @@ impl ClosedPico {
     }
 }
 
+/// A test one-shot: its program, arguments and whole environment.
+#[cfg(test)]
+type OnboardFixture = (
+    std::path::PathBuf,
+    Vec<std::ffi::OsString>,
+    Vec<(std::ffi::OsString, std::ffi::OsString)>,
+);
+
 /// Field order is part of ownership: Submission joins ALL I/O before Broker
 /// teardown may forfeit native closure. No broker extraction/restart is exposed.
 ///
@@ -81,6 +89,12 @@ pub struct Mutation {
     spawned: bool,
     #[cfg(test)]
     launch_fixture: Option<(std::path::PathBuf, Vec<std::ffi::OsString>)>,
+    #[cfg(test)]
+    onboard_fixture: Option<OnboardFixture>,
+    /// An Onboard one-shot was asked to stop: an explicit Stop or its bound.
+    onboard_stopped: bool,
+    /// The one-shot's bound, as for the legacy onboarding path.
+    onboard_deadline: Option<std::time::Instant>,
     status: MutationStatus,
 }
 
@@ -97,6 +111,10 @@ impl Mutation {
             spawned: false,
             #[cfg(test)]
             launch_fixture: None,
+            #[cfg(test)]
+            onboard_fixture: None,
+            onboard_stopped: false,
+            onboard_deadline: None,
             status: MutationStatus::Idle,
         }
     }
@@ -219,6 +237,21 @@ impl Mutation {
         self.submission.fixture_image(image);
     }
 
+    fn onboard_command(&self) -> std::process::Command {
+        #[cfg(test)]
+        if let Some((program, args, envs)) = &self.onboard_fixture {
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .env_clear()
+                .envs(envs.iter().map(|(key, value)| (key, value)))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            return command;
+        }
+        super::super::controller::picoclaw_onboard_command(&self.broker.group.home)
+    }
+
     /// Ordinary supervision of the broker's OTHER cells while this job owns
     /// it: KVM, hwmon and backend. The Pico cell, its launch association and
     /// the job's admissions stay with the job; `supervise` must not use them.
@@ -268,6 +301,43 @@ impl Mutation {
                 self.submission.begin_apply()
             }
             TransitionStatus::Superseded => return MutationStatus::Superseded(id),
+            // A Stop before the one-shot starts means it never runs.
+            TransitionStatus::OnboardStaged if !self.spawned && self.stop_requested => {
+                self.submission.begin_abort()
+            }
+            TransitionStatus::OnboardStaged if !self.spawned => {
+                // The stage and its marker are durable: launch the one-shot
+                // exactly once under the job's retained admissions.
+                self.spawned = true;
+                self.onboard_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                let command = self.onboard_command();
+                if self.broker.start_picoclaw_onboard_for_job(command).is_ok() {
+                    return MutationStatus::Settling(id);
+                }
+                self.submission.begin_abort()
+            }
+            TransitionStatus::OnboardStaged => match native {
+                Some(Status::Starting | Status::Running) => {
+                    let expired = self
+                        .onboard_deadline
+                        .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                    if (self.stop_requested || expired) && !self.onboard_stopped {
+                        self.onboard_stopped = true;
+                        self.broker.group.stop_picoclaw();
+                    }
+                    return MutationStatus::Settling(id);
+                }
+                Some(Status::Stopping) => return MutationStatus::Settling(id),
+                // Only a successful exit after receipt, reap and EOF imports.
+                Some(Status::Closed(super::super::controller::Completion::SuccessfulExit))
+                    if !self.onboard_stopped =>
+                {
+                    self.submission.begin_import()
+                }
+                Some(Status::Closed(_)) => self.submission.begin_abort(),
+                _ => return MutationStatus::RecoveryRequired,
+            },
             // Nothing to launch: the runtime is gone, or not configured yet.
             TransitionStatus::CommittedWithoutLaunch => {
                 self.submission.begin_finish(RuntimeResult::NotRequested)

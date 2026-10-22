@@ -4,6 +4,9 @@ use super::*;
 use std::path::PathBuf;
 
 use crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY as STAGE;
+/// Binds the fixed stage name to exactly one durable broker Onboard job.
+const MARKER: &str = ".nanokvm-onboard-job";
+const MAX_MARKER: usize = 256;
 const MAX_ENTRIES: usize = 256;
 const MAX_TOTAL: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 12;
@@ -61,6 +64,78 @@ fn child(parent: &Directory, name: &str, create: bool) -> Result<Directory> {
     };
     directory.check()?;
     Ok(directory)
+}
+
+// The name a job's stage has while it is created or retired, unique to the
+// job: the fixed stage name only ever exists carrying exactly its marker.
+fn side_name(marker: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut name = String::with_capacity(STAGE.len() + 33);
+    name.push_str(STAGE);
+    name.push('-');
+    for byte in &Sha256::digest(marker)[..16] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    name
+}
+
+// Remove a tree under a job's side name: every entry by a bounded walk, then
+// the directory. The name binds it to the job; its marker is absent before it
+// is written and once the walk has removed it.
+fn remove_side(home: &Directory, side: &str, stage: &Directory) -> Result<()> {
+    let named = child(home, side, false)?;
+    if Revision::from(&named.file.metadata()?) != Revision::from(&stage.file.metadata()?) {
+        return Err(invalid());
+    }
+    let mut visited = 0;
+    for name in names(stage)? {
+        remove_entry(stage, &name, 0, &mut visited)?;
+    }
+    stage.file.sync_all()?;
+    #[cfg(test)]
+    fail_at("side-emptied")?;
+    unlinkat(&home.file, side, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
+    home.file.sync_all()?;
+    Ok(())
+}
+
+// Fault injection at one point of a job's stage lifecycle; an emulated later
+// boot does not inherit it.
+#[cfg(test)]
+fn fail_at(point: &str) -> Result<()> {
+    if super::jobs::TEST_BOOT.with(std::cell::Cell::get).is_none()
+        && std::env::var("NANOKVM_PICO_ACCEPT_FAIL").as_deref() == Ok(point)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+// One entry of a job's own stage, removed without following any link.
+fn remove_entry(
+    directory: &Directory,
+    name: &str,
+    depth: usize,
+    visited: &mut usize,
+) -> Result<()> {
+    *visited += 1;
+    if depth > MAX_DEPTH || *visited > 4 * MAX_ENTRIES {
+        return Err(invalid());
+    }
+    let stat = rustix::fs::statat(&directory.file, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(std::io::Error::from)?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory {
+        let nested = child(directory, name, false)?;
+        for entry in names(&nested)? {
+            remove_entry(&nested, &entry, depth + 1, visited)?;
+        }
+        nested.file.sync_all()?;
+        unlinkat(&directory.file, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
+    } else {
+        unlinkat(&directory.file, name, AtFlags::empty()).map_err(std::io::Error::from)?;
+    }
+    Ok(())
 }
 
 fn names(directory: &Directory) -> Result<Vec<String>> {
@@ -234,6 +309,137 @@ impl Onboarding {
         }))
     }
 
+    /// Create the stage of a broker Onboard job. The caller holds Update,
+    /// Config and the exclusive lease of `home`, proved the pair and any stage
+    /// absent and made Applying durable. The stage is built under this job's
+    /// side name and takes the fixed name only once its marker is durable,
+    /// before the one-shot can write anything into it.
+    pub(super) fn stage_for_job(home: &Directory, home_path: &Path, marker: &[u8]) -> Result<Self> {
+        if marker.is_empty() || marker.len() > MAX_MARKER {
+            return Err(invalid());
+        }
+        let home = Directory {
+            file: home.file.try_clone()?,
+            device: home.device,
+        };
+        home.check()?;
+        if home.inspect(CONFIG)?.is_some() || home.inspect(SECURITY)?.is_some() {
+            return Err(invalid());
+        }
+        let side = side_name(marker);
+        mkdirat(&home.file, side.as_str(), Mode::from_raw_mode(0o700))
+            .map_err(std::io::Error::from)?;
+        home.file.sync_all()?;
+        #[cfg(test)]
+        fail_at("side-created")?;
+        let stage = child(&home, &side, false)?;
+        let mut temporary = stage.temporary(MAX_MARKER)?;
+        temporary.file.write_all(marker)?;
+        temporary.file.sync_all()?;
+        temporary.publish(MARKER, None)?;
+        drop(temporary);
+        stage.file.sync_all()?;
+        #[cfg(test)]
+        fail_at("side-marked")?;
+        renameat_with(
+            &home.file,
+            side.as_str(),
+            &home.file,
+            STAGE,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)?;
+        home.file.sync_all()?;
+        Ok(Self {
+            home,
+            stage,
+            path: Self::path(home_path),
+            #[cfg(test)]
+            fail_after_member: None,
+        })
+    }
+
+    /// Settle exactly this job's stage at a later boot: a stage carrying this
+    /// job's marker, or a tree under this job's side name, is retired. A stage
+    /// without exactly this marker, or both names at once, refuses and is kept.
+    pub(super) fn recover_for_job(home: &Directory, home_path: &Path, marker: &[u8]) -> Result<()> {
+        let side = side_name(marker);
+        let leftover = match child(home, &side, false) {
+            Ok(directory) => Some(directory),
+            Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        match (Self::reopen_for_job(home, home_path, marker)?, leftover) {
+            (Some(stage), None) => stage.retire(marker),
+            (None, Some(stage)) => remove_side(home, &side, &stage),
+            (None, None) => Ok(()),
+            (Some(_), Some(_)) => Err(invalid()),
+        }
+    }
+
+    /// Exactly this job's stage after an interruption: `None` when absent. A
+    /// stage without exactly this marker is never adopted and refuses.
+    fn reopen_for_job(home: &Directory, home_path: &Path, marker: &[u8]) -> Result<Option<Self>> {
+        let home = Directory {
+            file: home.file.try_clone()?,
+            device: home.device,
+        };
+        let stage = match child(&home, STAGE, false) {
+            Ok(stage) => stage,
+            Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if stage
+            .read_bounded(MARKER, MAX_MARKER)?
+            .as_deref()
+            .map(Vec::as_slice)
+            != Some(marker)
+        {
+            return Err(AppError::Conflict(
+                "picoclaw onboarding stage belongs to no job".into(),
+            ));
+        }
+        Ok(Some(Self {
+            home,
+            stage,
+            path: Self::path(home_path),
+            #[cfg(test)]
+            fail_after_member: None,
+        }))
+    }
+
+    /// Remove exactly this job's stage after its import or abort. The fixed
+    /// name goes first and atomically, renamed to this job's side name; the
+    /// side tree then goes by a bounded walk. Each step is synced.
+    pub(super) fn retire(self, marker: &[u8]) -> Result<()> {
+        let named = child(&self.home, STAGE, false)?;
+        if Revision::from(&named.file.metadata()?) != Revision::from(&self.stage.file.metadata()?)
+            || self
+                .stage
+                .read_bounded(MARKER, MAX_MARKER)?
+                .as_deref()
+                .map(Vec::as_slice)
+                != Some(marker)
+        {
+            return Err(invalid());
+        }
+        let side = side_name(marker);
+        renameat_with(
+            &self.home.file,
+            STAGE,
+            &self.home.file,
+            side.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)?;
+        self.home.file.sync_all()?;
+        #[cfg(test)]
+        fail_at("stage-renamed")?;
+        remove_side(&self.home, &side, &self.stage)
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_after_member(&mut self, count: usize) {
         assert!(count != 0);
@@ -250,7 +456,7 @@ impl Onboarding {
             return Err(invalid());
         }
         for name in names(&self.stage)? {
-            if !matches!(name.as_str(), CONFIG | SECURITY | "workspace") {
+            if !matches!(name.as_str(), CONFIG | SECURITY | "workspace" | MARKER) {
                 return Err(invalid());
             }
         }

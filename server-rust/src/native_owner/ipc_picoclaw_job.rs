@@ -25,6 +25,7 @@ pub(super) const JOB_CLIENTS: usize = 4;
 const REQUEST_MAGIC: &[u8; 8] = b"NKPJQ001";
 const REPLY_MAGIC: &[u8; 8] = b"NKPJS001";
 // The executors wired to this transport; the store's kind codes.
+const ONBOARD: u8 = 1;
 const MODEL: u8 = 2;
 const STARTUP: u8 = 3;
 const PROFILE: u8 = 4;
@@ -34,6 +35,8 @@ const REMOVE: u8 = 6;
 /// What a submission asks the broker to settle.
 #[derive(Clone, PartialEq, Eq)]
 pub enum JobKind {
+    /// First configuration through the upstream one-shot into a fresh stage.
+    Onboard,
     Startup,
     /// Exactly the managed executable, credential and pair; user data stays.
     Remove,
@@ -57,6 +60,7 @@ pub enum JobKind {
 impl std::fmt::Debug for JobKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Onboard => "Onboard",
             Self::Startup => "Startup",
             Self::Remove => "Remove",
             Self::Profile { kvm: false } => "Profile { kvm: false }",
@@ -70,6 +74,7 @@ impl std::fmt::Debug for JobKind {
 impl JobKind {
     fn code(&self) -> u8 {
         match self {
+            Self::Onboard => ONBOARD,
             Self::Startup => STARTUP,
             Self::Remove => REMOVE,
             Self::Profile { .. } => PROFILE,
@@ -80,9 +85,11 @@ impl JobKind {
 
     fn fields(&self) -> [&str; 3] {
         match self {
-            Self::Startup | Self::Remove | Self::Profile { .. } | Self::Install { .. } => {
-                ["", "", ""]
-            }
+            Self::Onboard
+            | Self::Startup
+            | Self::Remove
+            | Self::Profile { .. }
+            | Self::Install { .. } => ["", "", ""],
             Self::Model {
                 model,
                 api_base,
@@ -117,6 +124,7 @@ impl JobKind {
 
     fn request(self) -> PicoRequest {
         match self {
+            Self::Onboard => PicoRequest::Onboard,
             Self::Startup => PicoRequest::Startup,
             Self::Remove => PicoRequest::Remove,
             Self::Install { digest } => PicoRequest::Install { digest },
@@ -329,6 +337,7 @@ pub(super) fn decode_request(bytes: &[u8]) -> Option<JobRequest> {
     }
     match (bytes[8], bytes[9]) {
         (1, 0) if epoch == [0; 16] && sequence == 0 && nonce == [0; 16] => Some(JobRequest::Cursor),
+        (2, ONBOARD) => submit(JobKind::Onboard),
         (2, STARTUP) => submit(JobKind::Startup),
         (2, REMOVE) => submit(JobKind::Remove),
         (3, 0) if epoch != [0; 16] && nonce != [0; 16] && sequence != 0 => {
@@ -705,6 +714,11 @@ fn nonce() -> io::Result<[u8; 16]> {
 /// Run one broker-owned Startup job to its durable end within `timeout`.
 pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
     run_job(JobKind::Startup, timeout)
+}
+
+/// Run one broker-owned Onboard job to its durable end within `timeout`.
+pub fn run_onboard_job(timeout: Duration) -> io::Result<JobReply> {
+    run_job(JobKind::Onboard, timeout)
 }
 
 /// Run one broker-owned Install job for the staged executable with exactly

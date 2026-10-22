@@ -265,6 +265,16 @@ impl Broker {
             .map_err(StartFailure::Scope)
     }
 
+    /// Launch an Onboard job's one-shot under the job's retained admissions.
+    fn start_picoclaw_onboard_for_job(
+        &mut self,
+        command: std::process::Command,
+    ) -> Result<(), StartFailure> {
+        self.check_picoclaw_launch()
+            .map_err(StartFailure::Journal)?;
+        self.launch(Role::Picoclaw, command)
+    }
+
     fn start_picoclaw_onboard(
         &mut self,
         command: std::process::Command,

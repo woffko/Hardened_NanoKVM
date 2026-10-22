@@ -24,7 +24,7 @@ mod picoclaw;
 pub mod picoclaw_job;
 pub use picoclaw_job::{
     JobChannel, JobCode, JobKind, JobReply, JobRequest, run_install_job, run_model_job,
-    run_profile_job, run_remove_job, run_startup_job,
+    run_onboard_job, run_profile_job, run_remove_job, run_startup_job,
 };
 
 #[cfg(test)]

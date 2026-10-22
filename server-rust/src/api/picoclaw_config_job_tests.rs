@@ -12,6 +12,20 @@ fn reply(code: JobCode, receipt: [u8; 4]) -> JobReply {
 }
 
 #[test]
+fn a_failed_onboarding_is_final_and_never_retried_as_superseded() {
+    assert!(matches!(
+        job_outcome(reply(JobCode::Ok, [1, 8, 1, 2]), ONBOARD_JOB_KIND),
+        Ok(JobDone::Done)
+    ));
+    for runtime in [1, 2, 6] {
+        assert!(matches!(
+            job_outcome(reply(JobCode::Ok, [1, 8, 3, runtime]), ONBOARD_JOB_KIND),
+            Err(AppError::Config(_))
+        ));
+    }
+}
+
+#[test]
 fn only_a_changed_or_noop_receipt_of_the_same_kind_counts_as_done() {
     for (kind, other) in [
         (MODEL_JOB_KIND, STARTUP_JOB_KIND),

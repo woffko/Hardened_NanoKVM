@@ -541,9 +541,65 @@ pub(super) fn decode_install(record: &Record, bytes: &[u8]) -> Result<InstallPla
     })
 }
 
+const ONBOARD_MAGIC: &[u8; 8] = b"NKPONB01";
+const MARKER_MAGIC: &[u8; 8] = b"NKPSTG01";
+const ONBOARD_BYTES: usize = 96;
+
+// One binding of the job's identity under a domain: the onboarding plan
+// member, or the marker that ties the fixed stage name to this job.
+fn onboard_binding(record: &Record, magic: &[u8; 8], domain: &[u8]) -> [u8; ONBOARD_BYTES] {
+    let mut bytes = [0; ONBOARD_BYTES];
+    bytes[..8].copy_from_slice(magic);
+    bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[16..32].copy_from_slice(&record.nonce);
+    bytes[32..64].copy_from_slice(&record.source);
+    let hash = private_digest(domain, &bytes[..64]);
+    bytes[64..].copy_from_slice(&hash);
+    bytes
+}
+
+fn encode_onboard(record: &Record) -> [u8; ONBOARD_BYTES] {
+    onboard_binding(record, ONBOARD_MAGIC, b"NanoKVM Pico onboard plan v1\0")
+}
+
+fn onboard_marker(record: &Record) -> [u8; ONBOARD_BYTES] {
+    onboard_binding(record, MARKER_MAGIC, b"NanoKVM Pico onboard stage v1\0")
+}
+
+pub(super) fn decode_onboard(record: &Record, bytes: &[u8]) -> Result<()> {
+    if bytes != encode_onboard(record).as_slice() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+// The Home an Onboard job works in, exclusively: the job's own Home lease when
+// Home existed at acceptance, otherwise a new Home under the accepted ancestor.
+fn onboard_home(source: &Source, view: &SourceView<'_>, create: bool) -> Result<Option<Directory>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if view.home_present {
+        source.lock_exclusive()?;
+        return Ok(Some(Directory {
+            file: source.directory.file.try_clone()?,
+            device: source.directory.device,
+        }));
+    }
+    let path = Path::new(std::ffi::OsStr::from_bytes(view.home));
+    let home = match Directory::open(path, create) {
+        Ok(home) => home,
+        Err(AppError::Io(error)) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    home.lock(false)?;
+    Ok(Some(home))
+}
+
 // The plan member of a job, by the job's kind.
 fn check_plan(record: &Record, bytes: &[u8]) -> Result<()> {
     match record.kind {
+        Kind::Onboard => decode_onboard(record, bytes),
         Kind::Remove => decode_removal(record, bytes).map(|_| ()),
         Kind::Profile => decode_profile(record, bytes).map(|_| ()),
         Kind::Install => decode_install(record, bytes).map(|_| ()),
@@ -1070,6 +1126,8 @@ pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<Transit
         Advance::Apply => return apply(payload),
         Advance::Activate => return activate(payload),
         Advance::Finish(resume) => return finish(payload, resume),
+        Advance::Import => return import_onboard(payload),
+        Advance::Abort => return abort_onboard(payload),
         Advance::Stop { .. } | Advance::Closed { .. } => {}
     }
     let store = payload.store.as_mut().ok_or_else(invalid)?;
@@ -1164,6 +1222,35 @@ fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<T
     store.publish_terminal(record, touched)?;
     store.retire()?;
     Ok(TransitionStatus::Refused)
+}
+
+/// Onboard: run the upstream one-shot into a fresh stage and import it. An
+/// existing configuration is a strict no-op; a security file without a
+/// configuration, or any stage left from before, refuses and is kept.
+fn settle_onboard(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    let view = decode_source(source.bytes.as_slice())?;
+    if view.config.is_some() {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Noop;
+        record.runtime = if record.was_running && !record.resume_allowed {
+            Runtime::Suppressed
+        } else {
+            Runtime::Unchanged
+        };
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Completed);
+    }
+    let stage = Path::new(std::ffi::OsStr::from_bytes(view.home))
+        .join(crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY);
+    if view.security.is_some() || std::fs::symlink_metadata(&stage).is_ok() {
+        return refuse(store, record, &mut payload.touched);
+    }
+    store.write_plan(&encode_onboard(&record), &mut payload.touched)?;
+    Ok(TransitionStatus::Planned)
 }
 
 /// Install: put the installer's staged executable in place when its SHA-512
@@ -1318,6 +1405,9 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     if record.kind == Kind::Install {
         return settle_install(payload, record);
     }
+    if record.kind == Kind::Onboard {
+        return settle_onboard(payload, record);
+    }
     if !matches!(record.kind, Kind::Startup | Kind::Model) {
         // The other fixed operations have no settlement executor yet.
         return refuse(store, record, &mut payload.touched);
@@ -1399,7 +1489,12 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.phase != Phase::Closed
         || !matches!(
             record.kind,
-            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile | Kind::Install
+            Kind::Startup
+                | Kind::Model
+                | Kind::Remove
+                | Kind::Profile
+                | Kind::Install
+                | Kind::Onboard
         )
         || store.members[3].is_none()
     {
@@ -1413,6 +1508,9 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     }
     if record.kind == Kind::Install {
         return apply_install(payload, record);
+    }
+    if record.kind == Kind::Onboard {
+        return apply_onboard(payload, record);
     }
     let plan = payload.plan.as_ref().ok_or_else(invalid)?;
     let source = payload.source.as_ref().ok_or_else(invalid)?;
@@ -1457,6 +1555,81 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     Ok(TransitionStatus::Committed(
         super::super::super::Generation::from_documents(&installed),
     ))
+}
+
+/// Stage a quiesced Onboard job: Applying is durable, then the fixed stage is
+/// created under the job's exclusive Home lease with this job's marker.
+fn apply_onboard(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    let view = decode_source(source.bytes.as_slice())?;
+    record.phase = Phase::Applying;
+    store.publish(record, &mut payload.touched, Publication::Applying)?;
+    let home = onboard_home(source, &view, true)?.ok_or_else(invalid)?;
+    let path = Path::new(std::ffi::OsStr::from_bytes(view.home));
+    payload.onboard = Some(super::super::super::Onboarding::stage_for_job(
+        &home,
+        path,
+        &onboard_marker(&record),
+    )?);
+    #[cfg(test)]
+    checkpoint("stage", "created")?;
+    Ok(TransitionStatus::OnboardStaged)
+}
+
+/// Import a succeeded one-shot's stage: generated assets and the user's own
+/// files as `Onboarding::finish` defines, the pair LAST. Committed is durable
+/// before the stage is retired; nothing is launched.
+fn import_onboard(payload: &mut Payload) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.kind != Kind::Onboard
+        || record.phase != Phase::Applying
+    {
+        return Err(fenced());
+    }
+    let onboarding = payload.onboard.as_mut().ok_or_else(invalid)?;
+    onboarding.finish(&payload._configuration)?;
+    #[cfg(test)]
+    checkpoint("pair", "imported")?;
+    record.phase = Phase::Committed;
+    store.publish(record, &mut payload.touched, Publication::Committed)?;
+    payload
+        .onboard
+        .take()
+        .ok_or_else(invalid)?
+        .retire(&onboard_marker(&record))?;
+    #[cfg(test)]
+    checkpoint("stage", "retired")?;
+    Ok(TransitionStatus::CommittedWithoutLaunch)
+}
+
+/// A one-shot that did not succeed changed nothing but its own stage: retire
+/// the stage and end the job as a terminal failure.
+fn abort_onboard(payload: &mut Payload) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.kind != Kind::Onboard
+        || record.phase != Phase::Applying
+    {
+        return Err(fenced());
+    }
+    if let Some(onboarding) = payload.onboard.take() {
+        onboarding.retire(&onboard_marker(&record))?;
+    }
+    record.phase = Phase::Completed;
+    record.outcome = Outcome::Failed;
+    record.runtime = Runtime::NotRequested;
+    store.publish_terminal(record, &mut payload.touched)?;
+    store.retire()?;
+    Ok(TransitionStatus::Superseded)
 }
 
 /// Install the planned executable of a quiesced Install job. The staged file
@@ -1619,7 +1792,12 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
         || record.boot != payload.facts.boot
         || !matches!(
             record.kind,
-            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile | Kind::Install
+            Kind::Startup
+                | Kind::Model
+                | Kind::Remove
+                | Kind::Profile
+                | Kind::Install
+                | Kind::Onboard
         )
     {
         return Err(fenced());
@@ -1996,6 +2174,54 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             }
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
+        }
+        // The one-shot cannot have survived the boot. A published pair means
+        // the import completed; otherwise nothing but the stage changed.
+        (Phase::Applying | Phase::Committed, Kind::Onboard) => {
+            use std::os::unix::ffi::OsStrExt as _;
+            let Some(bytes) = contents[2].take() else {
+                return Ok(false);
+            };
+            let view = decode_source(&bytes)?;
+            let path = Path::new(std::ffi::OsStr::from_bytes(view.home));
+            let home = if view.home_present {
+                let Some(source) = reopen_source(bytes.clone())? else {
+                    return Ok(false);
+                };
+                source.lock_exclusive()?;
+                Some(Directory {
+                    file: source.directory.file.try_clone()?,
+                    device: source.directory.device,
+                })
+            } else {
+                match Directory::open(path, false) {
+                    Ok(home) => {
+                        home.lock(false)?;
+                        Some(home)
+                    }
+                    Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            let mut imported = record.phase == Phase::Committed;
+            if let Some(home) = &home {
+                super::super::super::pair::recover(home)?;
+                imported |= super::super::super::pair::read_source(home)?[0].is_some();
+                super::super::super::Onboarding::recover_for_job(
+                    home,
+                    path,
+                    &onboard_marker(&record),
+                )?;
+            }
+            record.outcome = if imported {
+                Outcome::Changed
+            } else {
+                Outcome::Failed
+            };
+            record.runtime = Runtime::NotRequested;
+            record.resume_allowed = false;
         }
         (Phase::Applying, Kind::Install) => {
             let Some(plan) = &contents[3] else {

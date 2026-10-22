@@ -26,6 +26,11 @@ fn job_frames_round_trip_and_refuse_every_unfixed_field() {
         JobRequest::Submit {
             cursor,
             nonce: [9; 16],
+            kind: JobKind::Onboard,
+        },
+        JobRequest::Submit {
+            cursor,
+            nonce: [9; 16],
             kind: JobKind::Profile { kvm: false },
         },
         JobRequest::Submit {
@@ -302,6 +307,8 @@ mod endpoint {
         let change = case != "settle-noop-absent";
         let reply = match &kind {
             JobKind::Startup => run_startup_job(Duration::from_secs(30)).unwrap(),
+            // The mutation fixtures drive onboarding with its one-shot probe.
+            JobKind::Onboard => unreachable!("onboarding is covered by the mutation fixtures"),
             JobKind::Remove => run_remove_job(Duration::from_secs(30)).unwrap(),
             JobKind::Profile { kvm } => run_profile_job(*kvm, Duration::from_secs(30)).unwrap(),
             JobKind::Install { digest } => {

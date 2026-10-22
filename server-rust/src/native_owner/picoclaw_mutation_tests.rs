@@ -56,6 +56,8 @@ fn command(root: &Path, case: &str) -> Command {
         .or_else(|| case.strip_prefix("settle-remove-fail:"))
         .or_else(|| case.strip_prefix("settle-profile-fail:"))
         .or_else(|| case.strip_prefix("settle-install-fail:"))
+        .or_else(|| case.strip_prefix("settle-onboard-fail:"))
+        .or_else(|| case.strip_prefix("settle-onboard-foreign-fail:"))
     {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
@@ -241,6 +243,33 @@ fn model_settlement_shares_the_executor_with_its_own_change_before_the_defaults(
     for point in ["applying-renamed", "pair-published", "committed-renamed"] {
         run(&format!("settle-model-change-fail:{point}"));
     }
+}
+
+#[test]
+fn onboarding_imports_a_successful_one_shot_and_retires_its_own_stage() {
+    for case in [
+        "settle-onboard-noop-absent",
+        "settle-onboard-refused-absent",
+        "settle-onboard-orphan-absent",
+        "settle-onboard-absent",
+        "settle-onboard-failed-absent",
+        "settle-onboard-stop-absent",
+    ] {
+        run(case);
+    }
+    for point in [
+        "side-created",
+        "side-marked",
+        "stage-created",
+        "pair-imported",
+        "committed-renamed",
+        "stage-renamed",
+        "side-emptied",
+        "stage-retired",
+    ] {
+        run(&format!("settle-onboard-fail:{point}"));
+    }
+    run("settle-onboard-foreign-fail:side-marked");
 }
 
 #[test]
@@ -569,7 +598,9 @@ fn mutation_child() {
         && !case.starts_with("settle-model-change-fail:")
         && !case.starts_with("settle-remove-fail:")
         && !case.starts_with("settle-profile-fail:")
-        && !case.starts_with("settle-install-fail:");
+        && !case.starts_with("settle-install-fail:")
+        && !case.starts_with("settle-onboard-fail:")
+        && !case.starts_with("settle-onboard-foreign-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -608,7 +639,9 @@ fn mutation_child() {
         None::<&str>,
     )
     .unwrap();
-    let fixture = relaunched(&case).then(|| host_runtime(root));
+    let fixture = (relaunched(&case) || onboard_spawns(&case)).then(|| host_runtime(root));
+    // The onboarding one-shot fixture is this test binary at its host path.
+    let test_exe = std::env::current_exe().unwrap();
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
     jobs::prepare_factory_fixture();
@@ -712,6 +745,19 @@ fn mutation_child() {
         assert!(record() == before);
     }
     if let Some(pair) = settle_pair {
+        if onboard_spawns(&case) {
+            mutation.onboard_fixture = Some((
+                test_exe.clone(),
+                [
+                    "--exact",
+                    "native_owner::broker::ipc::tests::picoclaw::onboard_probe",
+                    "--nocapture",
+                ]
+                .map(Into::into)
+                .to_vec(),
+                vec![("NANOKVM_NATIVE_ONBOARD_FIXTURE".into(), "/".into())],
+            ));
+        }
         settle_case(&case, mutation, live, &pair, &before, fixture.as_ref());
         settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
         println!("pico-mutation-checked");
@@ -936,6 +982,9 @@ fn request(case: &str) -> PicoRequest {
     if case.starts_with("settle-profile-") {
         return PicoRequest::Profile(crate::native_owner::broker::PicoProfile::Kvm);
     }
+    if case.starts_with("settle-onboard") {
+        return PicoRequest::Onboard;
+    }
     if case.starts_with("settle-install-") {
         let mut digest = staged_digest();
         if case == "settle-install-refused-absent" {
@@ -1025,6 +1074,9 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
     if case.starts_with("settle-install-") {
         install_fixture(case);
     }
+    if let Some(early) = onboard_fixture(case) {
+        return early;
+    }
     if case.starts_with("settle-refused-")
         || case == "settle-model-refused-absent"
         || case == "settle-remove-noop-absent"
@@ -1105,6 +1157,267 @@ fn remove_fixture(case: &str) {
     let workspace = Path::new(HOME).join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     private_write(&workspace.join("AGENT.md"), AGENT);
+}
+
+// Onboarding cases whose job runs the one-shot fixture.
+fn onboard_spawns(case: &str) -> bool {
+    matches!(
+        case,
+        "settle-onboard-absent"
+            | "settle-onboard-failed-absent"
+            | "settle-onboard-stop-absent"
+            | "settle-onboard-fail:pair-imported"
+            | "settle-onboard-fail:committed-renamed"
+            | "settle-onboard-fail:stage-renamed"
+            | "settle-onboard-fail:side-emptied"
+            | "settle-onboard-fail:stage-retired"
+    )
+}
+
+// Trees under a job's side name: present only while a stage is created or
+// retired, never after a settlement.
+fn onboard_sides() -> usize {
+    let prefix = format!("{}-", crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY);
+    fs::read_dir(HOME).map_or(0, |entries| {
+        entries
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .count()
+    })
+}
+
+fn onboard_stage() -> std::path::PathBuf {
+    Path::new(HOME).join(crate::native_owner::picoclaw_home::ONBOARD_DIRECTORY)
+}
+
+// What an onboarding case starts from: no Home at all, except an existing
+// configuration (no-op), a security file alone (refused) or a leftover stage.
+fn onboard_fixture(case: &str) -> Option<SettlePair> {
+    if !case.starts_with("settle-onboard") || case == "settle-onboard-noop-absent" {
+        return None;
+    }
+    let empty = || SettlePair {
+        config: (Vec::new(), 0),
+        security: None,
+        model: false,
+    };
+    match case {
+        "settle-onboard-refused-absent" => {
+            fs::create_dir_all(HOME).unwrap();
+            fs::set_permissions(HOME, fs::Permissions::from_mode(0o700)).unwrap();
+            private_write(&Path::new(HOME).join(".security.yml"), b"kept: true\n");
+        }
+        "settle-onboard-orphan-absent" => {
+            fs::create_dir_all(onboard_stage().join("workspace")).unwrap();
+            fs::set_permissions(HOME, fs::Permissions::from_mode(0o700)).unwrap();
+            private_write(&onboard_stage().join("leftover"), b"older evidence\n");
+        }
+        _ => {}
+    }
+    Some(empty())
+}
+
+// The output a successful upstream one-shot leaves in the stage.
+fn write_onboard_stage() {
+    let stage = onboard_stage();
+    fs::create_dir(stage.join("workspace")).unwrap();
+    let config = serde_json::json!({
+        "agents": {"defaults": {"workspace": stage.join("workspace")}},
+        "model_list": []
+    });
+    private_write(
+        &stage.join("config.json"),
+        &serde_json::to_vec(&config).unwrap(),
+    );
+    private_write(&stage.join(".security.yml"), b"model_list: {}\n");
+    private_write(
+        &stage.join("workspace/notes.md"),
+        b"synthetic onboarding notes\n",
+    );
+}
+
+// The imported Home: rewritten workspace, the stage's own file, the generated
+// assets and the security document; the stage itself is gone.
+fn assert_onboarded() {
+    let home = Path::new(HOME);
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["agents"]["defaults"]["workspace"],
+        home.join("workspace").to_str().unwrap()
+    );
+    assert_eq!(config["agents"]["defaults"]["restrict_to_workspace"], true);
+    assert_eq!(
+        fs::read(home.join(".security.yml")).unwrap(),
+        b"model_list: {}\n"
+    );
+    assert_eq!(
+        fs::read(home.join("workspace/notes.md")).unwrap(),
+        b"synthetic onboarding notes\n"
+    );
+    assert!(
+        fs::read(home.join("workspace/AGENT.md")).unwrap()
+            == include_bytes!("../../../kvmapp/picoclaw/AGENT_KVM.md")
+    );
+    assert!(home.join("workspace/skills/kvm-control/SKILL.md").is_file());
+}
+
+fn onboard_case(case: &str, mut mutation: Mutation, pair: &SettlePair) {
+    let marker = onboard_stage().join(".nanokvm-onboard-job");
+    if case == "settle-onboard-failed-absent" {
+        fs::write("/onboard-fail", b"fail").unwrap();
+    }
+    mutation.request_settlement();
+    if onboard_spawns(case) {
+        // The marker is durable before the one-shot runs.
+        until(|| {
+            mutation.poll();
+            Path::new("/onboard-pid").exists()
+        });
+        assert!(marker.is_file());
+        if case == "settle-onboard-stop-absent" {
+            mutation.request_stop();
+        } else {
+            write_onboard_stage();
+            fs::write("/onboard-release", b"release").unwrap();
+        }
+    }
+    let status = settle_until(&mut mutation);
+    if let Some(point) = case.strip_prefix("settle-onboard-foreign-fail:") {
+        // An unmarked stage beside this job's side tree is never adopted: the
+        // later boot keeps the fence and both trees.
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        assert_eq!(point, "side-marked");
+        let state = record();
+        drop(mutation);
+        fs::create_dir(onboard_stage()).unwrap();
+        private_write(&onboard_stage().join("leftover"), b"older evidence\n");
+        jobs::TEST_BOOT.with(|boot| boot.set(Some([0x5a; 16])));
+        assert!(crate::native_owner::broker::boot::activate_early().is_err());
+        jobs::TEST_BOOT.with(|boot| boot.set(None));
+        assert!(record() == state, "a foreign stage keeps the job active");
+        assert_eq!(
+            fs::read(onboard_stage().join("leftover")).unwrap(),
+            b"older evidence\n"
+        );
+        assert_eq!(onboard_sides(), 1);
+        return;
+    }
+    if let Some(point) = case.strip_prefix("settle-onboard-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        let state = record();
+        let before_spawn = matches!(point, "side-created" | "side-marked" | "stage-created");
+        let phase = if before_spawn || point == "pair-imported" {
+            4
+        } else {
+            5
+        };
+        assert_eq!(state[128 + 169], phase);
+        assert_eq!(state[128 + 168], 1, "Onboard");
+        let imported = !before_spawn;
+        assert_eq!(Path::new(HOME).join("config.json").exists(), imported);
+        // The fixed name exists only while it carries the job's marker.
+        assert_eq!(
+            marker.exists(),
+            matches!(
+                point,
+                "stage-created" | "pair-imported" | "committed-renamed"
+            )
+        );
+        assert_eq!(onboard_stage().exists(), marker.exists());
+        assert_eq!(
+            onboard_sides(),
+            usize::from(matches!(
+                point,
+                "side-created" | "side-marked" | "stage-renamed" | "side-emptied"
+            ))
+        );
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain onboarding returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+        assert_eq!(
+            settled[RECEIPT + 172],
+            if imported { 1 } else { 3 },
+            "outcome"
+        );
+        assert!(!onboard_stage().exists(), "the job's own stage is retired");
+        assert_eq!(onboard_sides(), 0);
+        if imported {
+            assert_onboarded();
+        } else {
+            assert!(!Path::new(HOME).join("config.json").exists());
+        }
+        return;
+    }
+    let state = record();
+    match case {
+        "settle-onboard-noop-absent" => {
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(state[RECEIPT + 168], 1, "Onboard");
+            assert_eq!(state[RECEIPT + 172], 2, "Noop");
+            assert_pair_unchanged(pair);
+            assert!(!onboard_stage().exists());
+        }
+        "settle-onboard-refused-absent" | "settle-onboard-orphan-absent" => {
+            let MutationStatus::SettlementRefused(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert!(!Path::new(HOME).join("config.json").exists());
+            if case == "settle-onboard-orphan-absent" {
+                // Older evidence is kept, never adopted or deleted.
+                assert_eq!(
+                    fs::read(onboard_stage().join("leftover")).unwrap(),
+                    b"older evidence\n"
+                );
+            } else {
+                assert_eq!(
+                    fs::read(Path::new(HOME).join(".security.yml")).unwrap(),
+                    b"kept: true\n"
+                );
+            }
+        }
+        "settle-onboard-absent" => {
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(state[RECEIPT + 168], 1, "Onboard");
+            assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            assert_eq!(state[RECEIPT + 173], 2, "runtime NotRequested");
+            assert_onboarded();
+            assert!(!onboard_stage().exists());
+        }
+        _ => {
+            // A failed or stopped one-shot changes nothing but its own stage.
+            let MutationStatus::Superseded(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 2, "runtime NotRequested");
+            assert!(!Path::new(HOME).join("config.json").exists());
+            assert!(!onboard_stage().exists());
+        }
+    }
+    assert_eq!(members_present(), [false; 3]);
+    assert!(!plan_present());
+    drop(assert_released(mutation));
 }
 
 const STAGED_BINARY: &[u8] = b"synthetic staged runtime executable, never run\n";
@@ -1282,6 +1595,9 @@ fn settle_case(
     accepted: &[u8],
     fixture: Option<&std::path::PathBuf>,
 ) {
+    if case.starts_with("settle-onboard") {
+        return onboard_case(case, mutation, pair);
+    }
     if let Some(program) = fixture {
         mutation.launch_fixture = Some((
             program.clone(),

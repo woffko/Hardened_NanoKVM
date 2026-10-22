@@ -136,16 +136,28 @@ struct Payload {
     removal: Option<accept::Removal>,
     profile: Option<accept::ProfilePlan>,
     install: Option<accept::InstallPlan>,
+    /// An Onboard job's own stage, from its creation to its retirement.
+    onboard: Option<super::super::Onboarding>,
     touched: bool,
 }
 
 enum Advance {
-    Stop { id: JobId, explicit: bool },
-    Closed { proof: ClosedPico, explicit: bool },
+    Stop {
+        id: JobId,
+        explicit: bool,
+    },
+    Closed {
+        proof: ClosedPico,
+        explicit: bool,
+    },
     Settle,
     Apply,
     Activate,
     Finish(RuntimeResult),
+    /// An Onboard one-shot succeeded: import its stage.
+    Import,
+    /// An Onboard one-shot did not succeed: retire its stage, change nothing.
+    Abort,
 }
 
 /// Runtime result the owner observed for a committed change.
@@ -175,8 +187,11 @@ pub(crate) enum TransitionStatus {
     /// The planned change is installed; carries the installed generation.
     Committed(super::super::Generation),
     /// The change is durably done and nothing is launched for it: a removal,
-    /// or an install while no configuration exists yet.
+    /// an install while no configuration exists yet, or an onboarding.
     CommittedWithoutLaunch,
+    /// An Onboard job's stage and marker are durable under Applying; its
+    /// one-shot may run now.
+    OnboardStaged,
     /// Resume intent is durable; the owner may launch the runtime now.
     Activating,
     /// The accepted source changed before apply: terminal failure receipt,
@@ -255,6 +270,7 @@ impl Submission {
                 removal: None,
                 profile: None,
                 install: None,
+                onboard: None,
                 touched: false,
             })),
         }
@@ -394,6 +410,14 @@ impl Submission {
         self.begin_transition(Advance::Finish(resume))
     }
 
+    pub(crate) fn begin_import(&mut self) -> Result<()> {
+        self.begin_transition(Advance::Import)
+    }
+
+    pub(crate) fn begin_abort(&mut self) -> Result<()> {
+        self.begin_transition(Advance::Abort)
+    }
+
     fn begin_transition(&mut self, advance: Advance) -> Result<()> {
         let settled = match &self.transition {
             TransitionWorker::Idle => None,
@@ -416,6 +440,7 @@ impl Submission {
             ) => true,
             (Advance::Apply, Some(TransitionStatus::Closed)) => true,
             (Advance::Activate, Some(TransitionStatus::Committed(_))) => true,
+            (Advance::Import | Advance::Abort, Some(TransitionStatus::OnboardStaged)) => true,
             (
                 Advance::Finish(_),
                 Some(
@@ -443,7 +468,11 @@ impl Submission {
             .name(
                 match advance {
                     Advance::Settle => "pico-job-settle",
-                    Advance::Apply | Advance::Activate | Advance::Finish(_) => "pico-job-apply",
+                    Advance::Apply
+                    | Advance::Activate
+                    | Advance::Finish(_)
+                    | Advance::Import
+                    | Advance::Abort => "pico-job-apply",
                     Advance::Stop { .. } | Advance::Closed { .. } => "pico-job-stop",
                 }
                 .into(),

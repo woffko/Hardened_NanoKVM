@@ -69,7 +69,6 @@ const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(90);
 const INTERNAL_TOKEN_HEADER: &str = startup::INTERNAL_TOKEN_HEADER;
 const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
@@ -2756,7 +2755,6 @@ fn sha512_file(path: &Path) -> Result<[u8; 64]> {
 enum PicoControl {
     Ensure,
     Stop,
-    Onboard,
 }
 
 async fn native_control_ready() -> Result<crate::native_owner::broker::boot::Permit> {
@@ -2790,7 +2788,6 @@ async fn run_native_control(
     let (argument, timeout) = match control {
         PicoControl::Ensure => ("ensure-picoclaw", PICOCLAW_START_TIMEOUT),
         PicoControl::Stop => ("stop-picoclaw", PICOCLAW_STOP_TIMEOUT),
-        PicoControl::Onboard => ("onboard-picoclaw", PICOCLAW_ONBOARD_TIMEOUT),
     };
     // The command owner retains the boot proof through cancellation, capture
     // cleanup and direct-child reap. Broker Stop independently retains its
@@ -2967,10 +2964,12 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
 }
 
 async fn onboard_runtime_config() -> Result<()> {
-    // The broker owns Update -> Config across native completion and checked
-    // import. Holding Config here would invert/reacquire those admissions.
-    let support = native_control_ready().await?;
-    run_native_control(PicoControl::Onboard, support).await?;
+    // A broker-owned Onboard job runs the one-shot, imports its stage with the
+    // pair last and retires the stage; this handler holds no admission itself.
+    run_config_job(ONBOARD_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_onboard_job(ONBOARD_JOB_TIMEOUT)
+    })
+    .await?;
     task::spawn_blocking(|| load_config_document().map(|_| ()))
         .await
         .map_err(|_| AppError::Internal("picoclaw onboarding validation task failed".into()))?
@@ -3098,7 +3097,10 @@ fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> Stri
 /// One broker-owned configuration job, including a live gateway's quiescence
 /// and relaunch, ends within this bound.
 const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+const ONBOARD_JOB_KIND: u8 = 1;
 const MODEL_JOB_KIND: u8 = 2;
+/// The one-shot itself is bounded at 60 s by the broker.
+const ONBOARD_JOB_TIMEOUT: Duration = Duration::from_secs(90);
 const STARTUP_JOB_KIND: u8 = 3;
 const PROFILE_JOB_KIND: u8 = 4;
 const INSTALL_JOB_KIND: u8 = 5;
@@ -3117,6 +3119,10 @@ fn job_outcome(reply: crate::native_owner::broker::ipc::JobReply, kind: u8) -> R
     match (reply.code, reply.receipt) {
         // Changed or Noop.
         (JobCode::Ok, [code, 8, 1 | 2, _]) if code == kind => Ok(JobDone::Done),
+        // A failed one-shot is final: nothing to settle again.
+        (JobCode::Ok, [ONBOARD_JOB_KIND, 8, 3, _]) if kind == ONBOARD_JOB_KIND => Err(
+            AppError::Config("picoclaw onboarding did not complete; nothing was changed".into()),
+        ),
         (JobCode::Ok, [code, 8, 3, 2]) if code == kind => Ok(JobDone::Superseded),
         (JobCode::Ok, [code, 8, 3, _]) if code == kind => Err(AppError::Config(
             match kind {
