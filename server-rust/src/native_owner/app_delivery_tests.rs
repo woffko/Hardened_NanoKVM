@@ -89,6 +89,9 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
     }
     until(|| exchange(&mut control, Operation::Observe).roles == [2; 2]);
     until(|| exchange(&mut control, Operation::BackendRunning).code == Code::Ok);
+    // The daemon keeps the production 5 s idle limit for non-lease clients:
+    // release a quiet observer at a complete reply boundary, reopen after.
+    drop(control);
     let mut frontend = child(path, "frontend_child");
     until(|| path.join("offer-sent").exists());
     let old_inode = path.join("kvmapp").metadata().unwrap().ino();
@@ -96,6 +99,7 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
     let status = frontend.0.wait().unwrap();
     assert!(!status.success());
     assert_excluded(path);
+    control = connect(path);
     assert_eq!(
         exchange(&mut control, Operation::Observe).mode,
         Mode::Running
@@ -175,6 +179,9 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
         fs::read(root.join("kvm")).unwrap(),
         fs::read(root.join("hwmon")).unwrap(),
     ];
+    // The daemon keeps the production 5 s idle limit for non-lease clients:
+    // release a quiet observer at a complete reply boundary, reopen after.
+    drop(control);
     let mut frontend = child(root, "frontend_child");
     until(|| root.join("offer-sent").exists());
     let old = root.join("kvmapp").metadata().unwrap().ino();
@@ -182,8 +189,11 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
     assert!(!frontend.0.wait().unwrap().success());
     assert_excluded(root);
     fs::remove_file(root.join("hold-install-offer")).unwrap();
+    control = connect(root);
     observed(&mut control, Mode::Installing);
+    drop(control);
     until(|| root.join("trial-owner-started").exists());
+    control = connect(root);
     assert_eq!(exchange(&mut control, Operation::Observe).roles, [4; 2]);
     assert_eq!(
         exchange(&mut control, Operation::BackendRunning).code,
@@ -192,12 +202,12 @@ fn independent_daemon_commits_after_frontend_death_and_restarts_native_services_
     assert_excluded(root);
     // Neither sender death nor replacing the observing client cancels the job.
     drop(control);
-    control = connect(root);
     fs::remove_file(root.join("trial-ready-hold")).unwrap();
     until(|| {
         fs::read(root.join("trial-authorized"))
             .is_ok_and(|bytes| bytes.len() == crate::app_trial_wire::BYTES)
     });
+    control = connect(root);
     let record = fs::read(root.join("application-slot/current/state")).unwrap();
     let transaction: [u8; 16] = record[16..32].try_into().unwrap();
     assert_eq!(record[8], app_slot::Phase::Committed as u8);
@@ -831,10 +841,14 @@ fn fixed_root_delivery_child() {
         drop(owner);
         let mut control = Channel::connect().unwrap();
         observed(&mut control, Mode::Installing);
+        // Production 5 s idle applies to this non-lease observer: release it at
+        // a complete reply boundary for the filesystem wait, then reopen.
+        drop(control);
         until(|| {
             fs::read("/etc/kvm/application-slot/current/state").unwrap()[8]
                 == app_slot::Phase::Published as u8
         });
+        control = Channel::connect().unwrap();
         let record = fs::read("/etc/kvm/application-slot/current/state").unwrap();
         assert_eq!(record[16..32], id);
         assert!(matches!(app_slot::status(), Err(app_slot::SlotError::Busy)));
