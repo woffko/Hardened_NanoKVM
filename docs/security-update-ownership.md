@@ -507,11 +507,13 @@ publication/application. This is not automatic fallback or confirmation. A secon
 backend cannot replace a live owner's marker: the kernel Firewall lock survives
 the first handler's reply. Confirming a foreign owner is rejected, not forwarded.
 
-Here successful application means the command completed with status0, not that
-effective rules were read back and proved correct. The current S40firewall script
-can return0/print OK after individual iptables failures; this component does not
-fix that service error-propagation/readback gap. It remains a required WP-11
-gate, not evidence of effective firewall enforcement or remote reachability.
+Here successful application means the command completed with status0. S40firewall
+commits each address family as one `iptables-restore --noflush` transaction into
+its own `NKVM-INPUT`/`NKVM-OUTPUT` chains, reads the policies, the jumps and the
+number of managed rules back, and exits non-zero when either family is not
+committed; that family keeps its previous table and the other family is still
+applied. Status0 is still not evidence of how each rule acts on traffic or of
+remote reachability: those remain target gates.
 
 These are one-process-lifetime guarantees, not durable firewall recovery. The
 legacy `/tmp` marker and file rename helper still lack protected durable journal,

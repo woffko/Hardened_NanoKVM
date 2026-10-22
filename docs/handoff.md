@@ -658,6 +658,13 @@ scripts/validate-nanokvm-rootfs.sh <rootfs>
   WebRTC UDP.
 - Paranoid permits local HTTPS only and intentionally blocks online updates.
 - Restricted and Paranoid require working HTTPS before activation.
+- The rules live in `NKVM-INPUT` and `NKVM-OUTPUT`. The built-in chains hold
+  the policies, one jump to each, and the jumps of other software, so
+  Tailscale's `ts-*` chains survive mode changes.
+- Each address family is replaced in one `iptables-restore` commit. A family
+  that fails keeps its previous rules and `S40firewall` exits non-zero, which
+  fails the API request. `scripts/test-s40firewall.sh` checks this against real
+  legacy iptables.
 
 ### Time and NTP
 
