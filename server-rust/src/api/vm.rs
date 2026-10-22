@@ -49,7 +49,7 @@ use crate::{
     state::{AppState, is_allowed_session_lock_duration},
     system::{
         command::{AllowedCommand, run_allowed},
-        usb,
+        files, usb,
     },
     update::state_writers::ConfigPermit,
     ws::{hid as hid_ws, origin::validate_ws_origin},
@@ -299,26 +299,80 @@ pub async fn get_hostname() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_hostname(Json(req): Json<SetHostnameReq>) -> Result<impl IntoResponse> {
+pub async fn set_hostname(
+    State(state): State<AppState>,
+    Json(req): Json<SetHostnameReq>,
+) -> Result<impl IntoResponse> {
     validate_hostname(&req.hostname)?;
-    let old_hostname = read_trimmed(ETC_HOSTNAME_FILE).unwrap_or_default();
-
-    if old_hostname != req.hostname {
-        if let Ok(hosts) = fs::read_to_string(ETC_HOSTS_FILE) {
-            fs::write(ETC_HOSTS_FILE, hosts.replace(&old_hostname, &req.hostname))?;
-        }
-    }
-
-    fs::write(BOOT_HOSTNAME_FILE, req.hostname.as_bytes())?;
-    fs::write(ETC_HOSTNAME_FILE, req.hostname.as_bytes())?;
-    let _ = run_allowed(
-        AllowedCommand::Hostname,
-        ["-F", ETC_HOSTNAME_FILE],
-        Duration::from_secs(2),
-    )
-    .await;
+    let permit = state.writers.configuration()?;
+    let hostname = req.hostname;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |_| {
+                    let old_hostname = read_trimmed(ETC_HOSTNAME_FILE).unwrap_or_default();
+                    if old_hostname != hostname
+                        && let Ok(hosts) = fs::read_to_string(ETC_HOSTS_FILE)
+                        && let Some(hosts) = rename_host_entries(&hosts, &old_hostname, &hostname)
+                    {
+                        files::write_atomic(Path::new(ETC_HOSTS_FILE), hosts.as_bytes(), 0o644)?;
+                    }
+                    fs::write(BOOT_HOSTNAME_FILE, hostname.as_bytes())?;
+                    files::write_atomic(Path::new(ETC_HOSTNAME_FILE), hostname.as_bytes(), 0o644)
+                })
+                .await?;
+            let _ = writer
+                .command(
+                    AllowedCommand::Hostname,
+                    ["-F", ETC_HOSTNAME_FILE],
+                    Duration::from_secs(2),
+                )
+                .await;
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+/// Rename `old` where it is a whole host name on an `/etc/hosts` entry: never
+/// inside another name, in the address field or in a comment. `None` when
+/// nothing changes, which includes an empty `old`.
+fn rename_host_entries(hosts: &str, old: &str, new: &str) -> Option<String> {
+    if old.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(hosts.len() + new.len());
+    let mut changed = false;
+    for line in hosts.split_inclusive('\n') {
+        let (entry, comment) = line.split_at(line.find('#').unwrap_or(line.len()));
+        let mut field = 0;
+        let mut start = None;
+        let mut push = |token: &str, field: usize, out: &mut String| {
+            if field > 0 && token == old {
+                out.push_str(new);
+                changed = true;
+            } else {
+                out.push_str(token);
+            }
+        };
+        for (index, character) in entry.char_indices() {
+            if character.is_whitespace() {
+                if let Some(begin) = start.take() {
+                    push(&entry[begin..index], field, &mut out);
+                    field += 1;
+                }
+                out.push(character);
+            } else if start.is_none() {
+                start = Some(index);
+            }
+        }
+        if let Some(begin) = start {
+            push(&entry[begin..], field, &mut out);
+        }
+        out.push_str(comment);
+    }
+    changed.then_some(out)
 }
 
 pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
@@ -1381,7 +1435,7 @@ fn remove_swap_inittab_lines(input: &str) -> String {
 }
 
 fn write_inittab(content: &str) -> Result<()> {
-    crate::system::files::write_atomic(Path::new(INITTAB_PATH), content.as_bytes(), 0o644)
+    files::write_atomic(Path::new(INITTAB_PATH), content.as_bytes(), 0o644)
 }
 
 #[derive(Debug, Clone)]
@@ -1564,6 +1618,22 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_hostname_replaces_only_whole_host_names() {
+        let hosts = "127.0.0.1\tlocalhost\n127.0.1.1\tkvm-1234 kvm-1234.local nanokvm\n# kvm-1234 was here\n10.0.0.2 kvm-1234";
+        assert_eq!(
+            rename_host_entries(hosts, "kvm-1234", "desk").as_deref(),
+            Some(
+                "127.0.0.1\tlocalhost\n127.0.1.1\tdesk kvm-1234.local nanokvm\n# kvm-1234 was here\n10.0.0.2 desk"
+            )
+        );
+        // RC12 replaced substrings, and an empty old name everywhere.
+        assert_eq!(rename_host_entries(hosts, "kvm", "desk"), None);
+        assert_eq!(rename_host_entries(hosts, "", "desk"), None);
+        // An address field is never rewritten.
+        assert_eq!(rename_host_entries("kvm 127.0.0.1\n", "kvm", "desk"), None);
+    }
 
     fn gpio_line(dir: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, String) {
         let line = dir.path().join(name);

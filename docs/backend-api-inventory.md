@@ -98,7 +98,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | --------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | GET             | `/api/vm/info`             | Implemented; includes image version, application version, hostname, IP, mDNS, and uptime.                          |
 | GET             | `/api/vm/hardware`         | Implemented.                                                                                                       |
-| GET/POST        | `/api/vm/hostname`         | Implemented.                                                                                                       |
+| GET/POST        | `/api/vm/hostname`         | Implemented. In `/etc/hosts` only whole host names equal to the old hostname are renamed (an empty old name changes nothing); `/etc/hosts` and `/etc/hostname` are replaced atomically under the configuration writer permit. |
 | GET/POST        | `/api/vm/web-title`        | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/gpio`             | Implemented. A power or reset pulse (50 ms to 5 s) runs in its own task and always releases the line, even after a lost client or at shutdown; an overlapping pulse on the same line is refused (-409). |
 | POST            | `/api/vm/screen`           | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
