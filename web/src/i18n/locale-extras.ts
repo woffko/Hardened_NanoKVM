@@ -4704,6 +4704,79 @@ const currentPasswordExtras = keyedExtras(currentPasswordKeys, {
   zh_tw: ['目前密碼', '目前密碼不正確']
 });
 
+const autostartNoticeKeys = ['settings.device.autostart.notExecuted'] as const;
+
+const autostartNoticeExtras = keyedExtras(autostartNoticeKeys, {
+  ca: [
+    'Aquesta imatge no executa scripts d’inici automàtic. Els fitxers desats aquí es conserven, però no s’executen mai.'
+  ],
+  cz: [
+    'Tento obraz nespouští skripty automatického spuštění. Zde uložené soubory zůstanou zachovány, ale nikdy se nespustí.'
+  ],
+  da: [
+    'Dette image kører ikke autostart-scripts. Filer, der gemmes her, bevares, men køres aldrig.'
+  ],
+  de: [
+    'Dieses Image führt keine Autostart-Skripte aus. Hier gespeicherte Dateien bleiben erhalten, werden aber nie ausgeführt.'
+  ],
+  es: [
+    'Esta imagen no ejecuta scripts de inicio automático. Los archivos guardados aquí se conservan, pero nunca se ejecutan.'
+  ],
+  et: [
+    'See tõmmis ei käivita automaatkäivituse skripte. Siia salvestatud failid säilivad, kuid neid ei käivitata kunagi.'
+  ],
+  fi: [
+    'Tämä levykuva ei suorita automaattisen käynnistyksen skriptejä. Tänne tallennetut tiedostot säilyvät, mutta niitä ei koskaan suoriteta.'
+  ],
+  fr: [
+    'Cette image n’exécute pas les scripts de démarrage automatique. Les fichiers enregistrés ici sont conservés mais jamais exécutés.'
+  ],
+  hu: [
+    'Ez a rendszerkép nem futtat automatikus indítási szkripteket. Az itt mentett fájlok megmaradnak, de soha nem futnak le.'
+  ],
+  id: [
+    'Image ini tidak menjalankan skrip mulai otomatis. File yang disimpan di sini tetap tersimpan tetapi tidak pernah dijalankan.'
+  ],
+  it: [
+    'Questa immagine non esegue script di avvio automatico. I file salvati qui vengono conservati ma non vengono mai eseguiti.'
+  ],
+  ja: [
+    'このイメージは自動起動スクリプトを実行しません。ここに保存したファイルは保持されますが、実行されることはありません。'
+  ],
+  ko: [
+    '이 이미지는 자동 시작 스크립트를 실행하지 않습니다. 여기에 저장한 파일은 보관되지만 실행되지 않습니다.'
+  ],
+  nb: [
+    'Dette bildet kjører ikke autostart-skript. Filer som lagres her, beholdes, men kjøres aldri.'
+  ],
+  nl: [
+    'Deze image voert geen autostartscripts uit. Bestanden die hier zijn opgeslagen, blijven bewaard maar worden nooit uitgevoerd.'
+  ],
+  pl: [
+    'Ten obraz nie uruchamia skryptów autostartu. Zapisane tu pliki są przechowywane, ale nigdy nie są wykonywane.'
+  ],
+  pt_br: [
+    'Esta imagem não executa scripts de inicialização automática. Os arquivos salvos aqui são mantidos, mas nunca executados.'
+  ],
+  se: [
+    'Den här avbildningen kör inte autostartskript. Filer som sparas här behålls men körs aldrig.'
+  ],
+  th: [
+    'อิมเมจนี้ไม่เรียกใช้สคริปต์เริ่มอัตโนมัติ ไฟล์ที่บันทึกไว้ที่นี่จะถูกเก็บไว้ แต่จะไม่ถูกเรียกใช้'
+  ],
+  tr: [
+    'Bu imaj otomatik başlatma betiklerini çalıştırmaz. Buraya kaydedilen dosyalar saklanır ancak hiçbir zaman çalıştırılmaz.'
+  ],
+  uk: [
+    'Цей образ не запускає скрипти автозапуску. Збережені тут файли зберігаються, але ніколи не виконуються.'
+  ],
+  vi: [
+    'Bản image này không chạy các script tự khởi động. Các tệp lưu ở đây được giữ lại nhưng không bao giờ được thực thi.'
+  ],
+  zh: ['此镜像不会运行自启动脚本。保存在这里的文件会被保留，但永远不会被执行。'],
+  zh_tw: ['此映像不會執行自動啟動腳本。儲存在這裡的檔案會被保留，但永遠不會被執行。']
+});
+
 const hardenedCommonKeys = [
   'head.firstSetup',
   'auth.setupTitle',
@@ -7199,6 +7272,7 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(hardenedCommonExtras[key] || {}),
     ...(scriptUnlockExtras[key] || {}),
     ...(currentPasswordExtras[key] || {}),
+    ...(autostartNoticeExtras[key] || {}),
     ...(legacyExtras[key] || {}),
     ...(systemUpdateExtras[key] || {}),
     ...(firewallExtras[key] || {}),

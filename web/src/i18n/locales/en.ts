@@ -431,7 +431,9 @@ const en = {
           no: 'No',
           scriptName: 'Autostart Script Name',
           scriptContent: 'Autostart Script Content',
-          settings: 'Settings'
+          settings: 'Settings',
+          notExecuted:
+            'This image does not run autostart scripts. Files saved here are kept but never executed.'
         },
         hidOnly: 'HID-Only Mode',
         hidOnlyDesc: 'Stop emulating virtual devices, retaining only basic HID control',

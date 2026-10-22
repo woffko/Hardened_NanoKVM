@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { DeleteOutlined, EditOutlined, PlusOutlined, SettingOutlined } from '@ant-design/icons';
-import { Button, Input, Modal, Popconfirm, Space, Table } from 'antd';
+import { Alert, Button, Input, Modal, Popconfirm, Space, Table } from 'antd';
 import TextArea from 'antd/es/input/TextArea';
 import type { TableProps } from 'antd/es/table';
 import { useSetAtom } from 'jotai';
@@ -125,8 +125,9 @@ export const Autostart = () => {
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
           <span>{t('settings.device.autostart.title')}</span>
+          {/* Nothing in this image executes these files: say so, never "runs at startup". */}
           <span className="text-xs text-neutral-500">
-            {t('settings.device.autostart.description')}
+            {t('settings.device.autostart.notExecuted')}
           </span>
         </div>
         <div>
@@ -166,8 +167,14 @@ export const Autostart = () => {
         footer=""
         onCancel={() => setIsManageAutostartOpen(false)}
         title={t('settings.device.autostart.title')}
-        >
-          <div className="flex justify-end">
+      >
+        <Alert
+          className="mb-3"
+          type="warning"
+          showIcon
+          message={t('settings.device.autostart.notExecuted')}
+        />
+        <div className="flex justify-end">
           <Button
             type="text"
             onClick={() => {
