@@ -122,6 +122,7 @@ async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>>
     }
     install_runtime_update_trust(&config);
     initialize_kvm();
+    nanokvm_rust_server::ws::hid::start_persisted_mouse_jiggler();
 
     serve_config(config, None).await
 }

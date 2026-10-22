@@ -89,16 +89,31 @@ struct MouseJiggler {
 
 impl MouseJiggler {
     fn from_config() -> Self {
-        let mode = fs::read_to_string(MOUSE_JIGGLER_CONFIG)
+        Self::from_config_at(Path::new(MOUSE_JIGGLER_CONFIG))
+    }
+
+    fn from_config_at(path: &Path) -> Self {
+        let mode = fs::read_to_string(path)
             .ok()
             .map(|value| normalize_jiggler_mode(value.trim()))
             .unwrap_or_else(|| JIGGLER_MODE_RELATIVE.to_string());
         Self {
-            enabled: Path::new(MOUSE_JIGGLER_CONFIG).exists(),
+            enabled: path.exists(),
             running: false,
             mode,
             last_updated: Instant::now(),
         }
+    }
+
+    /// Mark a loop as running when the jiggler is enabled and none runs yet.
+    /// True means the caller must start that loop.
+    fn claim_loop(&mut self) -> bool {
+        if !self.enabled || self.running {
+            return false;
+        }
+        self.running = true;
+        self.last_updated = Instant::now();
+        true
     }
 }
 
@@ -714,19 +729,15 @@ pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
         let mode = validate_jiggler_mode(mode)?;
         fs::write(MOUSE_JIGGLER_CONFIG, mode.as_bytes())?;
 
-        let mut should_spawn = false;
-        {
+        let should_spawn = {
             let mut state = MOUSE_JIGGLER
                 .lock()
                 .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
             state.enabled = true;
             state.mode = mode;
             state.last_updated = Instant::now();
-            if !state.running {
-                state.running = true;
-                should_spawn = true;
-            }
-        }
+            state.claim_loop()
+        };
 
         if should_spawn {
             tokio::spawn(mouse_jiggler_loop());
@@ -742,6 +753,19 @@ pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resume a jiggler that was enabled before the backend restarted. Its setting
+/// survives a reboot, so it must run again without being set anew. The frozen
+/// app trial never calls this: it drives no input.
+pub fn start_persisted_mouse_jiggler() {
+    let should_spawn = MOUSE_JIGGLER
+        .lock()
+        .map(|mut state| state.claim_loop())
+        .unwrap_or(false);
+    if should_spawn {
+        tokio::spawn(mouse_jiggler_loop());
+    }
 }
 
 fn touch_mouse_jiggler() {
@@ -824,6 +848,26 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_persisted_jiggler_claims_one_loop_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mouse-jiggler");
+        let mut absent = MouseJiggler::from_config_at(&path);
+        assert!(!absent.enabled);
+        assert!(!absent.claim_loop());
+
+        fs::write(&path, b"absolute\n").unwrap();
+        let mut persisted = MouseJiggler::from_config_at(&path);
+        assert!(persisted.enabled);
+        assert_eq!(persisted.mode, JIGGLER_MODE_ABSOLUTE);
+        // A restart finds the setting enabled but no loop running.
+        assert!(!persisted.running);
+        assert!(persisted.claim_loop());
+        assert!(persisted.running);
+        // A second start, or enabling it again, does not add a second loop.
+        assert!(!persisted.claim_loop());
+    }
 
     #[test]
     fn validates_jiggler_modes() {
