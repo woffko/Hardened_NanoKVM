@@ -43,6 +43,9 @@ const HID_REOPEN_TIMEOUT: Duration = Duration::from_secs(2);
 const HID_REOPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
 const HID_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const HID_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// At most one USB gadget reset per this interval: each reset also drops
+/// virtual media and the USB network, and it cannot help while the host is off.
+const HID_RECOVERY_COOLDOWN: Duration = Duration::from_secs(60);
 const HID_EVENT_QUEUE_CAPACITY: usize = 200;
 const MAX_WS_MESSAGE_BYTES: usize = 16;
 const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
@@ -76,7 +79,8 @@ struct HidDevices {
     keyboard: Mutex<Option<File>>,
     relative_mouse: Mutex<Option<File>>,
     absolute_mouse: Mutex<Option<File>>,
-    recovery: Mutex<()>,
+    /// When the last gadget reset was attempted.
+    recovery: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug)]
@@ -175,6 +179,18 @@ impl HidDevices {
                                     deadline = Instant::now() + HID_REOPEN_TIMEOUT;
                                     continue;
                                 }
+                                // A skipped reset (host off or asleep, or a
+                                // reset just done) is expected; do not flood.
+                                Err(recovery_err)
+                                    if recovery_err.kind() == io::ErrorKind::WouldBlock =>
+                                {
+                                    tracing::debug!(
+                                        path,
+                                        error = %err,
+                                        reason = %recovery_err,
+                                        "HID recovery skipped after write failure"
+                                    );
+                                }
                                 Err(recovery_err) => {
                                     tracing::warn!(
                                         path,
@@ -213,19 +229,26 @@ impl HidDevices {
                 "USB gadget operation is in progress",
             )
         })?;
-        let _guard = self
+        let mut last_reset = self
             .recovery
             .lock()
             .map_err(|_| io::Error::other("hid recovery lock poisoned"))?;
 
-        if usb_udc_is_configured().unwrap_or(false) {
-            return Ok(());
+        let state = read_usb_udc_state().unwrap_or(None);
+        match gadget_reset_decision(state.as_deref(), *last_reset, Instant::now()) {
+            ResetDecision::NotNeeded => return Ok(()),
+            ResetDecision::Skip(reason) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, reason));
+            }
+            ResetDecision::Reset => {}
         }
 
         tracing::warn!(
             path,
+            state = state.as_deref().unwrap_or("unknown"),
             "HID write failed while USB gadget is not configured; resetting USB gadget"
         );
+        *last_reset = Some(Instant::now());
         self.close_all()?;
         run_usb_dev_restart()?;
         wait_for_usb_udc_configured(HID_RECOVERY_TIMEOUT)
@@ -621,6 +644,35 @@ fn usb_udc_is_configured() -> io::Result<bool> {
     Ok(read_usb_udc_state()?.as_deref() == Some("configured"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ResetDecision {
+    NotNeeded,
+    Skip(&'static str),
+    Reset,
+}
+
+/// Whether a failed HID write may reset the USB gadget. A reset cannot help
+/// while the host is off ("not attached"), and while it sleeps ("suspended")
+/// it would break wakeup by keyboard. Other states may be a stuck enumeration,
+/// reset at most once per cooldown.
+fn gadget_reset_decision(
+    state: Option<&str>,
+    last_reset: Option<Instant>,
+    now: Instant,
+) -> ResetDecision {
+    match state {
+        Some("configured") => ResetDecision::NotNeeded,
+        Some("not attached") => ResetDecision::Skip("the USB host is not attached"),
+        Some("suspended") => ResetDecision::Skip("the USB host is suspended"),
+        _ if last_reset
+            .is_some_and(|last| now.saturating_duration_since(last) < HID_RECOVERY_COOLDOWN) =>
+        {
+            ResetDecision::Skip("the USB gadget was reset recently")
+        }
+        _ => ResetDecision::Reset,
+    }
+}
+
 fn read_usb_udc_state() -> io::Result<Option<String>> {
     let entries = match fs::read_dir(USB_UDC_CLASS) {
         Ok(entries) => entries,
@@ -848,6 +900,39 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_usb_gadget_is_reset_only_when_it_can_help_and_not_too_often() {
+        let now = Instant::now();
+        let recently = now.checked_sub(Duration::from_secs(10));
+        let long_ago = now.checked_sub(HID_RECOVERY_COOLDOWN + Duration::from_secs(1));
+        assert_eq!(
+            gadget_reset_decision(Some("configured"), None, now),
+            ResetDecision::NotNeeded
+        );
+        for state in ["not attached", "suspended"] {
+            assert!(matches!(
+                gadget_reset_decision(Some(state), None, now),
+                ResetDecision::Skip(_)
+            ));
+        }
+        for state in [Some("default"), Some("addressed"), Some("powered"), None] {
+            assert_eq!(
+                gadget_reset_decision(state, None, now),
+                ResetDecision::Reset
+            );
+            assert_eq!(
+                gadget_reset_decision(state, long_ago, now),
+                ResetDecision::Reset
+            );
+            if recently.is_some() {
+                assert!(matches!(
+                    gadget_reset_decision(state, recently, now),
+                    ResetDecision::Skip(_)
+                ));
+            }
+        }
+    }
 
     #[test]
     fn a_persisted_jiggler_claims_one_loop_at_start() {

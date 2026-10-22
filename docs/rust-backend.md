@@ -163,7 +163,10 @@ For end-user flashing instructions, see
   HTTPS.
 - Keyboard and mouse HID websocket, queued HID writes, paste, shortcuts, HID
   mode/reset, mouse jiggler, mobile TouchSync pointer mode, and relative
-  pointer sensitivity controls.
+  pointer sensitivity controls. A failed HID write resets the USB gadget only
+  when that can help and at most once a minute: never while the host is off
+  ("not attached") or asleep ("suspended"), where a reset would also drop
+  virtual media and the USB network and break wakeup by keyboard.
 - Storage image listing, browser ISO upload, mount, unmount, delete, and CD-ROM
   mode with path validation. Runtime media changes now eject and insert the
   mass-storage LUN; switching between CD-ROM and mass-storage mode also
