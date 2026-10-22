@@ -282,6 +282,7 @@ fn install_puts_exactly_the_verified_staged_executable_in_place() {
         "settle-install-noop-absent",
         "settle-install-refused-absent",
         "settle-install-replace-live",
+        "settle-install-legacy-live",
     ] {
         run(case);
     }
@@ -304,6 +305,7 @@ fn profile_replaces_only_an_absent_or_shipped_agent_document() {
         "settle-profile-create-absent",
         "settle-profile-custom-absent",
         "settle-profile-change-live",
+        "settle-profile-legacy-live",
     ] {
         run(case);
     }
@@ -1099,9 +1101,20 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
         crate::update::picoclaw_model::apply(&mut config, &mut security, MODEL, API_BASE, API_KEY)
             .unwrap();
     }
-    startup::apply(&mut config, &mut security, GATEWAY, INTERNAL).unwrap();
+    startup::apply(
+        &mut config,
+        &mut security,
+        GATEWAY,
+        INTERNAL,
+        Path::new(HOME),
+    )
+    .unwrap();
     if case.starts_with("settle-change-") || case == "settle-superseded-absent" {
         config["gateway"]["port"] = serde_json::json!(1);
+    }
+    if case.ends_with("-legacy-live") {
+        // As RC12 left it: a pair without the local tool policy.
+        config["agents"]["defaults"]["restrict_to_workspace"] = serde_json::json!(false);
     }
     let encoded = startup::encode(&config, &security).unwrap();
     // Original formatting/comments differ from canonical bytes on purpose: a
@@ -1480,9 +1493,9 @@ fn install_fixture(case: &str) {
     executable_write(Path::new("/root/.picoclaw-cache/picoclaw"), STAGED_BINARY);
     match case {
         "settle-install-noop-absent" => executable_write(Path::new(BINARY), STAGED_BINARY),
-        "settle-install-replace-live" | "settle-install-refused-absent" => {
-            executable_write(Path::new(BINARY), OLD_BINARY)
-        }
+        "settle-install-replace-live"
+        | "settle-install-legacy-live"
+        | "settle-install-refused-absent" => executable_write(Path::new(BINARY), OLD_BINARY),
         _ => {}
     }
 }
@@ -1564,7 +1577,7 @@ fn desired(pair: &SettlePair, internal: &str) -> crate::update::picoclaw_startup
         )
         .unwrap();
     }
-    startup::desired(&documents, GATEWAY, internal).unwrap()
+    startup::desired(&documents, GATEWAY, internal, Path::new(HOME)).unwrap()
 }
 
 pub(crate) fn assert_pair_desired(pair: &SettlePair, internal: &str) {
@@ -2042,7 +2055,8 @@ fn settle_case(
         }
         "settle-install-absent"
         | "settle-install-unconfigured-absent"
-        | "settle-install-replace-live" => {
+        | "settle-install-replace-live"
+        | "settle-install-legacy-live" => {
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };
@@ -2054,7 +2068,9 @@ fn settle_case(
             assert_eq!(state[RECEIPT + 168], 5, "Install");
             assert_eq!(state[RECEIPT + 172], 1, "Changed");
             // No owner helper exists in this chroot, so a relaunch attempt
-            // truthfully fails instead of claiming the old task resumed.
+            // truthfully fails instead of claiming the old task resumed. A
+            // pair without the local tool policy is not relaunched at all and
+            // reports the same: the running runtime did not resume.
             assert_eq!(
                 state[RECEIPT + 173],
                 if live { 4 } else { 2 },
@@ -2099,7 +2115,8 @@ fn settle_case(
         }
         "settle-profile-change-absent"
         | "settle-profile-create-absent"
-        | "settle-profile-change-live" => {
+        | "settle-profile-change-live"
+        | "settle-profile-legacy-live" => {
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };
@@ -2110,9 +2127,18 @@ fn settle_case(
             assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
             assert_eq!(state[RECEIPT + 168], 4, "Profile");
             assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            // A pair without the local tool policy is never relaunched: the
+            // runtime that was running reports that it did not resume.
+            let relaunch = case == "settle-profile-change-live";
             assert_eq!(
                 state[RECEIPT + 173],
-                if live { 3 } else { 2 },
+                if relaunch {
+                    3
+                } else if live {
+                    4
+                } else {
+                    2
+                },
                 "runtime result"
             );
             assert_eq!(state[RECEIPT + 174], u8::from(live));
@@ -2122,7 +2148,13 @@ fn settle_case(
             // Only the workspace document changed; the pair kept its bytes and inodes.
             assert_pair_unchanged(pair);
             let mut broker = assert_released(mutation);
-            if live {
+            if live && !relaunch {
+                assert!(matches!(
+                    broker.group.poll()[3],
+                    None | Some(Status::Closed(_))
+                ));
+                shutdown(broker);
+            } else if live {
                 // Relaunched with the generation of the SAME unchanged pair.
                 let security = pair.security.as_ref().unwrap().0.as_slice();
                 assert_eq!(broker.group.poll()[3], Some(Status::Running));

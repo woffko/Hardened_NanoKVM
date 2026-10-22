@@ -1,5 +1,5 @@
 use nanokvm_rust_server::native_owner::broker::ipc::{
-    Channel, Code, JobChannel, JobCode, Mode, Operation, run_onboard_job,
+    Channel, Code, JobChannel, JobCode, Mode, Operation, run_onboard_job, run_startup_job,
 };
 use nanokvm_rust_server::native_owner::broker::{Broker, JournalError, boot};
 use std::{
@@ -7,8 +7,31 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The job store's Onboard kind.
+/// The job store's Onboard and Startup kinds.
 const ONBOARD: u8 = 1;
+const STARTUP: u8 = 3;
+
+// Startup defaults, with the local tool policy, as one broker-owned job before
+// S96 ensures the runtime: the broker never launches a pair without them.
+fn startup_picoclaw() -> Result<(), ExitCode> {
+    if JobChannel::connect().is_err() {
+        eprintln!("cannot connect to the protected job transport; nothing was submitted");
+        return Err(ExitCode::from(70));
+    }
+    match run_startup_job(Duration::from_secs(60)) {
+        Ok(reply) => match (reply.code, reply.receipt) {
+            (JobCode::Ok, [STARTUP, 8, 1 | 2, _]) => Ok(()),
+            (code, receipt) => {
+                eprintln!("picoclaw startup defaults: {code:?} {receipt:?}");
+                Err(ExitCode::from(71))
+            }
+        },
+        Err(_) => {
+            eprintln!("job reply lost; completion is unknown");
+            Err(ExitCode::from(71))
+        }
+    }
+}
 
 // S96 first configuration: one broker-owned Onboard job over the private job
 // transport, never the service frame. Only its durable Changed or Noop
@@ -154,6 +177,11 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(64);
     };
+    if op == Operation::EnsurePicoclaw
+        && let Err(code) = startup_picoclaw()
+    {
+        return code;
+    }
     let Ok(mut channel) = Channel::connect() else {
         if op == Operation::Shutdown && Broker::verify_stopped().is_ok() {
             return ExitCode::SUCCESS;

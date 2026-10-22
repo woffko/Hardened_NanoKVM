@@ -4,6 +4,7 @@
 //! crash/retry replays the same desired documents instead of new randomness.
 use crate::{AppError, Result};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::path::Path;
 
 pub(crate) const GATEWAY_HOST: &str = "127.0.0.1";
 pub(crate) const GATEWAY_PORT: u16 = 18790;
@@ -12,37 +13,6 @@ pub(crate) const WRITE_TIMEOUT_MS: i32 = 10_000;
 pub(crate) const PING_INTERVAL_MS: i32 = 30_000;
 pub(crate) const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
 const MCP_URL: &str = "http://127.0.0.1:80/api/picoclaw/mcp";
-
-/// Refuse shapes the defaults would otherwise overwrite or misread. Explicit
-/// custom booleans are kept; only absent local-tool defaults are filled in.
-pub(crate) fn check_local_policy(config: &JsonValue) -> Result<()> {
-    for path in ["/agents", "/agents/defaults"] {
-        if config.pointer(path).is_some_and(|value| !value.is_object()) {
-            return Err(AppError::Config(
-                "invalid picoclaw local tool policy".into(),
-            ));
-        }
-    }
-    for path in [
-        "/agents/defaults/restrict_to_workspace",
-        "/agents/defaults/allow_read_outside_workspace",
-    ] {
-        if config
-            .pointer(path)
-            .is_some_and(|value| !value.is_boolean())
-        {
-            return Err(AppError::Config(
-                "invalid picoclaw local tool policy".into(),
-            ));
-        }
-    }
-    if !config.is_object() {
-        return Err(AppError::Internal(
-            "picoclaw config root is not an object".into(),
-        ));
-    }
-    Ok(())
-}
 
 /// The gateway token already in use: security settings, then the legacy
 /// security location, then the config copy. `None` means the caller must
@@ -73,26 +43,21 @@ pub(crate) fn existing_gateway_token(
         .map(str::to_string)
 }
 
-/// Apply the fixed startup defaults to decoded documents. Unrelated and custom
-/// fields are preserved; the result is a pure function of the inputs.
+/// Apply the fixed startup defaults to decoded documents, including the local
+/// tool policy of the root runtime in `home`, over any explicit values.
+/// Unrelated fields are preserved; the result is a pure function of the inputs.
 pub(crate) fn apply(
     config: &mut JsonValue,
     security: &mut serde_yaml::Value,
     gateway_token: &str,
     internal_token: &str,
+    home: &Path,
 ) -> Result<()> {
-    check_local_policy(config)?;
+    crate::update::picoclaw_policy::enforce(config, home)?;
     set_security_gateway_token(security, gateway_token);
     let raw = config
         .as_object_mut()
         .ok_or_else(|| AppError::Internal("picoclaw config root is not an object".into()))?;
-    let defaults = ensure_object_path(raw, &["agents", "defaults"]);
-    defaults
-        .entry("restrict_to_workspace".to_string())
-        .or_insert(JsonValue::Bool(true));
-    defaults
-        .entry("allow_read_outside_workspace".to_string())
-        .or_insert(JsonValue::Bool(false));
     let gateway = ensure_object_path(raw, &["gateway"]);
     gateway.insert(
         "host".to_string(),
@@ -119,6 +84,10 @@ pub(crate) fn apply(
     }
     ensure_object_path(raw, &["tools", "mcp"]).insert("enabled".to_string(), JsonValue::Bool(true));
     let server = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm"]);
+    // Only ever the loopback HTTP server, never a local command.
+    for key in ["command", "args", "env", "env_file"] {
+        server.remove(key);
+    }
     server.insert("enabled".to_string(), JsonValue::Bool(true));
     server.insert("type".to_string(), JsonValue::String("http".to_string()));
     server.insert("url".to_string(), JsonValue::String(MCP_URL.to_string()));
@@ -183,8 +152,12 @@ pub(crate) enum Decision {
 
 /// A Startup request makes no change of its own: the source is its target.
 #[cfg(test)]
-pub(crate) fn classify(documents: &Documents, internal_token: Option<&str>) -> Result<Decision> {
-    classify_change(documents, documents, internal_token)
+pub(crate) fn classify(
+    documents: &Documents,
+    internal_token: Option<&str>,
+    home: &Path,
+) -> Result<Decision> {
+    classify_change(documents, documents, internal_token, home)
 }
 
 /// As `classify`, for a request whose own change turned `source` into
@@ -194,8 +167,9 @@ pub(crate) fn classify_change(
     source: &Documents,
     target: &Documents,
     internal_token: Option<&str>,
+    home: &Path,
 ) -> Result<Decision> {
-    check_local_policy(&target.config)?;
+    crate::update::picoclaw_policy::validate(&target.config, home)?;
     let gateway = existing_gateway_token(&target.config, &target.security);
     let (Some(gateway), Some(internal)) = (gateway.as_deref(), internal_token) else {
         return Ok(Decision::Change {
@@ -203,7 +177,7 @@ pub(crate) fn classify_change(
             internal_token: internal_token.is_none(),
         });
     };
-    let desired = desired(target, gateway, internal)?;
+    let desired = desired(target, gateway, internal, home)?;
     if desired == encode(&source.config, &source.security)? {
         Ok(Decision::Noop)
     } else {
@@ -215,10 +189,15 @@ pub(crate) fn classify_change(
 }
 
 /// Canonical desired pair for explicit tokens; the inputs are not modified.
-pub(crate) fn desired(documents: &Documents, gateway: &str, internal: &str) -> Result<Encoding> {
+pub(crate) fn desired(
+    documents: &Documents,
+    gateway: &str,
+    internal: &str,
+    home: &Path,
+) -> Result<Encoding> {
     let mut config = documents.config.clone();
     let mut security = documents.security.clone();
-    apply(&mut config, &mut security, gateway, internal)?;
+    apply(&mut config, &mut security, gateway, internal, home)?;
     encode(&config, &security)
 }
 

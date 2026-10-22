@@ -5,6 +5,10 @@ fn yaml(text: &str) -> serde_yaml::Value {
     serde_yaml::from_str(text).unwrap()
 }
 
+fn home() -> &'static Path {
+    Path::new("/root/.picoclaw")
+}
+
 #[test]
 fn apply_is_a_pure_fixed_point_that_preserves_unrelated_and_custom_fields() {
     let mut config = json!({
@@ -19,6 +23,7 @@ fn apply_is_a_pure_fixed_point_that_preserves_unrelated_and_custom_fields() {
         &mut security,
         "gateway-token",
         "internal-token",
+        home(),
     )
     .unwrap();
     let (once_config, once_security) = (config.clone(), security.clone());
@@ -27,17 +32,20 @@ fn apply_is_a_pure_fixed_point_that_preserves_unrelated_and_custom_fields() {
         &mut security,
         "gateway-token",
         "internal-token",
+        home(),
     )
     .unwrap();
     assert_eq!(config, once_config);
     assert_eq!(security, once_security);
 
-    // Explicit custom local-tool choice and unrelated fields survive.
-    assert_eq!(config["agents"]["defaults"]["restrict_to_workspace"], false);
+    // The local tool policy overrides the explicit choice; unrelated fields
+    // survive.
+    assert_eq!(config["agents"]["defaults"]["restrict_to_workspace"], true);
     assert_eq!(
         config["agents"]["defaults"]["allow_read_outside_workspace"],
         false
     );
+    assert_eq!(config["tools"]["exec"]["enabled"], false);
     assert_eq!(config["agents"]["defaults"]["model"], "custom");
     assert_eq!(config["unrelated"], json!([1, 2, 3]));
     assert_eq!(config["gateway"]["extra"], true);
@@ -68,7 +76,7 @@ fn apply_is_a_pure_fixed_point_that_preserves_unrelated_and_custom_fields() {
 fn absent_local_defaults_become_restrictive_and_tokens_are_caller_supplied() {
     let mut config = json!({});
     let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    apply(&mut config, &mut security, "g", "i").unwrap();
+    apply(&mut config, &mut security, "g", "i", home()).unwrap();
     assert_eq!(config["agents"]["defaults"]["restrict_to_workspace"], true);
     assert_eq!(
         config["agents"]["defaults"]["allow_read_outside_workspace"],
@@ -77,7 +85,7 @@ fn absent_local_defaults_become_restrictive_and_tokens_are_caller_supplied() {
     // The same inputs give the same documents: no hidden entropy.
     let mut again = json!({});
     let mut again_security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    apply(&mut again, &mut again_security, "g", "i").unwrap();
+    apply(&mut again, &mut again_security, "g", "i", home()).unwrap();
     assert_eq!(config, again);
     assert_eq!(security, again_security);
 }
@@ -94,7 +102,7 @@ fn malformed_policy_or_root_is_refused_before_any_change() {
     ] {
         let mut config = value.clone();
         let mut security = yaml("kept: true\n");
-        assert!(apply(&mut config, &mut security, "g", "i").is_err());
+        assert!(apply(&mut config, &mut security, "g", "i", home()).is_err());
         assert_eq!(config, value);
         assert_eq!(security, yaml("kept: true\n"));
     }
@@ -130,14 +138,14 @@ fn gateway_token_preference_and_absence() {
 fn non_mapping_security_shapes_are_replaced_only_on_the_token_path() {
     let mut config = json!({});
     let mut security = yaml("channel_list: 5\nother: kept\n");
-    apply(&mut config, &mut security, "g", "i").unwrap();
+    apply(&mut config, &mut security, "g", "i", home()).unwrap();
     assert_eq!(security["other"].as_str(), Some("kept"));
     assert_eq!(
         security["channel_list"]["pico"]["settings"]["token"].as_str(),
         Some("g")
     );
     let mut scalar = serde_yaml::Value::String("scalar".into());
-    apply(&mut json!({}), &mut scalar, "g", "i").unwrap();
+    apply(&mut json!({}), &mut scalar, "g", "i", home()).unwrap();
     assert_eq!(
         scalar["channel_list"]["pico"]["settings"]["token"].as_str(),
         Some("g")
@@ -147,7 +155,7 @@ fn non_mapping_security_shapes_are_replaced_only_on_the_token_path() {
 fn canonical_pair(gateway: &str, internal: &str) -> (Vec<u8>, Vec<u8>) {
     let mut config = json!({"agents": {"defaults": {"model": "m"}}});
     let mut security = yaml("model_list:\n  m:0:\n    api_keys: [secret]\n");
-    apply(&mut config, &mut security, gateway, internal).unwrap();
+    apply(&mut config, &mut security, gateway, internal, home()).unwrap();
     let encoded = encode(&config, &security).unwrap();
     (
         encoded.config.to_vec(),
@@ -160,7 +168,7 @@ fn canonical_defaults_with_both_tokens_are_a_noop_even_with_other_formatting() {
     let (config, security) = canonical_pair("gateway", "internal");
     let documents = decode(&config, Some(&security)).unwrap();
     assert_eq!(
-        classify(&documents, Some("internal")).unwrap(),
+        classify(&documents, Some("internal"), home()).unwrap(),
         Decision::Noop
     );
     // Same values, different on-disk formatting: still a no-op, nothing to
@@ -169,7 +177,7 @@ fn canonical_defaults_with_both_tokens_are_a_noop_even_with_other_formatting() {
     let commented = format!("# kept comment\n{}", String::from_utf8(security).unwrap());
     let reformatted = decode(&compact, Some(commented.as_bytes())).unwrap();
     assert_eq!(
-        classify(&reformatted, Some("internal")).unwrap(),
+        classify(&reformatted, Some("internal"), home()).unwrap(),
         Decision::Noop
     );
 }
@@ -179,14 +187,14 @@ fn missing_or_different_tokens_and_values_are_a_change_without_inventing_tokens(
     let (config, security) = canonical_pair("gateway", "internal");
     let documents = decode(&config, Some(&security)).unwrap();
     assert_eq!(
-        classify(&documents, None).unwrap(),
+        classify(&documents, None, home()).unwrap(),
         Decision::Change {
             gateway_token: false,
             internal_token: true
         }
     );
     assert_eq!(
-        classify(&documents, Some("rotated")).unwrap(),
+        classify(&documents, Some("rotated"), home()).unwrap(),
         Decision::Change {
             gateway_token: false,
             internal_token: false
@@ -194,7 +202,7 @@ fn missing_or_different_tokens_and_values_are_a_change_without_inventing_tokens(
     );
     let bare = decode(b"{}", None).unwrap();
     assert_eq!(
-        classify(&bare, Some("internal")).unwrap(),
+        classify(&bare, Some("internal"), home()).unwrap(),
         Decision::Change {
             gateway_token: true,
             internal_token: false
@@ -204,7 +212,7 @@ fn missing_or_different_tokens_and_values_are_a_change_without_inventing_tokens(
     let mut drifted = decode(&config, Some(&security)).unwrap();
     drifted.config["gateway"]["port"] = json!(1);
     assert_eq!(
-        classify(&drifted, Some("internal")).unwrap(),
+        classify(&drifted, Some("internal"), home()).unwrap(),
         Decision::Change {
             gateway_token: false,
             internal_token: false
@@ -212,7 +220,7 @@ fn missing_or_different_tokens_and_values_are_a_change_without_inventing_tokens(
     );
     // desired() never modifies its input documents.
     let before = encode(&drifted.config, &drifted.security).unwrap();
-    let wanted = desired(&drifted, "gateway", "internal").unwrap();
+    let wanted = desired(&drifted, "gateway", "internal", home()).unwrap();
     assert!(wanted != before);
     assert!(encode(&drifted.config, &drifted.security).unwrap() == before);
     assert!(wanted == encode(&documents.config, &documents.security).unwrap());
@@ -227,14 +235,21 @@ fn decoding_requires_config_json_and_treats_absent_security_as_empty() {
         documents.security,
         serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
     );
-    assert!(classify(&decode(br#"{"agents": []}"#, None).unwrap(), Some("i")).is_err());
+    assert!(
+        classify(
+            &decode(br#"{"agents": []}"#, None).unwrap(),
+            Some("i"),
+            home()
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
     let mut config = json!({"agents": {"defaults": {}}});
     let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    apply(&mut config, &mut security, "gateway", "internal").unwrap();
+    apply(&mut config, &mut security, "gateway", "internal", home()).unwrap();
     let source = Documents {
         config: config.clone(),
         security: security.clone(),
@@ -250,7 +265,7 @@ fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
     .unwrap();
     // The defaults are canonical, but the requested model is not selected yet.
     assert_eq!(
-        classify_change(&source, &target, Some("internal")).unwrap(),
+        classify_change(&source, &target, Some("internal"), home()).unwrap(),
         Decision::Change {
             gateway_token: false,
             internal_token: false,
@@ -262,7 +277,7 @@ fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
         security: target.security.clone(),
     };
     assert_eq!(
-        classify_change(&selected, &target, Some("internal")).unwrap(),
+        classify_change(&selected, &target, Some("internal"), home()).unwrap(),
         Decision::Noop
     );
     // The target's local policy is checked, not only the source's.
@@ -271,11 +286,11 @@ fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
         security: target.security.clone(),
     };
     broken.config["agents"]["defaults"]["restrict_to_workspace"] = json!("no");
-    assert!(classify_change(&selected, &broken, Some("internal")).is_err());
+    assert!(classify_change(&selected, &broken, Some("internal"), home()).is_err());
 }
 
 #[test]
-fn explicit_local_tool_choices_survive_and_only_absent_defaults_are_filled() {
+fn the_local_tool_policy_overrides_every_explicit_choice() {
     for (policy, expected) in [
         (json!({}), (true, false)),
         (json!({"restrict_to_workspace": true}), (true, false)),
@@ -287,14 +302,15 @@ fn explicit_local_tool_choices_survive_and_only_absent_defaults_are_filled() {
             json!({"restrict_to_workspace": true, "allow_read_outside_workspace": false}),
             (true, false),
         ),
+        // The pair RC12 forced on every start.
         (
             json!({"restrict_to_workspace": false, "allow_read_outside_workspace": true}),
-            (false, true),
+            (true, false),
         ),
     ] {
         let mut config = json!({"agents": {"defaults": policy}, "custom": "retained"});
         let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        apply(&mut config, &mut security, "gateway", "internal").unwrap();
+        apply(&mut config, &mut security, "gateway", "internal", home()).unwrap();
         let flag = |path: &str| config.pointer(path).and_then(JsonValue::as_bool);
         assert_eq!(
             flag("/agents/defaults/restrict_to_workspace"),
@@ -321,12 +337,60 @@ fn malformed_local_tool_policy_refuses_both_apply_and_classification() {
     ] {
         let mut config = raw.clone();
         let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        assert!(apply(&mut config, &mut security, "gateway", "internal").is_err());
+        assert!(apply(&mut config, &mut security, "gateway", "internal", home()).is_err());
         assert_eq!(config, raw, "nothing is filled in before the refusal");
         let documents = Documents {
             config: raw,
             security,
         };
-        assert!(classify(&documents, Some("internal")).is_err());
+        assert!(classify(&documents, Some("internal"), home()).is_err());
     }
+}
+
+#[test]
+fn a_legacy_rc12_pair_changes_once_then_is_a_noop() {
+    // RC12 forced these on every start; upstream then enabled exec by default.
+    let legacy = json!({
+        "agents": {"defaults": {"restrict_to_workspace": false, "allow_read_outside_workspace": true}},
+        "tools": {"mcp": {"servers": {"nanokvm": {"command": "/bin/sh", "args": ["-c", "id"]}}}}
+    });
+    let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    let documents = Documents {
+        config: legacy.clone(),
+        security: security.clone(),
+    };
+    assert_eq!(
+        classify(&documents, Some("internal"), home()).unwrap(),
+        Decision::Change {
+            gateway_token: true,
+            internal_token: false
+        }
+    );
+    let mut config = legacy;
+    apply(&mut config, &mut security, "gateway", "internal", home()).unwrap();
+    crate::update::picoclaw_policy::check(&config, home()).unwrap();
+    let server = &config["tools"]["mcp"]["servers"]["nanokvm"];
+    assert_eq!(server["type"], "http");
+    for key in ["command", "args", "env", "env_file"] {
+        assert!(server.get(key).is_none(), "{key}");
+    }
+    let enforced = Documents { config, security };
+    assert_eq!(
+        classify(&enforced, Some("internal"), home()).unwrap(),
+        Decision::Noop
+    );
+}
+
+#[test]
+fn a_workspace_outside_the_home_workspace_refuses_apply_and_classification() {
+    let raw = json!({"agents": {"defaults": {"workspace": "/"}}});
+    let mut config = raw.clone();
+    let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    assert!(apply(&mut config, &mut security, "gateway", "internal", home()).is_err());
+    assert_eq!(config, raw);
+    let documents = Documents {
+        config: raw,
+        security,
+    };
+    assert!(classify(&documents, Some("internal"), home()).is_err());
 }

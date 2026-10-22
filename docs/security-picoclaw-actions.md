@@ -149,5 +149,7 @@ cleanup-failure retention, full-queue control, stale receipts, deadline clocks
 and ambiguous gateway envelope rejection. These are handler/worker/report tests,
 not authenticated router or device tests. They do not prove physical input,
 real multi-batch HID execution, end-to-end Stop/revocation or manual/Pico handoff.
-H2, M10 and the remaining WP-06 gateway/token/URL and privilege boundaries are
-separate unresolved work.
+M10 is fixed: the gateway WebSocket validates its Origin before any effect.
+For H2, the first release enforces the
+[local tool policy](security-picoclaw-local-tools.md). The unprivileged runtime
+and the remaining WP-06 gateway, token and URL boundaries are separate work.

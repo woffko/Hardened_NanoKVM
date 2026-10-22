@@ -376,9 +376,13 @@ pub(crate) fn prepare_launch(_permit: &ConfigPermit, path: &Path) -> Result<Gene
     let (directory, _) = destination(path)?;
     directory.lock(false)?;
     pair::recover(&directory)?;
-    Ok(Generation::from_documents(&pair::read_installed(
-        &directory,
-    )?))
+    let documents = pair::read_installed(&directory)?;
+    // The root runtime never starts on a pair without the local tool policy;
+    // a Startup job applies it first.
+    let config: serde_json::Value =
+        serde_json::from_slice(&documents.config).map_err(|_| invalid())?;
+    crate::update::picoclaw_policy::check(&config, path.parent().ok_or_else(invalid)?)?;
+    Ok(Generation::from_documents(&documents))
 }
 
 pub(crate) fn read_pair(path: &Path) -> Result<RawDocuments> {
@@ -408,7 +412,7 @@ pub(crate) fn needs_onboard(_permit: &ConfigPermit, path: &Path) -> Result<bool>
 
 /// Direct pair publication for fixtures only. Production pair changes run as
 /// broker-owned jobs through the same pair journal.
-#[cfg(test)]
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 pub(crate) fn replace_pair(
     _permit: &ConfigPermit,
     path: &Path,

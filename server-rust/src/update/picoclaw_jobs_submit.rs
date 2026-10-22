@@ -189,6 +189,9 @@ pub(crate) enum TransitionStatus {
     /// The change is durably done and nothing is launched for it: a removal,
     /// an install while no configuration exists yet, or an onboarding.
     CommittedWithoutLaunch,
+    /// The change is durably done, but the installed pair lacks the local
+    /// tool policy: a runtime that was running is not resumed on it.
+    CommittedUnlaunchable,
     /// An Onboard job's stage and marker are durable under Applying; its
     /// one-shot may run now.
     OnboardStaged,
@@ -446,7 +449,8 @@ impl Submission {
                 Some(
                     TransitionStatus::Committed(_)
                     | TransitionStatus::Activating
-                    | TransitionStatus::CommittedWithoutLaunch,
+                    | TransitionStatus::CommittedWithoutLaunch
+                    | TransitionStatus::CommittedUnlaunchable,
                 ),
             ) => true,
             _ => false,

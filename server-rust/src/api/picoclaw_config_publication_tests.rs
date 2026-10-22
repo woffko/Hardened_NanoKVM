@@ -224,7 +224,19 @@ fn private_root_child() {
             let security = directory.join(".security.yml");
             assert!(prepare_launch(&permit, &config).is_err());
             assert!(!config.exists());
+            // A pair without the local tool policy is never launched, and
+            // refusing it changes nothing.
             put_private(&config, br#"{"synthetic":1}"#);
+            let inode = config.metadata().unwrap().ino();
+            assert!(prepare_launch(&permit, &config).is_err());
+            assert_eq!(fs::read(&config).unwrap(), br#"{"synthetic":1}"#);
+            assert_eq!(config.metadata().unwrap().ino(), inode);
+            let launchable = |value: JsonValue| {
+                let mut value = value;
+                crate::update::picoclaw_policy::enforce(&mut value, directory).unwrap();
+                serde_json::to_vec(&value).unwrap()
+            };
+            put_private(&config, &launchable(json!({"synthetic": 1})));
             let absent = current_generation(&config).unwrap();
             let inode = config.metadata().unwrap().ino();
             assert!(prepare_launch(&permit, &config).unwrap() == absent);
@@ -235,7 +247,7 @@ fn private_root_child() {
             replace_pair(
                 &permit,
                 &config,
-                br#"{"synthetic":2}"#,
+                &launchable(json!({"synthetic": 2})),
                 Some(b"key: synthetic\n"),
             )
             .unwrap();

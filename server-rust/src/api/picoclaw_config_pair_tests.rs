@@ -246,8 +246,11 @@ fn actual_recovery_fences_visible_intent_before_publishing_and_survives_another_
 }
 
 pub(super) fn write(permit: &crate::update::state_writers::ConfigPermit, directory: &Path) {
+    // A launchable pair: launch preparation settles it after a cut.
+    let mut raw = json!({"epoch": "new"});
+    crate::update::picoclaw_policy::enforce(&mut raw, directory).unwrap();
     let doc = ConfigDocument {
-        raw: json!({"epoch": "new"}),
+        raw,
         security: serde_yaml::from_slice(b"epoch: new\n").unwrap(),
     };
     let result = save_config_document(permit, &directory.join("config.json"), &doc);

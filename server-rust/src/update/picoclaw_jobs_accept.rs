@@ -1426,10 +1426,16 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         return refuse(store, record, &mut payload.touched);
     };
     let internal = crate::update::picoclaw_token::observe()?;
+    // The local tool policy is confined to this job's accepted Home.
+    let home = {
+        use std::os::unix::ffi::OsStrExt as _;
+        Path::new(std::ffi::OsStr::from_bytes(view.home))
+    };
     let decision = match crate::update::picoclaw_startup::classify_change(
         &documents,
         &target,
         internal.as_deref().map(String::as_str),
+        home,
     ) {
         Ok(decision) => decision,
         Err(_) => return refuse(store, record, &mut payload.touched),
@@ -1448,7 +1454,7 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
             Some(value) => value,
             None => crate::update::picoclaw_token::new_value()?,
         };
-        let desired = crate::update::picoclaw_startup::desired(&target, &gateway, &internal)?;
+        let desired = crate::update::picoclaw_startup::desired(&target, &gateway, &internal, home)?;
         let plan = Plan {
             config: desired.config,
             security: Zeroizing::new(desired.security.as_bytes().to_vec()),
@@ -1659,8 +1665,9 @@ fn apply_install(payload: &mut Payload, mut record: Record) -> Result<Transition
     checkpoint("binary", "installed")?;
     // A running runtime had a configuration; a fresh install may have none.
     let generation = if view.home_present && view.config.is_some() {
-        Some(super::super::super::Generation::from_documents(
+        Some(launchable(
             &super::super::super::pair::read_installed(&source.directory)?,
+            &view,
         ))
     } else {
         None
@@ -1668,7 +1675,8 @@ fn apply_install(payload: &mut Payload, mut record: Record) -> Result<Transition
     record.phase = Phase::Committed;
     store.publish(record, &mut payload.touched, Publication::Committed)?;
     Ok(match generation {
-        Some(generation) => TransitionStatus::Committed(generation),
+        Some(Some(generation)) => TransitionStatus::Committed(generation),
+        Some(None) => TransitionStatus::CommittedUnlaunchable,
         None => TransitionStatus::CommittedWithoutLaunch,
     })
 }
@@ -1707,12 +1715,30 @@ fn apply_profile(payload: &mut Payload, mut record: Record) -> Result<Transition
     }
     #[cfg(test)]
     checkpoint("profile", "published")?;
-    let installed = super::super::super::pair::read_installed(&source.directory)?;
+    let generation = launchable(
+        &super::super::super::pair::read_installed(&source.directory)?,
+        &view,
+    );
     record.phase = Phase::Committed;
     store.publish(record, &mut payload.touched, Publication::Committed)?;
-    Ok(TransitionStatus::Committed(
-        super::super::super::Generation::from_documents(&installed),
-    ))
+    Ok(match generation {
+        Some(generation) => TransitionStatus::Committed(generation),
+        None => TransitionStatus::CommittedUnlaunchable,
+    })
+}
+
+// The generation a job may resume the runtime on: only a pair carrying the
+// local tool policy for its Home. Otherwise the job ends without a launch, and
+// the next Startup job applies the policy first.
+fn launchable(
+    installed: &super::super::super::RawDocuments,
+    view: &SourceView<'_>,
+) -> Option<super::super::super::Generation> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let home = Path::new(std::ffi::OsStr::from_bytes(view.home));
+    let config: serde_json::Value = serde_json::from_slice(&installed.config).ok()?;
+    crate::update::picoclaw_policy::check(&config, home).ok()?;
+    Some(super::super::super::Generation::from_documents(installed))
 }
 
 /// Delete exactly the planned files of a quiesced Remove job. Under the job's
@@ -1809,6 +1835,13 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
         _ if record.kind == Kind::Remove => return Err(fenced()),
         (Phase::Activating, RuntimeResult::Resumed) => Runtime::Resumed,
         (Phase::Activating, RuntimeResult::ResumeFailed) => Runtime::ResumeFailed,
+        // A pair without the local tool policy is never launched: the job
+        // that stopped a running runtime reports that it did not resume.
+        (Phase::Committed, RuntimeResult::ResumeFailed)
+            if record.was_running && record.resume_allowed =>
+        {
+            Runtime::ResumeFailed
+        }
         (Phase::Committed | Phase::Activating, RuntimeResult::Suppressed) if record.was_running => {
             record.resume_allowed = false;
             Runtime::Suppressed

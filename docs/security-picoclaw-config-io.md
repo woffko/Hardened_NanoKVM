@@ -164,14 +164,15 @@ the exact installed-pair generation are retained. A real settings/token change
 still uses the checked pair publisher. This is not a native stop/join barrier;
 configuration changes and independent writers still need lifecycle integration.
 
-Explicit boolean `restrict_to_workspace` and `allow_read_outside_workspace`
-values are retained. Missing values default to `true` and `false`, respectively,
-instead of forcibly enabling unrestricted local filesystem access. Malformed
-policy fields/containers fail before pair publication or internal-token
-provisioning. Existing explicitly unrestricted installations are **not** silently
-migrated or described as isolated: these upstream settings alone do not enforce
-the required NanoKVM privilege boundary. Target GUI/HID/BIOS/terminal autonomy
-and the installed-runtime/fallback acceptance checks remain separate gates.
+The defaults include the [local tool policy](security-picoclaw-local-tools.md).
+It is enforced over explicit values while the runtime runs as root, and it
+covers the workspace switches, shell, cron commands, hardware tools, path
+allowlists and local MCP commands. Malformed policy fields or containers, or a
+workspace outside `<Home>/workspace`, fail before pair publication or
+internal-token provisioning. Launch preparation refuses a pair without the
+policy. These upstream settings are not an operating-system boundary. Target
+GUI/HID/BIOS/terminal autonomy and the installed-runtime acceptance checks
+remain separate gates.
 
 ## Remaining transaction/lifecycle work
 

@@ -349,6 +349,15 @@ impl Mutation {
             TransitionStatus::CommittedWithoutLaunch => {
                 self.submission.begin_finish(RuntimeResult::NotRequested)
             }
+            // The pair lacks the local tool policy: never launched on it.
+            TransitionStatus::CommittedUnlaunchable => match self.submission.resume_allowed() {
+                Some(true) if !self.stop_requested => {
+                    self.submission.begin_finish(RuntimeResult::ResumeFailed)
+                }
+                Some(true) => self.submission.begin_finish(RuntimeResult::Suppressed),
+                Some(false) => self.submission.begin_finish(RuntimeResult::NotRequested),
+                None => return MutationStatus::RecoveryRequired,
+            },
             TransitionStatus::Committed(generation) => {
                 self.launch = Some(generation);
                 match self.submission.resume_allowed() {
