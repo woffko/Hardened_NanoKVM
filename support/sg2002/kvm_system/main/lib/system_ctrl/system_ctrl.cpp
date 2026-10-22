@@ -101,26 +101,27 @@ void kvm_wifi_web_config_process()
 
 void kvm_wifi_config_process()
 {	
-	int temp;
-	char ran_num;
 	switch(kvm_sys_state.wifi_config_process){
 		case -1:
 			// printf("[kvms]Not in the process of configuring WiFi\n");
 			break;
 		case 0: // 启动wifi
-			srand((unsigned)time::time_ms());
-			for(temp = 0; temp < 4; temp++){
-				do{
-					ran_num = (char)rand()%10 + '0';
-					if(temp == 0) break;
-				} while (ran_num == kvm_sys_state.wifi_ap_pass[(temp-1)*2]);
-				kvm_sys_state.wifi_ap_pass[temp*2] = ran_num;
-				kvm_sys_state.wifi_ap_pass[temp*2+1] = ran_num;
+			// Every AP session gets a fresh CSPRNG key, stored 0600. Without
+			// one the AP is not started; there is no weaker fallback.
+			if(ap_key_generate(kvm_sys_state.wifi_ap_pass) != 0){
+				printf("[kvms]WiFi AP not started: no random key\n");
+				kvm_sys_state.wifi_config_process = -1;
+				kvm_sys_state.sub_page = 6;
+				break;
 			}
-			kvm_sys_state.wifi_ap_pass[8] = '\0';
-
 			write_text_file("/kvmapp/kvm/ap.ssid", "NanoKVM\n");
-			write_text_file("/kvmapp/kvm/ap.pass", kvm_sys_state.wifi_ap_pass);
+			if(ap_key_store("/kvmapp/kvm/ap.pass", kvm_sys_state.wifi_ap_pass) != 0){
+				printf("[kvms]WiFi AP not started: key not stored\n");
+				memset(kvm_sys_state.wifi_ap_pass, 0, sizeof(kvm_sys_state.wifi_ap_pass));
+				kvm_sys_state.wifi_config_process = -1;
+				kvm_sys_state.sub_page = 6;
+				break;
+			}
 			system("/etc/init.d/S30wifi ap");
 
 			kvm_sys_state.wifi_config_process = 1;

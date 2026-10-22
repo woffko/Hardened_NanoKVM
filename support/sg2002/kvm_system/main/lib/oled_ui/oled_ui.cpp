@@ -411,14 +411,13 @@ void show_wifi_config_ip(void)
 	OLED_Clear();
 	get_ip_addr(WiFi_IP);
 	OLED_ShowString(1, 0, "Config URL", 8);
-	OLED_ShowString_AlignRight(63, 1, "----------------", 4);
-	// OLED_ShowString_AlignRight(63, 2, (char*)kvm_sys_state.wifi_addr, 4);
 	static char wifi_addr_with_path[30];
-	static char wifi_addr_with_key[30];
 	snprintf(wifi_addr_with_path, sizeof(wifi_addr_with_path), "%s/#/", kvm_sys_state.wifi_addr);
-	snprintf(wifi_addr_with_key, sizeof(wifi_addr_with_key), "WIFI?P=%s", kvm_sys_state.wifi_ap_pass);
-	OLED_ShowString_AlignRight(63, 2, wifi_addr_with_path, 4);
-	OLED_ShowString_AlignRight(63, 3, wifi_addr_with_key, 4);
+	// The key fills a 6x8 line on its own; "WIFI?P=" and the key no longer
+	// fit one 4-pixel line together.
+	OLED_ShowString_AlignRight(63, 1, wifi_addr_with_path, 4);
+	OLED_ShowString_AlignRight(63, 2, "WIFI?P=", 4);
+	OLED_ShowString_AlignRight(63, 3, kvm_sys_state.wifi_ap_pass, 8);
 }
 
 void show_wifi_config_QR(void)
@@ -442,6 +441,13 @@ void show_wifi_connecting(void)
 	OLED_Clear();
 	OLED_ShowString(0, 1, "WiFi", 8);
 	OLED_ShowString(0, 2, "Connect...", 8);
+}
+
+void show_wifi_failed(void)
+{
+	OLED_Clear();
+	OLED_ShowString(0, 1, "WiFi AP", 8);
+	OLED_ShowString(0, 2, "failed", 8);
 }
 
 void kvm_wifi_config_ui_disp(uint8_t first_disp, uint8_t subpage_changed)
@@ -470,6 +476,9 @@ void kvm_wifi_config_ui_disp(uint8_t first_disp, uint8_t subpage_changed)
 				break;
 			case 5: // Connecting...
 				show_wifi_connecting();
+				break;
+			case 6: // no AP key: the AP was not started
+				show_wifi_failed();
 				break;
 		}
 	}

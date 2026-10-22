@@ -102,10 +102,12 @@ Known exceptions:
 - DNS/Wi-Fi files: strict value validation and atomic writes. A Wi-Fi SSID is
   1–32 bytes and a passphrase 8–63 bytes, as the supplicant accepts, and both
   are rejected before anything is written.
-- AP provisioning key: its few possible values are guarded by a lockout of 5
-  failures per source and 20 shared by all sources, each for 10 minutes. The key
-  generator (native `kvm_system`), the `ap.pass` mode and hostapd's cipher
-  choice live in native code and boot scripts and are still open.
+- AP provisioning key: each AP session gets a fresh 10-character key from the
+  kernel CSPRNG (about 49 bits), stored in `ap.pass` with mode 0600; without a
+  random source the AP is not started. The API allows 5 failed keys per source
+  and 20 shared by all sources, each for 10 minutes. hostapd's cipher choice,
+  the `hostapd.conf` mode and an AP timeout live in `S30wifi` and are still
+  open. See [security-wifi-ap-key.md](security-wifi-ap-key.md).
 
 ## Follow-Up For Hardening
 
