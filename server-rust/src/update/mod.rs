@@ -13,6 +13,7 @@ pub mod native_bootstrap;
 pub mod operation;
 pub(crate) mod operation_lock;
 pub(crate) mod picoclaw_config;
+pub(crate) mod picoclaw_startup;
 pub(crate) mod picoclaw_token;
 pub mod raw_transport;
 pub mod restore_archive;

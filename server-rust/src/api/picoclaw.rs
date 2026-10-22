@@ -40,6 +40,7 @@ use crate::{
     error::ApiResponse,
     state::AppState,
     system::command::{self, AllowedCommand},
+    update::picoclaw_startup as startup,
     ws::hid as hid_ws,
 };
 
@@ -58,18 +59,18 @@ const PICOCLAW_DOWNLOAD_URL: &str =
     "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz";
 const PICOCLAW_CHECKSUM_URL: &str =
     "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/sha512.txt";
-const DEFAULT_GATEWAY_HOST: &str = "127.0.0.1";
-const DEFAULT_GATEWAY_PORT: u16 = 18790;
+const DEFAULT_GATEWAY_HOST: &str = startup::GATEWAY_HOST;
+const DEFAULT_GATEWAY_PORT: u16 = startup::GATEWAY_PORT;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_READ_TIMEOUT_MS: i32 = 60_000;
-const DEFAULT_WRITE_TIMEOUT_MS: i32 = 10_000;
-const DEFAULT_PING_INTERVAL_MS: i32 = 30_000;
+const DEFAULT_READ_TIMEOUT_MS: i32 = startup::READ_TIMEOUT_MS;
+const DEFAULT_WRITE_TIMEOUT_MS: i32 = startup::WRITE_TIMEOUT_MS;
+const DEFAULT_PING_INTERVAL_MS: i32 = startup::PING_INTERVAL_MS;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(90);
-const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
+const INTERNAL_TOKEN_HEADER: &str = startup::INTERNAL_TOKEN_HEADER;
 const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
 const CODE_PICOCLAW_LOCK_HELD: &str = "AI_LOCK_HELD";
@@ -3194,96 +3195,7 @@ fn save_yaml(
 }
 
 fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> String {
-    let security_token = security
-        .get("channel_list")
-        .and_then(|channels| channels.get("pico"))
-        .and_then(|pico| {
-            pico.get("settings")
-                .and_then(|settings| settings.get("token"))
-                .or_else(|| pico.get("token"))
-        })
-        .and_then(serde_yaml::Value::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty());
-    if let Some(token) = security_token {
-        return token.to_string();
-    }
-
-    config
-        .pointer("/channel_list/pico/settings/token")
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn ensure_pico_security_token(doc: &mut ConfigDocument) -> Result<String> {
-    let token = {
-        let current = resolved_pico_token(&doc.raw, &doc.security);
-        if current.is_empty() {
-            random_token(36)
-        } else {
-            current
-        }
-    };
-
-    set_pico_security_token(&mut doc.security, &token);
-    Ok(token)
-}
-
-fn set_pico_security_token(security: &mut serde_yaml::Value, token: &str) {
-    if !security.is_mapping() {
-        *security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let root = security.as_mapping_mut().expect("security mapping");
-    let channel_list_key = serde_yaml::Value::String("channel_list".to_string());
-    root.entry(channel_list_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !root[&channel_list_key].is_mapping() {
-        root.insert(
-            channel_list_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let channel_list = root
-        .get_mut(&channel_list_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("channel_list mapping");
-    let pico_key = serde_yaml::Value::String("pico".to_string());
-    channel_list
-        .entry(pico_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !channel_list[&pico_key].is_mapping() {
-        channel_list.insert(
-            pico_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let pico = channel_list
-        .get_mut(&pico_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("pico mapping");
-    let settings_key = serde_yaml::Value::String("settings".to_string());
-    pico.entry(settings_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !pico[&settings_key].is_mapping() {
-        pico.insert(
-            settings_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let settings = pico
-        .get_mut(&settings_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("pico settings mapping");
-    settings.insert(
-        serde_yaml::Value::String("token".to_string()),
-        serde_yaml::Value::String(token.to_string()),
-    );
+    startup::existing_gateway_token(config, security).unwrap_or_default()
 }
 
 fn set_model_secret(
@@ -3333,80 +3245,12 @@ fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -
     // coherent installed pair. A connection must not settle a pending journal;
     // only stopped native preparation can establish that boundary.
     crate::update::picoclaw_config::current_generation(&doc.config_path)?;
-    for path in ["/agents", "/agents/defaults"] {
-        if doc
-            .raw
-            .pointer(path)
-            .is_some_and(|value| !value.is_object())
-        {
-            return Err(AppError::Config(
-                "invalid picoclaw local tool policy".into(),
-            ));
-        }
-    }
-    for path in [
-        "/agents/defaults/restrict_to_workspace",
-        "/agents/defaults/allow_read_outside_workspace",
-    ] {
-        if doc
-            .raw
-            .pointer(path)
-            .is_some_and(|value| !value.is_boolean())
-        {
-            return Err(AppError::Config(
-                "invalid picoclaw local tool policy".into(),
-            ));
-        }
-    }
+    startup::check_local_policy(&doc.raw)?;
     let before = encode_config_document(&doc)?;
-    let _ = ensure_pico_security_token(&mut doc)?;
-    let raw = doc
-        .raw
-        .as_object_mut()
-        .ok_or_else(|| AppError::Internal("picoclaw config root is not an object".to_string()))?;
-    let defaults = ensure_object_path(raw, &["agents", "defaults"]);
-    defaults
-        .entry("restrict_to_workspace".to_string())
-        .or_insert(JsonValue::Bool(true));
-    defaults
-        .entry("allow_read_outside_workspace".to_string())
-        .or_insert(JsonValue::Bool(false));
-    ensure_object_path(raw, &["gateway"]).insert(
-        "host".to_string(),
-        JsonValue::String(DEFAULT_GATEWAY_HOST.to_string()),
-    );
-    ensure_object_path(raw, &["gateway"]).insert(
-        "port".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_GATEWAY_PORT)),
-    );
-    let pico = ensure_object_path(raw, &["channel_list", "pico"]);
-    pico.insert("type".to_string(), JsonValue::String("pico".to_string()));
-    pico.insert("enabled".to_string(), JsonValue::Bool(true));
-    let settings = ensure_object_path(raw, &["channel_list", "pico", "settings"]);
-    settings.insert("allow_token_query".to_string(), JsonValue::Bool(false));
-    settings.insert(
-        "ping_interval".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_PING_INTERVAL_MS / 1000)),
-    );
-    settings.insert(
-        "read_timeout".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_READ_TIMEOUT_MS / 1000)),
-    );
-    settings.insert(
-        "write_timeout".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_WRITE_TIMEOUT_MS / 1000)),
-    );
-    ensure_object_path(raw, &["tools", "mcp"]).insert("enabled".to_string(), JsonValue::Bool(true));
-    let token = crate::update::picoclaw_token::ensure(permit)?;
-    let server = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm"]);
-    server.insert("enabled".to_string(), JsonValue::Bool(true));
-    server.insert("type".to_string(), JsonValue::String("http".to_string()));
-    server.insert(
-        "url".to_string(),
-        JsonValue::String("http://127.0.0.1:80/api/picoclaw/mcp".to_string()),
-    );
-    let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
-    headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
+    let gateway = startup::existing_gateway_token(&doc.raw, &doc.security)
+        .unwrap_or_else(|| random_token(36));
+    let internal = crate::update::picoclaw_token::ensure(permit)?;
+    startup::apply(&mut doc.raw, &mut doc.security, &gateway, &internal)?;
     let after = encode_config_document(&doc)?;
     if before != after {
         crate::update::picoclaw_config::replace_pair(
@@ -3422,23 +3266,6 @@ fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 #[path = "picoclaw_config_publication_tests.rs"]
 mod config_publication_tests;
-
-fn ensure_object_path<'a>(
-    root: &'a mut JsonMap<String, JsonValue>,
-    path: &[&str],
-) -> &'a mut JsonMap<String, JsonValue> {
-    let mut current = root;
-    for key in path {
-        let entry = current
-            .entry((*key).to_string())
-            .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-        if !entry.is_object() {
-            *entry = JsonValue::Object(JsonMap::new());
-        }
-        current = entry.as_object_mut().expect("object path");
-    }
-    current
-}
 
 fn apply_agent_profile(profile: &str) -> Result<()> {
     let source = resolve_agent_profile_source(profile)?;
