@@ -85,3 +85,30 @@ fn apply_refuses_an_empty_identifier_or_a_non_object_root_unchanged() {
         assert_eq!(security, yaml("kept: true\n"));
     }
 }
+
+#[test]
+fn request_fields_are_bounded_trimmed_and_printable() {
+    assert!(check_request("vendor/model", "https://x.invalid", "key").is_ok());
+    for (model, base, key) in [
+        ("", "b", "k"),
+        ("m", "", "k"),
+        ("m", "b", ""),
+        (" m", "b", "k"),
+        ("m", "b ", "k"),
+        ("m", "b", "k\n"),
+        ("m\u{7}", "b", "k"),
+        ("vendor/", "b", "k"),
+    ] {
+        assert!(
+            check_request(model, base, key).is_err(),
+            "{model:?} {base:?}"
+        );
+    }
+    let long = |length: usize| "x".repeat(length);
+    assert!(check_request(&long(MAX_MODEL_BYTES), "b", "k").is_ok());
+    assert!(check_request(&long(MAX_MODEL_BYTES + 1), "b", "k").is_err());
+    assert!(check_request("m", &long(MAX_API_BASE_BYTES), "k").is_ok());
+    assert!(check_request("m", &long(MAX_API_BASE_BYTES + 1), "k").is_err());
+    assert!(check_request("m", "b", &long(MAX_API_KEY_BYTES)).is_ok());
+    assert!(check_request("m", "b", &long(MAX_API_KEY_BYTES + 1)).is_err());
+}

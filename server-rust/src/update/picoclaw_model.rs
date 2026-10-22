@@ -5,6 +5,32 @@
 use crate::{AppError, Result};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+pub(crate) const MAX_MODEL_BYTES: usize = 256;
+pub(crate) const MAX_API_BASE_BYTES: usize = 2048;
+pub(crate) const MAX_API_KEY_BYTES: usize = 4096;
+
+/// Bounded request fields, already trimmed, without control characters, and
+/// a non-empty short name. Anything else refuses before a job is accepted.
+pub(crate) fn check_request(model: &str, api_base: &str, api_key: &str) -> Result<()> {
+    for (value, limit) in [
+        (model, MAX_MODEL_BYTES),
+        (api_base, MAX_API_BASE_BYTES),
+        (api_key, MAX_API_KEY_BYTES),
+    ] {
+        if value.is_empty()
+            || value.len() > limit
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            return Err(AppError::BadRequest("invalid model configuration".into()));
+        }
+    }
+    match model_name(model) {
+        Some(name) if !name.is_empty() => Ok(()),
+        _ => Err(AppError::BadRequest("invalid model configuration".into())),
+    }
+}
+
 /// The model's short name: the last segment of its identifier.
 pub(crate) fn model_name(model: &str) -> Option<String> {
     let trimmed = model.trim();

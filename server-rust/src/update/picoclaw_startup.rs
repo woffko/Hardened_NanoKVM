@@ -181,17 +181,30 @@ pub(crate) enum Decision {
     },
 }
 
+/// A Startup request makes no change of its own: the source is its target.
+#[cfg(test)]
 pub(crate) fn classify(documents: &Documents, internal_token: Option<&str>) -> Result<Decision> {
-    check_local_policy(&documents.config)?;
-    let gateway = existing_gateway_token(&documents.config, &documents.security);
+    classify_change(documents, documents, internal_token)
+}
+
+/// As `classify`, for a request whose own change turned `source` into
+/// `target`: a no-op only when the defaults applied to `target` reproduce the
+/// source's canonical encoding exactly.
+pub(crate) fn classify_change(
+    source: &Documents,
+    target: &Documents,
+    internal_token: Option<&str>,
+) -> Result<Decision> {
+    check_local_policy(&target.config)?;
+    let gateway = existing_gateway_token(&target.config, &target.security);
     let (Some(gateway), Some(internal)) = (gateway.as_deref(), internal_token) else {
         return Ok(Decision::Change {
             gateway_token: gateway.is_none(),
             internal_token: internal_token.is_none(),
         });
     };
-    let desired = desired(documents, gateway, internal)?;
-    if desired == encode(&documents.config, &documents.security)? {
+    let desired = desired(target, gateway, internal)?;
+    if desired == encode(&source.config, &source.security)? {
         Ok(Decision::Noop)
     } else {
         Ok(Decision::Change {

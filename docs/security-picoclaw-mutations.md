@@ -256,6 +256,37 @@ Chroot fixtures cover:
 Settlement after a reboot is described next. Same-boot recovery, the other
 five executors and the transport/API/S96 wiring are not implemented yet.
 
+## Current Model settlement
+
+The Model job shares the Startup executor. Settlement first applies the
+request's own change: the shared pure model selection in
+`update::picoclaw_model`. That selection updates the entry with the same short
+name in place, or appends it. It drops config copies of the key, makes the
+default agent select the model, and stores the key only in the security
+document.
+
+The fixed startup defaults then apply on top. The job is a no-op only when the
+result reproduces the source's canonical encoding exactly. Otherwise it follows
+the Startup change unchanged: plan, quiescence, apply, activation, receipts and
+prior-boot settlement. A missing Home or config, unparsable documents, a
+transform error or a malformed target policy refuses before any plan or stop.
+
+Request fields are checked before acceptance:
+
+- model at most 256 bytes, API base at most 2048, key at most 4096;
+- each already trimmed, printable and non-empty;
+- the model has a non-empty short name.
+
+The key is held only in the protected payload and plan members and in the
+security document. It is never argv, environment, log or public status data.
+
+Chroot fixtures cover the no-op, absent and live changes (the live one is
+relaunched with the installed pair's generation), refusal, and failures after
+Applying, after the pair and after Committed, each settled at a later boot.
+
+The backend's model update still uses the legacy in-handler writer. Its
+transport frame and API migration come next.
+
 ## Current prior-boot settlement
 
 A job that a previous kernel boot left behind would otherwise keep the fence
@@ -285,17 +316,17 @@ Settlement by durable phase:
 
 - **Accepted, Stopping or Closed.** No target change began. The job records a
   terminal Cancelled receipt (runtime NotRequested, resume lowered).
-- **Applying (Startup).** The SAME durable plan completes under the job's own
+- **Applying (Startup or Model).** The SAME durable plan completes under the job's own
   Home identity (device, inode, owner and mode must match the source). An
   interrupted pair journal is completed first. The pair must then be either
   the accepted source or already the plan, and the credential either the
   planned value or, for a new one, absent; the plan's value is installed and
   the plan's pair published only where missing. Any other state keeps the
   fence. No entropy is drawn and no classification is repeated.
-- **Committed (Startup).** The change is complete. The receipt records Changed
+- **Committed (Startup or Model).** The change is complete. The receipt records Changed
   with Suppressed (resume lowered) for a previously running runtime, otherwise
   NotRequested. Recovery never starts a runtime.
-- **Activating (Startup).** The relaunched scope cannot have survived the
+- **Activating (Startup or Model).** The relaunched scope cannot have survived the
   boot: Changed with ResumeFailed.
 - **Any other phase or kind.** No executor exists; the fence remains.
 

@@ -229,3 +229,47 @@ fn decoding_requires_config_json_and_treats_absent_security_as_empty() {
     );
     assert!(classify(&decode(br#"{"agents": []}"#, None).unwrap(), Some("i")).is_err());
 }
+
+#[test]
+fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
+    let mut config = json!({"agents": {"defaults": {}}});
+    let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    apply(&mut config, &mut security, "gateway", "internal").unwrap();
+    let source = Documents {
+        config: config.clone(),
+        security: security.clone(),
+    };
+    let mut target = Documents { config, security };
+    crate::update::picoclaw_model::apply(
+        &mut target.config,
+        &mut target.security,
+        "vendor/model",
+        "https://model.invalid",
+        "synthetic-key",
+    )
+    .unwrap();
+    // The defaults are canonical, but the requested model is not selected yet.
+    assert_eq!(
+        classify_change(&source, &target, Some("internal")).unwrap(),
+        Decision::Change {
+            gateway_token: false,
+            internal_token: false,
+        }
+    );
+    // Once the source equals its target, the same request is a no-op.
+    let selected = Documents {
+        config: target.config.clone(),
+        security: target.security.clone(),
+    };
+    assert_eq!(
+        classify_change(&selected, &target, Some("internal")).unwrap(),
+        Decision::Noop
+    );
+    // The target's local policy is checked, not only the source's.
+    let mut broken = Documents {
+        config: target.config.clone(),
+        security: target.security.clone(),
+    };
+    broken.config["agents"]["defaults"]["restrict_to_workspace"] = json!("no");
+    assert!(classify_change(&selected, &broken, Some("internal")).is_err());
+}

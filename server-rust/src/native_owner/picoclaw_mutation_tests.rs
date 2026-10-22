@@ -66,6 +66,7 @@ fn change_failure(case: &str) -> Option<&str> {
         "settle-change-fail:",
         "settle-internal-fail:",
         "settle-change-live-fail:",
+        "settle-model-change-fail:",
     ]
     .into_iter()
     .find_map(|prefix| case.strip_prefix(prefix))
@@ -221,6 +222,21 @@ fn startup_change_settlement_applies_once_and_records_the_exact_runtime_result()
         "settle-change-stop-live",
     ] {
         run(case);
+    }
+}
+
+#[test]
+fn model_settlement_shares_the_executor_with_its_own_change_before_the_defaults() {
+    for case in [
+        "settle-model-noop-absent",
+        "settle-model-change-absent",
+        "settle-model-change-live",
+        "settle-model-refused-absent",
+    ] {
+        run(case);
+    }
+    for point in ["applying-renamed", "pair-published", "committed-renamed"] {
+        run(&format!("settle-model-change-fail:{point}"));
     }
 }
 
@@ -479,7 +495,8 @@ fn mutation_child() {
         && !case.ends_with("-absent")
         && !case.starts_with("settle-fail:")
         && !case.starts_with("settle-change-fail:")
-        && !case.starts_with("settle-internal-fail:");
+        && !case.starts_with("settle-internal-fail:")
+        && !case.starts_with("settle-model-change-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -518,7 +535,7 @@ fn mutation_child() {
         None::<&str>,
     )
     .unwrap();
-    let fixture = (case == "settle-change-live").then(|| host_runtime(root));
+    let fixture = relaunched(&case).then(|| host_runtime(root));
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
     jobs::prepare_factory_fixture();
@@ -581,11 +598,7 @@ fn mutation_child() {
         .submission
         .fixture_image(File::open("/producer-image").unwrap());
     mutation
-        .submit(
-            PicoCursor { epoch, sequence: 0 },
-            [67; 16],
-            PicoRequest::Startup,
-        )
+        .submit(PicoCursor { epoch, sequence: 0 }, [67; 16], request(&case))
         .unwrap();
     if let Some((entered, resume)) = acceptance_gate {
         entered.recv_timeout(Duration::from_secs(30)).unwrap();
@@ -828,6 +841,27 @@ fn mutation_child() {
 }
 
 pub(crate) const HOME: &str = "/root/.picoclaw";
+const MODEL: &str = "synthetic-vendor/synthetic-model";
+const API_BASE: &str = "https://synthetic.invalid/v1";
+const API_KEY: &str = "synthetic-model-key-fixture";
+
+// Startup jobs, or a Model job selecting the fixed synthetic model.
+fn request(case: &str) -> PicoRequest {
+    if case.starts_with("settle-model-") {
+        PicoRequest::Model {
+            model: zeroize::Zeroizing::new(MODEL.into()),
+            api_base: zeroize::Zeroizing::new(API_BASE.into()),
+            api_key: zeroize::Zeroizing::new(API_KEY.into()),
+        }
+    } else {
+        PicoRequest::Startup
+    }
+}
+
+// Cases whose change relaunches a real fixture scope.
+fn relaunched(case: &str) -> bool {
+    matches!(case, "settle-change-live" | "settle-model-change-live")
+}
 const GATEWAY: &str = "synthetic-gateway-fixture";
 pub(crate) const INTERNAL: &str = "synthetic-internal-fixture";
 
@@ -866,6 +900,8 @@ fn host_runtime(root: &Path) -> std::path::PathBuf {
 pub(crate) struct SettlePair {
     config: (Vec<u8>, u64),
     security: Option<(Vec<u8>, u64)>,
+    /// A Model job: its model selection precedes the defaults.
+    model: bool,
 }
 
 fn private_write(path: &Path, bytes: &[u8]) {
@@ -884,16 +920,22 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
             format!("{INTERNAL}\n").as_bytes(),
         );
     }
-    if case.starts_with("settle-refused-") {
+    if case.starts_with("settle-refused-") || case == "settle-model-refused-absent" {
         return SettlePair {
             config: (Vec::new(), 0),
             security: None,
+            model: case.starts_with("settle-model-"),
         };
     }
     fs::create_dir_all(HOME).unwrap();
     fs::set_permissions(HOME, fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = serde_json::json!({"agents": {"defaults": {"model": "fixture"}}});
     let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    if case == "settle-model-noop-absent" {
+        // Already selected with the same endpoint and key.
+        crate::update::picoclaw_model::apply(&mut config, &mut security, MODEL, API_BASE, API_KEY)
+            .unwrap();
+    }
     startup::apply(&mut config, &mut security, GATEWAY, INTERNAL).unwrap();
     if case.starts_with("settle-change-") || case == "settle-superseded-absent" {
         config["gateway"]["port"] = serde_json::json!(1);
@@ -912,6 +954,7 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
     SettlePair {
         config: (config_bytes, inode("config.json")),
         security: Some((security_bytes.into_bytes(), inode(".security.yml"))),
+        model: case.starts_with("settle-model-"),
     }
 }
 
@@ -941,7 +984,17 @@ pub(crate) fn internal_on_disk() -> Option<String> {
 fn desired(pair: &SettlePair, internal: &str) -> crate::update::picoclaw_startup::Encoding {
     use crate::update::picoclaw_startup as startup;
     let security = &pair.security.as_ref().unwrap().0;
-    let documents = startup::decode(&pair.config.0, Some(security)).unwrap();
+    let mut documents = startup::decode(&pair.config.0, Some(security)).unwrap();
+    if pair.model {
+        crate::update::picoclaw_model::apply(
+            &mut documents.config,
+            &mut documents.security,
+            MODEL,
+            API_BASE,
+            API_KEY,
+        )
+        .unwrap();
+    }
     startup::desired(&documents, GATEWAY, internal).unwrap()
 }
 
@@ -1170,7 +1223,7 @@ fn settle_case(
         return;
     }
     match case {
-        "settle-noop-absent" | "settle-noop-live" => {
+        "settle-noop-absent" | "settle-noop-live" | "settle-model-noop-absent" => {
             assert_pair_unchanged(pair);
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
@@ -1202,7 +1255,7 @@ fn settle_case(
                 shutdown(broker);
             }
         }
-        "settle-refused-absent" | "settle-refused-live" => {
+        "settle-refused-absent" | "settle-refused-live" | "settle-model-refused-absent" => {
             // Refused before any plan or stop: terminal at once, like a no-op.
             let MutationStatus::SettlementRefused(id) = status else {
                 panic!("{case}: {status:?}");
@@ -1270,12 +1323,13 @@ fn settle_case(
             assert_eq!(state[RECEIPT + 172], 1, "Changed");
             assert_eq!(state[RECEIPT + 170], u8::from(live));
             let runtime = match case {
-                "settle-change-live" => 3,
+                _ if relaunched(case) => 3,
                 "settle-change-stop-live" => 6,
                 _ => 2,
             };
             assert_eq!(state[RECEIPT + 173], runtime, "runtime result");
-            assert_eq!(state[RECEIPT + 174], u8::from(case == "settle-change-live"));
+            assert_eq!(state[RECEIPT + 174], u8::from(relaunched(case)));
+            assert_eq!(state[RECEIPT + 168], if pair.model { 2 } else { 3 }, "kind");
             assert_eq!(members_present(), [false; 3]);
             assert!(!plan_present());
             let internal = internal_on_disk().unwrap();
@@ -1287,7 +1341,7 @@ fn settle_case(
             }
             assert_pair_desired(pair, &internal);
             let mut broker = assert_released(mutation);
-            if case == "settle-change-live" {
+            if relaunched(case) {
                 // The SAME broker relaunched one scope bound to the installed pair.
                 let wanted = desired(pair, &internal);
                 assert_eq!(broker.group.poll()[3], Some(Status::Running));

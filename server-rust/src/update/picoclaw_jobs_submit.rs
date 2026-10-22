@@ -73,9 +73,8 @@ impl Request {
                 api_base,
                 api_key,
             } => {
-                if model.trim().is_empty() {
-                    return Err(invalid());
-                }
+                crate::update::picoclaw_model::check_request(model, api_base, api_key)
+                    .map_err(|_| invalid())?;
                 [model.as_bytes(), api_base.as_bytes(), api_key.as_bytes()]
             }
             Self::Profile(Profile::Default) => [b"default", b"", b""],

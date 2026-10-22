@@ -844,6 +844,36 @@ pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<Transit
     Ok(status)
 }
 
+// The documents a request asks for before the fixed startup defaults: the
+// source itself for Startup, the selected model for Model.
+fn target_documents(
+    request: Option<&Request>,
+    source: &crate::update::picoclaw_startup::Documents,
+) -> Result<crate::update::picoclaw_startup::Documents> {
+    let mut target = crate::update::picoclaw_startup::Documents {
+        config: source.config.clone(),
+        security: source.security.clone(),
+    };
+    match request {
+        Some(Request::Startup) => {}
+        Some(Request::Model {
+            model,
+            api_base,
+            api_key,
+        }) => {
+            crate::update::picoclaw_model::apply(
+                &mut target.config,
+                &mut target.security,
+                model,
+                api_base,
+                api_key,
+            )?;
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(target)
+}
+
 // Nothing was planned, stopped or changed: like a canonical no-op, the refusal
 // is terminal at once and a live runtime keeps running untouched.
 fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<TransitionStatus> {
@@ -874,7 +904,7 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     {
         return Err(fenced());
     }
-    if record.kind != Kind::Startup {
+    if !matches!(record.kind, Kind::Startup | Kind::Model) {
         // The other fixed operations have no settlement executor yet.
         return refuse(store, record, &mut payload.touched);
     }
@@ -887,9 +917,14 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     let Ok(documents) = crate::update::picoclaw_startup::decode(config, view.security) else {
         return refuse(store, record, &mut payload.touched);
     };
+    // The request's own change first, then the fixed startup defaults on top.
+    let Ok(target) = target_documents(payload.request.as_ref(), &documents) else {
+        return refuse(store, record, &mut payload.touched);
+    };
     let internal = crate::update::picoclaw_token::observe()?;
-    let decision = match crate::update::picoclaw_startup::classify(
+    let decision = match crate::update::picoclaw_startup::classify_change(
         &documents,
+        &target,
         internal.as_deref().map(String::as_str),
     ) {
         Ok(decision) => decision,
@@ -899,8 +934,8 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         // Select missing tokens exactly once and make the whole change durable
         // before any stop: a retry or crash replays this plan, never new entropy.
         let gateway = crate::update::picoclaw_startup::existing_gateway_token(
-            &documents.config,
-            &documents.security,
+            &target.config,
+            &target.security,
         )
         .map(Zeroizing::new)
         .unwrap_or_else(|| Zeroizing::new(crate::auth::token::random_token(36)));
@@ -909,7 +944,7 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
             Some(value) => value,
             None => crate::update::picoclaw_token::new_value()?,
         };
-        let desired = crate::update::picoclaw_startup::desired(&documents, &gateway, &internal)?;
+        let desired = crate::update::picoclaw_startup::desired(&target, &gateway, &internal)?;
         let plan = Plan {
             config: desired.config,
             security: Zeroizing::new(desired.security.as_bytes().to_vec()),
@@ -945,7 +980,7 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.boot != payload.facts.boot
         || record.home != payload.facts.home_fingerprint
         || record.phase != Phase::Closed
-        || record.kind != Kind::Startup
+        || !matches!(record.kind, Kind::Startup | Kind::Model)
         || store.members[3].is_none()
     {
         return Err(fenced());
@@ -1018,7 +1053,10 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
     let store = payload.store.as_mut().ok_or_else(invalid)?;
     store.check_current()?;
     let mut record = store.snapshot.active.ok_or_else(invalid)?;
-    if record.uncertain || record.boot != payload.facts.boot || record.kind != Kind::Startup {
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || !matches!(record.kind, Kind::Startup | Kind::Model)
+    {
         return Err(fenced());
     }
     record.runtime = match (record.phase, resume) {
@@ -1328,7 +1366,7 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.runtime = Runtime::NotRequested;
             record.resume_allowed = false;
         }
-        (Phase::Applying, Kind::Startup) => {
+        (Phase::Applying, Kind::Startup | Kind::Model) => {
             let source = contents[2].take();
             let (Some(plan), Some(source)) = (&contents[3], source) else {
                 return Ok(false);
@@ -1340,12 +1378,12 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
-        (Phase::Committed, Kind::Startup) => {
+        (Phase::Committed, Kind::Startup | Kind::Model) => {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
         // The relaunched scope did not survive this boot.
-        (Phase::Activating, Kind::Startup) => {
+        (Phase::Activating, Kind::Startup | Kind::Model) => {
             record.outcome = Outcome::Changed;
             record.runtime = Runtime::ResumeFailed;
         }
