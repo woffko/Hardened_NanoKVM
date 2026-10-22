@@ -100,27 +100,29 @@ were changed. There is no automatic rollback or blind retry guarantee.
 
 ## Owned first-run import
 
-API and current S96 submit the fixed home-bound native onboarding operation.
-The API does not hold Config while asking the broker to acquire Update/Config.
-The broker refuses a live gateway and retains both admissions until the one-shot
-has a valid completion receipt, owner reap and EOF, then imports its output.
-An abandoned API/ctl receiver does not release those admissions. Deadline/Stop
-requests native cleanup and never reports import success; missing closure pins
-uncertainty instead of authorizing another writer.
+API and current S96 submit one broker-owned Onboard job over the private job
+transport. The API does not hold Config while the broker acquires Update/Config
+for the job. An existing configuration is a no-op; a lone security file or a
+leftover stage refuses. The job retains both admissions until the one-shot has
+a valid completion receipt, owner reap and EOF, then imports its output and
+retires its stage. An abandoned API/ctl receiver does not release those
+admissions. The bound and Stop request native cleanup and never report import
+success; missing closure keeps the job fenced as recovery-required instead of
+authorizing another writer.
 
-After successful native closure, checked import runs in one fixed joined worker;
-the broker keeps supervising native cells without locking its I/O payload. The
-worker retains the complete Update/Config permit and checked stage. Import Err,
-spawn failure or a caught host-test unwind keeps them owned and marks the broker
-Uncertain rather than releasing a partially completed operation. Stop after
-import admission cannot abandon that worker. Preexisting broker/native
-uncertainty wins over a late successful I/O result. Engine teardown joins before
-releasing its native singleton. Production process death still needs durable
-recovery; panic=abort is unchanged. Initial scratch preparation is not made
-asynchronous by this import-only change.
+After successful native closure, the checked import runs on the job's
+submission worker while the broker keeps supervising native cells. The worker
+retains the complete Update/Config permit and the checked stage. An import
+error, spawn failure or caught host-test unwind keeps the job fenced with both
+admissions instead of releasing a partially completed operation. A Stop after
+the import has started cannot abandon it. Process death or power loss is
+settled at a later boot, as described in
+[the mutation jobs](security-picoclaw-mutations.md#current-onboard-settlement);
+panic=abort is unchanged.
 
-The installed home/pair is not passed to upstream `onboard`: a fresh private
-`.nanokvm-onboard` scratch is created with exclusive mkdir, and the command's
+The installed home/pair is not passed to upstream `onboard`. A fresh private
+`.nanokvm-onboard` scratch is built under the job's side name with an exclusive
+mkdir and renamed into place already carrying the job's marker; the command's
 home/config/cwd point there. Inspected upstream v0.2.8
 [onboard helpers](https://github.com/sipeed/picoclaw/blob/v0.2.8/cmd/picoclaw/internal/onboard/helpers.go)
 write workspace templates over existing files; running them in the scratch
@@ -141,14 +143,15 @@ rewritten to the installed home and restricted defaults for this new config.
 An existing valid config pair remains unchanged and does not launch upstream.
 
 This is not a whole-workspace transaction. A later I/O failure may leave newly
-published default files without a committed pair. Scratch evidence is retained;
-orphan scratch/dangling security is refused, not deleted, adopted or blindly
-retried. Durable closed-owner retry/retirement, SIGKILL/kernel-I/O settlement,
-actual optional-binary validation and installed-device acceptance remain open.
-The scratch is not a restore-schema member or proof of all-writer quiescence.
-The complete [mutation-job protocol](security-picoclaw-mutations.md) is selected,
-but its durable store/result correlation/recovery and ordinary writer migration
-are not yet implemented. The legacy completion boolean is not a job receipt.
+published default files without a committed pair; a later onboarding treats
+them as existing files. The job retires only its own stage, after Committed or
+after a one-shot that did not succeed, and a later boot settles an interrupted
+job. Orphan scratch and dangling security are refused, not deleted, adopted or
+blindly retried. Actual optional-binary validation and installed-device
+acceptance remain open. The scratch is not a restore-schema member or proof of
+all-writer quiescence. The job protocol, store and recovery are described in
+[the mutation jobs](security-picoclaw-mutations.md). The legacy completion
+boolean and its query are gone.
 
 ## Startup defaults and connection-time publication
 

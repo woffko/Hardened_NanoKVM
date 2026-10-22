@@ -6,11 +6,11 @@ activation or acceptance report. These now exist:
 - broker-library acceptance and explicit Stop/Closed publication;
 - all six executors (onboarding, model, startup defaults, profile, install and
   removal), each with its prior-boot settlement;
-- the private job transport, used by every backend caller.
+- the private job transport, used by every backend caller and by S96
+  `onboard-picoclaw`.
 
-Not yet migrated: S96 `onboard-picoclaw`, which still drives the older control
-frame, and same-boot recovery. The legacy onboarding completion boolean is not
-a durable job receipt.
+Same-boot recovery is not implemented. The legacy onboarding frame and its
+completion boolean are gone.
 
 ## Current connected reader, fence and factory bootstrap
 
@@ -55,8 +55,8 @@ legacy case; old installations still need explicit trusted migration rather
 than factory seeding from an app archive. Raw preservation/recovery must carry
 anchor and store together, and is not implemented by this bootstrap.
 
-The backend's onboarding publishes these records as an Onboard job; S96
-`onboard-picoclaw` does not yet. There is still NO target-execution API,
+Onboarding, from the backend and from S96, publishes these records as an
+Onboard job. There is still NO target-execution API,
 retirement or job recovery bypass. Ordinary unmanaged Pico writers and
 OS-level H2 isolation remain outside this connected cooperative fence.
 
@@ -151,9 +151,9 @@ Disposable host fixtures cover live/absent/paused/error-completed native trees,
 an independently live backend, blocked acceptance/phase work, joined teardown,
 late uncertainty, changed private members, Stop/Closed publication failures and
 real SIGKILL during Stop publication. They do not establish production launch
-ordering, hardware execution or recovery. Automatic quiescence, the change paths
-of all six operation executors, transport/API/S96 integration, activation and
-recovery remain unimplemented.
+ordering, hardware execution or recovery. The executors, automatic quiescence,
+prior-boot recovery and the transport are described in the following sections;
+same-boot recovery and target acceptance remain open.
 
 ## Current Startup no-op settlement
 
@@ -331,14 +331,17 @@ retired:
 A fixed-name stage without exactly this marker, or both names at once, is
 never adopted: the fence remains and both trees are kept.
 
-The backend's onboarding runs this job through `run_onboard_job`. S96
-`onboard` still drives the older broker-owned path through the native control
-frame, because moving it needs a rebuilt static ctl helper and its binding.
+The backend's onboarding and S96 `onboard-picoclaw` both run this job through
+`run_onboard_job`. The ctl reports success only for the job's durable Changed
+or Noop receipt. The older onboarding frame (operations 18 and 19) and its
+broker-side worker are removed.
 
 Chroot fixtures run a real one-shot fixture under the job. They cover:
 
 - a successful import;
-- a failed and a stopped one-shot;
+- a failed and a stopped one-shot, and one stopped by its bound;
+- a one-shot that leaves a complete stage but exits without its receipt: never
+  imported, fenced in the same boot and Failed at a later boot;
 - the no-op, a lone security file and a leftover stage;
 - failures at each step of the stage's creation and retirement, after
   staging, after the import and after Committed, each settled at a later boot;
@@ -605,17 +608,16 @@ The legacy in-handler writers are removed. The direct pair writer and the
 token provisioning helper remain only as test fixtures.
 
 A chroot fixture runs the real daemon loop over its real endpoint for Startup,
-Model, Profile, Install and Remove jobs. It covers no-op and change jobs with their exact receipts, the
+Model, Profile, Install and Remove jobs, and for an Onboard no-op (the one-shot
+itself runs in the mutation fixtures). It covers no-op and change jobs with
+their exact receipts, the
 broker's return, identical resubmission, a different request with the same
 identity, a stale cursor, an unknown id, a malformed datagram, and free
 admissions afterwards.
 
-Still open:
-
-- moving S96 `onboard` (and with it the native ctl) from the older control
-  frame to the job transport;
-- a pending pair journal still refuses acceptance, as it refused the legacy
-  writer. Stopped recovery of that journal inside the job is not implemented.
+Still open: a pending pair journal still refuses acceptance, as it refused the
+legacy writer. Stopped recovery of that journal inside the job is not
+implemented.
 
 ## Authority and scope
 
@@ -758,8 +760,9 @@ does not replay the upstream onboarding command or an unknown accepted payload.
 ## Integration and acceptance still required
 
 The private bounded SEQPACKET request/result transport now carries all six
-jobs for their backend callers. S96 `onboard-picoclaw` must still migrate,
-with exact helper/ABI bindings. No mutation opcode
+jobs for their backend callers and for S96 `onboard-picoclaw`. The rebuilt
+static ctl and broker helpers and their bindings belong to the next candidate
+build. No mutation opcode
 is added to the old 48-byte service frame as an interim arbitrary-command path.
 The development raw-update barrier and unsupported support transition stay shut.
 

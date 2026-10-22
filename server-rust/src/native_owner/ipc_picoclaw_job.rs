@@ -412,7 +412,6 @@ impl Engine {
             && !self.abandoned
             && self.backend_restart.is_none()
             && self.picoclaw_stop.is_none()
-            && self.picoclaw_onboard.is_none()
     }
 
     /// Poll the job; once nothing durable is left to it, the SAME broker

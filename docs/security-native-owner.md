@@ -157,8 +157,9 @@ PicoClaw program.
 Ordinary API and current S96 start/stop/onboard now use fixed broker operations rather
 than direct gateway launch, pidof or process-name killing. This is partial
 service integration, not adoption of an already running legacy process or C1/H2
-closure. Interrupted onboarding recovery, install/uninstall and profile/workspace writers still require
-complete ownership/enrollment, runtime-intent handoff and target acceptance.
+closure. Onboarding, model, startup defaults, profile, install and uninstall
+are broker-owned jobs with prior-boot recovery (see
+[the mutation jobs](security-picoclaw-mutations.md)); target acceptance remains.
 Uninstall now refuses deletion after an unverified Stop, but this alone is not
 serialized stopped ownership through deletion or protection against all writers.
 Preserve the separate enforceable local-tool privilege boundary and target
@@ -208,7 +209,7 @@ H2 remain required.
 The NKC2/NKR2 frames remain 48 bytes. Each operation below carries the full
 32-byte home fingerprint in its own request; a prior home query grants nothing.
 The ctl accepts no alternate executable, pathname, environment map or arguments.
-All six ctl service operations require and retain a current fresh-boot receipt
+All four ctl service operations require and retain a current fresh-boot receipt
 for this executing client's compiled consumer profile, before broker contact.
 
 | Operation | Opcode | Fixed ctl command | Meaning |
@@ -217,8 +218,11 @@ for this executing client's compiled consumer profile, before broker contact.
 | PicoclawRunning | 15 | picoclaw-running | Observe owned-scope readiness, not gateway/application health |
 | StopPicoclaw | 16 | stop-picoclaw | Admit Stop, then ctl waits for the separate Stopped query |
 | PicoclawStopped | 17 | picoclaw-stopped | Observe receipt + owner reap + EOF, or absence of an enrolled scope |
-| OnboardPicoclaw | 18 | onboard-picoclaw | Admit a fixed fresh-home one-shot or preserve an existing valid pair unchanged |
-| PicoclawOnboardComplete | 19 | picoclaw-onboard-complete | Observe the last one-shot's successful closure and checked import, not upstream gateway health |
+
+Opcodes 18 and 19, the older onboarding frame, are retired and decode as
+unknown. `onboard-picoclaw` retains the same boot receipt and submits one
+Onboard job over the private job transport instead; only its durable Changed
+or Noop receipt is success. `picoclaw-onboard-complete` no longer exists.
 
 Home mismatch refuses before any lifecycle tick. Read-only queries do not launch
 pending wanted work. Exact serial+frame replay returns the prior response and
@@ -251,8 +255,9 @@ reset, owner adoption or automatic restart is offered.
 
 These commands concern the enrolled optional scope only. They do not prove an
 independently launched legacy gateway is stopped. API/S96 migration must first
-exclude those legacy launchers and bind every writer, including gateway default
-refresh, interrupted onboarding recovery, binary install/uninstall and profile/workspace changes.
+exclude those legacy launchers and bind every writer. Gateway default refresh,
+onboarding with its interrupted recovery, binary install/uninstall and
+profile/workspace changes are now broker-owned jobs.
 
 ### Ordinary API/S96 control routing
 
@@ -267,7 +272,7 @@ A helper error, timeout or lost reply is not Stopped. The existing broker retain
 its own Stop exclusion/receipt/reap/EOF responsibility after the client dies.
 
 S96 first calls the new `picoclaw-control-ready` entrypoint, then the actual
-ensure/stop/onboard operation. Older clients that knew the original service verbs reject
+ensure/stop frame operation or the onboarding job. Older clients that knew the original service verbs reject
 this new entrypoint instead of acknowledging an empty owned scope. The new probe
 checks/retains the compiled boot profile and uses the existing full-home-bound
 Running-owner query; it grants no lease to the later connection. Every actual
@@ -290,13 +295,16 @@ This complements real native ownership/root fixtures, not target acceptance.
 
 ### Owned first-run onboarding
 
-Onboard shares the optional Pico cell, so a live gateway, pending Stop, another
-onboarding task or admission contention refuses before starting a writer. The
-broker retains UpdateEX then Config, independent of the requesting connection,
-through receipt, owner reap, EOF and checked output import. A 60-second deadline
-requests owned Stop; neither timeout nor Stop counts as successful onboarding.
-Missing/invalid closure pins both admissions and uncertainty. Pending onboarding
-also blocks app install, maintenance, backend restart and full shutdown.
+First-run onboarding is a broker-owned Onboard job, for the API and for S96
+alike. The job owns the optional Pico cell until its durable end, so a pending
+Stop, another job or admission contention refuses before any writer starts. It
+retains UpdateEX then Config, independent of the requesting connection, through
+receipt, owner reap, EOF, the checked import and the stage retirement. A
+60-second bound requests owned Stop; neither the bound nor Stop counts as
+successful onboarding. Missing or invalid closure keeps the job fenced as
+recovery-required, with both admissions and the uncertainty retained. While the
+job owns the broker, app install, maintenance, backend restart and full
+shutdown report Busy.
 
 The fixed owner launches against `<effective-home>/.nanokvm-onboard`, created
 exclusively on the checked rootfs. HOME, PICOCLAW_HOME, PICOCLAW_CONFIG and cwd

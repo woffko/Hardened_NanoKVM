@@ -80,21 +80,6 @@ pub(super) fn trial_owner_command(root: &Path) -> Command {
     command
 }
 
-pub(super) fn onboard_command(root: &Path) -> Command {
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command
-        .args([
-            "--exact",
-            "native_owner::broker::ipc::tests::picoclaw::onboard_probe",
-            "--nocapture",
-        ])
-        .env_clear()
-        .env("NANOKVM_NATIVE_ONBOARD_FIXTURE", root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-}
-
 fn trial_gate(control: &mut UnixStream, root: &Path, marker: &str) -> bool {
     control
         .set_read_timeout(Some(Duration::from_millis(20)))

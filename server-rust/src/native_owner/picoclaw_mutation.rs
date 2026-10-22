@@ -91,6 +91,9 @@ pub struct Mutation {
     launch_fixture: Option<(std::path::PathBuf, Vec<std::ffi::OsString>)>,
     #[cfg(test)]
     onboard_fixture: Option<OnboardFixture>,
+    /// A shorter one-shot bound for the deadline test.
+    #[cfg(test)]
+    onboard_bound: Option<std::time::Duration>,
     /// An Onboard one-shot was asked to stop: an explicit Stop or its bound.
     onboard_stopped: bool,
     /// The one-shot's bound, as for the legacy onboarding path.
@@ -113,6 +116,8 @@ impl Mutation {
             launch_fixture: None,
             #[cfg(test)]
             onboard_fixture: None,
+            #[cfg(test)]
+            onboard_bound: None,
             onboard_stopped: false,
             onboard_deadline: None,
             status: MutationStatus::Idle,
@@ -309,8 +314,10 @@ impl Mutation {
                 // The stage and its marker are durable: launch the one-shot
                 // exactly once under the job's retained admissions.
                 self.spawned = true;
-                self.onboard_deadline =
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                let bound = std::time::Duration::from_secs(60);
+                #[cfg(test)]
+                let bound = self.onboard_bound.unwrap_or(bound);
+                self.onboard_deadline = Some(std::time::Instant::now() + bound);
                 let command = self.onboard_command();
                 if self.broker.start_picoclaw_onboard_for_job(command).is_ok() {
                     return MutationStatus::Settling(id);

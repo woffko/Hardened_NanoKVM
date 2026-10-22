@@ -261,6 +261,7 @@ mod endpoint {
             "settle-remove-absent",
             "settle-profile-change-absent",
             "settle-install-absent",
+            "settle-onboard-noop-absent",
         ] {
             let root = fixture::root();
             let output = command(root.path(), case).output().unwrap();
@@ -301,14 +302,17 @@ mod endpoint {
             JobKind::Install {
                 digest: fixture::staged_digest(),
             }
+        } else if case.starts_with("settle-onboard-") {
+            JobKind::Onboard
         } else {
             JobKind::Startup
         };
-        let change = case != "settle-noop-absent";
+        let change = !case.contains("-noop-");
         let reply = match &kind {
             JobKind::Startup => run_startup_job(Duration::from_secs(30)).unwrap(),
-            // The mutation fixtures drive onboarding with its one-shot probe.
-            JobKind::Onboard => unreachable!("onboarding is covered by the mutation fixtures"),
+            // An existing configuration: a Noop that never runs the one-shot,
+            // which the mutation fixtures drive with its probe.
+            JobKind::Onboard => run_onboard_job(Duration::from_secs(30)).unwrap(),
             JobKind::Remove => run_remove_job(Duration::from_secs(30)).unwrap(),
             JobKind::Profile { kvm } => run_profile_job(*kvm, Duration::from_secs(30)).unwrap(),
             JobKind::Install { digest } => {

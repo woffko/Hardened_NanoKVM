@@ -275,16 +275,6 @@ impl Broker {
         self.launch(Role::Picoclaw, command)
     }
 
-    fn start_picoclaw_onboard(
-        &mut self,
-        command: std::process::Command,
-        _admission: &RuntimePermit,
-    ) -> Result<(), StartFailure> {
-        self.check_picoclaw_launch()
-            .map_err(StartFailure::Journal)?;
-        self.launch(Role::Picoclaw, command)
-    }
-
     /// Gate before any stopped-pair recovery as well as before native spawn.
     fn check_picoclaw_launch(&self) -> Result<(), JournalError> {
         #[cfg(test)]

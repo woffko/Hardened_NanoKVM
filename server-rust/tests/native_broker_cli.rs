@@ -35,6 +35,8 @@ fn shipped_broker_and_ctl_reject_generic_paths_and_maintenance_cli() {
                 vec!["picoclaw-stopped", "/tmp/other"],
                 vec!["onboard-picoclaw", "extra"],
                 vec!["onboard-picoclaw", "/tmp/other"],
+                // The older onboarding completion query no longer exists.
+                vec!["picoclaw-onboard-complete"],
                 vec!["picoclaw-onboard-complete", "extra"],
                 vec!["picoclaw-onboard-complete", "/tmp/other"],
             ],

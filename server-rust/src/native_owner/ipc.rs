@@ -50,8 +50,8 @@ pub enum Operation {
     PicoclawRunning = 15,
     StopPicoclaw = 16,
     PicoclawStopped = 17,
-    OnboardPicoclaw = 18,
-    PicoclawOnboardComplete = 19,
+    // 18 and 19 were the older onboarding frame; S96 now runs an Onboard job
+    // over the job transport, and both bytes decode as unknown.
 }
 impl Operation {
     fn binds_picoclaw_home(self) -> bool {
@@ -62,8 +62,6 @@ impl Operation {
                 | Self::PicoclawRunning
                 | Self::StopPicoclaw
                 | Self::PicoclawStopped
-                | Self::OnboardPicoclaw
-                | Self::PicoclawOnboardComplete
         )
     }
 
@@ -86,8 +84,6 @@ impl Operation {
             15 => Some(Self::PicoclawRunning),
             16 => Some(Self::StopPicoclaw),
             17 => Some(Self::PicoclawStopped),
-            18 => Some(Self::OnboardPicoclaw),
-            19 => Some(Self::PicoclawOnboardComplete),
             _ => None,
         }
     }
@@ -234,8 +230,6 @@ impl Channel {
                 | Operation::PicoclawRunning
                 | Operation::StopPicoclaw
                 | Operation::PicoclawStopped
-                | Operation::OnboardPicoclaw
-                | Operation::PicoclawOnboardComplete
         ) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -391,8 +385,6 @@ struct Engine {
     picoclaw_status: Option<Status>,
     // Retained until receipt + owner reap + EOF, even if the caller disconnects.
     picoclaw_stop: Option<crate::update::operation_lock::ProcessLock>,
-    picoclaw_onboard: Option<picoclaw::Onboard>,
-    picoclaw_onboard_result: Option<bool>,
     /// The last job's identity and final status, for its submitter.
     pico_job_last: Option<(super::PicoJobId, super::PicoMutationStatus)>,
     #[cfg(all(test, feature = "sandbox-test-fixture"))]
@@ -422,15 +414,6 @@ struct BackendRestart {
     _admission: RuntimePermit,
     safe_mode: bool,
 }
-impl Drop for Engine {
-    fn drop(&mut self) {
-        // Join filesystem work before implicit field teardown can release the
-        // running broker/singleton. Its payload and admissions remain owned.
-        if let Some(onboard) = self.picoclaw_onboard.as_mut() {
-            onboard.work.join_for_teardown();
-        }
-    }
-}
 impl Engine {
     fn new(broker: Broker) -> Self {
         Self {
@@ -450,8 +433,6 @@ impl Engine {
             backend_restart: None,
             picoclaw_status: None,
             picoclaw_stop: None,
-            picoclaw_onboard: None,
-            picoclaw_onboard_result: None,
             pico_job_last: None,
             #[cfg(all(test, feature = "sandbox-test-fixture"))]
             fixture_pico_image: None,
@@ -1088,7 +1069,6 @@ impl Engine {
             || self.abandoned
             || self.backend_restart.is_some()
             || self.picoclaw_stop.is_some()
-            || self.picoclaw_onboard.is_some()
             || !matches!(self.owner, Some(Owner::Running(_)))
         {
             return Code::Busy;
@@ -1258,9 +1238,7 @@ impl Engine {
             | Operation::EnsurePicoclaw
             | Operation::PicoclawRunning
             | Operation::StopPicoclaw
-            | Operation::PicoclawStopped
-            | Operation::OnboardPicoclaw
-            | Operation::PicoclawOnboardComplete => code = Code::Invalid,
+            | Operation::PicoclawStopped => code = Code::Invalid,
             Operation::CancelAppInstall => code = self.cancel_install(),
             Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
@@ -1284,7 +1262,6 @@ impl Engine {
                 if self.mode != Mode::Running
                     || self.backend_restart.is_some()
                     || self.picoclaw_stop.is_some()
-                    || self.picoclaw_onboard.is_some()
                 {
                     code = Code::Busy;
                 } else if let Some(Owner::Running(broker)) = self.owner.as_mut() {
@@ -1324,10 +1301,7 @@ impl Engine {
                 }
             }
             Operation::Pause => {
-                if self.backend_restart.is_some()
-                    || self.picoclaw_stop.is_some()
-                    || self.picoclaw_onboard.is_some()
-                {
+                if self.backend_restart.is_some() || self.picoclaw_stop.is_some() {
                     code = Code::Busy;
                 } else if self.lease == Some(key) && !self.abandoned {
                 } else {
@@ -1374,7 +1348,6 @@ impl Engine {
                     || self.abandoned
                     || self.backend_restart.is_some()
                     || self.picoclaw_stop.is_some()
-                    || self.picoclaw_onboard.is_some()
                 {
                     code = Code::Busy;
                 } else {

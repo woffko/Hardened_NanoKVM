@@ -65,7 +65,11 @@ fn invalid_home_check_refuses_before_contacting_a_broker_or_creating_state() {
         OsString::from("/bad\nname"),
         OsString::from_vec(b"/bad\xff".to_vec()),
     ] {
-        for operation in ["picoclaw-home-check", "picoclaw-control-ready"] {
+        for operation in [
+            "picoclaw-home-check",
+            "picoclaw-control-ready",
+            "onboard-picoclaw",
+        ] {
             let output = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-ctl"))
                 .arg(operation)
                 .current_dir(root.path())

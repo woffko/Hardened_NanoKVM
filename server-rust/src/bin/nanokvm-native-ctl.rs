@@ -1,9 +1,54 @@
-use nanokvm_rust_server::native_owner::broker::ipc::{Channel, Code, Mode, Operation};
+use nanokvm_rust_server::native_owner::broker::ipc::{
+    Channel, Code, JobChannel, JobCode, Mode, Operation, run_onboard_job,
+};
 use nanokvm_rust_server::native_owner::broker::{Broker, JournalError, boot};
 use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
+
+/// The job store's Onboard kind.
+const ONBOARD: u8 = 1;
+
+// S96 first configuration: one broker-owned Onboard job over the private job
+// transport, never the service frame. Only its durable Changed or Noop
+// receipt is success.
+fn onboard_picoclaw() -> ExitCode {
+    if nanokvm_rust_server::native_owner::picoclaw_home::Home::resolve().is_err() {
+        eprintln!("invalid picoclaw home; no runtime action taken");
+        return ExitCode::from(64);
+    }
+    let _pico_boot = match boot::require_ready() {
+        Ok(permit) => permit,
+        Err(error) => {
+            eprintln!("picoclaw native boot: {error}");
+            return ExitCode::from(78);
+        }
+    };
+    if JobChannel::connect().is_err() {
+        eprintln!("cannot connect to the protected job transport; nothing was submitted");
+        return ExitCode::from(70);
+    }
+    // The broker bounds the one-shot at 60 s; import and retirement follow.
+    match run_onboard_job(Duration::from_secs(90)) {
+        Ok(reply) => match (reply.code, reply.receipt) {
+            (JobCode::Ok, [ONBOARD, 8, 1 | 2, _]) => ExitCode::SUCCESS,
+            (JobCode::Ok, [ONBOARD, 8, 3, _]) => {
+                eprintln!("picoclaw onboarding did not complete; nothing was changed");
+                ExitCode::from(71)
+            }
+            (code, _) => {
+                eprintln!("picoclaw onboarding job: {code:?}");
+                ExitCode::from(71)
+            }
+        },
+        Err(_) => {
+            eprintln!("job reply lost; completion is unknown");
+            ExitCode::from(71)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let _ = std::hint::black_box(include_bytes!(concat!(
         env!("OUT_DIR"),
@@ -21,6 +66,9 @@ fn main() -> ExitCode {
                 ExitCode::from(64)
             }
         };
+    }
+    if args.len() == 1 && args[0] == "onboard-picoclaw" {
+        return onboard_picoclaw();
     }
     if args.len() == 1 {
         let result = match args[0].to_str() {
@@ -49,14 +97,7 @@ fn main() -> ExitCode {
     let pico_service = args.len() == 1
         && matches!(
             args[0].to_str(),
-            Some(
-                "ensure-picoclaw"
-                    | "picoclaw-running"
-                    | "stop-picoclaw"
-                    | "picoclaw-stopped"
-                    | "onboard-picoclaw"
-                    | "picoclaw-onboard-complete"
-            )
+            Some("ensure-picoclaw" | "picoclaw-running" | "stop-picoclaw" | "picoclaw-stopped")
         );
     let selected_home = if home_check || pico_service {
         match nanokvm_rust_server::native_owner::picoclaw_home::Home::resolve() {
@@ -102,8 +143,6 @@ fn main() -> ExitCode {
             Some("picoclaw-running") => Some(Operation::PicoclawRunning),
             Some("stop-picoclaw") => Some(Operation::StopPicoclaw),
             Some("picoclaw-stopped") => Some(Operation::PicoclawStopped),
-            Some("onboard-picoclaw") => Some(Operation::OnboardPicoclaw),
-            Some("picoclaw-onboard-complete") => Some(Operation::PicoclawOnboardComplete),
             _ => None,
         }
     } else {
@@ -111,7 +150,7 @@ fn main() -> ExitCode {
     };
     let Some(op) = op else {
         eprintln!(
-            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|picoclaw-control-ready|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|onboard-picoclaw|picoclaw-onboard-complete|shutdown}}"
+            "usage: nanokvm-native-ctl {{activate-boot|boot-ready|status|running|kvm-running|backend-running|ensure-kvm|ensure-hwmon|ensure-backend|restart-backend|restart-backend-safe|retry-app-retirement|picoclaw-home|picoclaw-home-check|picoclaw-control-ready|ensure-picoclaw|picoclaw-running|stop-picoclaw|picoclaw-stopped|onboard-picoclaw|shutdown}}"
         );
         return ExitCode::from(64);
     };
@@ -141,12 +180,7 @@ fn main() -> ExitCode {
     );
     let mut backend_wait = false;
     let mut pico_wait = false;
-    let timeout = Duration::from_secs(if op == Operation::OnboardPicoclaw {
-        75
-    } else {
-        15
-    });
-    while start.elapsed() < timeout {
+    while start.elapsed() < Duration::from_secs(15) {
         match channel.poll() {
             Ok(Some(reply)) => {
                 if matches!(
@@ -154,7 +188,6 @@ fn main() -> ExitCode {
                     Operation::BackendRunning
                         | Operation::PicoclawRunning
                         | Operation::PicoclawStopped
-                        | Operation::PicoclawOnboardComplete
                 ) && reply.code == Code::Unavailable
                 {
                     return ExitCode::from(1);
@@ -166,18 +199,13 @@ fn main() -> ExitCode {
                     return ExitCode::from(71);
                 }
                 if pico_service {
-                    if matches!(
-                        op,
-                        Operation::PicoclawRunning
-                            | Operation::PicoclawStopped
-                            | Operation::PicoclawOnboardComplete
-                    ) || (pico_wait && reply.code == Code::Ok)
+                    if matches!(op, Operation::PicoclawRunning | Operation::PicoclawStopped)
+                        || (pico_wait && reply.code == Code::Ok)
                     {
                         return ExitCode::SUCCESS;
                     }
                     let query = match op {
                         Operation::StopPicoclaw => Operation::PicoclawStopped,
-                        Operation::OnboardPicoclaw => Operation::PicoclawOnboardComplete,
                         _ => Operation::PicoclawRunning,
                     };
                     let Some(home) = &selected_home else {

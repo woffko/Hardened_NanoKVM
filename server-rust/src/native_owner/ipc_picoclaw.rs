@@ -3,58 +3,12 @@
 use super::*;
 use crate::update::picoclaw_config::{self, Generation};
 
-#[path = "picoclaw_onboard_work.rs"]
-pub(super) mod work;
-use work::{ImportStatus, ImportWork};
-
-pub(super) struct Onboard {
-    pub(super) work: ImportWork,
-    pub(super) deadline: Instant,
-    cancelled: bool,
-    importing: bool,
-}
-
 impl Engine {
     pub(super) fn tick_picoclaw(&mut self, broker: &mut Broker) {
         self.picoclaw_status = broker.group.poll()[3];
         if broker.group.uncertainty_latched() || self.mode == Mode::Uncertain {
             self.mode = Mode::Uncertain;
             return;
-        }
-        if let Some(mut onboard) = self.picoclaw_onboard.take() {
-            if let Some(Status::Closed(completion)) = self.picoclaw_status {
-                let success = !onboard.cancelled && completion == Completion::SuccessfulExit;
-                if success || onboard.importing {
-                    // Stop after import admission cannot drop/join a live I/O
-                    // worker on this loop or reinterpret its partial result.
-                    onboard.importing = true;
-                    match onboard.work.poll_closed() {
-                        ImportStatus::Pending => self.picoclaw_onboard = Some(onboard),
-                        ImportStatus::Complete => {
-                            self.picoclaw_onboard_result = Some(!onboard.cancelled);
-                            // Successful I/O and joined worker, not a returned
-                            // Err, release the complete in-memory owner.
-                            drop(onboard);
-                        }
-                        ImportStatus::Failed => {
-                            self.picoclaw_onboard_result = Some(false);
-                            self.mode = Mode::Uncertain;
-                            self.picoclaw_onboard = Some(onboard);
-                        }
-                    }
-                } else {
-                    // No import was started: the one-shot is proven closed.
-                    // Scratch remains evidence; durable retirement is separate.
-                    self.picoclaw_onboard_result = Some(false);
-                    drop(onboard);
-                }
-            } else {
-                if !onboard.cancelled && Instant::now() >= onboard.deadline {
-                    onboard.cancelled = true;
-                    broker.group.stop_picoclaw();
-                }
-                self.picoclaw_onboard = Some(onboard);
-            }
         }
         if matches!(self.picoclaw_status, None | Some(Status::Closed(_))) {
             // Only this proven closed owned scope releases Stop's UpdateEX.
@@ -87,7 +41,6 @@ impl Engine {
 
     fn ensure_picoclaw(&mut self, broker: &mut Broker) -> Code {
         if self.picoclaw_stop.is_some()
-            || self.picoclaw_onboard.is_some()
             || matches!(
                 self.picoclaw_status,
                 Some(Status::Stopping | Status::Uncertain | Status::TrialFailed)
@@ -132,14 +85,6 @@ impl Engine {
     }
 
     fn stop_picoclaw(&mut self, broker: &mut Broker) -> Code {
-        if let Some(onboard) = self.picoclaw_onboard.as_mut() {
-            // Already owns both admissions. Never recursively acquire Update
-            // while stopping the one-shot or report it as a successful import.
-            onboard.cancelled = true;
-            broker.group.stop_picoclaw();
-            self.picoclaw_status = broker.group.poll()[3];
-            return Code::Ok;
-        }
         if self.picoclaw_stop.is_some()
             || matches!(self.picoclaw_status, None | Some(Status::Closed(_)))
         {
@@ -159,81 +104,8 @@ impl Engine {
         Code::Ok
     }
 
-    fn onboard_picoclaw(&mut self, broker: &mut Broker) -> Code {
-        if self.picoclaw_stop.is_some()
-            || self.picoclaw_onboard.is_some()
-            || !matches!(self.picoclaw_status, None | Some(Status::Closed(_)))
-        {
-            return Code::Busy;
-        }
-        let admission = match broker.runtime_permit() {
-            Ok(admission) => admission,
-            Err(super::super::JournalError::Busy) => return Code::Busy,
-            Err(_) => return Code::Unavailable,
-        };
-        if broker.check_picoclaw_launch().is_err() {
-            return Code::Unavailable;
-        }
-        self.picoclaw_onboard_result = None;
-        #[cfg(test)]
-        let fixture = self.fixture.is_some();
-        #[cfg(not(test))]
-        let fixture = false;
-        let stage = if fixture {
-            None
-        } else {
-            match picoclaw_config::Onboarding::prepare(
-                &admission._configuration,
-                &broker.group.home.path().join("config.json"),
-            ) {
-                Ok(Some(stage)) => Some(stage),
-                Ok(None) => {
-                    self.picoclaw_onboard_result = Some(true);
-                    return Code::Ok;
-                }
-                Err(_) => return Code::Unavailable,
-            }
-        };
-        #[cfg(test)]
-        let command = if let Some(root) = &self.fixture {
-            tests::onboard_command(root)
-        } else {
-            crate::native_owner::controller::picoclaw_onboard_command(&broker.group.home)
-        };
-        #[cfg(not(test))]
-        let command = crate::native_owner::controller::picoclaw_onboard_command(&broker.group.home);
-        match broker.start_picoclaw_onboard(command, &admission) {
-            Ok(()) => {
-                self.picoclaw_onboard = Some(Onboard {
-                    work: ImportWork::new(admission, stage),
-                    deadline: Instant::now() + Duration::from_secs(60),
-                    cancelled: false,
-                    importing: false,
-                });
-                self.picoclaw_status = broker.group.poll()[3];
-                Code::Ok
-            }
-            Err(StartFailure::Scope(StartError::Spawn(_))) => Code::Unavailable,
-            Err(_) => {
-                // No closure proof: retain admission even for a journal or
-                // ownership failure, and close further lifecycle admission.
-                self.picoclaw_onboard = Some(Onboard {
-                    work: ImportWork::new(admission, stage),
-                    deadline: Instant::now(),
-                    cancelled: true,
-                    importing: false,
-                });
-                self.mode = Mode::Uncertain;
-                Code::Uncertain
-            }
-        }
-    }
-
     pub(super) fn picoclaw_request(&mut self, op: Operation) -> Reply {
-        if matches!(
-            op,
-            Operation::EnsurePicoclaw | Operation::StopPicoclaw | Operation::OnboardPicoclaw
-        ) {
+        if matches!(op, Operation::EnsurePicoclaw | Operation::StopPicoclaw) {
             self.tick();
         }
         if self.mode == Mode::Uncertain {
@@ -256,7 +128,6 @@ impl Engine {
                         matches!(owner, Owner::Running(broker) if broker.group.picoclaw_generation().is_some())
                     })
                     && self.picoclaw_stop.is_none()
-                    && self.picoclaw_onboard.is_none()
                 {
                     Code::Ok
                 } else {
@@ -266,25 +137,18 @@ impl Engine {
             Operation::PicoclawStopped => {
                 if matches!(self.picoclaw_status, None | Some(Status::Closed(_)))
                     && self.picoclaw_stop.is_none()
-                    && self.picoclaw_onboard.is_none()
                 {
                     Code::Ok
                 } else {
                     Code::Unavailable
                 }
             }
-            Operation::PicoclawOnboardComplete => match self.picoclaw_onboard_result {
-                Some(true) if self.picoclaw_onboard.is_none() => Code::Ok,
-                Some(false) => Code::Invalid,
-                _ => Code::Unavailable,
-            },
-            Operation::EnsurePicoclaw | Operation::StopPicoclaw | Operation::OnboardPicoclaw => {
+            Operation::EnsurePicoclaw | Operation::StopPicoclaw => {
                 let owner = self.owner.take();
                 match owner {
                     Some(Owner::Running(mut broker)) => {
                         let code = match op {
                             Operation::EnsurePicoclaw => self.ensure_picoclaw(&mut broker),
-                            Operation::OnboardPicoclaw => self.onboard_picoclaw(&mut broker),
                             _ => self.stop_picoclaw(&mut broker),
                         };
                         self.owner = Some(Owner::Running(broker));

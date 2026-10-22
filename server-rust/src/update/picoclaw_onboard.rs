@@ -269,8 +269,10 @@ impl Onboarding {
         home.join(STAGE)
     }
 
-    /// Caller proves its native Pico cell absent/Closed and retains Update and
-    /// Config. An orphan scratch directory is preserved/refused, never adopted.
+    /// An unmarked stage for the import tests; production stages come only
+    /// from a broker Onboard job. An orphan scratch directory is preserved
+    /// and refused, never adopted.
+    #[cfg(test)]
     pub(crate) fn prepare(_permit: &ConfigPermit, path: &Path) -> Result<Option<Self>> {
         if path.file_name().and_then(|name| name.to_str()) != Some(CONFIG) {
             return Err(invalid());
@@ -590,7 +592,7 @@ impl Onboarding {
             &encoded,
             documents.security.as_deref().map(|s| s.as_slice()),
         )
-        // Retain the bounded scratch as recovery evidence. Its retirement and
-        // interrupted first-run retry need a separate closed-owner receipt.
+        // The stage stays for the caller: a broker Onboard job retires it only
+        // after its durable Committed.
     }
 }

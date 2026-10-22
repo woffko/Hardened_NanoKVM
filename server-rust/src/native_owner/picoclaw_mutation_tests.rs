@@ -254,6 +254,8 @@ fn onboarding_imports_a_successful_one_shot_and_retires_its_own_stage() {
         "settle-onboard-absent",
         "settle-onboard-failed-absent",
         "settle-onboard-stop-absent",
+        "settle-onboard-deadline-absent",
+        "settle-onboard-missing-receipt-absent",
     ] {
         run(case);
     }
@@ -1166,6 +1168,8 @@ fn onboard_spawns(case: &str) -> bool {
         "settle-onboard-absent"
             | "settle-onboard-failed-absent"
             | "settle-onboard-stop-absent"
+            | "settle-onboard-deadline-absent"
+            | "settle-onboard-missing-receipt-absent"
             | "settle-onboard-fail:pair-imported"
             | "settle-onboard-fail:committed-renamed"
             | "settle-onboard-fail:stage-renamed"
@@ -1270,8 +1274,15 @@ fn assert_onboarded() {
 
 fn onboard_case(case: &str, mut mutation: Mutation, pair: &SettlePair) {
     let marker = onboard_stage().join(".nanokvm-onboard-job");
-    if case == "settle-onboard-failed-absent" {
-        fs::write("/onboard-fail", b"fail").unwrap();
+    match case {
+        "settle-onboard-failed-absent" => fs::write("/onboard-fail", b"fail").unwrap(),
+        "settle-onboard-deadline-absent" => {
+            mutation.onboard_bound = Some(std::time::Duration::from_millis(300));
+        }
+        "settle-onboard-missing-receipt-absent" => {
+            fs::write("/onboard-missing-receipt", b"fixture").unwrap();
+        }
+        _ => {}
     }
     mutation.request_settlement();
     if onboard_spawns(case) {
@@ -1281,14 +1292,41 @@ fn onboard_case(case: &str, mut mutation: Mutation, pair: &SettlePair) {
             Path::new("/onboard-pid").exists()
         });
         assert!(marker.is_file());
-        if case == "settle-onboard-stop-absent" {
-            mutation.request_stop();
-        } else {
-            write_onboard_stage();
-            fs::write("/onboard-release", b"release").unwrap();
+        match case {
+            "settle-onboard-stop-absent" => mutation.request_stop(),
+            // Only the bound stops this one-shot; nothing releases it.
+            "settle-onboard-deadline-absent" => {}
+            _ => {
+                write_onboard_stage();
+                fs::write("/onboard-release", b"release").unwrap();
+            }
         }
     }
     let status = settle_until(&mut mutation);
+    if case == "settle-onboard-missing-receipt-absent" {
+        // A complete stage without the one-shot's receipt is never imported:
+        // the job stays fenced, and a later boot fails it.
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        let state = record();
+        assert_eq!(state[128 + 169], 4, "Applying");
+        assert!(marker.is_file());
+        assert!(!Path::new(HOME).join("config.json").exists());
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("an unreceipted one-shot returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 172], 3, "Failed");
+        assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+        assert!(!onboard_stage().exists());
+        assert_eq!(onboard_sides(), 0);
+        assert!(!Path::new(HOME).join("config.json").exists());
+        return;
+    }
     if let Some(point) = case.strip_prefix("settle-onboard-foreign-fail:") {
         // An unmarked stage beside this job's side tree is never adopted: the
         // later boot keeps the fence and both trees.
