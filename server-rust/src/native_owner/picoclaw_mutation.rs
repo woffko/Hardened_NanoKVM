@@ -268,8 +268,10 @@ impl Mutation {
                 self.submission.begin_apply()
             }
             TransitionStatus::Superseded => return MutationStatus::Superseded(id),
-            // A removal never resumes: the runtime itself is gone.
-            TransitionStatus::Removed => self.submission.begin_finish(RuntimeResult::NotRequested),
+            // Nothing to launch: the runtime is gone, or not configured yet.
+            TransitionStatus::CommittedWithoutLaunch => {
+                self.submission.begin_finish(RuntimeResult::NotRequested)
+            }
             TransitionStatus::Committed(generation) => {
                 self.launch = Some(generation);
                 match self.submission.resume_allowed() {

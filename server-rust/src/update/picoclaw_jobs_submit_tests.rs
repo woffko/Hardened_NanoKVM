@@ -21,7 +21,7 @@ fn request(kind: &str) -> Request {
         },
         "startup" => Request::Startup,
         "profile" => Request::Profile(Profile::Kvm),
-        "install" => Request::Install,
+        "install" => Request::Install { digest: [0x5d; 64] },
         "remove" => Request::Remove,
         _ => panic!("unknown fixture kind"),
     }

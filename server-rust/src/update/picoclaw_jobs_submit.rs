@@ -50,7 +50,10 @@ pub enum Request {
     },
     Startup,
     Profile(Profile),
-    Install,
+    /// The installer's staged executable, by its SHA-512.
+    Install {
+        digest: [u8; 64],
+    },
     Remove,
 }
 
@@ -61,7 +64,7 @@ impl Request {
             Self::Model { .. } => Kind::Model,
             Self::Startup => Kind::Startup,
             Self::Profile(_) => Kind::Profile,
-            Self::Install => Kind::Install,
+            Self::Install { .. } => Kind::Install,
             Self::Remove => Kind::Remove,
         }
     }
@@ -79,6 +82,7 @@ impl Request {
             }
             Self::Profile(Profile::Default) => [b"default", b"", b""],
             Self::Profile(Profile::Kvm) => [b"kvm", b"", b""],
+            Self::Install { digest } => [digest.as_slice(), b"", b""],
             _ => [b"", b"", b""],
         };
         let total = fields
@@ -131,6 +135,7 @@ struct Payload {
     plan: Option<accept::Plan>,
     removal: Option<accept::Removal>,
     profile: Option<accept::ProfilePlan>,
+    install: Option<accept::InstallPlan>,
     touched: bool,
 }
 
@@ -169,8 +174,9 @@ pub(crate) enum TransitionStatus {
     Refused,
     /// The planned change is installed; carries the installed generation.
     Committed(super::super::Generation),
-    /// The planned removal is durably done; there is nothing to resume.
-    Removed,
+    /// The change is durably done and nothing is launched for it: a removal,
+    /// or an install while no configuration exists yet.
+    CommittedWithoutLaunch,
     /// Resume intent is durable; the owner may launch the runtime now.
     Activating,
     /// The accepted source changed before apply: terminal failure receipt,
@@ -248,6 +254,7 @@ impl Submission {
                 plan: None,
                 removal: None,
                 profile: None,
+                install: None,
                 touched: false,
             })),
         }
@@ -414,7 +421,7 @@ impl Submission {
                 Some(
                     TransitionStatus::Committed(_)
                     | TransitionStatus::Activating
-                    | TransitionStatus::Removed,
+                    | TransitionStatus::CommittedWithoutLaunch,
                 ),
             ) => true,
             _ => false,

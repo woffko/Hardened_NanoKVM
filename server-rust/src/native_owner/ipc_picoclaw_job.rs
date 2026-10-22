@@ -28,6 +28,7 @@ const REPLY_MAGIC: &[u8; 8] = b"NKPJS001";
 const MODEL: u8 = 2;
 const STARTUP: u8 = 3;
 const PROFILE: u8 = 4;
+const INSTALL: u8 = 5;
 const REMOVE: u8 = 6;
 
 /// What a submission asks the broker to settle.
@@ -39,6 +40,10 @@ pub enum JobKind {
     /// The shipped default or KVM agent profile for the workspace.
     Profile {
         kvm: bool,
+    },
+    /// The installer's staged executable with exactly this SHA-512.
+    Install {
+        digest: [u8; 64],
     },
     /// Bounded, trimmed fields; see `picoclaw_model::check_request`.
     Model {
@@ -56,6 +61,7 @@ impl std::fmt::Debug for JobKind {
             Self::Remove => "Remove",
             Self::Profile { kvm: false } => "Profile { kvm: false }",
             Self::Profile { kvm: true } => "Profile { kvm: true }",
+            Self::Install { .. } => "Install { .. }",
             Self::Model { .. } => "Model { .. }",
         })
     }
@@ -67,13 +73,16 @@ impl JobKind {
             Self::Startup => STARTUP,
             Self::Remove => REMOVE,
             Self::Profile { .. } => PROFILE,
+            Self::Install { .. } => INSTALL,
             Self::Model { .. } => MODEL,
         }
     }
 
     fn fields(&self) -> [&str; 3] {
         match self {
-            Self::Startup | Self::Remove | Self::Profile { .. } => ["", "", ""],
+            Self::Startup | Self::Remove | Self::Profile { .. } | Self::Install { .. } => {
+                ["", "", ""]
+            }
             Self::Model {
                 model,
                 api_base,
@@ -96,6 +105,9 @@ impl JobKind {
         let mut hash = Sha256::new();
         hash.update(b"NanoKVM Pico job submission v1\0");
         hash.update([self.code(), self.flag()]);
+        if let Self::Install { digest } = self {
+            hash.update(digest);
+        }
         for field in self.fields() {
             hash.update((field.len() as u64).to_le_bytes());
             hash.update(field.as_bytes());
@@ -107,6 +119,7 @@ impl JobKind {
         match self {
             Self::Startup => PicoRequest::Startup,
             Self::Remove => PicoRequest::Remove,
+            Self::Install { digest } => PicoRequest::Install { digest },
             Self::Profile { kvm } => PicoRequest::Profile(if kvm {
                 PicoProfile::Kvm
             } else {
@@ -228,6 +241,9 @@ pub(super) fn encode_request(request: &JobRequest) -> Zeroizing<Vec<u8>> {
     if let Some(kind) = kind {
         bytes[9] = kind.code();
         bytes[56] = kind.flag();
+        if let JobKind::Install { digest } = kind {
+            bytes.extend_from_slice(digest);
+        }
         if let JobKind::Model { .. } = kind {
             for (index, field) in kind.fields().into_iter().enumerate() {
                 let offset = 56 + index * 2;
@@ -292,6 +308,13 @@ pub(super) fn decode_request(bytes: &[u8]) -> Option<JobRequest> {
     };
     if (bytes[8], bytes[9]) == (2, MODEL) {
         return submit(decode_model(bytes)?);
+    }
+    if (bytes[8], bytes[9]) == (2, INSTALL) {
+        let digest: [u8; 64] = bytes.get(PACKET..).and_then(|body| body.try_into().ok())?;
+        if bytes[56..PACKET].iter().any(|byte| *byte != 0) || digest == [0; 64] {
+            return None;
+        }
+        return submit(JobKind::Install { digest });
     }
     if (bytes[8], bytes[9]) == (2, PROFILE) {
         if bytes.len() != PACKET || bytes[56] > 1 || bytes[57..].iter().any(|byte| *byte != 0) {
@@ -682,6 +705,12 @@ fn nonce() -> io::Result<[u8; 16]> {
 /// Run one broker-owned Startup job to its durable end within `timeout`.
 pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
     run_job(JobKind::Startup, timeout)
+}
+
+/// Run one broker-owned Install job for the staged executable with exactly
+/// this SHA-512, to its durable end within `timeout`.
+pub fn run_install_job(digest: [u8; 64], timeout: Duration) -> io::Result<JobReply> {
+    run_job(JobKind::Install { digest }, timeout)
 }
 
 /// Run one broker-owned Profile job to its durable end within `timeout`.

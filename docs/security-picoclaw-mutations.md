@@ -286,6 +286,46 @@ Applying, after the pair and after Committed, each settled at a later boot.
 
 The backend's model update runs this job over the job transport (below).
 
+## Current Install settlement
+
+Installation is split. The backend keeps the network part: it downloads the
+release checksum and archive, verifies the archive's SHA-512 against that
+checksum, and extracts `picoclaw` into its scratch directory
+`/root/.picoclaw-cache`. That checksum proves integrity against the same
+origin, not provenance; package trust remains WP-13. The backend then submits
+an Install job carrying the extracted file's SHA-512 and never writes the
+rootfs runtime itself.
+
+The broker's Install job owns the rootfs change:
+
+- **Settlement.** The staged file must be a regular, single-link, root-owned
+  file that is not group- or world-writable, at most 128 MiB, and its streamed
+  SHA-512 must equal the request; otherwise the job refuses. An installed
+  executable with the same digest is a no-op that never stops a live runtime.
+  Otherwise the plan records the staged file's identity and digest and the
+  prior executable's identity (or its absence) before anything is stopped.
+- **Apply.** A live runtime is quiesced with resume kept. The staged file and
+  the prior executable are revalidated, and any difference ends the job as a
+  terminal failure with nothing changed. Applying is durable before the copy.
+  The copy goes into a private temporary in `/usr/bin` and is hashed again
+  while it is written. Only a matching copy is made 0755 and renamed over
+  exactly the planned prior file, or created without replacing anything when
+  there was none. Only that unrenamed temporary is ever removed on failure.
+- **Commit.** Committed binds the current pair's generation, so a previously
+  running runtime is relaunched with the new executable. A fresh install
+  without a configuration commits without a launch.
+
+An interrupted install settles at a later boot with the SAME plan. An
+executable that already has the planned digest is done. If the planned prior
+file is still in place, the install is redone from the staged file, which
+must still verify; anything else keeps the fence.
+
+Chroot fixtures cover a fresh install with and without a configuration, the
+no-op, a staged file that does not match, a live replacement whose relaunch
+truthfully fails in a chroot without the owner helper, and failures after
+the plan, Closed, Applying, the installation and Committed, each settled at a
+later boot.
+
 ## Current Profile settlement
 
 The Profile job selects the shipped default or KVM agent profile for the
@@ -408,6 +448,8 @@ Settlement by durable phase:
   described in Current Remove settlement: Changed with Removed.
 - **Applying (Profile).** The SAME profile plan completes, as described in
   Current Profile settlement; Committed and Activating settle as for Startup.
+- **Applying (Install).** The SAME install plan completes, as described in
+  Current Install settlement; Committed and Activating settle as for Startup.
 - **Any other phase or kind.** No executor exists; the fence remains.
 
 Each settled job then retires payload, source and plan, syncs, and retires the
@@ -446,9 +488,9 @@ with matching peer credentials. Each datagram is one request with a fixed
 
 - Cursor: the next submission cursor of an idle store.
 - Submit(cursor, nonce, kind): Startup, Remove, Profile with its one profile
-  byte, or Model with its three bounded fields after the header. Model field
-  lengths must account for the datagram exactly, and the fields must pass the
-  model request check.
+  byte, Install with a 64-byte SHA-512 after the header, or Model with its
+  three bounded fields after the header. Model field lengths must account for
+  the datagram exactly, and the fields must pass the model request check.
 - Observe(job id).
 
 Each reply is one fixed 64-byte frame: a result code, the cursor or job
@@ -488,10 +530,11 @@ client nonce, so it is known before acceptance.
 **Backend callers.** `ensure_startup_defaults` (gateway session start and
 runtime start) runs a Startup job through `run_startup_job`, and the model
 update runs a Model job through `run_model_job`, after the same field check.
-The uninstall runs a Remove job through `run_remove_job` and the profile
-selector a Profile job through `run_profile_job`; both report any failure
-instead of ignoring it. No handler writes or deletes the pair, the
-credential, the executable or the workspace profile document. A lost reply re-observes the same job; only
+The uninstall runs a Remove job through `run_remove_job`, the profile
+selector a Profile job through `run_profile_job`, and the installer an
+Install job through `run_install_job`; each reports any failure instead of
+ignoring it. No handler writes or deletes the pair, the credential, the
+executable or the workspace profile document. A lost reply re-observes the same job; only
 an explicit non-acceptance leads to a fresh submission. A Changed or Noop
 receipt of the job's own kind is success, and a superseded change is retried
 once. Refusal, Busy and RecoveryRequired are errors with fixed text.
@@ -500,14 +543,14 @@ The legacy in-handler writers are removed. The direct pair writer and the
 token provisioning helper remain only as test fixtures.
 
 A chroot fixture runs the real daemon loop over its real endpoint for Startup,
-Model, Profile and Remove jobs. It covers no-op and change jobs with their exact receipts, the
+Model, Profile, Install and Remove jobs. It covers no-op and change jobs with their exact receipts, the
 broker's return, identical resubmission, a different request with the same
 identity, a stale cursor, an unknown id, a malformed datagram, and free
 admissions afterwards.
 
 Still open:
 
-- the onboarding and install executors, and their API and S96 callers;
+- the onboarding executor and its API and S96 callers;
 - a pending pair journal still refuses acceptance, as it refused the legacy
   writer. Stopped recovery of that journal inside the job is not implemented.
 

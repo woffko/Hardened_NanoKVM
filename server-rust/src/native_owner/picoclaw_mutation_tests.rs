@@ -55,6 +55,7 @@ fn command(root: &Path, case: &str) -> Command {
         .or_else(|| change_failure(case))
         .or_else(|| case.strip_prefix("settle-remove-fail:"))
         .or_else(|| case.strip_prefix("settle-profile-fail:"))
+        .or_else(|| case.strip_prefix("settle-install-fail:"))
     {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
@@ -239,6 +240,28 @@ fn model_settlement_shares_the_executor_with_its_own_change_before_the_defaults(
     }
     for point in ["applying-renamed", "pair-published", "committed-renamed"] {
         run(&format!("settle-model-change-fail:{point}"));
+    }
+}
+
+#[test]
+fn install_puts_exactly_the_verified_staged_executable_in_place() {
+    for case in [
+        "settle-install-absent",
+        "settle-install-unconfigured-absent",
+        "settle-install-noop-absent",
+        "settle-install-refused-absent",
+        "settle-install-replace-live",
+    ] {
+        run(case);
+    }
+    for point in [
+        "plan-durable",
+        "closed-renamed",
+        "applying-renamed",
+        "binary-installed",
+        "committed-renamed",
+    ] {
+        run(&format!("settle-install-fail:{point}"));
     }
 }
 
@@ -545,7 +568,8 @@ fn mutation_child() {
         && !case.starts_with("settle-internal-fail:")
         && !case.starts_with("settle-model-change-fail:")
         && !case.starts_with("settle-remove-fail:")
-        && !case.starts_with("settle-profile-fail:");
+        && !case.starts_with("settle-profile-fail:")
+        && !case.starts_with("settle-install-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -912,6 +936,13 @@ fn request(case: &str) -> PicoRequest {
     if case.starts_with("settle-profile-") {
         return PicoRequest::Profile(crate::native_owner::broker::PicoProfile::Kvm);
     }
+    if case.starts_with("settle-install-") {
+        let mut digest = staged_digest();
+        if case == "settle-install-refused-absent" {
+            digest[0] ^= 1;
+        }
+        return PicoRequest::Install { digest };
+    }
     if case.starts_with("settle-model-") {
         PicoRequest::Model {
             model: zeroize::Zeroizing::new(MODEL.into()),
@@ -991,9 +1022,13 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
             format!("{INTERNAL}\n").as_bytes(),
         );
     }
+    if case.starts_with("settle-install-") {
+        install_fixture(case);
+    }
     if case.starts_with("settle-refused-")
         || case == "settle-model-refused-absent"
         || case == "settle-remove-noop-absent"
+        || case == "settle-install-unconfigured-absent"
     {
         return SettlePair {
             config: (Vec::new(), 0),
@@ -1070,6 +1105,43 @@ fn remove_fixture(case: &str) {
     let workspace = Path::new(HOME).join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     private_write(&workspace.join("AGENT.md"), AGENT);
+}
+
+const STAGED_BINARY: &[u8] = b"synthetic staged runtime executable, never run\n";
+const OLD_BINARY: &[u8] = b"synthetic previous runtime executable, never run\n";
+
+pub(crate) fn staged_digest() -> [u8; 64] {
+    use sha2::Digest as _;
+    sha2::Sha512::digest(STAGED_BINARY).into()
+}
+
+fn executable_write(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// The installer's staged executable and the executable a case starts from.
+fn install_fixture(case: &str) {
+    for directory in ["/root/.picoclaw-cache", "/usr/bin"] {
+        fs::create_dir_all(directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    executable_write(Path::new("/root/.picoclaw-cache/picoclaw"), STAGED_BINARY);
+    match case {
+        "settle-install-noop-absent" => executable_write(Path::new(BINARY), STAGED_BINARY),
+        "settle-install-replace-live" | "settle-install-refused-absent" => {
+            executable_write(Path::new(BINARY), OLD_BINARY)
+        }
+        _ => {}
+    }
+}
+
+// The installed executable's bytes, after checking its executable mode.
+pub(crate) fn installed_binary() -> Option<Vec<u8>> {
+    let metadata = fs::symlink_metadata(BINARY).ok()?;
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o755);
+    Some(fs::read(BINARY).unwrap())
 }
 
 const SHIPPED_DEFAULT: &[u8] = b"---\nname: pico\n---\nsynthetic default profile\n";
@@ -1293,6 +1365,46 @@ fn settle_case(
         assert_eq!(settled[RECEIPT + 169], 8, "Completed");
         assert_pair_unchanged(pair);
         drop(StateWriters::default().configuration().unwrap());
+        return;
+    }
+    if let Some(point) = case.strip_prefix("settle-install-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        for _ in 0..3 {
+            assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
+        }
+        let state = record();
+        let phase = match point {
+            "plan-durable" => 1,
+            "closed-renamed" => 3,
+            "committed-renamed" => 5,
+            _ => 4,
+        };
+        assert_eq!(state[128 + 169], phase);
+        assert_eq!(state[128 + 168], 5, "Install");
+        assert_eq!(members_present(), [true; 3]);
+        assert!(plan_present(), "the install stays bound to its plan");
+        let installed = matches!(point, "binary-installed" | "committed-renamed");
+        assert!(installed_binary().as_deref() == installed.then_some(STAGED_BINARY));
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain install returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+        if phase < 4 {
+            assert_eq!(settled[RECEIPT + 172], 4, "Cancelled");
+            assert!(installed_binary().is_none(), "nothing was installed");
+        } else {
+            assert_eq!(settled[RECEIPT + 172], 1, "Changed");
+            assert!(installed_binary().as_deref() == Some(STAGED_BINARY));
+        }
+        assert_pair_unchanged(pair);
         return;
     }
     if let Some(point) = case.strip_prefix("settle-profile-fail:") {
@@ -1550,6 +1662,61 @@ fn settle_case(
             );
             assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
             drop(assert_released(mutation));
+        }
+        "settle-install-noop-absent" => {
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 168], 5, "Install");
+            assert_eq!(state[RECEIPT + 172], 2, "Noop");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert!(installed_binary().as_deref() == Some(STAGED_BINARY));
+            assert!(!plan_present());
+            drop(assert_released(mutation));
+        }
+        "settle-install-refused-absent" => {
+            // A staged file that is not the requested one refuses before any stop.
+            let MutationStatus::SettlementRefused(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert!(installed_binary().as_deref() == Some(OLD_BINARY));
+            drop(assert_released(mutation));
+        }
+        "settle-install-absent"
+        | "settle-install-unconfigured-absent"
+        | "settle-install-replace-live" => {
+            let MutationStatus::Completed(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::Completed(id));
+            }
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 168], 5, "Install");
+            assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            // No owner helper exists in this chroot, so a relaunch attempt
+            // truthfully fails instead of claiming the old task resumed.
+            assert_eq!(
+                state[RECEIPT + 173],
+                if live { 4 } else { 2 },
+                "runtime result"
+            );
+            assert_eq!(state[RECEIPT + 174], u8::from(live));
+            assert!(installed_binary().as_deref() == Some(STAGED_BINARY));
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
+            if case != "settle-install-unconfigured-absent" {
+                assert_pair_unchanged(pair);
+            }
+            let broker = assert_released(mutation);
+            if live {
+                shutdown(broker);
+            }
         }
         "settle-profile-noop-absent" => {
             let MutationStatus::Completed(_) = status else {

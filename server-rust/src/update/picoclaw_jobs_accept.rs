@@ -481,13 +481,91 @@ pub(super) fn decode_profile(record: &Record, bytes: &[u8]) -> Result<ProfilePla
     })
 }
 
+const INSTALL_MAGIC: &[u8; 8] = b"NKPINS01";
+const INSTALL_BYTES: usize = 280;
+
+/// The executable an Install job puts in place: the staged file's exact
+/// identity and SHA-512, and the prior installed file (or its absence).
+pub(super) struct InstallPlan {
+    pub(super) staged: crate::update::picoclaw_runtime::Asset,
+    pub(super) digest: [u8; 64],
+    pub(super) prior: Option<crate::update::picoclaw_runtime::Asset>,
+}
+
+fn encode_install(record: &Record, plan: &InstallPlan) -> [u8; INSTALL_BYTES] {
+    use crate::update::picoclaw_runtime::Asset;
+    let mut bytes = [0; INSTALL_BYTES];
+    bytes[..8].copy_from_slice(INSTALL_MAGIC);
+    bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[16..32].copy_from_slice(&record.nonce);
+    bytes[32..64].copy_from_slice(&record.source);
+    bytes[64..64 + Asset::BYTES].copy_from_slice(&plan.staged.encode());
+    bytes[120..184].copy_from_slice(&plan.digest);
+    if let Some(prior) = plan.prior {
+        bytes[184] = 1;
+        bytes[192..192 + Asset::BYTES].copy_from_slice(&prior.encode());
+    }
+    let hash = private_digest(b"NanoKVM Pico install plan v1\0", &bytes[..248]);
+    bytes[248..].copy_from_slice(&hash);
+    bytes
+}
+
+pub(super) fn decode_install(record: &Record, bytes: &[u8]) -> Result<InstallPlan> {
+    use crate::update::picoclaw_runtime::Asset;
+    if bytes.len() != INSTALL_BYTES
+        || &bytes[..8] != INSTALL_MAGIC
+        || private_digest(b"NanoKVM Pico install plan v1\0", &bytes[..248]) != bytes[248..]
+        || bytes[8..16] != record.sequence.to_le_bytes()
+        || bytes[16..32] != record.nonce
+        || bytes[32..64] != record.source
+        || bytes[185..192].iter().any(|byte| *byte != 0)
+    {
+        return Err(invalid());
+    }
+    let asset = |offset: usize| -> Result<Asset> {
+        Ok(Asset::decode(
+            bytes[offset..offset + Asset::BYTES]
+                .try_into()
+                .map_err(|_| invalid())?,
+        ))
+    };
+    let prior = match bytes[184] {
+        0 if bytes[192..248].iter().all(|byte| *byte == 0) => None,
+        1 => Some(asset(192)?),
+        _ => return Err(invalid()),
+    };
+    Ok(InstallPlan {
+        staged: asset(64)?,
+        digest: bytes[120..184].try_into().map_err(|_| invalid())?,
+        prior,
+    })
+}
+
 // The plan member of a job, by the job's kind.
 fn check_plan(record: &Record, bytes: &[u8]) -> Result<()> {
     match record.kind {
         Kind::Remove => decode_removal(record, bytes).map(|_| ()),
         Kind::Profile => decode_profile(record, bytes).map(|_| ()),
+        Kind::Install => decode_install(record, bytes).map(|_| ()),
         _ => decode_plan(record, bytes).map(|_| ()),
     }
+}
+
+// Install exactly the planned executable once: installed already (done), the
+// planned prior still in place (installed now from the staged file, which
+// must still verify), or anything else (false: nothing written).
+fn complete_install(plan: &InstallPlan) -> Result<bool> {
+    let current = crate::update::picoclaw_runtime::installed()?;
+    if current.is_some_and(|(_, digest)| digest == plan.digest) {
+        return Ok(true);
+    }
+    if current.map(|(asset, _)| asset) != plan.prior
+        || crate::update::picoclaw_runtime::staged()? != Some((plan.staged, plan.digest))
+    {
+        return Ok(false);
+    }
+    crate::update::picoclaw_runtime::install(plan.staged, plan.digest, plan.prior)?;
+    Ok(true)
 }
 
 // The workspace an accepted source's config selects.
@@ -1088,6 +1166,49 @@ fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<T
     Ok(TransitionStatus::Refused)
 }
 
+/// Install: put the installer's staged executable in place when its SHA-512
+/// is the requested one. An installed equal executable is a no-op; a staged
+/// file that is missing, unsafe or different refuses.
+fn settle_install(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let Some(Request::Install { digest }) = payload.request.as_ref() else {
+        return Err(invalid());
+    };
+    let digest = *digest;
+    let (Ok(staged), Ok(installed)) = (
+        crate::update::picoclaw_runtime::staged(),
+        crate::update::picoclaw_runtime::installed(),
+    ) else {
+        return refuse(store, record, &mut payload.touched);
+    };
+    if installed.is_some_and(|(_, current)| current == digest) {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Noop;
+        record.runtime = if record.was_running && !record.resume_allowed {
+            Runtime::Suppressed
+        } else {
+            Runtime::Unchanged
+        };
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Completed);
+    }
+    let Some((staged, staged_digest)) = staged else {
+        return refuse(store, record, &mut payload.touched);
+    };
+    if staged_digest != digest {
+        return refuse(store, record, &mut payload.touched);
+    }
+    let plan = InstallPlan {
+        staged,
+        digest,
+        prior: installed.map(|(asset, _)| asset),
+    };
+    store.write_plan(&encode_install(&record, &plan), &mut payload.touched)?;
+    payload.install = Some(plan);
+    Ok(TransitionStatus::Planned)
+}
+
 /// Profile: replace the workspace AGENT.md with the requested shipped profile,
 /// but only an absent document or an exact shipped one; a customized document
 /// is kept and the request refused. An equal document is a no-op.
@@ -1194,6 +1315,9 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     if record.kind == Kind::Profile {
         return settle_profile(payload, record);
     }
+    if record.kind == Kind::Install {
+        return settle_install(payload, record);
+    }
     if !matches!(record.kind, Kind::Startup | Kind::Model) {
         // The other fixed operations have no settlement executor yet.
         return refuse(store, record, &mut payload.touched);
@@ -1275,7 +1399,7 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.phase != Phase::Closed
         || !matches!(
             record.kind,
-            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile
+            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile | Kind::Install
         )
         || store.members[3].is_none()
     {
@@ -1286,6 +1410,9 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     }
     if record.kind == Kind::Profile {
         return apply_profile(payload, record);
+    }
+    if record.kind == Kind::Install {
+        return apply_install(payload, record);
     }
     let plan = payload.plan.as_ref().ok_or_else(invalid)?;
     let source = payload.source.as_ref().ok_or_else(invalid)?;
@@ -1330,6 +1457,47 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     Ok(TransitionStatus::Committed(
         super::super::super::Generation::from_documents(&installed),
     ))
+}
+
+/// Install the planned executable of a quiesced Install job. The staged file
+/// and the prior executable are revalidated; any difference ends the job as a
+/// terminal failure with nothing changed. Applying is durable before the
+/// atomic replacement. Without a configuration nothing is launched.
+fn apply_install(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let plan = payload.install.as_ref().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    source.lock_exclusive()?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let unchanged = crate::update::picoclaw_runtime::staged()? == Some((plan.staged, plan.digest))
+        && crate::update::picoclaw_runtime::installed()?.map(|(asset, _)| asset) == plan.prior;
+    if !unchanged {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Failed;
+        record.runtime = Runtime::NotRequested;
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Superseded);
+    }
+    record.phase = Phase::Applying;
+    store.publish(record, &mut payload.touched, Publication::Applying)?;
+    crate::update::picoclaw_runtime::install(plan.staged, plan.digest, plan.prior)?;
+    #[cfg(test)]
+    checkpoint("binary", "installed")?;
+    // A running runtime had a configuration; a fresh install may have none.
+    let generation = if view.home_present && view.config.is_some() {
+        Some(super::super::super::Generation::from_documents(
+            &super::super::super::pair::read_installed(&source.directory)?,
+        ))
+    } else {
+        None
+    };
+    record.phase = Phase::Committed;
+    store.publish(record, &mut payload.touched, Publication::Committed)?;
+    Ok(match generation {
+        Some(generation) => TransitionStatus::Committed(generation),
+        None => TransitionStatus::CommittedWithoutLaunch,
+    })
 }
 
 /// Install the planned profile of a quiesced Profile job. Under the job's
@@ -1421,7 +1589,7 @@ fn apply_removal(payload: &mut Payload, mut record: Record) -> Result<Transition
     checkpoint("binary", "removed")?;
     record.phase = Phase::Committed;
     store.publish(record, &mut payload.touched, Publication::Committed)?;
-    Ok(TransitionStatus::Removed)
+    Ok(TransitionStatus::CommittedWithoutLaunch)
 }
 
 /// Record the intent to resume before the native launch.
@@ -1451,7 +1619,7 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
         || record.boot != payload.facts.boot
         || !matches!(
             record.kind,
-            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile
+            Kind::Startup | Kind::Model | Kind::Remove | Kind::Profile | Kind::Install
         )
     {
         return Err(fenced());
@@ -1829,6 +1997,16 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
+        (Phase::Applying, Kind::Install) => {
+            let Some(plan) = &contents[3] else {
+                return Ok(false);
+            };
+            if !complete_install(&decode_install(&record, plan)?)? {
+                return Ok(false);
+            }
+            record.outcome = Outcome::Changed;
+            startup_runtime(&mut record);
+        }
         (Phase::Applying, Kind::Remove) => {
             let source = contents[2].take();
             let (Some(plan), Some(source)) = (&contents[3], source) else {
@@ -1845,12 +2023,12 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             record.outcome = Outcome::Changed;
             record.runtime = Runtime::Removed;
         }
-        (Phase::Committed, Kind::Startup | Kind::Model | Kind::Profile) => {
+        (Phase::Committed, Kind::Startup | Kind::Model | Kind::Profile | Kind::Install) => {
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
         }
         // The relaunched scope did not survive this boot.
-        (Phase::Activating, Kind::Startup | Kind::Model | Kind::Profile) => {
+        (Phase::Activating, Kind::Startup | Kind::Model | Kind::Profile | Kind::Install) => {
             record.outcome = Outcome::Changed;
             record.runtime = Runtime::ResumeFailed;
         }

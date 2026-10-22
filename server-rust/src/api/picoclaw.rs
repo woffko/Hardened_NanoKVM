@@ -2595,7 +2595,16 @@ async fn run_install_runtime() -> Result<()> {
     };
 
     set_install_progress("installing", 95, None);
-    install_binary(&extracted, Path::new(PICOCLAW_BINARY_PATH))?;
+    // The broker installs exactly this verified staged executable as one job,
+    // stopping and relaunching a live runtime; this handler never writes the
+    // rootfs runtime itself.
+    let digest = task::spawn_blocking(move || sha512_file(&extracted))
+        .await
+        .map_err(|_| AppError::Internal("picoclaw digest task failed".into()))??;
+    run_config_job(INSTALL_JOB_KIND, move || {
+        crate::native_owner::broker::ipc::run_install_job(digest, CONFIG_JOB_TIMEOUT)
+    })
+    .await?;
 
     let _ = fs::remove_dir_all(cache);
     set_runtime_status(RuntimeStatus {
@@ -2737,12 +2746,11 @@ fn extract_picoclaw_binary(archive_path: &Path, destination: &Path) -> Result<Pa
     ))
 }
 
-fn install_binary(src: &Path, target: &Path) -> Result<()> {
-    let tmp = target.with_extension("tmp");
-    fs::copy(src, &tmp)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, target)?;
-    Ok(())
+fn sha512_file(path: &Path) -> Result<[u8; 64]> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha512::new();
+    io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().into())
 }
 
 enum PicoControl {
@@ -3093,6 +3101,7 @@ const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_JOB_KIND: u8 = 2;
 const STARTUP_JOB_KIND: u8 = 3;
 const PROFILE_JOB_KIND: u8 = 4;
+const INSTALL_JOB_KIND: u8 = 5;
 const REMOVE_JOB_KIND: u8 = 6;
 
 enum JobDone {
@@ -3110,10 +3119,12 @@ fn job_outcome(reply: crate::native_owner::broker::ipc::JobReply, kind: u8) -> R
         (JobCode::Ok, [code, 8, 1 | 2, _]) if code == kind => Ok(JobDone::Done),
         (JobCode::Ok, [code, 8, 3, 2]) if code == kind => Ok(JobDone::Superseded),
         (JobCode::Ok, [code, 8, 3, _]) if code == kind => Err(AppError::Config(
-            if kind == PROFILE_JOB_KIND {
-                "the workspace AGENT.md is customized or unavailable and was kept"
-            } else {
-                "picoclaw configuration cannot take this change"
+            match kind {
+                PROFILE_JOB_KIND => {
+                    "the workspace AGENT.md is customized or unavailable and was kept"
+                }
+                INSTALL_JOB_KIND => "the staged picoclaw executable is missing or does not match",
+                _ => "picoclaw configuration cannot take this change",
             }
             .into(),
         )),

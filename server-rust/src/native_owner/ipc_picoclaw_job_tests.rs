@@ -77,6 +77,29 @@ fn job_frames_round_trip_and_refuse_every_unfixed_field() {
     );
     wrapping[9] = 1;
     assert_eq!(decode_request(&wrapping), None, "no other kind is wired");
+    // An install carries exactly one nonzero SHA-512 after the header.
+    let install = JobRequest::Submit {
+        cursor,
+        nonce: [9; 16],
+        kind: JobKind::Install { digest: [0x42; 64] },
+    };
+    let bytes = encode_request(&install);
+    assert_eq!((bytes.len(), bytes[9]), (PACKET + 64, 5));
+    assert_eq!(decode_request(&bytes), Some(install.clone()));
+    assert_eq!(decode_request(&bytes[..PACKET + 63]), None);
+    let mut longer = bytes.to_vec();
+    longer.push(0);
+    assert_eq!(decode_request(&longer), None);
+    let mut zero = bytes.to_vec();
+    zero[PACKET..].fill(0);
+    assert_eq!(decode_request(&zero), None, "a zero digest names no file");
+    let mut padded = bytes.to_vec();
+    padded[56] = 1;
+    assert_eq!(decode_request(&padded), None);
+    assert_ne!(
+        JobKind::Install { digest: [0x42; 64] }.digest(),
+        JobKind::Install { digest: [0x43; 64] }.digest()
+    );
     // The profile flag is one typed byte, never another value.
     let mut profile = encode_request(&JobRequest::Submit {
         cursor,
@@ -232,6 +255,7 @@ mod endpoint {
             "settle-model-change-absent",
             "settle-remove-absent",
             "settle-profile-change-absent",
+            "settle-install-absent",
         ] {
             let root = fixture::root();
             let output = command(root.path(), case).output().unwrap();
@@ -268,6 +292,10 @@ mod endpoint {
             JobKind::Remove
         } else if case.starts_with("settle-profile-") {
             JobKind::Profile { kvm: true }
+        } else if case.starts_with("settle-install-") {
+            JobKind::Install {
+                digest: fixture::staged_digest(),
+            }
         } else {
             JobKind::Startup
         };
@@ -276,6 +304,9 @@ mod endpoint {
             JobKind::Startup => run_startup_job(Duration::from_secs(30)).unwrap(),
             JobKind::Remove => run_remove_job(Duration::from_secs(30)).unwrap(),
             JobKind::Profile { kvm } => run_profile_job(*kvm, Duration::from_secs(30)).unwrap(),
+            JobKind::Install { digest } => {
+                run_install_job(*digest, Duration::from_secs(30)).unwrap()
+            }
             JobKind::Model {
                 model,
                 api_base,
@@ -301,6 +332,14 @@ mod endpoint {
                 "Completed Changed/NotRequested"
             );
             fixture::assert_profile_installed();
+            fixture::assert_pair_unchanged(pair);
+        } else if let JobKind::Install { .. } = kind {
+            assert_eq!(
+                reply.receipt,
+                [5, 8, 1, 2],
+                "Completed Changed/NotRequested"
+            );
+            assert!(fixture::installed_binary().is_some());
             fixture::assert_pair_unchanged(pair);
         } else {
             assert_eq!(
