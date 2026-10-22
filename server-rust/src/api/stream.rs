@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::broadcast,
+    sync::{broadcast, oneshot},
     time::{self, MissedTickBehavior},
 };
 use tracing::{info, warn};
@@ -690,20 +690,59 @@ fn h264_direct_producer_action(
 pub async fn update_frame_detect(
     Json(req): Json<UpdateFrameDetectReq>,
 ) -> Result<impl IntoResponse> {
-    kvm::set_frame_detect(if req.enabled {
+    let frame = if req.enabled {
         FRAME_DETECT_INTERVAL
     } else {
         0
-    })?;
+    };
+    libkvm(move || kvm::set_frame_detect(frame)).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn stop_frame_detect(Json(req): Json<StopFrameDetectReq>) -> Result<impl IntoResponse> {
     let duration = Duration::from_secs(req.duration.unwrap_or(10).max(1));
-    kvm::set_frame_detect(0)?;
-    time::sleep(duration).await;
-    kvm::set_frame_detect(FRAME_DETECT_INTERVAL)?;
+    owned_interval(
+        || kvm::set_frame_detect(0),
+        duration,
+        || kvm::set_frame_detect(FRAME_DETECT_INTERVAL),
+    )
+    .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+/// Run a libkvm call on a blocking thread. Its calls wait on the capture mutex
+/// that frame reads hold, which would stall an async worker and with it HID,
+/// video and every other request.
+pub(crate) async fn libkvm<T, F>(work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| AppError::Internal("libkvm call failed".to_string()))?
+}
+
+/// Apply `first`, wait `hold`, then apply `then`, all in a task of its own, so
+/// a lost client cannot leave the first state in place. A failed `first`
+/// changed nothing and skips `then`.
+pub(crate) async fn owned_interval<F, G>(first: F, hold: Duration, then: G) -> Result<()>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+    G: FnOnce() -> Result<()> + Send + 'static,
+{
+    let (reply, done) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = async {
+            libkvm(first).await?;
+            time::sleep(hold).await;
+            libkvm(then).await
+        }
+        .await;
+        drop(reply.send(result));
+    });
+    done.await
+        .map_err(|_| AppError::Internal("libkvm interval ended without a result".to_string()))?
 }
 
 pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
@@ -1022,6 +1061,52 @@ fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_interval_restores_its_state_after_a_lost_client() {
+        use super::{AppError, owned_interval};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU8, Ordering},
+        };
+        use std::time::Duration;
+        let state = Arc::new(AtomicU8::new(0));
+        let request = tokio::spawn({
+            let (first, then) = (Arc::clone(&state), Arc::clone(&state));
+            owned_interval(
+                move || {
+                    first.store(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                Duration::from_millis(200),
+                move || {
+                    then.store(2, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(state.load(Ordering::SeqCst), 1);
+        // The HTTP handler's future is dropped when its client goes away.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        // A failed first step changes nothing, so the second never runs.
+        let untouched = Arc::new(AtomicU8::new(0));
+        let then = Arc::clone(&untouched);
+        let failed = owned_interval(
+            || Err(AppError::Internal("synthetic".into())),
+            Duration::from_millis(1),
+            move || {
+                then.store(2, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(untouched.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn an_unchanged_mjpeg_frame_is_neither_sent_nor_a_failure() {
         use super::{MJPEG_FRAME_UNCHANGED, MjpegRead, classify_mjpeg_read};

@@ -376,7 +376,8 @@ fn rename_host_entries(hosts: &str, old: &str, new: &str) -> Option<String> {
 }
 
 pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
-    stream::set_screen_value(&req.kind, req.value)?;
+    let (kind, value) = (req.kind.clone(), req.value);
+    stream::libkvm(move || stream::set_screen_value(&kind, value)).await?;
     info!(kind = %req.kind, value = req.value, "updated screen setting");
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -441,22 +442,28 @@ pub async fn get_hdmi_state() -> Result<impl IntoResponse> {
 }
 
 pub async fn enable_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(true)?;
+    stream::libkvm(|| kvm::set_hdmi(true)).await?;
     persist_hdmi_enabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn disable_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(false)?;
+    stream::libkvm(|| kvm::set_hdmi(false)).await?;
     persist_hdmi_disabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn reset_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(false)?;
-    time::sleep(Duration::from_secs(1)).await;
-    kvm::set_hdmi(true)?;
-    persist_hdmi_enabled()?;
+    // A lost client must not leave HDMI capture switched off.
+    stream::owned_interval(
+        || kvm::set_hdmi(false).map(drop),
+        Duration::from_secs(1),
+        || {
+            kvm::set_hdmi(true)?;
+            persist_hdmi_enabled()
+        },
+    )
+    .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
