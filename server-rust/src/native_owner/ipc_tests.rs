@@ -765,8 +765,23 @@ fn exchange(channel: &mut Channel, op: Operation) -> Reply {
     });
     reply.unwrap()
 }
+#[track_caller]
 fn observed(channel: &mut Channel, mode: Mode) {
-    until(|| exchange(channel, Operation::Observe).mode == mode);
+    let start = Instant::now();
+    let mut observations = 0_u64;
+    loop {
+        let reply = exchange(channel, Operation::Observe);
+        observations += 1;
+        if reply.mode == mode {
+            return;
+        }
+        assert!(
+            start.elapsed() < FIXTURE_WAIT,
+            "expected {mode:?}; last_reply={reply:?}; observations={observations}; elapsed={:?}",
+            start.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 // Same bound as Channel-based fixtures, without turning a stream timeout into
