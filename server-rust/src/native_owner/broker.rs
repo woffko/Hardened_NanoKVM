@@ -75,8 +75,10 @@ impl Broker {
     /// neither acceptance nor a public status is a native closure capability.
     pub fn begin_picoclaw_mutation(mut self) -> PicoMutationAdmission {
         match self.prepare_picoclaw_submission() {
-            Ok(submission) => PicoMutationAdmission::Owned(PicoMutation::new(self, submission)),
-            Err(_) => PicoMutationAdmission::Refused(self),
+            Ok(submission) => {
+                PicoMutationAdmission::Owned(Box::new(PicoMutation::new(self, submission)))
+            }
+            Err(_) => PicoMutationAdmission::Refused(Box::new(self)),
         }
     }
 
@@ -231,6 +233,22 @@ impl Broker {
         &mut self,
         command: std::process::Command,
         _admission: &RuntimePermit,
+        generation: crate::update::picoclaw_config::Generation,
+    ) -> Result<(), StartFailure> {
+        self.check_picoclaw_launch()
+            .map_err(StartFailure::Journal)?;
+        // Active remains durable before spawn, exactly as for other roles.
+        self.journal.begin().map_err(StartFailure::Journal)?;
+        self.group
+            .start_picoclaw(command, generation)
+            .map_err(StartFailure::Scope)
+    }
+
+    /// Launch for a settled Startup job. Its retained submission holds Update
+    /// and Config for the whole call, so no separate runtime permit exists.
+    fn start_picoclaw_for_job(
+        &mut self,
+        command: std::process::Command,
         generation: crate::update::picoclaw_config::Generation,
     ) -> Result<(), StartFailure> {
         self.check_picoclaw_launch()

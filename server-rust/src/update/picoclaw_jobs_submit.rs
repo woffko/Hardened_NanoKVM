@@ -132,6 +132,18 @@ enum Advance {
     Stop { id: JobId, explicit: bool },
     Closed { proof: ClosedPico, explicit: bool },
     Settle,
+    Apply,
+    Activate,
+    Finish(RuntimeResult),
+}
+
+/// Runtime result the owner observed for a committed change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeResult {
+    NotRequested,
+    Resumed,
+    ResumeFailed,
+    Suppressed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -148,6 +160,13 @@ pub(crate) enum TransitionStatus {
     Planned,
     /// Settlement cannot run for this accepted job; nothing was changed.
     Refused,
+    /// The planned change is installed; carries the installed generation.
+    Committed(super::super::Generation),
+    /// Resume intent is durable; the owner may launch the runtime now.
+    Activating,
+    /// The accepted source changed before apply: terminal failure receipt,
+    /// nothing changed and the job retired.
+    Superseded,
     Failed,
 }
 
@@ -345,18 +364,45 @@ impl Submission {
         self.begin_transition(Advance::Settle)
     }
 
+    pub(crate) fn begin_apply(&mut self) -> Result<()> {
+        self.begin_transition(Advance::Apply)
+    }
+
+    pub(crate) fn begin_activation(&mut self) -> Result<()> {
+        self.begin_transition(Advance::Activate)
+    }
+
+    pub(crate) fn begin_finish(&mut self, resume: RuntimeResult) -> Result<()> {
+        self.begin_transition(Advance::Finish(resume))
+    }
+
     fn begin_transition(&mut self, advance: Advance) -> Result<()> {
-        let settle = matches!(advance, Advance::Settle);
-        let ready = match &self.transition {
-            TransitionWorker::Idle => true,
+        let settled = match &self.transition {
+            TransitionWorker::Idle => None,
+            TransitionWorker::Settled(status) => Some(*status),
+            TransitionWorker::Running(_) => return Err(fenced()),
+        };
+        // Each step may only follow its own predecessor; the store re-checks
+        // the durable phase before publishing anything.
+        let ready = match (&advance, settled) {
+            (Advance::Settle | Advance::Stop { .. } | Advance::Closed { .. }, None) => true,
             // Stop/close may follow settlement, and an explicit Stop may
             // lower a quiesced job's resume permission in place.
-            TransitionWorker::Settled(
-                TransitionStatus::Stopping
-                | TransitionStatus::Closed
-                | TransitionStatus::Planned
-                | TransitionStatus::Refused,
-            ) => !settle,
+            (
+                Advance::Stop { .. } | Advance::Closed { .. },
+                Some(
+                    TransitionStatus::Stopping
+                    | TransitionStatus::Closed
+                    | TransitionStatus::Planned
+                    | TransitionStatus::Refused,
+                ),
+            ) => true,
+            (Advance::Apply, Some(TransitionStatus::Closed)) => true,
+            (Advance::Activate, Some(TransitionStatus::Committed(_))) => true,
+            (
+                Advance::Finish(_),
+                Some(TransitionStatus::Committed(_) | TransitionStatus::Activating),
+            ) => true,
             _ => false,
         };
         if !matches!(self.worker, Worker::Settled(Acceptance::Accepted(_))) || !ready {
@@ -374,10 +420,10 @@ impl Submission {
         let owned = Arc::clone(&self.payload);
         let worker = thread::Builder::new()
             .name(
-                if settle {
-                    "pico-job-settle"
-                } else {
-                    "pico-job-stop"
+                match advance {
+                    Advance::Settle => "pico-job-settle",
+                    Advance::Apply | Advance::Activate | Advance::Finish(_) => "pico-job-apply",
+                    Advance::Stop { .. } | Advance::Closed { .. } => "pico-job-stop",
                 }
                 .into(),
             )

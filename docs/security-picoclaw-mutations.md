@@ -193,6 +193,62 @@ Disposable chroot fixtures cover:
 
 They are host checks, not physical power cuts or device acceptance.
 
+## Current Startup change settlement
+
+When settlement finds work, the worker selects any missing gateway or internal
+token exactly once. It records the complete desired canonical pair and the
+internal value as a protected 0600 `plan` member, bound by a domain-separated
+digest to the job and its accepted source, before anything is stopped. A
+retry or crash replays this plan and never draws new entropy. The store's
+inventory follows the members it owns; the reader fence refuses any extra
+member.
+
+The same retained Group is then quiesced by automatic Stopping/Closed
+transitions. These keep resume permission and are refused without a durable
+plan; an explicit Stop instead lowers the permission monotonically.
+
+Apply, from Closed:
+
+1. **Lock and revalidate.** Convert the job's own Home lease to exclusive on the
+   same open description, with a bounded wait for transient readers. Because a
+   refused conversion can drop the shared lease, revalidation happens only under
+   the exclusive lease.
+2. **Superseded check.** If the pair or the internal credential differs from the
+   accepted source and plan, publish a terminal Failed receipt (runtime
+   NotRequested) and retire the job. Nothing is changed.
+3. **Applying.** Publish Applying durably before any target change.
+4. **Credential.** Install the planned internal value. An existing equal value
+   is a replay; any other value refuses.
+5. **Pair.** Publish the planned pair through its own crash-safe journal and
+   re-read it exactly.
+6. **Committed.** Publish Committed, carrying the installed generation.
+7. **Activation**, only when resume is still allowed. Activating is durable
+   before the SAME broker launches one scope bound to that generation under
+   the job's retained admissions. The job waits for Starting to become Running
+   and records Resumed, or ResumeFailed for any other result.
+8. **No activation.** Otherwise the receipt records NotRequested (no runtime
+   before) or Suppressed (an explicit Stop lowered resume).
+9. **Retirement.** Payload, source and plan are retired, then the active fence.
+
+An explicit Stop that arrives before apply lowers resume and then lets the
+planned change apply without resuming. After apply has started, an explicit
+Stop only suppresses resume.
+
+The job's Source ends its Home lease explicitly on drop. A duplicated or
+inherited description therefore cannot extend the lease; a host test proves
+this against an uncontrolled alias.
+
+Chroot fixtures cover:
+
+- absent, live, missing-credential and stop-during-preflight changes;
+- a relaunch of a real owned fixture scope with the installed generation;
+- a superseded source;
+- injected failures after Applying, after the credential, after the pair and
+  after Committed. Each keeps the fence with its exact partial state.
+
+Crash recovery of Applying, Committed and Activating jobs, the other five
+executors, and the transport/API/S96 wiring are not implemented yet.
+
 ## Authority and scope
 
 The native broker owns each accepted operation, not its HTTP caller. Admission

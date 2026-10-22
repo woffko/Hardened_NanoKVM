@@ -50,7 +50,10 @@ fn command(root: &Path, case: &str) -> Command {
     if let Some(point) = case.strip_prefix("kill:") {
         command.env("NANOKVM_PICO_ACCEPT_POINT", point);
     }
-    if let Some(point) = case.strip_prefix("settle-fail:") {
+    if let Some(point) = case
+        .strip_prefix("settle-fail:")
+        .or_else(|| case.strip_prefix("settle-change-fail:"))
+    {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
     command
@@ -198,13 +201,20 @@ fn startup_noop_settlement_publishes_a_terminal_receipt_and_returns_the_same_bro
 }
 
 #[test]
-fn startup_change_settlement_plans_once_and_quiesces_without_applying() {
+fn startup_change_settlement_applies_once_and_records_the_exact_runtime_result() {
     for case in [
         "settle-change-absent",
         "settle-internal-absent",
-        "settle-refused-absent",
         "settle-change-live",
+        "settle-change-stop-live",
     ] {
+        run(case);
+    }
+}
+
+#[test]
+fn startup_settlement_refuses_or_supersedes_without_changing_the_pair() {
+    for case in ["settle-refused-absent", "settle-superseded-absent"] {
         run(case);
     }
 }
@@ -218,6 +228,18 @@ fn startup_settlement_publication_and_retirement_errors_keep_the_fence() {
         "active-retired",
     ] {
         run(&format!("settle-fail:{point}"));
+    }
+}
+
+#[test]
+fn startup_apply_errors_keep_the_fence_with_an_exact_partial_state() {
+    for point in [
+        "applying-renamed",
+        "internal-installed",
+        "pair-published",
+        "committed-renamed",
+    ] {
+        run(&format!("settle-change-fail:{point}"));
     }
 }
 
@@ -399,7 +421,10 @@ fn mutation_child() {
     let root = Path::new(&root);
     let case = std::env::var("NANOKVM_PICO_MUTATION_CASE").unwrap();
     let mut group = Group::default();
-    let live = case != "absent" && !case.ends_with("-absent") && !case.starts_with("settle-fail:");
+    let live = case != "absent"
+        && !case.ends_with("-absent")
+        && !case.starts_with("settle-fail:")
+        && !case.starts_with("settle-change-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -438,6 +463,7 @@ fn mutation_child() {
         None::<&str>,
     )
     .unwrap();
+    let fixture = (case == "settle-change-live").then(|| host_runtime(root));
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
     jobs::prepare_factory_fixture();
@@ -451,7 +477,7 @@ fn mutation_child() {
     }
     if case == "unbound" {
         broker = match broker.begin_picoclaw_mutation() {
-            MutationAdmission::Refused(broker) => broker,
+            MutationAdmission::Refused(broker) => *broker,
             MutationAdmission::Owned(_) => panic!("unbound live scope must not authorize mutation"),
         };
         assert_eq!(broker.group.poll()[3], Some(Status::Running));
@@ -473,7 +499,7 @@ fn mutation_child() {
     if case == "refused" {
         let held = ProcessLock::acquire().unwrap();
         broker = match broker.begin_picoclaw_mutation() {
-            MutationAdmission::Refused(broker) => broker,
+            MutationAdmission::Refused(broker) => *broker,
             MutationAdmission::Owned(_) => panic!("busy admission must return the unchanged owner"),
         };
         assert_eq!(broker.group.poll()[3], Some(Status::Running));
@@ -481,7 +507,7 @@ fn mutation_child() {
         drop(held);
     }
     let mut mutation = match broker.begin_picoclaw_mutation() {
-        MutationAdmission::Owned(mutation) => mutation,
+        MutationAdmission::Owned(mutation) => *mutation,
         MutationAdmission::Refused(_) => panic!("actual root broker rejected mutation fixture"),
     };
     fs::write("/producer-image", b"synthetic private producer image data").unwrap();
@@ -544,7 +570,7 @@ fn mutation_child() {
         assert!(record() == before);
     }
     if let Some(pair) = settle_pair {
-        settle_case(&case, mutation, live, &pair, &before);
+        settle_case(&case, mutation, live, &pair, &before, fixture.as_ref());
         settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
         println!("pico-mutation-checked");
         return;
@@ -734,6 +760,40 @@ fn mutation_child() {
 }
 
 const HOME: &str = "/root/.picoclaw";
+const GATEWAY: &str = "synthetic-gateway-fixture";
+const INTERNAL: &str = "synthetic-internal-fixture";
+
+// The relaunched fixture runs inside the chroot: provide the host loader,
+// libraries, /dev/null and the fixture's own build directory (it re-executes
+// itself by its real path) by bind mounts in this private mount namespace.
+fn host_runtime(root: &Path) -> std::path::PathBuf {
+    let test = std::env::current_exe().unwrap();
+    let build = test.parent().unwrap().parent().unwrap().to_path_buf();
+    for host in ["/usr", "/lib", "/lib64", "/bin", "/dev"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .chain([build.clone()])
+    {
+        let Ok(metadata) = fs::symlink_metadata(&host) else {
+            continue;
+        };
+        let target = root.join(host.strip_prefix("/").unwrap());
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&host).unwrap(), &target).unwrap();
+        } else {
+            fs::create_dir_all(&target).unwrap();
+            nix::mount::mount(
+                Some(host.as_path()),
+                target.as_path(),
+                None::<&str>,
+                nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
+                None::<&str>,
+            )
+            .unwrap();
+        }
+    }
+    build.join("nanokvm-native-owner-fixture")
+}
 
 struct SettlePair {
     config: (Vec<u8>, u64),
@@ -753,7 +813,7 @@ fn settle_home(case: &str) -> SettlePair {
     if case != "settle-internal-absent" {
         private_write(
             Path::new("/etc/kvm/.picoclaw_internal_token"),
-            b"synthetic-internal-fixture\n",
+            format!("{INTERNAL}\n").as_bytes(),
         );
     }
     if case == "settle-refused-absent" {
@@ -766,14 +826,8 @@ fn settle_home(case: &str) -> SettlePair {
     fs::set_permissions(HOME, fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = serde_json::json!({"agents": {"defaults": {"model": "fixture"}}});
     let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    startup::apply(
-        &mut config,
-        &mut security,
-        "synthetic-gateway-fixture",
-        "synthetic-internal-fixture",
-    )
-    .unwrap();
-    if case.starts_with("settle-change-") {
+    startup::apply(&mut config, &mut security, GATEWAY, INTERNAL).unwrap();
+    if case.starts_with("settle-change-") || case == "settle-superseded-absent" {
         config["gateway"]["port"] = serde_json::json!(1);
     }
     let encoded = startup::encode(&config, &security).unwrap();
@@ -809,6 +863,29 @@ fn assert_pair_unchanged(pair: &SettlePair) {
     assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
 }
 
+fn internal_on_disk() -> Option<String> {
+    fs::read_to_string("/etc/kvm/.picoclaw_internal_token")
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+// The exact canonical pair the job must install, from the ORIGINAL bytes.
+fn desired(pair: &SettlePair, internal: &str) -> crate::update::picoclaw_startup::Encoding {
+    use crate::update::picoclaw_startup as startup;
+    let security = &pair.security.as_ref().unwrap().0;
+    let documents = startup::decode(&pair.config.0, Some(security)).unwrap();
+    startup::desired(&documents, GATEWAY, internal).unwrap()
+}
+
+fn assert_pair_desired(pair: &SettlePair, internal: &str) {
+    let wanted = desired(pair, internal);
+    assert!(fs::read(Path::new(HOME).join("config.json")).unwrap() == wanted.config[..]);
+    assert!(
+        fs::read(Path::new(HOME).join(".security.yml")).unwrap() == *wanted.security.as_bytes()
+    );
+    assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
+}
+
 fn members_present() -> [bool; 3] {
     ["active", "payload", "source"].map(|name| {
         Path::new("/etc/kvm/picoclaw-operations")
@@ -817,28 +894,88 @@ fn members_present() -> [bool; 3] {
     })
 }
 
+fn plan_present() -> bool {
+    Path::new("/etc/kvm/picoclaw-operations/plan").exists()
+}
+
 fn settle_until(mutation: &mut Mutation) -> MutationStatus {
     let mut status = MutationStatus::Idle;
     until(|| {
         status = mutation.poll();
-        !matches!(
+        matches!(
             status,
-            MutationStatus::Settling(_) | MutationStatus::Accepted(_)
+            MutationStatus::Completed(_)
+                | MutationStatus::Superseded(_)
+                | MutationStatus::SettlementRefused(_)
+                | MutationStatus::Quiesced(_)
+                | MutationStatus::RecoveryRequired
         )
     });
     status
 }
 
-fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair, accepted: &[u8]) {
+fn shutdown(broker: Broker) {
+    let admission = broker.runtime_permit().unwrap();
+    let crate::native_owner::broker::Shutdown::Draining(mut drain) = broker.shutdown(admission)
+    else {
+        panic!("owned test cleanup was refused");
+    };
+    until(|| drain.poll().unwrap() == crate::native_owner::controller::DrainStatus::Drained);
+}
+
+fn assert_released(mutation: Mutation) -> Broker {
+    let mut broker = match mutation.into_broker() {
+        Ok(broker) => broker,
+        Err(_) => panic!("terminal settlement kept its broker"),
+    };
+    // Admissions are free again and the store accepts new work.
+    drop(broker.prepare_picoclaw_submission().unwrap());
+    drop(ProcessLock::acquire().unwrap());
+    drop(StateWriters::default().configuration().unwrap());
+    broker
+}
+
+fn settle_case(
+    case: &str,
+    mut mutation: Mutation,
+    live: bool,
+    pair: &SettlePair,
+    accepted: &[u8],
+    fixture: Option<&std::path::PathBuf>,
+) {
     const RECEIPT: usize = 128 + 256;
-    mutation.request_settlement();
-    let status = settle_until(&mut mutation);
-    assert_pair_unchanged(pair);
-    // Only a planned change quiesces the runtime; every other result keeps it.
-    if live && !case.starts_with("settle-change-") {
-        assert_eq!(mutation.broker.group.poll()[3], Some(Status::Running));
+    if let Some(program) = fixture {
+        mutation.launch_fixture = Some((
+            program.clone(),
+            ["scope", "owned-tree", "/pico"].map(Into::into).to_vec(),
+        ));
     }
+    if case == "settle-superseded-absent" {
+        // An unmanaged writer replaces the accepted pair before apply.
+        private_write(
+            &Path::new(HOME).join("config.json"),
+            b"{\"superseded\":true}",
+        );
+    }
+    let blocked = (case == "settle-change-stop-live").then(|| {
+        let (entered, receive) = std::sync::mpsc::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        mutation
+            .submission
+            .fixture_work(jobs::WorkFixture::Block(entered, wait));
+        (receive, resume)
+    });
+    mutation.request_settlement();
+    if let Some((entered, resume)) = blocked {
+        assert!(matches!(mutation.poll(), MutationStatus::Settling(_)));
+        entered.recv_timeout(Duration::from_secs(30)).unwrap();
+        // An explicit Stop arrives while the preflight is still running.
+        mutation.request_stop();
+        resume.send(()).unwrap();
+    }
+    let status = settle_until(&mut mutation);
     if let Some(point) = case.strip_prefix("settle-fail:") {
+        assert_pair_unchanged(pair);
         assert_eq!(status, MutationStatus::RecoveryRequired);
         for _ in 0..3 {
             assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
@@ -874,8 +1011,36 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
         }
         return;
     }
+    if let Some(point) = case.strip_prefix("settle-change-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        for _ in 0..3 {
+            assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
+        }
+        let state = record();
+        assert_eq!(
+            state[128 + 169],
+            if point == "committed-renamed" { 5 } else { 4 }
+        );
+        assert_eq!(members_present(), [true; 3]);
+        assert!(plan_present(), "the change stays bound to its plan");
+        assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
+        if matches!(point, "applying-renamed" | "internal-installed") {
+            assert_pair_unchanged(pair);
+        } else {
+            assert_pair_desired(pair, INTERNAL);
+        }
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain apply returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        assert!(StateWriters::default().configuration().is_err());
+        return;
+    }
     match case {
         "settle-noop-absent" | "settle-noop-live" => {
+            assert_pair_unchanged(pair);
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };
@@ -890,10 +1055,7 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
             assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
             assert_eq!(state[RECEIPT + 170], u8::from(live));
             assert_eq!(members_present(), [false; 3]);
-            let mut broker = match mutation.into_broker() {
-                Ok(broker) => broker,
-                Err(_) => panic!("completed settlement kept its broker"),
-            };
+            let mut broker = assert_released(mutation);
             // The same owned scope keeps running with its launch generation.
             if live {
                 assert_eq!(broker.group.poll()[3], Some(Status::Running));
@@ -904,21 +1066,9 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
                         ))
                 );
             }
-            // Admissions are free again and the store accepts new work.
-            drop(broker.prepare_picoclaw_submission().unwrap());
-            drop(ProcessLock::acquire().unwrap());
-            drop(StateWriters::default().configuration().unwrap());
             assert_pair_unchanged(pair);
             if live {
-                let admission = broker.runtime_permit().unwrap();
-                let crate::native_owner::broker::Shutdown::Draining(mut drain) =
-                    broker.shutdown(admission)
-                else {
-                    panic!("owned test cleanup was refused");
-                };
-                until(|| {
-                    drain.poll().unwrap() == crate::native_owner::controller::DrainStatus::Drained
-                });
+                shutdown(broker);
             }
         }
         "settle-refused-absent" => {
@@ -927,7 +1077,7 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
             };
             assert!(record() == accepted, "nothing was published");
             assert_eq!(members_present(), [true; 3]);
-            assert!(!Path::new("/etc/kvm/picoclaw-operations/plan").exists());
+            assert!(!plan_present());
             let mut mutation = match mutation.into_broker() {
                 Ok(_) => panic!("unfinished job returned its broker"),
                 Err(mutation) => *mutation,
@@ -942,86 +1092,77 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
             drop(ProcessLock::acquire().unwrap());
             assert!(StateWriters::default().configuration().is_err());
         }
+        "settle-superseded-absent" => {
+            let MutationStatus::Superseded(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 169], 8, "Completed");
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 2, "runtime NotRequested");
+            assert_eq!(id.sequence, 1);
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
+            // The concurrent writer's bytes are kept; nothing was applied.
+            assert!(
+                fs::read(Path::new(HOME).join("config.json")).unwrap() == b"{\"superseded\":true}"
+            );
+            assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
+            drop(assert_released(mutation));
+        }
         _ => {
-            // A change makes its once-chosen plan durable, then quiesces the
-            // SAME scope without lowering resume permission. Nothing is applied.
-            let MutationStatus::Quiesced(id) = status else {
+            // A change applies its once-chosen plan exactly and records the
+            // runtime result it actually observed.
+            let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };
             for _ in 0..3 {
-                assert_eq!(mutation.poll(), MutationStatus::Quiesced(id));
+                assert_eq!(mutation.poll(), MutationStatus::Completed(id));
             }
-            let quiesced = record();
-            assert_eq!(quiesced[128 + 169], 3, "Closed");
-            assert_eq!(quiesced[128 + 170], u8::from(live), "was_running");
-            assert_eq!(quiesced[128 + 174], u8::from(live), "resume kept");
-            assert_eq!(members_present(), [true; 3]);
-            assert_plan(case, id);
-            if live {
-                assert_eq!(
-                    mutation.broker.group.poll()[3],
-                    Some(Status::Closed(Completion::Stopped))
-                );
-            }
-            let mut mutation = match mutation.into_broker() {
-                Ok(_) => panic!("unapplied change returned its broker"),
-                Err(mutation) => *mutation,
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 169], 8, "Completed");
+            assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            assert_eq!(state[RECEIPT + 170], u8::from(live));
+            let runtime = match case {
+                "settle-change-live" => 3,
+                "settle-change-stop-live" => 6,
+                _ => 2,
             };
-            assert!(StateWriters::default().configuration().is_err());
-            // An explicit Stop now lowers resume in place exactly once; with
-            // nothing to lower it is observed without re-publication.
-            mutation.request_stop();
-            until(|| closed(&mut mutation));
-            let stopped = record();
-            assert_eq!(stopped[128 + 169], 3);
-            assert_eq!(stopped[128 + 174], 0);
-            if !live {
-                assert!(stopped == quiesced);
+            assert_eq!(state[RECEIPT + 173], runtime, "runtime result");
+            assert_eq!(state[RECEIPT + 174], u8::from(case == "settle-change-live"));
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
+            let internal = internal_on_disk().unwrap();
+            if case == "settle-internal-absent" {
+                assert!(crate::update::picoclaw_token::valid_token(&internal));
+                assert_ne!(internal, INTERNAL);
+            } else {
+                assert_eq!(internal, INTERNAL);
             }
-            mutation.request_stop();
-            assert!(closed(&mut mutation));
-            assert!(record() == stopped);
-            assert_pair_unchanged(pair);
-            drop(mutation);
-            drop(ProcessLock::acquire().unwrap());
-            assert!(StateWriters::default().configuration().is_err());
+            assert_pair_desired(pair, &internal);
+            let mut broker = assert_released(mutation);
+            if case == "settle-change-live" {
+                // The SAME broker relaunched one scope bound to the installed pair.
+                let wanted = desired(pair, &internal);
+                assert_eq!(broker.group.poll()[3], Some(Status::Running));
+                assert!(
+                    broker.group.picoclaw_generation()
+                        == Some(crate::update::picoclaw_config::Generation::from_pair(
+                            &wanted.config,
+                            Some(wanted.security.as_bytes()),
+                        ))
+                );
+            } else if live {
+                assert!(matches!(
+                    broker.group.poll()[3],
+                    Some(Status::Closed(Completion::Stopped))
+                ));
+            }
+            if live {
+                shutdown(broker);
+            }
         }
     }
-}
-
-fn assert_plan(case: &str, id: PicoJobId) {
-    use crate::update::picoclaw_startup as startup;
-    use std::os::unix::fs::MetadataExt;
-    let path = Path::new("/etc/kvm/picoclaw-operations/plan");
-    let metadata = fs::metadata(path).unwrap();
-    assert_eq!(metadata.mode() & 0o7777, 0o600);
-    assert_eq!(metadata.nlink(), 1);
-    let plan = fs::read(path).unwrap();
-    assert_eq!(&plan[..8], b"NKPPLN01");
-    assert_eq!(plan[8..16], id.sequence.to_le_bytes());
-    assert_eq!(plan[16..32], id.nonce);
-    let internal_new = case == "settle-internal-absent";
-    assert_eq!(plan[64], u8::from(internal_new));
-    let length =
-        |offset: usize| u32::from_le_bytes(plan[offset..offset + 4].try_into().unwrap()) as usize;
-    let (config, security, internal) = (length(68), length(72), length(76));
-    assert_eq!(96 + config + security + internal + 32, plan.len());
-    let internal_value =
-        std::str::from_utf8(&plan[96 + config + security..96 + config + security + internal])
-            .unwrap();
-    if internal_new {
-        assert!(crate::update::picoclaw_token::valid_token(internal_value));
-        assert_ne!(internal_value, "synthetic-internal-fixture");
-        // Still not provisioned: nothing outside the job store changed.
-        assert!(!Path::new("/etc/kvm/.picoclaw_internal_token").exists());
-    } else {
-        assert_eq!(internal_value, "synthetic-internal-fixture");
-    }
-    let config_bytes = fs::read(Path::new(HOME).join("config.json")).unwrap();
-    let security_bytes = fs::read(Path::new(HOME).join(".security.yml")).unwrap();
-    let documents = startup::decode(&config_bytes, Some(&security_bytes)).unwrap();
-    let desired =
-        startup::desired(&documents, "synthetic-gateway-fixture", internal_value).unwrap();
-    assert!(plan[96..96 + config] == desired.config[..]);
-    assert!(plan[96 + config..96 + config + security] == *desired.security.as_bytes());
 }

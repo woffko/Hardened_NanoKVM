@@ -2,7 +2,12 @@
 //! Explicit Stop/closure only; no target mutation, activation or recovery API.
 use super::{Broker, PicoAcceptance, PicoCursor, PicoJobId, PicoRequest, PicoSubmission};
 use crate::{
-    Result, native_owner::controller::Status, update::picoclaw_config::jobs::TransitionStatus,
+    Result,
+    native_owner::controller::{Role, Status},
+    update::picoclaw_config::{
+        Generation,
+        jobs::{RuntimeResult, TransitionStatus},
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +29,9 @@ pub enum MutationStatus {
     SettlementRefused(PicoJobId),
     /// Terminal receipt published and private members retired.
     Completed(PicoJobId),
+    /// The accepted source changed before apply: terminal failure receipt,
+    /// nothing changed, private members retired.
+    Superseded(PicoJobId),
     Existing(PicoJobId),
     Expired,
     Rejected,
@@ -31,8 +39,8 @@ pub enum MutationStatus {
 }
 
 pub enum MutationAdmission {
-    Owned(Mutation),
-    Refused(Broker),
+    Owned(Box<Mutation>),
+    Refused(Box<Broker>),
 }
 
 // Not Clone/Copy/Debug or publicly constructible. Only the owning Mutation can
@@ -64,6 +72,14 @@ pub struct Mutation {
     broker: Broker,
     stop_requested: bool,
     settle_requested: bool,
+    /// A durable plan exists; an explicit Stop may then continue settlement.
+    planned: bool,
+    /// Apply started: from here an explicit Stop only suppresses resume.
+    applying: bool,
+    launch: Option<Generation>,
+    spawned: bool,
+    #[cfg(test)]
+    launch_fixture: Option<(std::path::PathBuf, Vec<std::ffi::OsString>)>,
     status: MutationStatus,
 }
 
@@ -74,6 +90,12 @@ impl Mutation {
             broker,
             stop_requested: false,
             settle_requested: false,
+            planned: false,
+            applying: false,
+            launch: None,
+            spawned: false,
+            #[cfg(test)]
+            launch_fixture: None,
             status: MutationStatus::Idle,
         }
     }
@@ -115,7 +137,10 @@ impl Mutation {
     /// Dropping the submission first joins its workers and releases the
     /// store, source, Config and Update leases before the broker leaves.
     pub fn into_broker(self) -> std::result::Result<Broker, Box<Self>> {
-        if !matches!(self.status, MutationStatus::Completed(_)) {
+        if !matches!(
+            self.status,
+            MutationStatus::Completed(_) | MutationStatus::Superseded(_)
+        ) {
             return Err(Box::new(self));
         }
         let Self {
@@ -158,14 +183,38 @@ impl Mutation {
         // only after the subreaper proves ECHILD. Closure is not task success.
         let closed = matches!(native, None | Some(Status::Closed(_)));
         let phase = self.submission.poll_transition();
-        self.status = if self.stop_requested {
-            self.explicit_stop(id, phase, native, closed)
+        if phase == TransitionStatus::Planned {
+            self.planned = true;
+        }
+        self.status = if self.stop_requested && !self.applying {
+            let status = self.explicit_stop(id, phase, native, closed);
+            // Once resume is durably lowered and the scope closed, a planned
+            // change still applies; it just never resumes the runtime.
+            if self.settle_requested && self.planned && status == MutationStatus::Closed(id) {
+                self.settle(id, phase, native, closed)
+            } else {
+                status
+            }
         } else if self.settle_requested {
             self.settle(id, phase, native, closed)
         } else {
             MutationStatus::Accepted(id)
         };
         self.status
+    }
+
+    fn pico_command(&self) -> std::process::Command {
+        #[cfg(test)]
+        if let Some((program, args)) = &self.launch_fixture {
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .env_clear()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            return command;
+        }
+        Role::Picoclaw.command(&self.broker.group.home)
     }
 
     fn proof(&self, id: PicoJobId) -> ClosedPico {
@@ -190,7 +239,44 @@ impl Mutation {
             TransitionStatus::Pending => return MutationStatus::Settling(id),
             TransitionStatus::Completed => return MutationStatus::Completed(id),
             TransitionStatus::Refused => return MutationStatus::SettlementRefused(id),
-            TransitionStatus::Closed => return MutationStatus::Quiesced(id),
+            TransitionStatus::Closed if !self.planned => return MutationStatus::Quiesced(id),
+            TransitionStatus::Closed => {
+                self.applying = true;
+                self.submission.begin_apply()
+            }
+            TransitionStatus::Superseded => return MutationStatus::Superseded(id),
+            TransitionStatus::Committed(generation) => {
+                self.launch = Some(generation);
+                match self.submission.resume_allowed() {
+                    Some(true) if !self.stop_requested => self.submission.begin_activation(),
+                    Some(true) => self.submission.begin_finish(RuntimeResult::Suppressed),
+                    Some(false) => self.submission.begin_finish(RuntimeResult::NotRequested),
+                    None => return MutationStatus::RecoveryRequired,
+                }
+            }
+            TransitionStatus::Activating if self.stop_requested && !self.spawned => {
+                self.submission.begin_finish(RuntimeResult::Suppressed)
+            }
+            TransitionStatus::Activating if !self.spawned => {
+                // Resume intent is durable; launch exactly once with the
+                // installed generation, then wait for its runtime result.
+                self.spawned = true;
+                let launched = self.launch.is_some_and(|generation| {
+                    let command = self.pico_command();
+                    self.broker
+                        .start_picoclaw_for_job(command, generation)
+                        .is_ok()
+                });
+                if launched {
+                    return MutationStatus::Settling(id);
+                }
+                self.submission.begin_finish(RuntimeResult::ResumeFailed)
+            }
+            TransitionStatus::Activating => match native {
+                Some(Status::Starting) => return MutationStatus::Settling(id),
+                Some(Status::Running) => self.submission.begin_finish(RuntimeResult::Resumed),
+                _ => self.submission.begin_finish(RuntimeResult::ResumeFailed),
+            },
             TransitionStatus::Planned | TransitionStatus::Stopping if closed => {
                 let proof = self.proof(id);
                 self.submission.persist_quiesced(proof)

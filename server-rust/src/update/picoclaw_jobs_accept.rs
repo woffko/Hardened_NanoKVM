@@ -28,6 +28,9 @@ enum Publication {
     Accepted,
     Stop,
     Closed,
+    Applying,
+    Committed,
+    Activating,
     Completed,
 }
 
@@ -38,6 +41,9 @@ impl Publication {
             Self::Accepted => "state",
             Self::Stop => "stop",
             Self::Closed => "closed",
+            Self::Applying => "applying",
+            Self::Committed => "committed",
+            Self::Activating => "activating",
             Self::Completed => "completed",
         }
     }
@@ -83,11 +89,38 @@ fn private_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
 }
 
 pub(super) struct Source {
-    _directory: Directory,
+    directory: Directory,
     bytes: Zeroizing<Vec<u8>>,
 }
 
+impl Drop for Source {
+    fn drop(&mut self) {
+        // End this lease explicitly: an inherited or duplicated description
+        // must not keep the Home lock after its owning job is gone.
+        let _ = flock(&self.directory.file, FlockOperation::Unlock);
+    }
+}
+
 impl Source {
+    /// Convert this job's Home lease to exclusive on the SAME description. A
+    /// refused non-blocking conversion can drop the shared lease, so callers
+    /// revalidate only after this returns. Bounded for transient readers.
+    fn lock_exclusive(&self) -> Result<()> {
+        for _ in 0..150 {
+            match flock(
+                &self.directory.file,
+                FlockOperation::NonBlockingLockExclusive,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(rustix::io::Errno::WOULDBLOCK) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(std::io::Error::from(error).into()),
+            }
+        }
+        Err(AppError::Conflict("picoclaw configuration is busy".into()))
+    }
+
     fn capture(facts: &Facts) -> Result<Self> {
         let mut directory = Directory::open(Path::new("/"), false)?;
         let mut present = true;
@@ -166,10 +199,22 @@ impl Source {
         for member in pair.into_iter().flatten() {
             bytes.extend_from_slice(member.as_slice());
         }
-        Ok(Self {
-            _directory: directory,
-            bytes,
-        })
+        Ok(Self { directory, bytes })
+    }
+}
+
+#[cfg(test)]
+pub(super) fn source_fixture(directory: Directory) -> Source {
+    Source {
+        directory,
+        bytes: Zeroizing::new(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+impl Source {
+    pub(super) fn alias_for_test(&self) -> File {
+        self.directory.file.try_clone().unwrap()
     }
 }
 
@@ -734,8 +779,12 @@ pub(super) fn perform(
 }
 
 pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<TransitionStatus> {
-    if matches!(advance, Advance::Settle) {
-        return settle(payload);
+    match advance {
+        Advance::Settle => return settle(payload),
+        Advance::Apply => return apply(payload),
+        Advance::Activate => return activate(payload),
+        Advance::Finish(resume) => return finish(payload, resume),
+        Advance::Stop { .. } | Advance::Closed { .. } => {}
     }
     let store = payload.store.as_mut().ok_or_else(invalid)?;
     store.check_current()?;
@@ -854,6 +903,117 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
     } else {
         Runtime::Unchanged
     };
+    store.publish_terminal(record, &mut payload.touched)?;
+    store.retire()?;
+    Ok(TransitionStatus::Completed)
+}
+
+/// Apply a quiesced Startup plan. Under the job's exclusive Home lease the
+/// accepted pair and internal value are revalidated; a concurrent change ends
+/// the job as a terminal failure with nothing changed. Otherwise Applying is
+/// durable before the planned internal value and then the pair (through its
+/// own journal) are installed, and Committed binds the installed generation.
+pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.home != payload.facts.home_fingerprint
+        || record.phase != Phase::Closed
+        || record.kind != Kind::Startup
+        || store.members[3].is_none()
+    {
+        return Err(fenced());
+    }
+    let plan = payload.plan.as_ref().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    source.lock_exclusive()?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let current = super::super::super::pair::read_source(&source.directory)?;
+    let internal = crate::update::picoclaw_token::observe()?;
+    let unchanged = current[0].as_deref().map(Vec::as_slice) == view.config
+        && current[1].as_deref().map(Vec::as_slice) == view.security
+        && match (&internal, plan.internal_new) {
+            (None, true) => true,
+            (Some(value), false) => value.as_str() == plan.internal.as_str(),
+            _ => false,
+        };
+    if !unchanged {
+        // The scope is proven closed and nothing was changed: terminal failure.
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Failed;
+        record.runtime = Runtime::NotRequested;
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Superseded);
+    }
+    record.phase = Phase::Applying;
+    store.publish(record, &mut payload.touched, Publication::Applying)?;
+    if plan.internal_new {
+        crate::update::picoclaw_token::install(&payload._configuration, plan.internal.as_str())?;
+    }
+    #[cfg(test)]
+    checkpoint("internal", "installed")?;
+    super::super::super::pair::publish(&source.directory, &plan.config, Some(&plan.security))?;
+    #[cfg(test)]
+    checkpoint("pair", "published")?;
+    let installed = super::super::super::pair::read_installed(&source.directory)?;
+    if installed.config.as_slice() != plan.config.as_slice()
+        || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice())
+    {
+        return Err(invalid());
+    }
+    record.phase = Phase::Committed;
+    store.publish(record, &mut payload.touched, Publication::Committed)?;
+    Ok(TransitionStatus::Committed(
+        super::super::super::Generation::from_documents(&installed),
+    ))
+}
+
+/// Record the intent to resume before the native launch.
+pub(super) fn activate(payload: &mut Payload) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.phase != Phase::Committed
+        || !record.was_running
+        || !record.resume_allowed
+    {
+        return Err(fenced());
+    }
+    record.phase = Phase::Activating;
+    store.publish(record, &mut payload.touched, Publication::Activating)?;
+    Ok(TransitionStatus::Activating)
+}
+
+/// Terminal Changed receipt with the exact runtime result, then retirement.
+pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain || record.boot != payload.facts.boot || record.kind != Kind::Startup {
+        return Err(fenced());
+    }
+    record.runtime = match (record.phase, resume) {
+        (Phase::Activating, RuntimeResult::Resumed) => Runtime::Resumed,
+        (Phase::Activating, RuntimeResult::ResumeFailed) => Runtime::ResumeFailed,
+        (Phase::Committed | Phase::Activating, RuntimeResult::Suppressed) if record.was_running => {
+            record.resume_allowed = false;
+            Runtime::Suppressed
+        }
+        (Phase::Committed, RuntimeResult::NotRequested) if !record.was_running => {
+            Runtime::NotRequested
+        }
+        (Phase::Committed, RuntimeResult::NotRequested) if !record.resume_allowed => {
+            Runtime::Suppressed
+        }
+        _ => return Err(fenced()),
+    };
+    record.phase = Phase::Completed;
+    record.outcome = Outcome::Changed;
     store.publish_terminal(record, &mut payload.touched)?;
     store.retire()?;
     Ok(TransitionStatus::Completed)

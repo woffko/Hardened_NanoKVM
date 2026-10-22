@@ -708,3 +708,34 @@ fn startup_plan_codec_round_trips_and_rejects_foreign_or_damaged_plans() {
     };
     assert!(accept::encode_plan(&record, &invalid).is_err());
 }
+
+#[test]
+fn a_dropped_source_releases_its_home_lease_even_when_an_alias_survives() {
+    use rustix::fs::{FlockOperation, flock};
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let open = || File::open(root.path()).unwrap();
+    let lease = |file: File| {
+        let device = file.metadata().unwrap().dev();
+        let directory = super::super::super::Directory { file, device };
+        directory.lock(true).unwrap();
+        directory
+    };
+    let exclusive = |file: &File| flock(file, FlockOperation::NonBlockingLockExclusive);
+    // Control: a plain Directory with a retained duplicate of its description
+    // keeps the shared lease after its owner is dropped.
+    let plain = lease(open());
+    let alias = plain.file.try_clone().unwrap();
+    drop(plain);
+    assert_eq!(exclusive(&open()), Err(rustix::io::Errno::WOULDBLOCK));
+    drop(alias);
+    // The job's Source ends its lease explicitly, so the same alias situation
+    // no longer extends it, while a live Source still excludes writers.
+    let source = accept::source_fixture(lease(open()));
+    let alias = source.alias_for_test();
+    let competitor = open();
+    assert_eq!(exclusive(&competitor), Err(rustix::io::Errno::WOULDBLOCK));
+    drop(source);
+    assert_eq!(exclusive(&competitor), Ok(()));
+    drop(alias);
+}

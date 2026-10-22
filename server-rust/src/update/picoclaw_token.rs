@@ -116,6 +116,12 @@ fn ensure_at(parent: &File, uid: u32) -> Result<String> {
         return Ok(token);
     }
     let token = new_value()?;
+    link_new(parent, uid, &token)
+}
+
+/// Durably link exactly `token`. If another creator won the race its value is
+/// returned unchanged; the caller decides whether that winner is acceptable.
+fn link_new(parent: &File, uid: u32, token: &str) -> Result<String> {
     let mut file: File = openat2(
         parent,
         ".",
@@ -146,7 +152,7 @@ fn ensure_at(parent: &File, uid: u32) -> Result<String> {
     ) {
         Ok(()) => {
             let (actual, named) = read_at(parent, uid)?.ok_or_else(invalid)?;
-            if named.metadata()?.ino() != file.metadata()?.ino() || actual != *token {
+            if named.metadata()?.ino() != file.metadata()?.ino() || actual != token {
                 return Err(invalid());
             }
             parent.sync_all()?;
@@ -161,6 +167,34 @@ fn ensure_at(parent: &File, uid: u32) -> Result<String> {
         }
         Err(error) => Err(std::io::Error::from(error).into()),
     }
+}
+
+/// Provision exactly a planned value. An existing equal value is a replay of
+/// the same plan; any other value refuses. No entropy is drawn here.
+fn install_at(parent: &File, uid: u32, value: &str) -> Result<()> {
+    if !valid_token(value) {
+        return Err(invalid());
+    }
+    let device = parent.metadata()?.dev();
+    parent_at(parent, uid, device)?;
+    let actual = match read_at(parent, uid)? {
+        Some((token, file)) => {
+            file.sync_all()?;
+            parent.sync_all()?;
+            token
+        }
+        None => link_new(parent, uid, value)?,
+    };
+    if actual != value {
+        return Err(AppError::Conflict(
+            "picoclaw internal credential changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn install(_permit: &ConfigPermit, value: &str) -> Result<()> {
+    install_at(&fixed_parent()?, 0, value)
 }
 
 pub(crate) fn ensure(_permit: &ConfigPermit) -> Result<String> {
