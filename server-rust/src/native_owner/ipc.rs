@@ -336,6 +336,7 @@ enum InstallOwner {
     },
     Trial(app_install::TrialSession),
     Committing(app_install::CommittingTrial),
+    RollingBack(app_install::RollingBack),
     Committed(app_install::Retirement),
     RolledBack(app_install::Retirement),
     Refused {
@@ -399,6 +400,8 @@ struct Engine {
     fixture_publication: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
     fixture_commit: Option<app_install::InstallIoFixture>,
+    #[cfg(test)]
+    fixture_rollback: Option<app_install::InstallIoFixture>,
 }
 struct BackendRestart {
     _admission: RuntimePermit,
@@ -453,6 +456,8 @@ impl Engine {
             fixture_publication: None,
             #[cfg(test)]
             fixture_commit: None,
+            #[cfg(test)]
+            fixture_rollback: None,
         }
     }
     fn command(&self, broker: &Broker, role: Role) -> std::process::Command {
@@ -799,17 +804,31 @@ impl Engine {
                                     }
                                 });
                             }
-                            InstallStage::Rollback => match session.rollback() {
-                                app_install::Rollback::Restored(restored) => {
-                                    return Some(
-                                        self.begin_retirement(restored.begin_retirement(), false),
-                                    );
-                                }
-                                app_install::Rollback::Retained(retained) => {
-                                    session = retained;
-                                    stage = InstallStage::Failed;
-                                }
-                            },
+                            InstallStage::Rollback => {
+                                return Some(match session.start_rollback() {
+                                    Ok(owner) => {
+                                        #[cfg(test)]
+                                        let owner = {
+                                            let mut owner = owner;
+                                            if let Some(fixture) = self.fixture_rollback.take() {
+                                                owner.set_fixture(fixture);
+                                            }
+                                            owner
+                                        };
+                                        Install {
+                                            owner: InstallOwner::RollingBack(owner),
+                                            stage: InstallStage::Rollback,
+                                        }
+                                    }
+                                    Err(session) => {
+                                        self.mode = Mode::Uncertain;
+                                        Install {
+                                            owner: InstallOwner::Draining(*session),
+                                            stage: InstallStage::Failed,
+                                        }
+                                    }
+                                });
+                            }
                             InstallStage::Failed => {}
                             _ => stage = InstallStage::Failed,
                         }
@@ -975,6 +994,37 @@ impl Engine {
             InstallOwner::Committed(committed) => {
                 return self.tick_retirement(committed, true, stage);
             }
+            InstallOwner::RollingBack(owner) => {
+                self.roles = [4; 2];
+                self.backend_status = Some(Status::Closed(Completion::Stopped));
+                match owner.poll() {
+                    app_install::RollbackPoll::Pending { owner, uncertain } => {
+                        if uncertain {
+                            stage = InstallStage::Failed;
+                            self.roles = [6; 2];
+                            self.backend_status = Some(Status::Uncertain);
+                        }
+                        InstallOwner::RollingBack(owner)
+                    }
+                    app_install::RollbackPoll::Failed(owner) => {
+                        stage = InstallStage::Failed;
+                        self.roles = [6; 2];
+                        self.backend_status = Some(Status::Uncertain);
+                        InstallOwner::RollingBack(owner)
+                    }
+                    app_install::RollbackPoll::Ready(rollback) => match *rollback {
+                        app_install::Rollback::Restored(restored) => {
+                            return Some(self.begin_retirement(restored.begin_retirement(), false));
+                        }
+                        app_install::Rollback::Retained(session) => {
+                            stage = InstallStage::Failed;
+                            self.roles = [6; 2];
+                            self.backend_status = Some(Status::Uncertain);
+                            InstallOwner::Draining(session)
+                        }
+                    },
+                }
+            }
             InstallOwner::RolledBack(restored) => {
                 return self.tick_retirement(restored, false, stage);
             }
@@ -1137,6 +1187,7 @@ impl Engine {
                 }
             }
             owner @ (InstallOwner::Refused { .. }
+            | InstallOwner::RollingBack(_)
             | InstallOwner::Committed(_)
             | InstallOwner::RolledBack(_)) => {
                 self.install = Some(Install { owner, stage });

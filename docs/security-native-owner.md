@@ -882,9 +882,16 @@ owner; production panic=abort still requires durable process recovery. Teardown
 joins before releasing admission, so kernel-blocked I/O can delay teardown.
 
 With support-transition epoch0 the production Engine still refuses before
-support or app publication. This does not enable the ordinary update API, establish all
-writer quiescence or make the remaining synchronous commit/rollback
-steps nonblocking. No whole-install hard latency or target acceptance is claimed.
+support or app publication. Durable commit and rollback now use distinct fixed,
+joined workers; rollback includes both support/app restoration and native-journal
+resume in the same result boundary. The broker retains the same Drain and checks
+closure before submission and after completion; it cannot resume or retire a
+failed, panicked or uncertain result. Cancellation during rollback does not start
+another operation or report completed cancellation. Teardown joins filesystem
+work before releasing singleton and accepted update/store/writer admission.
+These changes do not enable the ordinary update API or establish all-writer
+quiescence. Other synchronous transitions and real native/runtime behavior still
+require acceptance; no whole-install hard latency or target acceptance is claimed.
 
 Host tests compose real retained `Session` drain and terminal owners with
 synthetic protected payloads and child protocol probes. They cover successful

@@ -576,8 +576,33 @@ latched across both writes and the acknowledgement gap. Failed or uncertain
 commit retains the complete owner, even if the app record is already Committed;
 observation, reconnect, cancellation and terminal retry cannot replay it or
 authorize Stop/rollback. Teardown joins before releasing journal/update leases.
-Remaining rollback and other synchronous steps still require separate
-responsiveness acceptance; these host checks are not target/device acceptance.
+
+Rollback now has its own fixed joined worker. A fresh complete native drain
+authorizes the exact accepted transaction; the same broker retains that Drain
+while the worker restores support/app state and then resumes the native journal.
+Both journals and the accepted store/update/writer leases remain with one owner.
+Only successful joined work, fresh native closure and journal readiness permit
+conversion to the RolledBack terminal owner; archival/release remains a separate
+step. No callback, path, executable or caller-selected phase is accepted.
+
+Spawn failure, caught panic, layout/write failure or forfeited closure authority
+retains the rollback owner without replay, resume or early release. This includes
+failure between the app rollback record and native resume, and panic after both
+writes. Removing a collision, observation, reconnect and another Cancel cannot
+retry that unknown rollback or turn it into terminal-retirement authority.
+Cancel during rollback reports unknown completion rather than launching a second
+operation. Teardown joins before releasing singleton and accepted admission;
+production panic=abort still needs durable process recovery.
+
+Host fixtures hold work before rollback, between the two durable boundaries and
+after both writes while checking control responsiveness and retained exclusions.
+They cover real missing native receipt before admission, publication-error and
+foreign-layout refusal, cancellation and joining teardown. A separate private
+fixture forfeits main-thread authority after a real completed drain and verifies
+that later successful I/O cannot clear it; that models proof loss, not a physical
+owner loss after all scope owners have already reaped. Other synchronous steps
+and actual kernel-blocked I/O still require responsiveness acceptance; these host
+checks are not target/device or whole-install latency acceptance.
 
 Root may issue `nanokvm-native-ctl retry-app-retirement` through the existing
 protected lifecycle channel. This is the fixed `RetryAppRetirement` opcode in

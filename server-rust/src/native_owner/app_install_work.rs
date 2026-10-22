@@ -17,10 +17,11 @@ enum Operation {
     },
     Publish(ClosedRuntime),
     Commit(TrialReady),
+    Rollback(ClosedRuntime),
     Retire(TerminalBoundary),
 }
 
-pub(super) struct CommitState {
+pub(super) struct JournaledInstall {
     // Release the singleton before accepted update/writer admission LAST.
     pub(super) journal: journal::Store,
     pub(super) install: AcceptedInstall,
@@ -28,7 +29,8 @@ pub(super) struct CommitState {
 
 enum Payload {
     Install(AcceptedInstall),
-    Commit(CommitState),
+    Commit(JournaledInstall),
+    Rollback(JournaledInstall),
 }
 impl Operation {
     fn worker_copy(&self) -> Self {
@@ -49,6 +51,9 @@ impl Operation {
             }),
             Self::Commit(ready) => Self::Commit(TrialReady {
                 transaction: ready.transaction(),
+            }),
+            Self::Rollback(closed) => Self::Rollback(ClosedRuntime {
+                transaction: closed.transaction(),
             }),
             Self::Retire(boundary) => Self::Retire(TerminalBoundary {
                 transaction: boundary.transaction(),
@@ -114,6 +119,38 @@ impl Operation {
             (Self::Retire(boundary), Payload::Install(install)) => {
                 install.retire(&boundary).is_ok()
             }
+            (Self::Rollback(closed), Payload::Rollback(state)) => {
+                if !matches!(
+                    support_operation!(
+                        "native.rollback.slot",
+                        None,
+                        state.install.rollback(&closed)
+                    ),
+                    Ok(crate::update::app_slot::Status::Transaction(
+                        crate::update::app_slot::Phase::RolledBack
+                    ))
+                ) {
+                    return false;
+                }
+                #[cfg(test)]
+                match fault {
+                    Some(Fixture::BlockRollbackJournal { entered, resume }) => {
+                        if entered.send(()).is_err() || resume.recv().is_err() {
+                            return false;
+                        }
+                    }
+                    Some(Fixture::PanicAfterRollbackRecord) => {
+                        panic!("fixture failure between rollback record and native journal");
+                    }
+                    _ => {}
+                }
+                support_operation!(
+                    "native.rollback.journal-resume",
+                    None,
+                    state.journal.resume_active()
+                )
+                .is_ok()
+            }
             // A mismatched fixed factory cannot shed or reinterpret authority.
             _ => false,
         }
@@ -166,9 +203,14 @@ pub(crate) enum Fixture {
         entered: std::sync::mpsc::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
     },
+    BlockRollbackJournal {
+        entered: std::sync::mpsc::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    },
     Panic,
     PanicAfterIo,
     PanicAfterCommitRecord,
+    PanicAfterRollbackRecord,
     SpawnFailure,
 }
 
@@ -203,8 +245,12 @@ impl InstallWork {
         Self::new(Payload::Install(install), Operation::Publish(closed))
     }
 
-    pub(super) fn commit(state: CommitState, ready: TrialReady) -> Self {
+    pub(super) fn commit(state: JournaledInstall, ready: TrialReady) -> Self {
         Self::new(Payload::Commit(state), Operation::Commit(ready))
+    }
+
+    pub(super) fn rollback(state: JournaledInstall, closed: ClosedRuntime) -> Self {
+        Self::new(Payload::Rollback(state), Operation::Rollback(closed))
     }
 
     fn new(payload: Payload, operation: Operation) -> Self {
@@ -287,7 +333,7 @@ impl InstallWork {
         }
     }
 
-    pub(super) fn into_commit(mut self) -> Result<CommitState, Self> {
+    pub(super) fn into_commit(mut self) -> Result<JournaledInstall, Self> {
         // Failed/unknown commit work has no extractable success authority.
         if !matches!(self.state, State::Complete) {
             return Err(self);
@@ -301,6 +347,24 @@ impl InstallWork {
             });
         match payload {
             Some(Payload::Commit(state)) => Ok(state),
+            _ => Err(self),
+        }
+    }
+
+    pub(super) fn into_rollback(mut self) -> Result<JournaledInstall, Self> {
+        // A failed/unknown rollback cannot be retried or resumed by extraction.
+        if !matches!(self.state, State::Complete) {
+            return Err(self);
+        }
+        let payload = Arc::get_mut(&mut self.payload)
+            .and_then(|slot| slot.get_mut().ok())
+            .and_then(|slot| {
+                slot.take_if(|payload| {
+                    matches!(payload, Payload::Rollback(state) if state.journal.ready().is_ok())
+                })
+            });
+        match payload {
+            Some(Payload::Rollback(state)) => Ok(state),
             _ => Err(self),
         }
     }
@@ -319,6 +383,7 @@ impl InstallWork {
             Operation::Support { .. } => "app-support",
             Operation::Publish(_) => "app-publication",
             Operation::Commit(_) => "app-commit",
+            Operation::Rollback(_) => "app-rollback",
             Operation::Retire(_) => "app-retirement",
         };
         self.state = match thread::Builder::new().name(name.into()).spawn(move || {
@@ -345,7 +410,9 @@ impl InstallWork {
                         Fixture::SpawnFailure
                         | Fixture::PanicAfterIo
                         | Fixture::PanicAfterCommitRecord
+                        | Fixture::PanicAfterRollbackRecord
                         | Fixture::BlockCommitJournal { .. }
+                        | Fixture::BlockRollbackJournal { .. }
                         | Fixture::BlockAfterIo { .. },
                     )
                     | None => {}

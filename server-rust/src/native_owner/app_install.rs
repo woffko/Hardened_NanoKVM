@@ -12,11 +12,14 @@ mod committing;
 mod preparation;
 #[path = "app_retirement.rs"]
 mod retirement;
+#[path = "app_rollback_prepare.rs"]
+mod rolling_back;
 #[path = "app_install_work.rs"]
 mod work;
 pub(super) use committing::{CommittingTrial, Poll as CommitPoll};
 pub(super) use preparation::{Kind as PreparationKind, Poll as PreparationPoll, PreparingInstall};
 pub(super) use retirement::{Poll as RetirementPoll, Retirement};
+pub(super) use rolling_back::{Poll as RollbackPoll, RollingBack};
 #[cfg(test)]
 pub(super) use work::Fixture as InstallIoFixture;
 
@@ -393,14 +396,42 @@ impl Session {
         BeginTrial::Started(trial)
     }
 
-    /// After every old/trial tree has joined, restore the uncommitted old slot
-    /// under the SAME exclusions and resume only after durability.
-    /// Any unknown closure/layout/I/O result retains the complete owner.
+    pub(super) fn start_rollback(mut self) -> Result<RollingBack, Box<Session>> {
+        let Ok(closed) = self.closed() else {
+            return Err(Box::new(self));
+        };
+        let work = work::InstallWork::rollback(
+            work::JournaledInstall {
+                journal: self.journal,
+                install: self.install,
+            },
+            closed,
+        );
+        Ok(RollingBack::new(
+            self.group,
+            self.enrollment,
+            #[cfg(test)]
+            self.update_parent,
+            work,
+        ))
+    }
+
+    /// Synchronous component seam only. The live broker uses joined fixed work.
+    #[cfg(test)]
     pub fn rollback(mut self) -> Rollback {
         let Ok(closed) = self.closed() else {
             return Rollback::Retained(self);
         };
         if self.install.rollback(&closed).is_err() || self.journal.resume_active().is_err() {
+            return Rollback::Retained(self);
+        }
+        self.finish_rollback()
+    }
+
+    /// Called only with joined successful durable rollback, before any resume.
+    /// This checks cached journal readiness and native closure, never filesystem I/O.
+    fn finish_rollback(self) -> Rollback {
+        if self.journal.ready().is_err() {
             return Rollback::Retained(self);
         }
         match self.group.try_resume() {
@@ -463,7 +494,7 @@ impl TrialSession {
         if !self.native_resumed {
             let ready = TrialReady { transaction };
             let work = work::InstallWork::commit(
-                work::CommitState {
+                work::JournaledInstall {
                     journal: self.journal,
                     install: self.install,
                 },

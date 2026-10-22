@@ -14,6 +14,9 @@ mod publication;
 #[path = "app_commit_work_tests.rs"]
 mod commit_work;
 
+#[path = "app_rollback_work_tests.rs"]
+mod rollback_work;
+
 fn start_all(engine: &mut Engine) {
     for operation in [
         Operation::EnsureKvm,
@@ -85,6 +88,7 @@ fn install_state(engine: &Engine) -> Option<(&'static str, &'static str)> {
             InstallOwner::PreparingInstall { .. } => "preparing-install",
             InstallOwner::Trial(_) => "trial",
             InstallOwner::Committing(_) => "committing",
+            InstallOwner::RollingBack(_) => "rolling-back",
             InstallOwner::Committed(_) => "committed",
             InstallOwner::RolledBack(_) => "rolled-back",
             InstallOwner::Refused { .. } => "refused",
