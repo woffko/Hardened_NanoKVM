@@ -55,6 +55,8 @@ const H264_SAFE_MODE_FILE: &str = "/etc/kvm/h264_safe_mode";
 const MJPEG_FAILURE_LIMIT: usize = 3;
 const MJPEG_FAILURE_BACKOFF: Duration = Duration::from_millis(500);
 const MJPEG_FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
+/// libkvm's MJPEG result when frame detection found the screen unchanged.
+const MJPEG_FRAME_UNCHANGED: i32 = 5;
 const H264_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const H264_FAILURE_LIMIT: usize = 3;
 const H264_KEYFRAME_REQUEST_HOLD: Duration = Duration::from_millis(250);
@@ -530,12 +532,22 @@ async fn run_mjpeg_producer() {
             }
         };
         update_capture_status(CAPTURE_MODE_MJPEG, result);
-        if result < 0 || result == 5 || data.is_empty() {
-            if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                warn!(result, bytes = data.len(), "mjpeg frame unavailable");
+        match classify_mjpeg_read(result, data.len()) {
+            MjpegRead::Frame => {}
+            // The capture works and the screen is still: nothing to send, and
+            // no backoff that would stall the stream once the screen changes.
+            // The next read waits for the next camera frame.
+            MjpegRead::Unchanged => {
+                consecutive_failures = 0;
+                continue;
             }
-            backoff_after_mjpeg_failure(&mut consecutive_failures, result, data.len()).await;
-            continue;
+            MjpegRead::Failure => {
+                if !MJPEG_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                    warn!(result, bytes = data.len(), "mjpeg frame unavailable");
+                }
+                backoff_after_mjpeg_failure(&mut consecutive_failures, result, data.len()).await;
+                continue;
+            }
         }
         consecutive_failures = 0;
         if !MJPEG_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
@@ -551,6 +563,23 @@ async fn run_mjpeg_producer() {
             header,
             data: Bytes::from(data),
         });
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MjpegRead {
+    Frame,
+    Unchanged,
+    Failure,
+}
+
+fn classify_mjpeg_read(result: i32, bytes: usize) -> MjpegRead {
+    if result == MJPEG_FRAME_UNCHANGED {
+        MjpegRead::Unchanged
+    } else if result < 0 || bytes == 0 {
+        MjpegRead::Failure
+    } else {
+        MjpegRead::Frame
     }
 }
 
@@ -993,6 +1022,25 @@ fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unchanged_mjpeg_frame_is_neither_sent_nor_a_failure() {
+        use super::{MJPEG_FRAME_UNCHANGED, MjpegRead, classify_mjpeg_read};
+        // Frame detection reports a still screen as 5, with or without bytes.
+        assert_eq!(
+            classify_mjpeg_read(MJPEG_FRAME_UNCHANGED, 0),
+            MjpegRead::Unchanged
+        );
+        assert_eq!(
+            classify_mjpeg_read(MJPEG_FRAME_UNCHANGED, 4096),
+            MjpegRead::Unchanged
+        );
+        assert_eq!(classify_mjpeg_read(0, 4096), MjpegRead::Frame);
+        assert_eq!(classify_mjpeg_read(0, 0), MjpegRead::Failure);
+        for result in [-1, -2, -3] {
+            assert_eq!(classify_mjpeg_read(result, 4096), MjpegRead::Failure);
+        }
+    }
+
     use super::{
         H264DirectProducerAction, Screen, StreamMode, h264_direct_packet,
         h264_direct_producer_action, normalize_screen,
