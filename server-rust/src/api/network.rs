@@ -1,4 +1,9 @@
-use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{ConnectInfo, State},
+    http::HeaderMap,
+    response::IntoResponse,
+};
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,6 +14,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::http::tls::ClientAddr;
 use crate::{
     AppError, Result,
     error::ApiResponse,
@@ -25,8 +31,11 @@ const WIFI_PASSWORD_FILE: &str = "/etc/kvm/wifi.pass";
 const WIFI_CONNECT_FILE: &str = "/kvmapp/kvm/wifi_try_connect";
 const WIFI_STATE_FILE: &str = "/kvmapp/kvm/wifi_state";
 const WIFI_AP_PASS_FILE: &str = "/kvmapp/kvm/ap.pass";
-const MAX_WIFI_SSID_BYTES: usize = 128;
-const MAX_WIFI_PASSWORD_BYTES: usize = 256;
+/// 802.11 limits an SSID to 32 bytes.
+const MAX_WIFI_SSID_BYTES: usize = 32;
+/// A WPA2 passphrase, as `wpa_passphrase` accepts it: 8 to 63 bytes.
+const MIN_WIFI_PASSWORD_BYTES: usize = 8;
+const MAX_WIFI_PASSWORD_BYTES: usize = 63;
 
 const DNS_MODE_MANUAL: &str = "manual";
 const DNS_MODE_DHCP: &str = "dhcp";
@@ -527,10 +536,38 @@ pub async fn connect_wifi(
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn verify_ap_login(headers: HeaderMap) -> Result<impl IntoResponse> {
+// The AP key gates unauthenticated provisioning and has few possible values;
+// a locked source or an exhausted shared budget is refused before checking it.
+async fn ap_key_locked(state: &AppState, source: IpAddr) -> Result<()> {
+    if state.ap_key_limiter.write().await.check(source) {
+        return Err(AppError::RateLimited(
+            "too many AP key attempts; try again later".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn record_ap_key(state: &AppState, source: IpAddr, accepted: bool) {
+    let mut limiter = state.ap_key_limiter.write().await;
+    if accepted {
+        limiter.record_success(source);
+    } else {
+        limiter.record_failure(source);
+    }
+}
+
+pub async fn verify_ap_login(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
     let paths = NetworkPaths::default();
     ensure_wifi_ap_mode(&paths)?;
-    if !verify_ap_key(&paths, &headers) {
+    let source = addr.0.ip();
+    ap_key_locked(&state, source).await?;
+    let accepted = verify_ap_key(&paths, &headers);
+    record_ap_key(&state, source, accepted).await;
+    if !accepted {
         return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
     }
 
@@ -539,9 +576,12 @@ pub async fn verify_ap_login(headers: HeaderMap) -> Result<impl IntoResponse> {
 
 pub async fn connect_wifi_no_auth(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
     headers: HeaderMap,
     Json(req): Json<ConnectWifiReq>,
 ) -> Result<impl IntoResponse> {
+    let source = addr.0.ip();
+    ap_key_locked(&state, source).await?;
     let writer = state.writers.configuration()?;
     let accepted = writer
         .run(move |writer| async move {
@@ -562,6 +602,7 @@ pub async fn connect_wifi_no_auth(
                 .await
         })
         .await?;
+    record_ap_key(&state, source, accepted).await;
     if !accepted {
         return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
     }
@@ -679,8 +720,10 @@ fn validate_wifi_ssid(ssid: &str) -> Result<String> {
     Ok(ssid.to_string())
 }
 
+// Rejected before anything is written, so a value the supplicant would refuse
+// can no longer replace working credentials.
 fn validate_wifi_password(password: &str) -> Result<String> {
-    if password.is_empty()
+    if password.len() < MIN_WIFI_PASSWORD_BYTES
         || password.len() > MAX_WIFI_PASSWORD_BYTES
         || password.chars().any(char::is_control)
     {
@@ -1980,6 +2023,15 @@ mod tests {
         assert!(validate_wifi_password("secret-password").is_ok());
         assert!(validate_wifi_password("").is_err());
         assert!(validate_wifi_password("bad\npassword").is_err());
+        // What the supplicant accepts: an SSID of up to 32 bytes and a
+        // passphrase of 8 to 63 bytes.
+        assert!(validate_wifi_ssid(&"s".repeat(32)).is_ok());
+        assert!(validate_wifi_ssid(&"s".repeat(33)).is_err());
+        assert!(validate_wifi_ssid(&"é".repeat(17)).is_err(), "34 bytes");
+        assert!(validate_wifi_password(&"p".repeat(7)).is_err());
+        assert!(validate_wifi_password(&"p".repeat(8)).is_ok());
+        assert!(validate_wifi_password(&"p".repeat(63)).is_ok());
+        assert!(validate_wifi_password(&"p".repeat(64)).is_err());
     }
 
     #[test]

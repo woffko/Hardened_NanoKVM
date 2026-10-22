@@ -98,7 +98,13 @@ Known exceptions:
   its password was entered again. Listing and deleting need only the session.
 - Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
   executes these files; historical autostart uploads are never activated.
-- DNS/Wi-Fi files: strict value validation and atomic writes.
+- DNS/Wi-Fi files: strict value validation and atomic writes. A Wi-Fi SSID is
+  1–32 bytes and a passphrase 8–63 bytes, as the supplicant accepts, and both
+  are rejected before anything is written.
+- AP provisioning key: its few possible values are guarded by a lockout of 5
+  failures per source and 20 shared by all sources, each for 10 minutes. The key
+  generator (native `kvm_system`), the `ap.pass` mode and hostapd's cipher
+  choice live in native code and boot scripts and are still open.
 
 ## Follow-Up For Hardening
 

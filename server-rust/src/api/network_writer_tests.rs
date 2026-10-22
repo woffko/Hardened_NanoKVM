@@ -1,4 +1,9 @@
 use super::*;
+
+// The address of one AP client, for direct calls of the unauthenticated handlers.
+fn ap_client() -> ConnectInfo<ClientAddr> {
+    ConnectInfo(ClientAddr("192.168.4.100:40000".parse().unwrap()))
+}
 use crate::{config::Config, update::state_writers::StateWriters};
 use std::{
     fs::File,
@@ -298,6 +303,7 @@ async fn ap_publication_survives_reply_loss_but_does_not_claim_native_completion
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
     let mut request = Box::pin(connect_wifi_no_auth(
         State(state.clone()),
+        ap_client(),
         ap_headers(),
         Json(wifi_request()),
     ));
@@ -323,16 +329,26 @@ async fn ap_publication_survives_reply_loss_but_does_not_claim_native_completion
 async fn ap_wrong_key_or_mode_never_publishes_credentials_or_marker() {
     let (dir, state) = fixture().await;
     assert!(matches!(
-        connect_wifi_no_auth(State(state.clone()), ap_headers(), Json(wifi_request())).await,
+        connect_wifi_no_auth(
+            State(state.clone()),
+            ap_client(),
+            ap_headers(),
+            Json(wifi_request())
+        )
+        .await,
         Err(AppError::BadRequest(_))
     ));
     put(dir.path(), WIFI_AP_MODE_FILE, "fixture");
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
-    let response =
-        connect_wifi_no_auth(State(state.clone()), HeaderMap::new(), Json(wifi_request()))
-            .await
-            .unwrap()
-            .into_response();
+    let response = connect_wifi_no_auth(
+        State(state.clone()),
+        ap_client(),
+        HeaderMap::new(),
+        Json(wifi_request()),
+    )
+    .await
+    .unwrap()
+    .into_response();
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
@@ -368,7 +384,13 @@ async fn paused_network_mutators_cannot_publish_or_start_service_commands() {
         Err(AppError::Conflict(_))
     ));
     assert!(matches!(
-        connect_wifi_no_auth(State(state.clone()), ap_headers(), Json(wifi_request())).await,
+        connect_wifi_no_auth(
+            State(state.clone()),
+            ap_client(),
+            ap_headers(),
+            Json(wifi_request())
+        )
+        .await,
         Err(AppError::Conflict(_))
     ));
     assert!(matches!(
@@ -688,9 +710,14 @@ async fn ap_marker_failure_does_not_turn_partial_publication_into_success() {
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
     fs::create_dir_all(path(dir.path(), WIFI_CONNECT_FILE)).unwrap();
     assert!(
-        connect_wifi_no_auth(State(state.clone()), ap_headers(), Json(wifi_request()))
-            .await
-            .is_err()
+        connect_wifi_no_auth(
+            State(state.clone()),
+            ap_client(),
+            ap_headers(),
+            Json(wifi_request())
+        )
+        .await
+        .is_err()
     );
     assert_eq!(read(dir.path(), WIFI_SSID_FILE), "fixture network");
     assert_eq!(
