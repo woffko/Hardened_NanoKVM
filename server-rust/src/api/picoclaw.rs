@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{
         Path as AxumPath, Query, State,
@@ -38,6 +38,7 @@ use crate::{
     api::{hid, stream},
     auth::token::random_token,
     error::ApiResponse,
+    http::middleware::{CurrentSession, TransportSession},
     state::AppState,
     system::command::{self, AllowedCommand},
     update::picoclaw_startup as startup,
@@ -85,6 +86,8 @@ const CLOSE_NORMAL: u16 = 1000;
 const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
 const CLOSE_PICOCLAW_TAKEN_OVER: u16 = 4004;
 const CLOSE_UPSTREAM_CLOSED: u16 = 4005;
+/// The login that opened the socket was logged out, revoked or expired.
+const CLOSE_SESSION_ENDED: u16 = 1008;
 
 const SESSION_LOCK_DURATION: Duration = Duration::from_secs(30 * 60);
 const CACHED_FRAME_MAX_AGE: Duration = Duration::from_secs(2);
@@ -97,6 +100,10 @@ const DEFAULT_SCROLL_STEP: Duration = Duration::from_millis(20);
 
 static RUNTIME_STATUS: LazyLock<RwLock<RuntimeStatus>> =
     LazyLock::new(|| RwLock::new(RuntimeStatus::checking()));
+/// Tests that take the process-wide Pico session lock run one at a time.
+#[cfg(test)]
+pub(crate) static SESSION_LOCK_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 static SESSION_LOCK: LazyLock<Mutex<PicoSessionLock>> =
     LazyLock::new(|| Mutex::new(PicoSessionLock::default()));
 
@@ -843,6 +850,7 @@ pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
 
 pub async fn gateway_ws(
     State(state): State<AppState>,
+    session: Option<Extension<CurrentSession>>,
     Query(query): Query<GatewayQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -852,6 +860,8 @@ pub async fn gateway_ws(
     if !crate::ws::origin::validate_ws_origin(&headers, &state.config) {
         return Err(AppError::Forbidden("invalid websocket origin".to_string()));
     }
+    // The chat lives only as long as the login that opened it.
+    let transport = TransportSession::capture(&state.config, session)?;
     let session_id = gateway_session_id(&query);
     if let Err(err) = ensure_session_lock(&session_id) {
         return Ok(picoclaw_error_data_status(StatusCode::CONFLICT, err));
@@ -918,6 +928,7 @@ pub async fn gateway_ws(
                 upstream,
                 settings,
                 state.picoclaw_worker,
+                transport,
             )
         })
         .into_response())
@@ -1124,6 +1135,7 @@ async fn handle_gateway_socket(
     upstream: GatewayUpstream,
     settings: GatewaySettings,
     worker: Arc<worker::Worker>,
+    transport: TransportSession,
 ) {
     let (mut downstream_tx, mut downstream_rx) = socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
@@ -1134,9 +1146,16 @@ async fn handle_gateway_socket(
 
     ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     debug!(session_id, "picoclaw gateway websocket connected");
+    let session_ended = transport.ended();
+    tokio::pin!(session_ended);
 
     let close = loop {
         tokio::select! {
+            // Logout, revocation or expiry ends the chat and, below, its
+            // admitted calls; an idle socket does not outlive its login.
+            _ = &mut session_ended => {
+                break GatewayClose::new(CLOSE_SESSION_ENDED, "session ended");
+            }
             _ = &mut read_deadline => {
                 break GatewayClose::upstream("gateway read timeout");
             }

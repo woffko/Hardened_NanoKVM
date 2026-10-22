@@ -332,6 +332,7 @@ async fn direct_and_mcp_actions_and_screenshots_all_share_the_same_bounded_admis
 
 #[tokio::test(flavor = "current_thread")]
 async fn valid_direct_and_mcp_waits_leave_tokio_responsive_and_share_app_worker() {
+    let _serial = super::super::SESSION_LOCK_TESTS.lock().await;
     use super::super::{SESSION_ID_HEADER, State, actions, mcp};
     use serde_json::json;
     let mut config = crate::config::Config::default();

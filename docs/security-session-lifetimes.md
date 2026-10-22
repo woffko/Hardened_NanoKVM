@@ -45,6 +45,7 @@ authorization remain separate boundaries.
 | WebRTC | Live signaling/RTCP/media authority, bounded admission, retained peer/producer tasks and joined normal cleanup. | Connected RTP/backpressure, physical video and complete backend shutdown remain unaccepted; see [WebRTC ownership](security-webrtc-lifetimes.md). |
 | Terminal unlock ticket | Consuming a ticket also requires its captured session to remain live. | A ticket admits one terminal connection or one script upload/run. |
 | Terminal PTY | The connection waits on the session's lifetime, so logout, a password change or expiry close it with 1008, and a renewal keeps it. Cleanup then signals every live process in the shell's PTY session, by pidfd, before the shell is reaped. | A process that called `setsid()` itself leaves the session and is not reached; there are no cgroups. |
+| Pico gateway WebSocket | The chat relay waits on the session's lifetime, so logout, a password change or expiry close it with 1008, even while idle. The relay then cancels the session's admitted Pico calls, releases its Pico session lock and closes the upstream gateway. | Cancelling an admitted call does not preempt an action already in progress. Tasks delegated to the Pico runtime itself are not bound to the web session. |
 
 HID retains separate bounded keyboard and mouse queues and the existing packet
 formats. The shared report worker checks authority again after acquiring the
@@ -65,8 +66,8 @@ preemption or complete device-reset reconciliation is claimed.
 
 ## Remaining integration and acceptance
 
-Pico gateway and delegated task authority, pending privileged operations and
-complete app/runtime shutdown still need integration. WebRTC now
+Pico delegated task authority, pending privileged operations and complete
+app/runtime shutdown still need integration. WebRTC now
 has component ownership/lifetime integration, but its remaining connected-peer,
 backpressure, process-signal and device gates are not closed.
 Durable installation jobs must follow their retained transaction stop/drain
