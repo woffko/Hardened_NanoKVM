@@ -9,7 +9,7 @@ use crate::auth::token::random_token;
 
 #[path = "session_lifetime.rs"]
 mod lifetime;
-pub(crate) use lifetime::SessionLifetime;
+pub(crate) use lifetime::{SessionEnd, SessionLifetime};
 
 #[derive(Debug, Clone)]
 pub struct Session {

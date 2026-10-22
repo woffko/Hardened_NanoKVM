@@ -34,7 +34,10 @@ use tracing::{debug, info, warn};
 use crate::{
     AppError, Result,
     api::stream,
-    auth::compat_crypto::decode_frontend_password,
+    auth::{
+        compat_crypto::decode_frontend_password,
+        session::{SessionEnd, SessionLifetime},
+    },
     config::Config,
     error::ApiResponse,
     ffi::kvm,
@@ -658,11 +661,13 @@ pub async fn terminal(
 
     Ok(ws
         .max_message_size(TERMINAL_MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_terminal_socket(socket, session.expires_at))
+        .on_upgrade(move |socket| handle_terminal_socket(socket, session.lifetime()))
         .into_response())
 }
 
-async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
+// The root shell lives only as long as the session that unlocked it: logout,
+// a password change or expiry end it, while a renewal keeps it open.
+async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime) {
     let terminal = match spawn_terminal_pty() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -705,15 +710,20 @@ async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     debug!("terminal websocket connected");
-    let session_deadline = time::sleep(expires_at.saturating_duration_since(StdInstant::now()));
-    tokio::pin!(session_deadline);
+    let session_end = lifetime.ended();
+    tokio::pin!(session_end);
 
     loop {
         tokio::select! {
-            _ = &mut session_deadline => {
+            end = &mut session_end => {
+                let reason = match end {
+                    SessionEnd::Revoked => "terminal session revoked",
+                    SessionEnd::Expired => "terminal session expired",
+                    SessionEnd::Uncertain => "terminal session ended",
+                };
                 let _ = ws_tx.send(Message::Close(Some(CloseFrame {
                     code: 1008,
-                    reason: "terminal session expired".into(),
+                    reason: reason.into(),
                 }))).await;
                 break;
             }
@@ -957,11 +967,56 @@ fn set_terminal_winsize(pty: &File, winsize: &Winsize) {
     }
 }
 
+// The shell leads its own session (forkpty). Until it is reaped its pid cannot
+// be reused, so every live process with that session ID was started from this
+// terminal: end them all, not only the shell. A process that called setsid()
+// itself is beyond this reach; there are no cgroups on this kernel.
 fn cleanup_terminal_process_blocking(child: Pid) {
-    let _ = kill(child, Signal::SIGTERM);
+    signal_terminal_session(child, Signal::SIGTERM);
     std::thread::sleep(Duration::from_millis(50));
-    let _ = kill(child, Signal::SIGKILL);
+    signal_terminal_session(child, Signal::SIGKILL);
     let _ = waitpid(child, None);
+}
+
+/// Bound on the /proc entries scanned for one terminal's session.
+const MAX_PROC_ENTRIES: usize = 4096;
+
+fn signal_terminal_session(session: Pid, signal: Signal) {
+    let _ = kill(session, signal);
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten().take(MAX_PROC_ENTRIES) {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        // Pin the process before reading its session: a pid reused after
+        // this open names another process, and the pidfd signal then fails.
+        let Ok(process) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        else {
+            continue;
+        };
+        if session_of(pid.as_raw_nonzero().get()) == Some(session.as_raw()) {
+            let _ = rustix::process::pidfd_send_signal(
+                &process,
+                rustix::process::Signal::from_named_raw(signal as i32)
+                    .unwrap_or(rustix::process::Signal::KILL),
+            );
+        }
+    }
+}
+
+// Field 6 of /proc/<pid>/stat. The command name may hold spaces and ')', so
+// fields are counted after its last ')': state, ppid, pgrp, session.
+fn session_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(3)?.parse().ok()
 }
 
 pub async fn get_memory_limit() -> Result<impl IntoResponse> {
@@ -1483,5 +1538,106 @@ mod tests {
     fn removes_swap_inittab_lines() {
         let input = "tty::respawn:/bin/login\nsi11::sysinit:/sbin/swapon /swapfile\n";
         assert_eq!(remove_swap_inittab_lines(input), "tty::respawn:/bin/login");
+    }
+
+    // A real listener and PTY: logout ends the unlocked terminal and every
+    // process started from it, including a job that ignores SIGHUP.
+    #[tokio::test]
+    async fn logout_closes_the_terminal_and_ends_its_whole_pty_session() {
+        use crate::http::middleware::protected;
+        use axum::{Router, middleware::from_fn_with_state, routing::get};
+        use tokio_tungstenite::tungstenite::{
+            Message as WsMessage, client::IntoClientRequest, protocol::frame::coding::CloseCode,
+        };
+
+        let mut config = Config {
+            stun: "disable".into(),
+            ..Config::default()
+        };
+        config.security.allow_terminal = true;
+        let state = AppState::new(config).await.unwrap();
+        let login = state.sessions.issue("admin", 60).await;
+        let ticket = state.terminal_tickets.issue(&login, 120).await;
+        let router = Router::new()
+            .route("/api/vm/terminal", get(terminal))
+            .route_layer(from_fn_with_state(state.clone(), protected))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/api/vm/terminal?ticket={}", ticket.token)
+            .into_client_request()
+            .unwrap();
+        let headers = request.headers_mut();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", login.token).parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            format!("http://{address}").parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                "(trap '' HUP; exec sleep 300) & echo \"JOB:$!:END\"\n".into(),
+            ))
+            .await
+            .unwrap();
+        let mut output = String::new();
+        let job: i32 = time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(WsMessage::Binary(bytes)) =
+                    socket.next().await.map(|message| message.unwrap())
+                {
+                    output.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                if let Some(pid) = output
+                    .split("JOB:")
+                    .skip(1)
+                    .find_map(|rest| rest.split(":END").next()?.parse().ok())
+                {
+                    return pid;
+                }
+            }
+        })
+        .await
+        .expect("the job announced its pid");
+        assert!(Path::new(&format!("/proc/{job}")).exists());
+        state.sessions.revoke(&login.token).await;
+        let closed = time::timeout(Duration::from_secs(5), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(WsMessage::Close(frame))) => return frame,
+                    Some(Ok(_)) => continue,
+                    other => panic!("terminal ended without a close frame: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("logout closes the terminal")
+        .expect("a close frame");
+        assert_eq!(closed.code, CloseCode::Policy);
+        assert_eq!(closed.reason.as_str(), "terminal session revoked");
+        // The job ignored SIGHUP; only the session-wide cleanup ends it.
+        time::timeout(Duration::from_secs(5), async {
+            while session_of(job).is_some() && !zombie(job) {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the terminal's background job is gone");
+        server.abort();
+    }
+
+    // A killed orphan may linger unreaped under a non-reaping parent.
+    fn zombie(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let rest = &stat[stat.rfind(')')? + 1..];
+                rest.split_whitespace().next().map(|state| state == "Z")
+            })
+            .unwrap_or(true)
     }
 }
