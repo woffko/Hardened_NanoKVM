@@ -1423,11 +1423,90 @@ fn read_gpio(path: &str) -> Result<bool> {
     Ok(value == 0)
 }
 
+/// Lines with a pulse in progress. A second pulse on the same line would cut
+/// the first one short, or turn one long press into two.
+static PULSING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Press a power or reset line for `duration`, then release it. The pulse runs
+/// in its own task, so a lost client cannot leave the button pressed. If that
+/// task is dropped, as at backend shutdown, its guard still releases the line.
 async fn write_gpio_pulse(path: &str, duration: Duration) -> Result<()> {
-    fs::write(path, b"1")?;
+    let line = PulseLine::claim(path)?;
+    let (reply, done) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        drop(reply.send(pulse(line, duration).await));
+    });
+    done.await
+        .map_err(|_| AppError::Internal("gpio pulse ended without a result".to_string()))?
+}
+
+async fn pulse(line: PulseLine, duration: Duration) -> Result<()> {
+    let pressed = Pressed::press(line)?;
     time::sleep(duration).await;
-    fs::write(path, b"0")?;
-    Ok(())
+    pressed.release()
+}
+
+/// Exclusive use of one GPIO line until dropped.
+struct PulseLine(String);
+
+impl PulseLine {
+    fn claim(path: &str) -> Result<Self> {
+        let mut pulsing = PULSING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pulsing.iter().any(|line| line == path) {
+            return Err(AppError::Conflict(
+                "a power or reset pulse is already in progress".to_string(),
+            ));
+        }
+        pulsing.push(path.to_string());
+        Ok(Self(path.to_string()))
+    }
+}
+
+impl Drop for PulseLine {
+    fn drop(&mut self) {
+        let mut pulsing = PULSING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pulsing.retain(|line| line != &self.0);
+    }
+}
+
+/// A pressed line. Dropped without `release`, it still writes 0.
+struct Pressed(Option<PulseLine>);
+
+impl Pressed {
+    fn press(line: PulseLine) -> Result<Self> {
+        if let Err(error) = fs::write(&line.0, b"1") {
+            // The line state is unknown after a failed write: release it.
+            let _ = fs::write(&line.0, b"0");
+            return Err(error.into());
+        }
+        Ok(Self(Some(line)))
+    }
+
+    fn release(mut self) -> Result<()> {
+        match self.0.take() {
+            Some(line) => release(&line.0),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Pressed {
+    fn drop(&mut self) {
+        if let Some(line) = self.0.take() {
+            let _ = release(&line.0);
+        }
+    }
+}
+
+fn release(path: &str) -> Result<()> {
+    fs::write(path, b"0").map_err(|error| {
+        tracing::error!(%error, "gpio line release failed; the button may stay pressed");
+        AppError::from(error)
+    })
 }
 
 fn persist_hdmi_enabled() -> Result<()> {
@@ -1488,6 +1567,92 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gpio_line(dir: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, String) {
+        let line = dir.path().join(name);
+        fs::write(&line, b"0").unwrap();
+        let path = line.to_str().unwrap().to_string();
+        (line, path)
+    }
+
+    async fn pressed_within(line: &Path, limit: Duration) -> bool {
+        let started = StdInstant::now();
+        while started.elapsed() < limit {
+            if fs::read(line).unwrap() == b"1" {
+                return true;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pulse_is_released_even_when_its_client_goes_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let (line, path) = gpio_line(&dir, "power");
+        let request = tokio::spawn({
+            let path = path.clone();
+            async move { write_gpio_pulse(&path, Duration::from_millis(300)).await }
+        });
+        assert!(pressed_within(&line, Duration::from_secs(1)).await);
+        // An overlapping pulse on the same line is refused, not queued.
+        assert!(matches!(
+            write_gpio_pulse(&path, Duration::from_millis(50)).await,
+            Err(AppError::Conflict(_))
+        ));
+        // The HTTP handler's future is dropped when its client goes away.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+        // The line is free again once the pulse has ended.
+        write_gpio_pulse(&path, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pulses_on_different_lines_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (power, power_path) = gpio_line(&dir, "power");
+        let (reset, reset_path) = gpio_line(&dir, "reset");
+        let first =
+            tokio::spawn(
+                async move { write_gpio_pulse(&power_path, Duration::from_millis(300)).await },
+            );
+        assert!(pressed_within(&power, Duration::from_secs(1)).await);
+        write_gpio_pulse(&reset_path, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&reset).unwrap(), b"0");
+        first.await.unwrap().unwrap();
+        assert_eq!(fs::read(&power).unwrap(), b"0");
+    }
+
+    #[test]
+    fn a_pulse_dropped_at_shutdown_still_releases_its_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (line, path) = gpio_line(&dir, "reset");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.spawn({
+            let path = path.clone();
+            async move { write_gpio_pulse(&path, Duration::from_secs(30)).await }
+        });
+        let started = StdInstant::now();
+        while fs::read(&line).unwrap() != b"1" {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Dropping the runtime drops the pulse task in the middle of its press.
+        drop(runtime);
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+        drop(PulseLine::claim(&path).unwrap());
+    }
 
     #[test]
     fn validates_numeric_pids_only() {

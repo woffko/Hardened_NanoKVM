@@ -100,7 +100,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET             | `/api/vm/hardware`         | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/hostname`         | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/web-title`        | Implemented.                                                                                                       |
-| GET/POST        | `/api/vm/gpio`             | Implemented.                                                                                                       |
+| GET/POST        | `/api/vm/gpio`             | Implemented. A power or reset pulse (50 ms to 5 s) runs in its own task and always releases the line, even after a lost client or at shutdown; an overlapping pulse on the same line is refused (-409). |
 | POST            | `/api/vm/screen`           | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
 | GET/POST        | `/api/vm/device/virtual`   | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/oled`             | Implemented.                                                                                                       |
