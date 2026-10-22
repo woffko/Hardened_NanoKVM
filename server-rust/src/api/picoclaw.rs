@@ -638,17 +638,28 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
         ));
     }
 
-    let (api_base, api_key, model) = (api_base.to_string(), api_key.to_string(), model.to_string());
-    let result = crate::update::state_writers::StateWriters::default()
-        .configuration()?
-        .blocking(move |permit| {
-            let model_name = update_model_config_file(permit, &api_base, &api_key, &model)?;
-            write_startup_defaults(permit)?;
-            Ok(model_name)
-        })
-        .await;
+    if crate::update::picoclaw_model::check_request(model, api_base, api_key).is_err() {
+        return Ok(picoclaw_error(
+            CODE_RUNTIME_UNAVAILABLE,
+            "invalid model configuration",
+        ));
+    }
+    let model_name = crate::update::picoclaw_model::model_name(model).unwrap_or_default();
+    // The broker selects the model and applies the startup defaults as one
+    // job; this handler never writes the pair.
+    let fields = [model, api_base, api_key].map(|field| zeroize::Zeroizing::new(field.to_string()));
+    let result = run_config_job(MODEL_JOB_KIND, move || {
+        let [model, api_base, api_key] = fields.clone();
+        crate::native_owner::broker::ipc::run_model_job(
+            model,
+            api_base,
+            api_key,
+            CONFIG_JOB_TIMEOUT,
+        )
+    })
+    .await;
     match result {
-        Ok(model_name) => {
+        Ok(()) => {
             let status = refresh_runtime_status().await;
             Ok(Json(ApiResponse::ok(json!({
                 "model_name": model_name,
@@ -2915,7 +2926,6 @@ fn seconds_to_millis_i32(seconds: i64) -> Option<i32> {
 }
 
 struct ConfigDocument {
-    config_path: PathBuf,
     raw: JsonValue,
     security: serde_yaml::Value,
 }
@@ -2938,11 +2948,7 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
         security_data.as_deref().map(|bytes| bytes.as_slice()),
     )?;
 
-    Ok(ConfigDocument {
-        config_path,
-        raw,
-        security,
-    })
+    Ok(ConfigDocument { raw, security })
 }
 
 async fn onboard_runtime_config() -> Result<()> {
@@ -3027,42 +3033,21 @@ fn security_has_model_key(security: &serde_yaml::Value, model_name: &str, index:
     })
 }
 
-fn update_model_config_file(
-    permit: &crate::update::state_writers::ConfigPermit,
-    api_base: &str,
-    api_key: &str,
-    model: &str,
-) -> Result<String> {
-    let mut doc = load_config_document()?;
-    let model_name = crate::update::picoclaw_model::apply(
-        &mut doc.raw,
-        &mut doc.security,
-        model,
-        api_base,
-        api_key,
-    )?;
-    save_config_document(permit, &doc)?;
-    Ok(model_name)
-}
-
+/// Fixture writer for the pair publication and cut tests. Production pair
+/// changes run as broker-owned jobs; no handler writes the pair.
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 fn save_config_document(
     permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
     doc: &ConfigDocument,
 ) -> Result<()> {
-    let encoded = encode_config_document(doc)?;
+    let encoded = startup::encode(&doc.raw, &doc.security)?;
     crate::update::picoclaw_config::replace_pair(
         permit,
-        &doc.config_path,
+        path,
         &encoded.config,
         Some(encoded.security.as_bytes()),
     )
-}
-
-// Never Debug/log these credential-bearing buffers. Startup comparison uses
-// canonical encodings, not the on-disk formatting/comments; unchanged inputs
-// must not replace the pair or change a running scope's exact-byte generation.
-fn encode_config_document(doc: &ConfigDocument) -> Result<startup::Encoding> {
-    startup::encode(&doc.raw, &doc.security)
 }
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
@@ -3095,26 +3080,28 @@ fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> Stri
     startup::existing_gateway_token(config, security).unwrap_or_default()
 }
 
-/// One broker-owned Startup job, including a live gateway's quiescence and
-/// relaunch, ends within this bound.
-const STARTUP_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+/// One broker-owned configuration job, including a live gateway's quiescence
+/// and relaunch, ends within this bound.
+const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_JOB_KIND: u8 = 2;
+const STARTUP_JOB_KIND: u8 = 3;
 
-enum StartupJob {
+enum JobDone {
     Done,
     /// A concurrent writer changed the pair before apply; nothing applied.
     Superseded,
 }
 
-// Receipt codes: Startup kind, Completed, then outcome and runtime. Error
+// Receipt codes: the job's kind, Completed, then outcome and runtime. Error
 // text is fixed: never documents, credentials or broker detail.
-fn startup_job_outcome(reply: crate::native_owner::broker::ipc::JobReply) -> Result<StartupJob> {
+fn job_outcome(reply: crate::native_owner::broker::ipc::JobReply, kind: u8) -> Result<JobDone> {
     use crate::native_owner::broker::ipc::JobCode;
     match (reply.code, reply.receipt) {
         // Changed or Noop.
-        (JobCode::Ok, [3, 8, 1 | 2, _]) => Ok(StartupJob::Done),
-        (JobCode::Ok, [3, 8, 3, 2]) => Ok(StartupJob::Superseded),
-        (JobCode::Ok, [3, 8, 3, _]) => Err(AppError::Config(
-            "picoclaw configuration cannot take its startup defaults".into(),
+        (JobCode::Ok, [code, 8, 1 | 2, _]) if code == kind => Ok(JobDone::Done),
+        (JobCode::Ok, [code, 8, 3, 2]) if code == kind => Ok(JobDone::Superseded),
+        (JobCode::Ok, [code, 8, 3, _]) if code == kind => Err(AppError::Config(
+            "picoclaw configuration cannot take this change".into(),
         )),
         (JobCode::Busy, _) => Err(AppError::Conflict(
             "configuration change already in progress".into(),
@@ -3123,61 +3110,45 @@ fn startup_job_outcome(reply: crate::native_owner::broker::ipc::JobReply) -> Res
             "Pico mutation requires checked settlement".into(),
         )),
         _ => Err(AppError::Internal(
-            "picoclaw startup job did not complete".into(),
+            "picoclaw configuration job did not complete".into(),
         )),
     }
 }
 
-/// Startup defaults are a broker-owned job. The broker settles a canonical
-/// pair as a no-op, or quiesces a live gateway, applies the fixed defaults
-/// through the pair journal and resumes it. This handler never writes the
-/// pair; a lost reply re-observes the same job instead of starting another.
-async fn ensure_startup_defaults() -> Result<()> {
+/// Run one broker-owned configuration job. The broker settles a canonical
+/// pair as a no-op, or quiesces a live gateway, applies the change through
+/// the pair journal and resumes it; a superseded change is retried once. A
+/// lost reply re-observes the same job instead of starting another.
+async fn run_config_job<F>(kind: u8, job: F) -> Result<()>
+where
+    F: Fn() -> std::io::Result<crate::native_owner::broker::ipc::JobReply> + Clone + Send + 'static,
+{
     for _ in 0..2 {
-        let reply = task::spawn_blocking(|| {
-            crate::native_owner::broker::ipc::run_startup_job(STARTUP_JOB_TIMEOUT)
-        })
-        .await
-        .map_err(|_| AppError::Internal("picoclaw startup job worker failed".into()))?
-        .map_err(|_| AppError::Conflict("picoclaw startup job unavailable".into()))?;
-        if let StartupJob::Done = startup_job_outcome(reply)? {
+        let run = job.clone();
+        let reply = task::spawn_blocking(run)
+            .await
+            .map_err(|_| AppError::Internal("picoclaw configuration job worker failed".into()))?
+            .map_err(|_| AppError::Conflict("picoclaw configuration job unavailable".into()))?;
+        if let JobDone::Done = job_outcome(reply, kind)? {
             return Ok(());
         }
     }
     Err(AppError::Conflict(
-        "picoclaw configuration changed during startup defaults".into(),
+        "picoclaw configuration changed during the job".into(),
     ))
 }
 
-#[cfg(test)]
-#[path = "picoclaw_startup_job_tests.rs"]
-mod startup_job_tests;
-
-/// Legacy in-handler writer, kept only for the model update until its own
-/// broker-owned executor replaces it. Startup itself runs as a job.
-fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -> Result<()> {
-    let mut doc = load_config_document()?;
-    // A virtual committed-intent read is not evidence that upstream is using a
-    // coherent installed pair. A connection must not settle a pending journal;
-    // only stopped native preparation can establish that boundary.
-    crate::update::picoclaw_config::current_generation(&doc.config_path)?;
-    startup::check_local_policy(&doc.raw)?;
-    let before = encode_config_document(&doc)?;
-    let gateway = startup::existing_gateway_token(&doc.raw, &doc.security)
-        .unwrap_or_else(|| random_token(36));
-    let internal = crate::update::picoclaw_token::ensure(permit)?;
-    startup::apply(&mut doc.raw, &mut doc.security, &gateway, &internal)?;
-    let after = encode_config_document(&doc)?;
-    if before != after {
-        crate::update::picoclaw_config::replace_pair(
-            permit,
-            &doc.config_path,
-            &after.config,
-            Some(after.security.as_bytes()),
-        )?;
-    }
-    Ok(())
+/// Startup defaults are a broker-owned job; this handler never writes them.
+async fn ensure_startup_defaults() -> Result<()> {
+    run_config_job(STARTUP_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_startup_job(CONFIG_JOB_TIMEOUT)
+    })
+    .await
 }
+
+#[cfg(test)]
+#[path = "picoclaw_config_job_tests.rs"]
+mod config_job_tests;
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 #[path = "picoclaw_config_publication_tests.rs"]

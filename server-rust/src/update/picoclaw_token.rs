@@ -107,6 +107,9 @@ pub(crate) fn new_value() -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(URL_SAFE_NO_PAD.encode(entropy.as_ref())))
 }
 
+/// Provisioning fixture over the shared read and link core that `install`
+/// and `observe` use. Production never provisions outside a job's plan.
+#[cfg(test)]
 fn ensure_at(parent: &File, uid: u32) -> Result<String> {
     let device = parent.metadata()?.dev();
     parent_at(parent, uid, device)?;
@@ -195,10 +198,6 @@ fn install_at(parent: &File, uid: u32, value: &str) -> Result<()> {
 
 pub(crate) fn install(_permit: &ConfigPermit, value: &str) -> Result<()> {
     install_at(&fixed_parent()?, 0, value)
-}
-
-pub(crate) fn ensure(_permit: &ConfigPermit) -> Result<String> {
-    ensure_at(&fixed_parent()?, 0)
 }
 
 #[cfg(test)]

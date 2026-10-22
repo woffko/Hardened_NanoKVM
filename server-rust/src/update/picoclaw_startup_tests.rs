@@ -273,3 +273,60 @@ fn a_request_change_is_a_noop_only_when_the_source_already_equals_its_target() {
     broken.config["agents"]["defaults"]["restrict_to_workspace"] = json!("no");
     assert!(classify_change(&selected, &broken, Some("internal")).is_err());
 }
+
+#[test]
+fn explicit_local_tool_choices_survive_and_only_absent_defaults_are_filled() {
+    for (policy, expected) in [
+        (json!({}), (true, false)),
+        (json!({"restrict_to_workspace": true}), (true, false)),
+        (
+            json!({"allow_read_outside_workspace": false}),
+            (true, false),
+        ),
+        (
+            json!({"restrict_to_workspace": true, "allow_read_outside_workspace": false}),
+            (true, false),
+        ),
+        (
+            json!({"restrict_to_workspace": false, "allow_read_outside_workspace": true}),
+            (false, true),
+        ),
+    ] {
+        let mut config = json!({"agents": {"defaults": policy}, "custom": "retained"});
+        let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        apply(&mut config, &mut security, "gateway", "internal").unwrap();
+        let flag = |path: &str| config.pointer(path).and_then(JsonValue::as_bool);
+        assert_eq!(
+            flag("/agents/defaults/restrict_to_workspace"),
+            Some(expected.0)
+        );
+        assert_eq!(
+            flag("/agents/defaults/allow_read_outside_workspace"),
+            Some(expected.1)
+        );
+        assert_eq!(config["custom"], "retained");
+        assert_eq!(config["tools"]["mcp"]["enabled"], true);
+    }
+}
+
+#[test]
+fn malformed_local_tool_policy_refuses_both_apply_and_classification() {
+    for raw in [
+        json!({"agents": {"defaults": {"restrict_to_workspace": "true"}}}),
+        json!({"agents": {"defaults": {"restrict_to_workspace": null}}}),
+        json!({"agents": {"defaults": {"allow_read_outside_workspace": 1}}}),
+        json!({"agents": {"defaults": {"allow_read_outside_workspace": []}}}),
+        json!({"agents": false}),
+        json!({"agents": {"defaults": []}}),
+    ] {
+        let mut config = raw.clone();
+        let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        assert!(apply(&mut config, &mut security, "gateway", "internal").is_err());
+        assert_eq!(config, raw, "nothing is filled in before the refusal");
+        let documents = Documents {
+            config: raw,
+            security,
+        };
+        assert!(classify(&documents, Some("internal")).is_err());
+    }
+}

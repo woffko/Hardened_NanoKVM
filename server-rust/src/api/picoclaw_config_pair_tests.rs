@@ -247,11 +247,10 @@ fn actual_recovery_fences_visible_intent_before_publishing_and_survives_another_
 
 pub(super) fn write(permit: &crate::update::state_writers::ConfigPermit, directory: &Path) {
     let doc = ConfigDocument {
-        config_path: directory.join("config.json"),
         raw: json!({"epoch": "new"}),
         security: serde_yaml::from_slice(b"epoch: new\n").unwrap(),
     };
-    let result = save_config_document(permit, &doc);
+    let result = save_config_document(permit, &directory.join("config.json"), &doc);
     if std::env::var_os("NANOKVM_PICO_PAIR_EXPECT_FAILURE").is_some() {
         assert!(result.is_err());
     } else {

@@ -845,6 +845,15 @@ const MODEL: &str = "synthetic-vendor/synthetic-model";
 const API_BASE: &str = "https://synthetic.invalid/v1";
 const API_KEY: &str = "synthetic-model-key-fixture";
 
+// The fixed synthetic Model request, as the job transport carries it.
+pub(crate) fn model_kind() -> crate::native_owner::broker::ipc::JobKind {
+    crate::native_owner::broker::ipc::JobKind::Model {
+        model: zeroize::Zeroizing::new(MODEL.into()),
+        api_base: zeroize::Zeroizing::new(API_BASE.into()),
+        api_key: zeroize::Zeroizing::new(API_KEY.into()),
+    }
+}
+
 // Startup jobs, or a Model job selecting the fixed synthetic model.
 fn request(case: &str) -> PicoRequest {
     if case.starts_with("settle-model-") {

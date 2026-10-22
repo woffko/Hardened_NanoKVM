@@ -368,6 +368,9 @@ pub(crate) fn needs_onboard(_permit: &ConfigPermit, path: &Path) -> Result<bool>
     Ok(directory.inspect(CONFIG)?.is_none())
 }
 
+/// Direct pair publication for fixtures only. Production pair changes run as
+/// broker-owned jobs through the same pair journal.
+#[cfg(test)]
 pub(crate) fn replace_pair(
     _permit: &ConfigPermit,
     path: &Path,

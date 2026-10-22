@@ -284,8 +284,7 @@ Chroot fixtures cover the no-op, absent and live changes (the live one is
 relaunched with the installed pair's generation), refusal, and failures after
 Applying, after the pair and after Committed, each settled at a later boot.
 
-The backend's model update still uses the legacy in-handler writer. Its
-transport frame and API migration come next.
+The backend's model update runs this job over the job transport (below).
 
 ## Current prior-boot settlement
 
@@ -357,20 +356,25 @@ repeated. They cover:
 
 They are host checks, not physical power cuts or device acceptance.
 
-## Current job transport and Startup API
+## Current job transport and backend callers
 
 The broker daemon listens on a third root-only endpoint, `picoclaw-job.sock`:
 a SEQPACKET socket beside `control.sock` in the protected journal directory,
-with matching peer credentials. Each 64-byte datagram is one fixed request:
+with matching peer credentials. Each datagram is one request with a fixed
+64-byte header:
 
 - Cursor: the next submission cursor of an idle store.
-- SubmitStartup(cursor, nonce).
+- Submit(cursor, nonce, kind): Startup, or Model with its three bounded
+  fields after the header. Their lengths must account for the datagram
+  exactly, and the fields must pass the model request check.
 - Observe(job id).
 
 Each reply is one fixed 64-byte frame: a result code, the cursor or job
 identity, and for a terminal job only its kind, phase, outcome and runtime
-codes. There is no path, command, credential, digest or error text. A
-malformed datagram is answered Invalid and its connection is closed.
+codes. There is no path, command, credential, digest or error text; a Model
+key travels only in its submission, is never echoed or Debug-printed, and the
+receive buffer is cleared after use. A malformed datagram is answered Invalid
+and its connection is closed.
 Connections carry no authority, are bounded in number and expire when idle;
 a job never depends on its submitter's connection.
 
@@ -392,27 +396,34 @@ client nonce, so it is known before acceptance.
 
 - An identical resubmission observes the same job or its receipt and never
   starts another.
+- The same identity with a different request is refused: Invalid while the
+  job is in flight (an in-memory digest of the submission tells them apart),
+  Rejected by acceptance once its receipt exists.
 - A stale cursor is Expired. A job never accepted is Invalid.
 - Observation of a finished job reads the retained receipt ring read-only,
   under the store's shared lease.
 
-**Backend caller.** `ensure_startup_defaults` (gateway session start and
-runtime start) now runs this job through `run_startup_job` instead of writing
-the pair. A lost reply re-observes the same job; only an explicit
-non-acceptance leads to a fresh submission. Changed or Noop is success, and a
-superseded change is retried once. Refusal, Busy and RecoveryRequired are
-errors with fixed text. The legacy in-handler writer remains only inside the
-model update until its own executor replaces it.
+**Backend callers.** `ensure_startup_defaults` (gateway session start and
+runtime start) runs a Startup job through `run_startup_job`, and the model
+update runs a Model job through `run_model_job`, after the same field check.
+Neither handler writes the pair. A lost reply re-observes the same job; only
+an explicit non-acceptance leads to a fresh submission. A Changed or Noop
+receipt of the job's own kind is success, and a superseded change is retried
+once. Refusal, Busy and RecoveryRequired are errors with fixed text.
 
-A chroot fixture runs the real daemon loop over its real endpoint. It covers
-no-op and change jobs with their exact receipts, the broker's return,
-identical resubmission, a stale cursor, an unknown id, a malformed datagram,
-and free admissions afterwards.
+The legacy in-handler writers are removed. The direct pair writer and the
+token provisioning helper remain only as test fixtures.
+
+A chroot fixture runs the real daemon loop over its real endpoint for Startup
+and Model jobs. It covers no-op and change jobs with their exact receipts, the
+broker's return, identical resubmission, a different request with the same
+identity, a stale cursor, an unknown id, a malformed datagram, and free
+admissions afterwards.
 
 Still open:
 
-- the model, profile, onboarding, install and remove executors, and their
-  API and S96 callers;
+- the profile, onboarding, install and remove executors, and their API and
+  S96 callers;
 - a pending pair journal still refuses acceptance, as it refused the legacy
   writer. Stopped recovery of that journal inside the job is not implemented.
 

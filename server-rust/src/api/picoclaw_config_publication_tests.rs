@@ -125,33 +125,8 @@ fn actual_config_io_never_crosses_a_private_mount_boundary() {
 }
 
 #[test]
-fn actual_model_pair_preflights_both_documents_before_changing_either() {
-    run_private_root("pair-preflight");
-}
-
-#[test]
-fn actual_model_pair_keeps_custom_fields_and_publishes_the_matching_secret() {
-    run_private_root("pair-model");
-}
-
-#[test]
 fn actual_launch_generation_binds_both_documents_and_explicit_security_absence() {
     run_private_root("generation");
-}
-
-#[test]
-fn actual_startup_defaults_do_not_republish_an_unchanged_pair() {
-    run_private_root("startup-noop");
-}
-
-#[test]
-fn actual_startup_defaults_preserve_explicit_local_tool_restrictions() {
-    run_private_root("startup-policy");
-}
-
-#[test]
-fn actual_startup_defaults_reject_malformed_local_policy_before_publication() {
-    run_private_root("startup-invalid-policy");
 }
 
 #[test]
@@ -241,126 +216,6 @@ fn private_root_child() {
             );
             assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
         }
-        "startup-noop" => {
-            startup_fixture(directory, json!({}));
-            write_startup_defaults(&permit).unwrap();
-            let config = directory.join("config.json");
-            let security = directory.join(".security.yml");
-            // Formatting/comments are not a reason to replace either inode.
-            let doc = load_config_document().unwrap();
-            put_private(&config, &serde_json::to_vec(&doc.raw).unwrap());
-            let yaml = format!(
-                "# synthetic user comment\n{}",
-                serde_yaml::to_string(&doc.security).unwrap()
-            );
-            put_private(&security, yaml.as_bytes());
-            let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
-            let identity = |path: &Path| {
-                let metadata = path.metadata().unwrap();
-                (
-                    metadata.ino(),
-                    metadata.mtime(),
-                    metadata.mtime_nsec(),
-                    metadata.ctime(),
-                    metadata.ctime_nsec(),
-                )
-            };
-            let revisions = [identity(&config), identity(&security)];
-            let generation = crate::update::picoclaw_config::current_generation(&config).unwrap();
-            for _ in 0..3 {
-                write_startup_defaults(&permit).unwrap();
-                assert_eq!(
-                    [identity(&config), identity(&security)],
-                    revisions,
-                    "a gateway connection must not republish an unchanged pair"
-                );
-                assert_eq!(
-                    [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
-                    before
-                );
-                assert!(
-                    crate::update::picoclaw_config::current_generation(&config).unwrap()
-                        == generation
-                );
-            }
-            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
-            let mut changed = load_config_document().unwrap();
-            changed.raw["gateway"]["port"] = json!(1);
-            put_private(&config, &serde_json::to_vec(&changed.raw).unwrap());
-            let changed_generation =
-                crate::update::picoclaw_config::current_generation(&config).unwrap();
-            write_startup_defaults(&permit).unwrap();
-            let restored = load_config_document().unwrap();
-            assert_eq!(restored.raw["gateway"]["port"], DEFAULT_GATEWAY_PORT);
-            assert_eq!(restored.raw["custom"], "retained");
-            assert_eq!(
-                resolved_pico_token(&restored.raw, &restored.security),
-                "synthetic-gateway-token"
-            );
-            assert!(
-                crate::update::picoclaw_config::current_generation(&config).unwrap()
-                    != changed_generation
-            );
-        }
-        "startup-policy" => {
-            for (policy, expected) in [
-                (json!({}), (true, false)),
-                (json!({"restrict_to_workspace": true}), (true, false)),
-                (
-                    json!({"allow_read_outside_workspace": false}),
-                    (true, false),
-                ),
-                (
-                    json!({"restrict_to_workspace": true, "allow_read_outside_workspace": false}),
-                    (true, false),
-                ),
-                (
-                    json!({"restrict_to_workspace": false, "allow_read_outside_workspace": true}),
-                    (false, true),
-                ),
-            ] {
-                startup_fixture(directory, json!({"agents": {"defaults": policy}}));
-                write_startup_defaults(&permit).unwrap();
-                let doc = load_config_document().unwrap();
-                assert_eq!(
-                    doc.raw
-                        .pointer("/agents/defaults/restrict_to_workspace")
-                        .and_then(JsonValue::as_bool),
-                    Some(expected.0)
-                );
-                assert_eq!(
-                    doc.raw
-                        .pointer("/agents/defaults/allow_read_outside_workspace")
-                        .and_then(JsonValue::as_bool),
-                    Some(expected.1)
-                );
-                assert_eq!(doc.raw["custom"], "retained");
-                assert_eq!(doc.raw["tools"]["mcp"]["enabled"], true);
-            }
-        }
-        "startup-invalid-policy" => {
-            for raw in [
-                json!({"agents": {"defaults": {"restrict_to_workspace": "true"}}}),
-                json!({"agents": {"defaults": {"restrict_to_workspace": null}}}),
-                json!({"agents": {"defaults": {"allow_read_outside_workspace": 1}}}),
-                json!({"agents": {"defaults": {"allow_read_outside_workspace": []}}}),
-                json!({"agents": false}),
-                json!({"agents": {"defaults": []}}),
-            ] {
-                startup_fixture(directory, raw);
-                fs::remove_file("/etc/kvm/.picoclaw_internal_token").unwrap();
-                let config = directory.join("config.json");
-                let security = directory.join(".security.yml");
-                let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
-                assert!(write_startup_defaults(&permit).is_err());
-                assert_eq!(
-                    [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
-                    before
-                );
-                assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
-                assert!(!Path::new("/etc/kvm/.picoclaw_internal_token").exists());
-            }
-        }
         "generation" => {
             use crate::update::picoclaw_config::{
                 current_generation, prepare_launch, replace_pair,
@@ -397,8 +252,6 @@ fn private_root_child() {
             let config = directory.join("config.json");
             let security = directory.join(".security.yml");
             let before = [fs::read(&config).unwrap(), fs::read(&security).unwrap()];
-            seed_internal_token();
-            assert!(write_startup_defaults(&permit).is_err());
             assert!(current_generation(&config).is_err());
             assert_eq!(
                 [fs::read(&config).unwrap(), fs::read(&security).unwrap()],
@@ -413,60 +266,6 @@ fn private_root_child() {
         "pair-write" => pair::write(&permit, directory),
         "pair-recover" => pair::recover(&permit, directory),
         "pair-refuse" => pair::refuse(&permit, directory, sentinel),
-        "pair-model" => {
-            let config = directory.join("config.json");
-            let security = directory.join(".security.yml");
-            let original = json!({"custom": {"keep": true}, "agents": {"defaults": {"custom": "retained"}}, "model_list": [{"model_name": "chosen", "model": "old/chosen", "api_base": "https://old.invalid", "api_key": "synthetic-legacy", "custom": "retained"}]});
-            put_private(&config, &serde_json::to_vec(&original).unwrap());
-            put_private(&security, b"custom: retained\nmodel_list: {}\n");
-            assert_eq!(
-                update_model_config_file(
-                    &permit,
-                    "https://new.invalid/v1",
-                    "synthetic-new-key",
-                    "new/chosen"
-                )
-                .unwrap(),
-                "chosen"
-            );
-            let loaded = load_config_document_at(config).unwrap();
-            assert_eq!(loaded.raw["custom"], original["custom"]);
-            assert_eq!(loaded.raw["agents"]["defaults"]["custom"], "retained");
-            assert_eq!(loaded.raw["model_list"][0]["custom"], "retained");
-            assert_eq!(
-                loaded.raw["model_list"][0]["api_base"],
-                "https://new.invalid/v1"
-            );
-            assert!(loaded.raw["model_list"][0].get("api_key").is_none());
-            assert_eq!(loaded.security["custom"].as_str(), Some("retained"));
-            assert_eq!(
-                loaded.security["model_list"]["chosen:0"]["api_keys"][0].as_str(),
-                Some("synthetic-new-key")
-            );
-            assert!(is_model_configured(&loaded.raw, &loaded.security, "chosen"));
-            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
-        }
-        "pair-preflight" => {
-            let target = directory.join("config.json");
-            let security = directory.join(".security.yml");
-            let old_config = br#"{"model_list":[],"agents":{"defaults":{"model_name":"old"}}}"#;
-            let old_security = b"model_list: {}\n";
-            put_private(&target, old_config);
-            put_private(&security, old_security);
-            let oversized_key = "x".repeat(crate::update::picoclaw_config::MAX_FILE_BYTES);
-            assert!(
-                update_model_config_file(
-                    &permit,
-                    "https://fixture.invalid/v1",
-                    &oversized_key,
-                    "fixture/new-model"
-                )
-                .is_err()
-            );
-            assert_eq!(fs::read(&target).unwrap(), old_config);
-            assert_eq!(fs::read(&security).unwrap(), old_security);
-            assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
-        }
         "symlink" => {
             let target = directory.join("config.json");
             std::os::unix::fs::symlink(sentinel, &target).unwrap();

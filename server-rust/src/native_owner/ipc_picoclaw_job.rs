@@ -1,28 +1,112 @@
 //! Private fixed-frame Pico job transport on a root-only SEQPACKET endpoint:
 //! one bounded request and one reply per datagram. Typed fields and result
-//! codes only, never a path, command, credential or error text. The broker
-//! owns each job; a client's disconnect never cancels or settles it.
+//! codes only; a Model key travels only in its submission and is never echoed,
+//! logged or Debug-printed. No path, command or error text. The broker owns
+//! each job; a client's disconnect never cancels or settles it.
 use super::*;
 use crate::native_owner::broker::{
     PicoCursor, PicoJobId, PicoMutation, PicoMutationAdmission, PicoMutationStatus, PicoRequest,
 };
 use crate::update::picoclaw_config::jobs::{self, Observed};
+use crate::update::picoclaw_model;
 use rustix::net::{RecvFlags, SendFlags};
+use sha2::{Digest, Sha256};
 use std::os::fd::OwnedFd;
+use zeroize::Zeroizing;
 
 pub(super) const PACKET: usize = 64;
+/// A Model submission's bounded fields follow its fixed header.
+pub(super) const MAX_REQUEST: usize = PACKET
+    + picoclaw_model::MAX_MODEL_BYTES
+    + picoclaw_model::MAX_API_BASE_BYTES
+    + picoclaw_model::MAX_API_KEY_BYTES;
 pub(super) const JOB_CLIENTS: usize = 4;
 const REQUEST_MAGIC: &[u8; 8] = b"NKPJQ001";
 const REPLY_MAGIC: &[u8; 8] = b"NKPJS001";
-/// The only executor wired to this transport so far; the store's kind code.
+// The executors wired to this transport; the store's kind codes.
+const MODEL: u8 = 2;
 const STARTUP: u8 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a submission asks the broker to settle.
+#[derive(Clone, PartialEq, Eq)]
+pub enum JobKind {
+    Startup,
+    /// Bounded, trimmed fields; see `picoclaw_model::check_request`.
+    Model {
+        model: Zeroizing<String>,
+        api_base: Zeroizing<String>,
+        api_key: Zeroizing<String>,
+    },
+}
+
+// Never print the credential-bearing fields.
+impl std::fmt::Debug for JobKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Startup => "Startup",
+            Self::Model { .. } => "Model { .. }",
+        })
+    }
+}
+
+impl JobKind {
+    fn code(&self) -> u8 {
+        match self {
+            Self::Startup => STARTUP,
+            Self::Model { .. } => MODEL,
+        }
+    }
+
+    fn fields(&self) -> [&str; 3] {
+        match self {
+            Self::Startup => ["", "", ""],
+            Self::Model {
+                model,
+                api_base,
+                api_key,
+            } => [model, api_base, api_key],
+        }
+    }
+
+    // In-memory identity of one submission, so a replay of the same job id
+    // with a different request is refused. Never stored or sent.
+    fn digest(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"NanoKVM Pico job submission v1\0");
+        hash.update([self.code()]);
+        for field in self.fields() {
+            hash.update((field.len() as u64).to_le_bytes());
+            hash.update(field.as_bytes());
+        }
+        hash.finalize().into()
+    }
+
+    fn request(self) -> PicoRequest {
+        match self {
+            Self::Startup => PicoRequest::Startup,
+            Self::Model {
+                model,
+                api_base,
+                api_key,
+            } => PicoRequest::Model {
+                model,
+                api_base,
+                api_key,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobRequest {
     /// The next submission cursor of an idle store.
     Cursor,
-    /// One Startup job for exactly this observed cursor and client nonce.
-    SubmitStartup { cursor: PicoCursor, nonce: [u8; 16] },
+    /// One job for exactly this observed cursor and client nonce.
+    Submit {
+        cursor: PicoCursor,
+        nonce: [u8; 16],
+        kind: JobKind,
+    },
     /// A submitted job: its cursor's epoch, the next sequence and its nonce.
     Observe(PicoJobId),
 }
@@ -96,42 +180,96 @@ impl JobReply {
     }
 }
 
-pub(super) fn encode_request(request: JobRequest) -> [u8; PACKET] {
-    let mut bytes = [0; PACKET];
+/// One request datagram: the fixed header, then a Model's three fields.
+pub(super) fn encode_request(request: &JobRequest) -> Zeroizing<Vec<u8>> {
+    let mut bytes = Zeroizing::new(vec![0; PACKET]);
     bytes[..8].copy_from_slice(REQUEST_MAGIC);
     let (op, kind, epoch, sequence, nonce) = match request {
-        JobRequest::Cursor => (1, 0, [0; 16], 0, [0; 16]),
-        JobRequest::SubmitStartup { cursor, nonce } => {
-            (2, STARTUP, cursor.epoch, cursor.sequence, nonce)
-        }
-        JobRequest::Observe(id) => (3, 0, id.epoch, id.sequence, id.nonce),
+        JobRequest::Cursor => (1, None, [0; 16], 0, [0; 16]),
+        JobRequest::Submit {
+            cursor,
+            nonce,
+            kind,
+        } => (2, Some(kind), cursor.epoch, cursor.sequence, *nonce),
+        JobRequest::Observe(id) => (3, None, id.epoch, id.sequence, id.nonce),
     };
     bytes[8] = op;
-    bytes[9] = kind;
     bytes[16..32].copy_from_slice(&epoch);
     bytes[32..40].copy_from_slice(&sequence.to_le_bytes());
     bytes[40..56].copy_from_slice(&nonce);
+    if let Some(kind) = kind {
+        bytes[9] = kind.code();
+        if let JobKind::Model { .. } = kind {
+            for (index, field) in kind.fields().into_iter().enumerate() {
+                let offset = 56 + index * 2;
+                let length = u16::try_from(field.len()).unwrap_or(u16::MAX);
+                bytes[offset..offset + 2].copy_from_slice(&length.to_le_bytes());
+                bytes.extend_from_slice(field.as_bytes());
+            }
+        }
+    }
     bytes
 }
 
-pub(super) fn decode_request(bytes: &[u8; PACKET]) -> Option<JobRequest> {
-    if &bytes[..8] != REQUEST_MAGIC
+// The three bounded Model fields after the header; their lengths are its
+// last bytes and must account for the whole datagram exactly.
+fn decode_model(bytes: &[u8]) -> Option<JobKind> {
+    if bytes.len() > MAX_REQUEST || bytes[62..PACKET].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let length = |index: usize| {
+        usize::from(u16::from_le_bytes([
+            bytes[56 + index * 2],
+            bytes[57 + index * 2],
+        ]))
+    };
+    let (model, api_base, api_key) = (length(0), length(1), length(2));
+    if PACKET + model + api_base + api_key != bytes.len() {
+        return None;
+    }
+    let field = |start: usize, length: usize| {
+        std::str::from_utf8(&bytes[start..start + length])
+            .ok()
+            .map(|text| Zeroizing::new(text.to_string()))
+    };
+    let kind = JobKind::Model {
+        model: field(PACKET, model)?,
+        api_base: field(PACKET + model, api_base)?,
+        api_key: field(PACKET + model + api_base, api_key)?,
+    };
+    let [model, api_base, api_key] = kind.fields();
+    picoclaw_model::check_request(model, api_base, api_key).ok()?;
+    Some(kind)
+}
+
+pub(super) fn decode_request(bytes: &[u8]) -> Option<JobRequest> {
+    if bytes.len() < PACKET
+        || &bytes[..8] != REQUEST_MAGIC
         || bytes[10..16].iter().any(|byte| *byte != 0)
-        || bytes[56..].iter().any(|byte| *byte != 0)
     {
         return None;
     }
     let epoch: [u8; 16] = bytes[16..32].try_into().ok()?;
     let sequence = u64::from_le_bytes(bytes[32..40].try_into().ok()?);
     let nonce: [u8; 16] = bytes[40..56].try_into().ok()?;
-    match (bytes[8], bytes[9]) {
-        (1, 0) if epoch == [0; 16] && sequence == 0 && nonce == [0; 16] => Some(JobRequest::Cursor),
-        (2, STARTUP) if epoch != [0; 16] && nonce != [0; 16] && sequence < u64::MAX => {
-            Some(JobRequest::SubmitStartup {
+    let submit = |kind: JobKind| {
+        (epoch != [0; 16] && nonce != [0; 16] && sequence < u64::MAX).then_some(
+            JobRequest::Submit {
                 cursor: PicoCursor { epoch, sequence },
                 nonce,
-            })
-        }
+                kind,
+            },
+        )
+    };
+    if (bytes[8], bytes[9]) == (2, MODEL) {
+        return submit(decode_model(bytes)?);
+    }
+    if bytes.len() != PACKET || bytes[56..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    match (bytes[8], bytes[9]) {
+        (1, 0) if epoch == [0; 16] && sequence == 0 && nonce == [0; 16] => Some(JobRequest::Cursor),
+        (2, STARTUP) => submit(JobKind::Startup),
         (3, 0) if epoch != [0; 16] && nonce != [0; 16] && sequence != 0 => {
             Some(JobRequest::Observe(PicoJobId {
                 epoch,
@@ -175,6 +313,8 @@ pub(super) fn decode_reply(bytes: &[u8; PACKET]) -> Option<JobReply> {
 pub(super) struct Job {
     mutation: Box<PicoMutation>,
     id: PicoJobId,
+    /// The submission's in-memory identity; see `JobKind::digest`.
+    digest: [u8; 32],
     status: PicoMutationStatus,
 }
 
@@ -246,12 +386,16 @@ impl Engine {
                     Err(error) => JobReply::code(store_code(&error)),
                 }
             }
-            JobRequest::SubmitStartup { cursor, nonce } => self.submit_startup(cursor, nonce),
+            JobRequest::Submit {
+                cursor,
+                nonce,
+                kind,
+            } => self.submit(cursor, nonce, kind),
             JobRequest::Observe(id) => self.observe_pico_job(id),
         }
     }
 
-    fn submit_startup(&mut self, cursor: PicoCursor, nonce: [u8; 16]) -> JobReply {
+    fn submit(&mut self, cursor: PicoCursor, nonce: [u8; 16], kind: JobKind) -> JobReply {
         let Some(sequence) = cursor.sequence.checked_add(1) else {
             return JobReply::code(JobCode::Invalid);
         };
@@ -260,12 +404,14 @@ impl Engine {
             sequence,
             nonce,
         };
+        let digest = kind.digest();
         if let Some(Owner::PicoJob(job)) = &self.owner {
-            // An identical resubmission after a lost reply observes its job.
-            return if job.id == id {
-                self.observe_pico_job(id)
-            } else {
-                JobReply::code(JobCode::Busy)
+            // An identical resubmission after a lost reply observes its job;
+            // the same identity with a different request is invalid.
+            return match (job.id == id, job.digest == digest) {
+                (true, true) => self.observe_pico_job(id),
+                (true, false) => JobReply::job(JobCode::Invalid, id),
+                (false, _) => JobReply::code(JobCode::Busy),
             };
         }
         if !self.pico_job_idle() {
@@ -290,10 +436,7 @@ impl Engine {
         if let Some(image) = &self.fixture_pico_image {
             mutation.fixture_image(std::fs::File::open(image).unwrap());
         }
-        if mutation
-            .submit(cursor, nonce, PicoRequest::Startup)
-            .is_err()
-        {
+        if mutation.submit(cursor, nonce, kind.request()).is_err() {
             // Nothing was accepted, so the SAME broker comes straight back.
             return match mutation.into_broker() {
                 Ok(broker) => {
@@ -304,6 +447,7 @@ impl Engine {
                     self.owner = Some(Owner::PicoJob(Job {
                         mutation,
                         id,
+                        digest,
                         status: PicoMutationStatus::RecoveryRequired,
                     }));
                     JobReply::job(JobCode::RecoveryRequired, id)
@@ -314,6 +458,7 @@ impl Engine {
         let owner = self.tick_pico_job(Job {
             mutation,
             id,
+            digest,
             status: PicoMutationStatus::Accepting,
         });
         self.owner = Some(owner);
@@ -379,10 +524,11 @@ impl JobClient {
     /// One bounded nonblocking exchange. `false` closes the connection: peer
     /// EOF, idle expiry, a malformed datagram or a full send buffer.
     pub(super) fn tick(&mut self, engine: &mut Engine, idle: Duration) -> io::Result<bool> {
-        let mut bytes = [0; PACKET];
+        // A Model datagram carries a key: clear the buffer after use.
+        let mut bytes = Zeroizing::new([0; MAX_REQUEST]);
         let length = match rustix::net::recv(
             &self.socket,
-            &mut bytes,
+            &mut bytes[..],
             RecvFlags::DONTWAIT | RecvFlags::TRUNC,
         ) {
             Ok((_, length)) => length,
@@ -395,7 +541,10 @@ impl JobClient {
             return Ok(false);
         }
         self.last_activity = Instant::now();
-        let request = (length == PACKET).then(|| decode_request(&bytes)).flatten();
+        let request = (length <= MAX_REQUEST)
+            .then(|| decode_request(&bytes[..length]))
+            .flatten();
+        let decoded = request.is_some();
         let reply = match request {
             Some(request) => engine.pico_job_request(request),
             None => JobReply::code(JobCode::Invalid),
@@ -405,7 +554,7 @@ impl JobClient {
             &encode_reply(reply),
             SendFlags::NOSIGNAL | SendFlags::DONTWAIT,
         );
-        Ok(request.is_some() && matches!(sent, Ok(PACKET)))
+        Ok(decoded && matches!(sent, Ok(PACKET)))
     }
 }
 
@@ -427,10 +576,10 @@ impl JobChannel {
     }
 
     /// One request and its reply within `timeout`.
-    pub fn exchange(&mut self, request: JobRequest, timeout: Duration) -> io::Result<JobReply> {
+    pub fn exchange(&mut self, request: &JobRequest, timeout: Duration) -> io::Result<JobReply> {
         let deadline = Instant::now() + timeout;
-        if rustix::net::send(&self.socket, &encode_request(request), SendFlags::NOSIGNAL)? != PACKET
-        {
+        let bytes = encode_request(request);
+        if rustix::net::send(&self.socket, &bytes, SendFlags::NOSIGNAL)? != bytes.len() {
             return Err(io::ErrorKind::WriteZero.into());
         }
         loop {
@@ -493,15 +642,37 @@ fn nonce() -> io::Result<[u8; 16]> {
 }
 
 /// Run one broker-owned Startup job to its durable end within `timeout`.
+pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
+    run_job(JobKind::Startup, timeout)
+}
+
+/// Run one broker-owned Model job; the fields must pass
+/// `picoclaw_model::check_request` or the broker refuses the datagram.
+pub fn run_model_job(
+    model: Zeroizing<String>,
+    api_base: Zeroizing<String>,
+    api_key: Zeroizing<String>,
+    timeout: Duration,
+) -> io::Result<JobReply> {
+    run_job(
+        JobKind::Model {
+            model,
+            api_base,
+            api_key,
+        },
+        timeout,
+    )
+}
+
 /// A lost reply re-observes the SAME job and never submits a new one; only an
 /// explicit non-acceptance (a stale cursor, or a job the broker reports as
 /// never accepted) leads to a fresh submission. The returned reply is the
 /// final one, terminal or not.
-pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
+fn run_job(kind: JobKind, timeout: Duration) -> io::Result<JobReply> {
     let deadline = Instant::now() + timeout;
     let mut channel = JobChannel::connect()?;
     'fresh: for _ in 0..3 {
-        let cursor = channel.exchange(JobRequest::Cursor, left(deadline)?)?;
+        let cursor = channel.exchange(&JobRequest::Cursor, left(deadline)?)?;
         if cursor.code != JobCode::Ok {
             return Ok(cursor);
         }
@@ -518,10 +689,14 @@ pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
                 .ok_or(io::ErrorKind::InvalidData)?,
             nonce,
         };
-        let submit = JobRequest::SubmitStartup { cursor, nonce };
-        let mut request = submit;
+        let submit = JobRequest::Submit {
+            cursor,
+            nonce,
+            kind: kind.clone(),
+        };
+        let mut request = submit.clone();
         loop {
-            let reply = match channel.exchange(request, left(deadline)?) {
+            let reply = match channel.exchange(&request, left(deadline)?) {
                 Ok(reply) => reply,
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
                 Err(_) => {
@@ -532,15 +707,15 @@ pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
                     continue;
                 }
             };
-            match (reply.code, request) {
+            match (reply.code, &request) {
                 (JobCode::Pending, _) => {
                     std::thread::sleep(STEP);
                     request = JobRequest::Observe(id);
                 }
                 // The cursor went stale before acceptance: nothing was accepted.
-                (JobCode::Expired, JobRequest::SubmitStartup { .. }) => continue 'fresh,
+                (JobCode::Expired, JobRequest::Submit { .. }) => continue 'fresh,
                 // Never accepted, e.g. a lost submission: submit it again as is.
-                (JobCode::Invalid, JobRequest::Observe(_)) => request = submit,
+                (JobCode::Invalid, JobRequest::Observe(_)) => request = submit.clone(),
                 _ => return Ok(reply),
             }
             left(deadline)?;
