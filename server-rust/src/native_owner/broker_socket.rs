@@ -18,18 +18,20 @@ use std::{
 enum Kind {
     Control,
     AppInstall,
+    PicoJob,
 }
 impl Kind {
     fn name(self) -> &'static str {
         match self {
             Self::Control => "control.sock",
             Self::AppInstall => "app-install.sock",
+            Self::PicoJob => "picoclaw-job.sock",
         }
     }
     fn socket_type(self) -> SocketType {
         match self {
             Self::Control => SocketType::STREAM,
-            Self::AppInstall => SocketType::SEQPACKET,
+            Self::AppInstall | Self::PicoJob => SocketType::SEQPACKET,
         }
     }
 }
@@ -76,6 +78,10 @@ impl Endpoint {
 
     pub(crate) fn bind_install(parent: &File, uid: u32, device: u64) -> io::Result<Self> {
         Self::bind_kind(parent, uid, device, Kind::AppInstall)
+    }
+
+    pub(crate) fn bind_picoclaw_job(parent: &File, uid: u32, device: u64) -> io::Result<Self> {
+        Self::bind_kind(parent, uid, device, Kind::PicoJob)
     }
 
     fn bind_kind(parent: &File, uid: u32, device: u64, kind: Kind) -> io::Result<Self> {
@@ -141,6 +147,10 @@ pub(crate) fn connect(directory: &File, uid: u32) -> io::Result<UnixStream> {
 
 pub(crate) fn connect_install(directory: &File, uid: u32) -> io::Result<OwnedFd> {
     connect_kind(directory, uid, Kind::AppInstall)
+}
+
+pub(crate) fn connect_picoclaw_job(directory: &File, uid: u32) -> io::Result<OwnedFd> {
+    connect_kind(directory, uid, Kind::PicoJob)
 }
 
 fn connect_kind(directory: &File, uid: u32, kind: Kind) -> io::Result<OwnedFd> {

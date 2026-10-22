@@ -407,6 +407,16 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     // Callers retain Config serial or WriterActivity EX across this check.
     // A future producer/settler MUST acquire Config before directory EX; the
     // short shared directory lock alone is not a lifetime mutation barrier.
+    if read_parent(parent, uid)?.is_some_and(|snapshot| snapshot.active.is_some()) {
+        return Err(fenced());
+    }
+    Ok(())
+}
+
+/// The checked snapshot of an enrolled store whose only member is its state;
+/// `None` only for legacy absence of both anchor and store. Staged, partial,
+/// extra or unknown evidence fences exactly as for writer admission.
+fn read_parent(parent: &File, uid: u32) -> Result<Option<Snapshot>> {
     let metadata = parent.metadata()?;
     if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o7022 != 0 {
         return Err(invalid());
@@ -426,7 +436,7 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     ) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && enrollment.is_none() => {
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(error.into()),
     };
@@ -496,10 +506,69 @@ fn check_parent(parent: &File, uid: u32) -> Result<()> {
     if bootstrap::read_anchor(parent, uid)? != enrollment {
         return Err(invalid());
     }
+    Ok(Some(snapshot))
+}
+
+/// Public facts of one durable job for the private job transport: its fixed
+/// kind and result codes only, never credential digests or identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Observed {
+    Receipt {
+        kind: u8,
+        phase: u8,
+        outcome: u8,
+        runtime: u8,
+    },
+    /// Older than the retained receipt ring.
+    Expired,
+    /// Never accepted under this store epoch.
+    Unknown,
+}
+
+// The broker is the store's only producer and observes between its own jobs,
+// so the short shared lease is enough for these reads; they never repair,
+// settle or create anything. An active job fences.
+fn observed_store() -> Result<Snapshot> {
+    let parent = Directory::open(Path::new("/etc/kvm"), false)?;
+    let snapshot = read_parent(&parent.file, 0)?
+        .ok_or_else(|| AppError::Config("Pico mutation journal is not enrolled".into()))?;
     if snapshot.active.is_some() {
         return Err(fenced());
     }
-    Ok(())
+    Ok(snapshot)
+}
+
+/// The next submission cursor of an idle enrolled store.
+pub(crate) fn observe_cursor() -> Result<Cursor> {
+    let snapshot = observed_store()?;
+    Ok(Cursor {
+        epoch: snapshot.epoch,
+        sequence: snapshot.sequence,
+    })
+}
+
+/// One job's retained terminal receipt, by its exact identity.
+pub(crate) fn observe_job(id: JobId) -> Result<Observed> {
+    let snapshot = observed_store()?;
+    if id.epoch != snapshot.epoch || id.sequence == 0 || id.sequence > snapshot.sequence {
+        return Ok(Observed::Unknown);
+    }
+    if snapshot.sequence - id.sequence >= RETAINED as u64 {
+        return Ok(Observed::Expired);
+    }
+    Ok(
+        match snapshot.receipts[((id.sequence - 1) % RETAINED as u64) as usize] {
+            Some(receipt) if receipt.sequence == id.sequence && receipt.nonce == id.nonce => {
+                Observed::Receipt {
+                    kind: receipt.kind as u8,
+                    phase: receipt.phase as u8,
+                    outcome: receipt.outcome as u8,
+                    runtime: receipt.runtime as u8,
+                }
+            }
+            _ => Observed::Unknown,
+        },
+    )
 }
 
 pub(crate) fn check_writer_admission() -> Result<()> {

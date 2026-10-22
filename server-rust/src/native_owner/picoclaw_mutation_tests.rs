@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn until(mut condition: impl FnMut() -> bool) {
+pub(crate) fn until(mut condition: impl FnMut() -> bool) {
     let start = Instant::now();
     while !condition() {
         assert!(
@@ -71,7 +71,7 @@ fn change_failure(case: &str) -> Option<&str> {
     .find_map(|prefix| case.strip_prefix(prefix))
 }
 
-fn root() -> tempfile::TempDir {
+pub(crate) fn root() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     for name in [
         "etc/kvm",
@@ -429,9 +429,9 @@ impl Drop for Paused {
     }
 }
 
-const RECEIPT: usize = 128 + 256;
+pub(crate) const RECEIPT: usize = 128 + 256;
 
-fn record() -> Vec<u8> {
+pub(crate) fn record() -> Vec<u8> {
     fs::read("/etc/kvm/picoclaw-operations/state").unwrap()
 }
 
@@ -827,9 +827,9 @@ fn mutation_child() {
     println!("pico-mutation-checked");
 }
 
-const HOME: &str = "/root/.picoclaw";
+pub(crate) const HOME: &str = "/root/.picoclaw";
 const GATEWAY: &str = "synthetic-gateway-fixture";
-const INTERNAL: &str = "synthetic-internal-fixture";
+pub(crate) const INTERNAL: &str = "synthetic-internal-fixture";
 
 // The relaunched fixture runs inside the chroot: provide the host loader,
 // libraries, /dev/null and the fixture's own build directory (it re-executes
@@ -863,7 +863,7 @@ fn host_runtime(root: &Path) -> std::path::PathBuf {
     build.join("nanokvm-native-owner-fixture")
 }
 
-struct SettlePair {
+pub(crate) struct SettlePair {
     config: (Vec<u8>, u64),
     security: Option<(Vec<u8>, u64)>,
 }
@@ -875,7 +875,7 @@ fn private_write(path: &Path, bytes: &[u8]) {
 
 // Synthetic credential-free pair: canonical defaults for the noop cases,
 // one drifted default or a missing token/config for the others.
-fn settle_home(case: &str) -> SettlePair {
+pub(crate) fn settle_home(case: &str) -> SettlePair {
     use crate::update::picoclaw_startup as startup;
     use std::os::unix::fs::MetadataExt;
     if case != "settle-internal-absent" && !case.starts_with("settle-internal-fail:") {
@@ -915,7 +915,7 @@ fn settle_home(case: &str) -> SettlePair {
     }
 }
 
-fn assert_pair_unchanged(pair: &SettlePair) {
+pub(crate) fn assert_pair_unchanged(pair: &SettlePair) {
     use std::os::unix::fs::MetadataExt;
     if pair.config.0.is_empty() {
         assert!(!Path::new(HOME).exists());
@@ -931,7 +931,7 @@ fn assert_pair_unchanged(pair: &SettlePair) {
     assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
 }
 
-fn internal_on_disk() -> Option<String> {
+pub(crate) fn internal_on_disk() -> Option<String> {
     fs::read_to_string("/etc/kvm/.picoclaw_internal_token")
         .ok()
         .map(|value| value.trim().to_string())
@@ -945,7 +945,7 @@ fn desired(pair: &SettlePair, internal: &str) -> crate::update::picoclaw_startup
     startup::desired(&documents, GATEWAY, internal).unwrap()
 }
 
-fn assert_pair_desired(pair: &SettlePair, internal: &str) {
+pub(crate) fn assert_pair_desired(pair: &SettlePair, internal: &str) {
     let wanted = desired(pair, internal);
     assert!(fs::read(Path::new(HOME).join("config.json")).unwrap() == wanted.config[..]);
     assert!(
@@ -954,7 +954,7 @@ fn assert_pair_desired(pair: &SettlePair, internal: &str) {
     assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
 }
 
-fn members_present() -> [bool; 3] {
+pub(crate) fn members_present() -> [bool; 3] {
     ["active", "payload", "source"].map(|name| {
         Path::new("/etc/kvm/picoclaw-operations")
             .join(name)

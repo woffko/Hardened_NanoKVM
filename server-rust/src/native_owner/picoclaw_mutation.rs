@@ -212,6 +212,20 @@ impl Mutation {
         self.status
     }
 
+    /// Protected synthetic producer-image DATA for transport fixtures; the
+    /// host test executable exceeds the target image budget.
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
+    pub(crate) fn fixture_image(&mut self, image: std::fs::File) {
+        self.submission.fixture_image(image);
+    }
+
+    /// Ordinary supervision of the broker's OTHER cells while this job owns
+    /// it: KVM, hwmon and backend. The Pico cell, its launch association and
+    /// the job's admissions stay with the job; `supervise` must not use them.
+    pub(crate) fn supervise_cells(&mut self, supervise: impl FnOnce(&mut Broker)) {
+        supervise(&mut self.broker);
+    }
+
     fn pico_command(&self) -> std::process::Command {
         #[cfg(test)]
         if let Some((program, args)) = &self.launch_fixture {
@@ -359,4 +373,4 @@ impl Mutation {
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 #[path = "picoclaw_mutation_tests.rs"]
-mod tests;
+pub(crate) mod tests;

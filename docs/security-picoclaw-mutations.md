@@ -326,6 +326,65 @@ repeated. They cover:
 
 They are host checks, not physical power cuts or device acceptance.
 
+## Current job transport and Startup API
+
+The broker daemon listens on a third root-only endpoint, `picoclaw-job.sock`:
+a SEQPACKET socket beside `control.sock` in the protected journal directory,
+with matching peer credentials. Each 64-byte datagram is one fixed request:
+
+- Cursor: the next submission cursor of an idle store.
+- SubmitStartup(cursor, nonce).
+- Observe(job id).
+
+Each reply is one fixed 64-byte frame: a result code, the cursor or job
+identity, and for a terminal job only its kind, phase, outcome and runtime
+codes. There is no path, command, credential, digest or error text. A
+malformed datagram is answered Invalid and its connection is closed.
+Connections carry no authority, are bounded in number and expire when idle;
+a job never depends on its submitter's connection.
+
+**Ownership.** Submission requires an idle broker: no maintenance lease,
+install, backend restart, legacy Pico stop or onboarding. The broker then
+moves into a broker-owned job that holds the SAME broker. Meanwhile:
+
+- the KVM, hwmon and backend cells keep their ordinary supervision on that
+  broker;
+- a backend restart waits, because the job holds Update and Config;
+- legacy Pico lifecycle requests answer Busy.
+
+Once nothing durable is left to the job (a terminal receipt, or a submission
+that accepted nothing), the broker returns to ordinary operation. A fenced job
+keeps it.
+
+**Identity.** The job id is the cursor's epoch, its next sequence and the
+client nonce, so it is known before acceptance.
+
+- An identical resubmission observes the same job or its receipt and never
+  starts another.
+- A stale cursor is Expired. A job never accepted is Invalid.
+- Observation of a finished job reads the retained receipt ring read-only,
+  under the store's shared lease.
+
+**Backend caller.** `ensure_startup_defaults` (gateway session start and
+runtime start) now runs this job through `run_startup_job` instead of writing
+the pair. A lost reply re-observes the same job; only an explicit
+non-acceptance leads to a fresh submission. Changed or Noop is success, and a
+superseded change is retried once. Refusal, Busy and RecoveryRequired are
+errors with fixed text. The legacy in-handler writer remains only inside the
+model update until its own executor replaces it.
+
+A chroot fixture runs the real daemon loop over its real endpoint. It covers
+no-op and change jobs with their exact receipts, the broker's return,
+identical resubmission, a stale cursor, an unknown id, a malformed datagram,
+and free admissions afterwards.
+
+Still open:
+
+- the model, profile, onboarding, install and remove executors, and their
+  API and S96 callers;
+- a pending pair journal still refuses acceptance, as it refused the legacy
+  writer. Stopped recovery of that journal inside the job is not implemented.
+
 ## Authority and scope
 
 The native broker owns each accepted operation, not its HTTP caller. Admission
@@ -461,8 +520,9 @@ does not replay the upstream onboarding command or an unknown accepted payload.
 
 ## Integration and acceptance still required
 
-The new private bounded SEQPACKET request/result transport must migrate ordinary
-API and S96 callers together, with exact helper/ABI bindings. No mutation opcode
+The private bounded SEQPACKET request/result transport now carries the Startup
+job for its backend callers; the remaining API and S96 callers must migrate
+with their executors, with exact helper/ABI bindings. No mutation opcode
 is added to the old 48-byte service frame as an interim arbitrary-command path.
 The development raw-update barrier and unsupported support transition stay shut.
 

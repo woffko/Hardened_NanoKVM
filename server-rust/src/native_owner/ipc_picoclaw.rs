@@ -244,7 +244,9 @@ impl Engine {
             || self.lease.is_some()
             || self.abandoned
             || self.backend_restart.is_some()
+            || matches!(self.owner, Some(Owner::PicoJob(_)))
         {
+            // A broker-owned job owns the Pico cell until its durable end.
             return self.reply(Code::Busy);
         }
         let code = match op {

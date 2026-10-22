@@ -151,7 +151,7 @@ fn independent_daemon_accepts_queued_install_after_actual_frontend_death_and_can
     }
     until(|| daemon.0.try_wait().unwrap().is_some());
     assert!(daemon.0.wait().unwrap().success());
-    for name in ["control.sock", "app-install.sock"] {
+    for name in ["control.sock", "app-install.sock", "picoclaw-job.sock"] {
         assert!(!path.join("native-runtime-owner").join(name).exists());
     }
 }

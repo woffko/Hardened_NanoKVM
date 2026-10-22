@@ -20,6 +20,9 @@ const INSTALL_OFFERS: usize = 4;
 
 #[path = "ipc_picoclaw.rs"]
 mod picoclaw;
+#[path = "ipc_picoclaw_job.rs"]
+pub mod picoclaw_job;
+pub use picoclaw_job::{JobChannel, JobCode, JobReply, JobRequest, run_startup_job};
 
 #[cfg(test)]
 #[path = "ipc_test_diagnostics.rs"]
@@ -330,6 +333,8 @@ enum Owner {
     Running(Broker),
     Paused(RetainedDrain),
     Stopping(RetainedDrain),
+    /// A broker-owned Pico job holds the SAME broker until its durable end.
+    PicoJob(picoclaw_job::Job),
 }
 
 enum InstallOwner {
@@ -385,6 +390,10 @@ struct Engine {
     picoclaw_stop: Option<crate::update::operation_lock::ProcessLock>,
     picoclaw_onboard: Option<picoclaw::Onboard>,
     picoclaw_onboard_result: Option<bool>,
+    /// The last job's identity and final status, for its submitter.
+    pico_job_last: Option<(super::PicoJobId, super::PicoMutationStatus)>,
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
+    fixture_pico_image: Option<std::path::PathBuf>,
     #[cfg(test)]
     fixture: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -440,6 +449,9 @@ impl Engine {
             picoclaw_stop: None,
             picoclaw_onboard: None,
             picoclaw_onboard_result: None,
+            pico_job_last: None,
+            #[cfg(all(test, feature = "sandbox-test-fixture"))]
+            fixture_pico_image: None,
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -481,92 +493,15 @@ impl Engine {
         self.owner = Some(match owner {
             Owner::Running(mut broker) => {
                 self.tick_picoclaw(&mut broker);
-                self.backend_status = broker.backend_status();
-                let states = broker.poll();
-                self.roles = states.map(role_status);
-                if broker.group.uncertainty_latched() {
-                    self.mode = Mode::Uncertain;
-                }
-                if self.mode == Mode::Running {
-                    for (index, role) in [Role::KvmSystem, Role::Hwmon].into_iter().enumerate() {
-                        if self.wanted[index]
-                            && Instant::now() >= self.retry[index]
-                            && matches!(states[index], None | Some(Status::Closed(_)))
-                        {
-                            self.retry[index] = Instant::now() + RETRY;
-                            let command = self.command(&broker, role);
-                            #[cfg(test)]
-                            let started_at = Instant::now();
-                            let result = broker.start_owned(role, command);
-                            #[cfg(test)]
-                            if self.fixture_trace_starts {
-                                eprintln!(
-                                    "fixture-native-start: role={role:?}, prior={:?}, result={result:?}, elapsed={:?}",
-                                    states[index],
-                                    started_at.elapsed()
-                                );
-                            }
-                            if matches!(
-                                result,
-                                Err(StartFailure::Journal(_))
-                                    | Err(StartFailure::Scope(StartError::UncertainOwnership))
-                            ) {
-                                self.mode = Mode::Uncertain;
-                            }
-                        }
-                    }
-                    if self.backend_restart.is_some()
-                        && matches!(self.backend_status, None | Some(Status::Closed(_)))
-                    {
-                        if let Some(restart) = self.backend_restart.take() {
-                            // Both update/config permits remain held through
-                            // safe-mode publication and the replacement spawn.
-                            let policy = if restart.safe_mode {
-                                broker.prepare_safe_mode(&restart._admission)
-                            } else {
-                                Ok(())
-                            };
-                            let command = self.command(&broker, Role::Backend);
-                            if policy.is_err()
-                                || broker.start_backend(command, &restart._admission).is_err()
-                                || broker.finish_backend_restart().is_err()
-                            {
-                                self.mode = Mode::Uncertain;
-                            }
-                            drop(restart);
-                        }
-                    } else if self.backend_restart.is_none()
-                        && self.backend_wanted
-                        && Instant::now() >= self.backend_retry
-                        && matches!(self.backend_status, None | Some(Status::Closed(_)))
-                    {
-                        self.backend_retry = Instant::now() + RETRY;
-                        match broker.runtime_permit() {
-                            Ok(admission) => {
-                                let command = self.command(&broker, Role::Backend);
-                                if matches!(
-                                    broker.start_backend(command, &admission),
-                                    Err(StartFailure::Journal(_))
-                                        | Err(StartFailure::Scope(StartError::UncertainOwnership))
-                                ) {
-                                    self.mode = Mode::Uncertain;
-                                }
-                            }
-                            Err(super::JournalError::Busy) => {}
-                            Err(_) => self.mode = Mode::Uncertain,
-                        }
-                    }
-                }
-                self.backend_status = broker.backend_status();
-                if self.backend_status == Some(Status::Uncertain) {
-                    self.mode = Mode::Uncertain;
-                }
-                self.roles = broker.poll().map(role_status);
-                if broker.group.uncertainty_latched() {
-                    self.mode = Mode::Uncertain;
-                }
+                self.supervise(&mut broker);
                 self.tick_picoclaw(&mut broker);
                 Owner::Running(broker)
+            }
+            Owner::PicoJob(mut job) => {
+                // The job owns the Pico cell; every other cell keeps its
+                // ordinary supervision on the SAME broker meanwhile.
+                job.supervise_cells(|broker| self.supervise(broker));
+                self.tick_pico_job(job)
             }
             Owner::Paused(mut drain) => {
                 let result = drain.poll();
@@ -616,6 +551,94 @@ impl Engine {
                 Owner::Stopping(drain)
             }
         });
+    }
+
+    // KVM, hwmon and backend supervision; never the Pico cell.
+    fn supervise(&mut self, broker: &mut Broker) {
+        self.backend_status = broker.backend_status();
+        let states = broker.poll();
+        self.roles = states.map(role_status);
+        if broker.group.uncertainty_latched() {
+            self.mode = Mode::Uncertain;
+        }
+        if self.mode == Mode::Running {
+            for (index, role) in [Role::KvmSystem, Role::Hwmon].into_iter().enumerate() {
+                if self.wanted[index]
+                    && Instant::now() >= self.retry[index]
+                    && matches!(states[index], None | Some(Status::Closed(_)))
+                {
+                    self.retry[index] = Instant::now() + RETRY;
+                    let command = self.command(broker, role);
+                    #[cfg(test)]
+                    let started_at = Instant::now();
+                    let result = broker.start_owned(role, command);
+                    #[cfg(test)]
+                    if self.fixture_trace_starts {
+                        eprintln!(
+                            "fixture-native-start: role={role:?}, prior={:?}, result={result:?}, elapsed={:?}",
+                            states[index],
+                            started_at.elapsed()
+                        );
+                    }
+                    if matches!(
+                        result,
+                        Err(StartFailure::Journal(_))
+                            | Err(StartFailure::Scope(StartError::UncertainOwnership))
+                    ) {
+                        self.mode = Mode::Uncertain;
+                    }
+                }
+            }
+            if self.backend_restart.is_some()
+                && matches!(self.backend_status, None | Some(Status::Closed(_)))
+            {
+                if let Some(restart) = self.backend_restart.take() {
+                    // Both update/config permits remain held through
+                    // safe-mode publication and the replacement spawn.
+                    let policy = if restart.safe_mode {
+                        broker.prepare_safe_mode(&restart._admission)
+                    } else {
+                        Ok(())
+                    };
+                    let command = self.command(broker, Role::Backend);
+                    if policy.is_err()
+                        || broker.start_backend(command, &restart._admission).is_err()
+                        || broker.finish_backend_restart().is_err()
+                    {
+                        self.mode = Mode::Uncertain;
+                    }
+                    drop(restart);
+                }
+            } else if self.backend_restart.is_none()
+                && self.backend_wanted
+                && Instant::now() >= self.backend_retry
+                && matches!(self.backend_status, None | Some(Status::Closed(_)))
+            {
+                self.backend_retry = Instant::now() + RETRY;
+                match broker.runtime_permit() {
+                    Ok(admission) => {
+                        let command = self.command(broker, Role::Backend);
+                        if matches!(
+                            broker.start_backend(command, &admission),
+                            Err(StartFailure::Journal(_))
+                                | Err(StartFailure::Scope(StartError::UncertainOwnership))
+                        ) {
+                            self.mode = Mode::Uncertain;
+                        }
+                    }
+                    Err(super::JournalError::Busy) => {}
+                    Err(_) => self.mode = Mode::Uncertain,
+                }
+            }
+        }
+        self.backend_status = broker.backend_status();
+        if self.backend_status == Some(Status::Uncertain) {
+            self.mode = Mode::Uncertain;
+        }
+        self.roles = broker.poll().map(role_status);
+        if broker.group.uncertainty_latched() {
+            self.mode = Mode::Uncertain;
+        }
     }
 
     fn finish_install(&mut self, broker: Broker) {
@@ -1520,8 +1543,10 @@ struct Server {
     // Drop the endpoint before releasing the journal owner/lease.
     endpoint: journal::socket::Endpoint,
     install_endpoint: journal::socket::Endpoint,
+    job_endpoint: journal::socket::Endpoint,
     // Close queued rights before dropping accepted engine ownership/admission.
     offers: [Option<(app_install_lease::Incoming, Instant)>; INSTALL_OFFERS],
+    job_clients: [Option<picoclaw_job::JobClient>; picoclaw_job::JOB_CLIENTS],
     engine: Engine,
     clients: [Option<Client>; CLIENTS],
     next_key: u64,
@@ -1537,7 +1562,9 @@ impl Server {
         Ok(Self {
             endpoint: broker.journal.endpoint()?,
             install_endpoint: broker.journal.install_endpoint()?,
+            job_endpoint: broker.journal.picoclaw_job_endpoint()?,
             offers: std::array::from_fn(|_| None),
+            job_clients: std::array::from_fn(|_| None),
             engine: Engine::new(broker),
             clients: std::array::from_fn(|_| None),
             next_key: 1,
@@ -1626,6 +1653,31 @@ impl Server {
                             *slot = None;
                         }
                     }
+                }
+            }
+            for slot in &mut self.job_clients {
+                if let Some(client) = slot.as_mut()
+                    && !matches!(client.tick(&mut self.engine, self.idle), Ok(true))
+                {
+                    *slot = None;
+                }
+            }
+            for _ in 0..picoclaw_job::JOB_CLIENTS {
+                let Some(slot) = self.job_clients.iter_mut().find(|s| s.is_none()) else {
+                    break;
+                };
+                let fd = match rustix::net::accept_with(
+                    &self.job_endpoint.listener,
+                    rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+                ) {
+                    Ok(fd) => fd,
+                    Err(e) if e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR => {
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if rustix::net::sockopt::socket_peercred(&fd)?.uid.as_raw() == self.uid {
+                    *slot = Some(picoclaw_job::JobClient::new(fd));
                 }
             }
             // A stopped caller can disappear; retain completion/lease briefly

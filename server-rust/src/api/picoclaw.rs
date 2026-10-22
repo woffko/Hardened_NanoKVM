@@ -3217,13 +3217,66 @@ fn set_model_secret(
     );
 }
 
-async fn ensure_startup_defaults() -> Result<()> {
-    crate::update::state_writers::StateWriters::default()
-        .configuration()?
-        .blocking(write_startup_defaults)
-        .await
+/// One broker-owned Startup job, including a live gateway's quiescence and
+/// relaunch, ends within this bound.
+const STARTUP_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+
+enum StartupJob {
+    Done,
+    /// A concurrent writer changed the pair before apply; nothing applied.
+    Superseded,
 }
 
+// Receipt codes: Startup kind, Completed, then outcome and runtime. Error
+// text is fixed: never documents, credentials or broker detail.
+fn startup_job_outcome(reply: crate::native_owner::broker::ipc::JobReply) -> Result<StartupJob> {
+    use crate::native_owner::broker::ipc::JobCode;
+    match (reply.code, reply.receipt) {
+        // Changed or Noop.
+        (JobCode::Ok, [3, 8, 1 | 2, _]) => Ok(StartupJob::Done),
+        (JobCode::Ok, [3, 8, 3, 2]) => Ok(StartupJob::Superseded),
+        (JobCode::Ok, [3, 8, 3, _]) => Err(AppError::Config(
+            "picoclaw configuration cannot take its startup defaults".into(),
+        )),
+        (JobCode::Busy, _) => Err(AppError::Conflict(
+            "configuration change already in progress".into(),
+        )),
+        (JobCode::RecoveryRequired, _) => Err(AppError::Conflict(
+            "Pico mutation requires checked settlement".into(),
+        )),
+        _ => Err(AppError::Internal(
+            "picoclaw startup job did not complete".into(),
+        )),
+    }
+}
+
+/// Startup defaults are a broker-owned job. The broker settles a canonical
+/// pair as a no-op, or quiesces a live gateway, applies the fixed defaults
+/// through the pair journal and resumes it. This handler never writes the
+/// pair; a lost reply re-observes the same job instead of starting another.
+async fn ensure_startup_defaults() -> Result<()> {
+    for _ in 0..2 {
+        let reply = task::spawn_blocking(|| {
+            crate::native_owner::broker::ipc::run_startup_job(STARTUP_JOB_TIMEOUT)
+        })
+        .await
+        .map_err(|_| AppError::Internal("picoclaw startup job worker failed".into()))?
+        .map_err(|_| AppError::Conflict("picoclaw startup job unavailable".into()))?;
+        if let StartupJob::Done = startup_job_outcome(reply)? {
+            return Ok(());
+        }
+    }
+    Err(AppError::Conflict(
+        "picoclaw configuration changed during startup defaults".into(),
+    ))
+}
+
+#[cfg(test)]
+#[path = "picoclaw_startup_job_tests.rs"]
+mod startup_job_tests;
+
+/// Legacy in-handler writer, kept only for the model update until its own
+/// broker-owned executor replaces it. Startup itself runs as a job.
 fn write_startup_defaults(permit: &crate::update::state_writers::ConfigPermit) -> Result<()> {
     let mut doc = load_config_document()?;
     // A virtual committed-intent read is not evidence that upstream is using a
