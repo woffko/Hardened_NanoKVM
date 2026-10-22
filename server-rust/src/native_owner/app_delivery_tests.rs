@@ -38,6 +38,7 @@ fn broker_child() {
     };
     let root = Path::new(&root);
     let mut server = Server::new(broker(root), nix::unistd::geteuid().as_raw()).unwrap();
+    server.diagnostic_origin = test_diagnostics::Origin::DeliveryDaemon;
     server.engine.fixture = Some(root.to_path_buf());
     server.engine.fixture_allow_unsupported_support = true;
     fs::write(root.join("broker-ready"), b"ready").unwrap();
@@ -796,6 +797,7 @@ fn fixed_root_delivery_child() {
     // Only native enrollment/process execution are fixture supplied. Endpoint
     // connect, Incoming::open, prepared issuer and acceptance use fixed roots.
     let mut server = Server::new(broker(Path::new("/etc/kvm")), uid).unwrap();
+    server.diagnostic_origin = test_diagnostics::Origin::FixedRootDelivery;
     // This fixture proves production fixed-root delivery/issuer composition,
     // not execution of a native trial inside its deliberately minimal chroot.
     server.engine.fixture_hold_published = true;

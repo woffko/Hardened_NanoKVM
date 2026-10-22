@@ -126,8 +126,14 @@ fn normal_install_until(engine: &mut Engine, root: &Path, transaction: [u8; 16],
                 .ok()
                 .flatten()
                 .map(|status| (status.phase as u8, status.archived));
+            let worker = match engine.install.as_mut().map(|install| &mut install.owner) {
+                Some(InstallOwner::Committed(owner) | InstallOwner::RolledBack(owner)) => {
+                    owner.fixture_diagnostics()
+                }
+                _ => "no retained retirement worker in this phase".into(),
+            };
             panic!(
-                "payload-prune prelude timeout BEFORE fault injection: sequence={sequence}, transaction={transaction:02x?}, stage={after:?}, mode={:?}, roles={:?}, backend={:?}, receipt={receipt:?}, tick_duration={tick_duration:?}, elapsed={:?}",
+                "payload-prune prelude timeout BEFORE fault injection: sequence={sequence}, transaction={transaction:02x?}, stage={after:?}, mode={:?}, roles={:?}, backend={:?}, receipt={receipt:?}, tick_duration={tick_duration:?}, elapsed={:?}\n{worker}",
                 engine.mode,
                 engine.roles,
                 engine.backend_status,

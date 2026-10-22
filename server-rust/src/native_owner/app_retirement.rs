@@ -31,6 +31,12 @@ impl Retirement {
         self.work.set_fixture(fixture);
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_diagnostics(&mut self) -> String {
+        // Observation only, without exposing or extracting the retained work.
+        self.work.fixture_diagnostics()
+    }
+
     pub(crate) fn observe(
         &mut self,
     ) -> ([Option<controller::Status>; 2], Option<controller::Status>) {

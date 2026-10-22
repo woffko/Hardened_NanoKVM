@@ -50,6 +50,24 @@ async fn blocked_terminal_io_keeps_commit_and_rollback_control_responsive_and_ex
             rollback
         );
         assert_store_excluded(root);
+        let Some(install) = engine.install.as_mut() else {
+            panic!("retained installation absent");
+        };
+        let (InstallOwner::Committed(owner) | InstallOwner::RolledBack(owner)) = &mut install.owner
+        else {
+            panic!("blocked retirement owner absent");
+        };
+        let diagnostic = owner.fixture_diagnostics();
+        assert!(
+            diagnostic.contains("state=running, finished=Some(false)"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("tid=Some(") && diagnostic.contains("comm=\"app-retirement"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.len() < 17 * 1024);
+        assert_store_excluded(root);
         engine.disconnected(1);
         engine.disconnected(2);
         for _ in 0..3 {

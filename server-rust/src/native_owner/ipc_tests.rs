@@ -15,7 +15,7 @@ mod home;
 mod install_engine;
 #[path = "ipc_picoclaw_tests.rs"]
 mod picoclaw;
-fn broker(root: &Path) -> Broker {
+pub(super) fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),
         enrollment: super::super::boot::Permit::fixture(&File::open(root).unwrap()),

@@ -13,6 +13,14 @@ pub(super) fn child_threads(pid: u32) -> String {
     capture_at(Path::new(&format!("/proc/{pid}/task")))
 }
 
+pub(crate) fn observed_thread(pid: u32, tid: u32) -> String {
+    // A worker-reported task identifier is an observation only and may race
+    // task exit. No scanning/adoption, signaling, memory, argv, env or fd reads.
+    let mut text = String::with_capacity(OUTPUT_BYTES);
+    append_task(&mut text, Path::new(&format!("/proc/{pid}/task")), tid);
+    text
+}
+
 fn field(path: &Path) -> String {
     let mut bytes = Vec::with_capacity(FIELD_BYTES);
     match fs::File::open(path)
@@ -38,6 +46,19 @@ fn append(text: &mut String, value: &str) -> bool {
     text.push_str(&value[..keep]);
     text.push_str(TRUNCATED);
     false
+}
+
+fn append_task(text: &mut String, directory: &Path, tid: u32) -> bool {
+    if !append(text, &format!("tid={tid}\n")) {
+        return false;
+    }
+    for name in FIELDS {
+        let value = field(&directory.join(tid.to_string()).join(name));
+        if !append(text, &format!("  {name}={value:?}\n")) {
+            return false;
+        }
+    }
+    true
 }
 
 fn capture_at(directory: &Path) -> String {
@@ -67,20 +88,31 @@ fn capture_at(directory: &Path) -> String {
     }
     tids.sort_unstable();
     for tid in tids {
-        if !append(&mut text, &format!("tid={tid}\n")) {
+        if !append_task(&mut text, directory, tid) {
             return text;
-        }
-        for name in FIELDS {
-            let value = field(&directory.join(tid.to_string()).join(name));
-            if !append(&mut text, &format!("  {name}={value:?}\n")) {
-                return text;
-            }
         }
     }
     if omitted {
         append(&mut text, "[thread limit16: additional tasks omitted]\n");
     }
     text
+}
+
+#[test]
+fn exact_task_observation_does_not_scan_siblings_and_missing_task_is_not_authority() {
+    let root = tempfile::tempdir().unwrap();
+    for (tid, name) in [(3, "selected-worker"), (12, "unrelated-worker")] {
+        fs::create_dir(root.path().join(tid.to_string())).unwrap();
+        fs::write(root.path().join(tid.to_string()).join("comm"), name).unwrap();
+    }
+    let mut text = String::with_capacity(OUTPUT_BYTES);
+    assert!(append_task(&mut text, root.path(), 3));
+    assert!(text.contains("tid=3") && text.contains("selected-worker"));
+    assert!(!text.contains("tid=12") && !text.contains("unrelated-worker"));
+    text.clear();
+    assert!(append_task(&mut text, root.path(), 99));
+    assert_eq!(text.matches("unavailable:").count(), FIELDS.len());
+    assert!(text.len() <= OUTPUT_BYTES);
 }
 
 #[test]

@@ -21,6 +21,10 @@ const INSTALL_OFFERS: usize = 4;
 #[path = "ipc_picoclaw.rs"]
 mod picoclaw;
 
+#[cfg(test)]
+#[path = "ipc_test_diagnostics.rs"]
+mod test_diagnostics;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
     Observe = 1,
@@ -1524,6 +1528,8 @@ struct Server {
     uid: u32,
     idle: Duration,
     #[cfg(test)]
+    diagnostic_origin: test_diagnostics::Origin,
+    #[cfg(test)]
     cancel: Option<std::sync::mpsc::Receiver<()>>,
 }
 impl Server {
@@ -1537,6 +1543,8 @@ impl Server {
             next_key: 1,
             uid,
             idle: IDLE,
+            #[cfg(test)]
+            diagnostic_origin: test_diagnostics::Origin::Fixture,
             #[cfg(test)]
             cancel: None,
         })
@@ -1582,7 +1590,20 @@ impl Server {
                 };
                 match client.tick(&mut self.engine) {
                     Ok(true) => return Ok(()),
-                    Err(_) => {
+                    Err(error) => {
+                        #[cfg(test)]
+                        eprintln!(
+                            "{}",
+                            test_diagnostics::client_close(
+                                self.diagnostic_origin,
+                                client,
+                                &self.engine,
+                                self.idle,
+                                Some(error.kind()),
+                            )
+                        );
+                        #[cfg(not(test))]
+                        let _ = error;
                         self.engine.disconnected(client.key);
                         *slot = None;
                     }
@@ -1590,6 +1611,17 @@ impl Server {
                         if self.engine.lease != Some(client.key)
                             && client.last_activity.elapsed() >= self.idle
                         {
+                            #[cfg(test)]
+                            eprintln!(
+                                "{}",
+                                test_diagnostics::client_close(
+                                    self.diagnostic_origin,
+                                    client,
+                                    &self.engine,
+                                    self.idle,
+                                    None,
+                                )
+                            );
                             self.engine.disconnected(client.key);
                             *slot = None;
                         }

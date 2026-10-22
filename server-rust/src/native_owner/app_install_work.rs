@@ -187,6 +187,16 @@ pub(super) struct InstallWork {
     payload: Arc<Mutex<Option<Payload>>>,
     #[cfg(test)]
     fixture: Option<Fixture>,
+    #[cfg(test)]
+    diagnostic: Option<Box<WorkerObservation>>,
+}
+
+#[cfg(test)]
+struct WorkerObservation {
+    started: std::time::Instant,
+    pid: u32,
+    tid: Option<u32>,
+    receive: std::sync::mpsc::Receiver<u32>,
 }
 
 #[cfg(test)]
@@ -260,6 +270,8 @@ impl InstallWork {
             payload: Arc::new(Mutex::new(Some(payload))),
             #[cfg(test)]
             fixture: None,
+            #[cfg(test)]
+            diagnostic: None,
         }
     }
 
@@ -272,6 +284,38 @@ impl InstallWork {
     #[cfg(test)]
     pub(super) fn fixture_settled(&self) -> bool {
         matches!(self.state, State::Failed | State::Complete)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_diagnostics(&mut self) -> String {
+        // Never lock accepted payload or join/poll the worker to observe it.
+        let (state, finished) = match &self.state {
+            State::Idle => ("idle", None),
+            State::Running(worker) => ("running", worker.0.as_ref().map(JoinHandle::is_finished)),
+            State::Failed => ("failed", None),
+            State::Complete => ("complete", None),
+        };
+        let Some(observation) = &mut self.diagnostic else {
+            return format!(
+                "app-worker-observation: state={state}, finished={finished:?}, task=unreported"
+            );
+        };
+        if observation.tid.is_none() {
+            observation.tid = observation.receive.try_recv().ok();
+        }
+        let task = match (finished, observation.tid) {
+            (Some(false), Some(tid)) => {
+                crate::update::app_slot::test_diagnostics::observed_thread(observation.pid, tid)
+            }
+            (Some(false), None) => "task id not reported yet\n".into(),
+            _ => "worker is not observed running; proc task not sampled\n".into(),
+        };
+        format!(
+            "app-worker-observation: state={state}, finished={finished:?}, pid={}, tid={:?}, elapsed={:?}\n{task}",
+            observation.pid,
+            observation.tid,
+            observation.started.elapsed(),
+        )
     }
 
     pub(super) fn retry_terminal(&mut self) -> bool {
@@ -371,6 +415,10 @@ impl InstallWork {
 
     fn start(&mut self) {
         #[cfg(test)]
+        {
+            self.diagnostic = None;
+        }
+        #[cfg(test)]
         let fixture = self.fixture.take();
         #[cfg(test)]
         if matches!(fixture, Some(Fixture::SpawnFailure)) {
@@ -379,6 +427,17 @@ impl InstallWork {
         }
         let payload = Arc::clone(&self.payload);
         let operation = self.operation.worker_copy();
+        #[cfg(test)]
+        let (report_tid, receive) = std::sync::mpsc::sync_channel(1);
+        #[cfg(test)]
+        {
+            self.diagnostic = Some(Box::new(WorkerObservation {
+                started: std::time::Instant::now(),
+                pid: std::process::id(),
+                tid: None,
+                receive,
+            }));
+        }
         let name = match operation {
             Operation::Support { .. } => "app-support",
             Operation::Publish(_) => "app-publication",
@@ -387,6 +446,8 @@ impl InstallWork {
             Operation::Retire(_) => "app-retirement",
         };
         self.state = match thread::Builder::new().name(name.into()).spawn(move || {
+            #[cfg(test)]
+            let _ = report_tid.try_send(rustix::thread::gettid().as_raw_pid() as u32);
             // The original Arc remains with the main owner even on spawn
             // failure/panic. Catch only a borrow of the complete payload.
             let Ok(mut slot) = payload.lock() else {
