@@ -143,3 +143,89 @@ fn non_mapping_security_shapes_are_replaced_only_on_the_token_path() {
         Some("g")
     );
 }
+
+fn canonical_pair(gateway: &str, internal: &str) -> (Vec<u8>, Vec<u8>) {
+    let mut config = json!({"agents": {"defaults": {"model": "m"}}});
+    let mut security = yaml("model_list:\n  m:0:\n    api_keys: [secret]\n");
+    apply(&mut config, &mut security, gateway, internal).unwrap();
+    let encoded = encode(&config, &security).unwrap();
+    (
+        encoded.config.to_vec(),
+        encoded.security.as_bytes().to_vec(),
+    )
+}
+
+#[test]
+fn canonical_defaults_with_both_tokens_are_a_noop_even_with_other_formatting() {
+    let (config, security) = canonical_pair("gateway", "internal");
+    let documents = decode(&config, Some(&security)).unwrap();
+    assert_eq!(
+        classify(&documents, Some("internal")).unwrap(),
+        Decision::Noop
+    );
+    // Same values, different on-disk formatting: still a no-op, nothing to
+    // publish, so original bytes/comments are kept.
+    let compact = serde_json::to_vec(&documents.config).unwrap();
+    let commented = format!("# kept comment\n{}", String::from_utf8(security).unwrap());
+    let reformatted = decode(&compact, Some(commented.as_bytes())).unwrap();
+    assert_eq!(
+        classify(&reformatted, Some("internal")).unwrap(),
+        Decision::Noop
+    );
+}
+
+#[test]
+fn missing_or_different_tokens_and_values_are_a_change_without_inventing_tokens() {
+    let (config, security) = canonical_pair("gateway", "internal");
+    let documents = decode(&config, Some(&security)).unwrap();
+    assert_eq!(
+        classify(&documents, None).unwrap(),
+        Decision::Change {
+            gateway_token: false,
+            internal_token: true
+        }
+    );
+    assert_eq!(
+        classify(&documents, Some("rotated")).unwrap(),
+        Decision::Change {
+            gateway_token: false,
+            internal_token: false
+        }
+    );
+    let bare = decode(b"{}", None).unwrap();
+    assert_eq!(
+        classify(&bare, Some("internal")).unwrap(),
+        Decision::Change {
+            gateway_token: true,
+            internal_token: false
+        }
+    );
+    // A changed default (gateway port) is a value change, not a no-op.
+    let mut drifted = decode(&config, Some(&security)).unwrap();
+    drifted.config["gateway"]["port"] = json!(1);
+    assert_eq!(
+        classify(&drifted, Some("internal")).unwrap(),
+        Decision::Change {
+            gateway_token: false,
+            internal_token: false
+        }
+    );
+    // desired() never modifies its input documents.
+    let before = encode(&drifted.config, &drifted.security).unwrap();
+    let wanted = desired(&drifted, "gateway", "internal").unwrap();
+    assert!(wanted != before);
+    assert!(encode(&drifted.config, &drifted.security).unwrap() == before);
+    assert!(wanted == encode(&documents.config, &documents.security).unwrap());
+}
+
+#[test]
+fn decoding_requires_config_json_and_treats_absent_security_as_empty() {
+    assert!(decode(b"not json", None).is_err());
+    assert!(decode(b"{}", Some(b": : not yaml")).is_err());
+    let documents = decode(b"{}", None).unwrap();
+    assert_eq!(
+        documents.security,
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    );
+    assert!(classify(&decode(br#"{"agents": []}"#, None).unwrap(), Some("i")).is_err());
+}

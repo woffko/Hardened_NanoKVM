@@ -129,6 +129,86 @@ pub(crate) fn apply(
     Ok(())
 }
 
+/// Decoded credential-bearing pair. Never Debug/log it.
+pub(crate) struct Documents {
+    pub(crate) config: JsonValue,
+    pub(crate) security: serde_yaml::Value,
+}
+
+/// Canonical encodings used for change detection and publication; the original
+/// on-disk formatting is compared through these, never rewritten on a no-op.
+#[derive(PartialEq, Eq)]
+pub(crate) struct Encoding {
+    pub(crate) config: zeroize::Zeroizing<Vec<u8>>,
+    pub(crate) security: zeroize::Zeroizing<String>,
+}
+
+/// Config is required; an absent security file is an empty mapping.
+pub(crate) fn decode(config: &[u8], security: Option<&[u8]>) -> Result<Documents> {
+    let config = serde_json::from_slice(config)
+        .map_err(|err| AppError::Internal(format!("failed to parse picoclaw config: {err}")))?;
+    let security = match security {
+        Some(data) => serde_yaml::from_slice(data).map_err(|err| {
+            AppError::Internal(format!("failed to parse picoclaw security config: {err}"))
+        })?,
+        None => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    };
+    Ok(Documents { config, security })
+}
+
+pub(crate) fn encode(config: &JsonValue, security: &serde_yaml::Value) -> Result<Encoding> {
+    let config =
+        zeroize::Zeroizing::new(serde_json::to_vec_pretty(config).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw config: {err}"))
+        })?);
+    let security =
+        zeroize::Zeroizing::new(serde_yaml::to_string(security).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw security: {err}"))
+        })?);
+    Ok(Encoding { config, security })
+}
+
+/// What a Startup job must do. Missing tokens are never invented here: the
+/// caller selects them once, records them durably, then calls `desired`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Decision {
+    /// The documents already equal their canonical defaults; nothing is
+    /// published and a live runtime is not stopped.
+    Noop,
+    Change {
+        gateway_token: bool,
+        internal_token: bool,
+    },
+}
+
+pub(crate) fn classify(documents: &Documents, internal_token: Option<&str>) -> Result<Decision> {
+    check_local_policy(&documents.config)?;
+    let gateway = existing_gateway_token(&documents.config, &documents.security);
+    let (Some(gateway), Some(internal)) = (gateway.as_deref(), internal_token) else {
+        return Ok(Decision::Change {
+            gateway_token: gateway.is_none(),
+            internal_token: internal_token.is_none(),
+        });
+    };
+    let desired = desired(documents, gateway, internal)?;
+    if desired == encode(&documents.config, &documents.security)? {
+        Ok(Decision::Noop)
+    } else {
+        Ok(Decision::Change {
+            gateway_token: false,
+            internal_token: false,
+        })
+    }
+}
+
+/// Canonical desired pair for explicit tokens; the inputs are not modified.
+pub(crate) fn desired(documents: &Documents, gateway: &str, internal: &str) -> Result<Encoding> {
+    let mut config = documents.config.clone();
+    let mut security = documents.security.clone();
+    apply(&mut config, &mut security, gateway, internal)?;
+    encode(&config, &security)
+}
+
 fn set_security_gateway_token(security: &mut serde_yaml::Value, token: &str) {
     let mut current = security;
     for key in ["channel_list", "pico", "settings"] {

@@ -15,6 +15,14 @@ pub enum MutationStatus {
     Stopping(PicoJobId),
     /// This Pico tree is proven closed; the mutation job is still nonterminal.
     Closed(PicoJobId),
+    /// Ordinary settlement is running in its fixed joined worker.
+    Settling(PicoJobId),
+    /// Settlement found work to do; nothing was published or changed yet.
+    ChangeRequired(PicoJobId),
+    /// Settlement cannot run for this job; it stays accepted and fenced.
+    SettlementRefused(PicoJobId),
+    /// Terminal receipt published and private members retired.
+    Completed(PicoJobId),
     Existing(PicoJobId),
     Expired,
     Rejected,
@@ -54,6 +62,7 @@ pub struct Mutation {
     submission: PicoSubmission,
     broker: Broker,
     stop_requested: bool,
+    settle_requested: bool,
     status: MutationStatus,
 }
 
@@ -63,6 +72,7 @@ impl Mutation {
             submission,
             broker,
             stop_requested: false,
+            settle_requested: false,
             status: MutationStatus::Idle,
         }
     }
@@ -91,6 +101,27 @@ impl Mutation {
     /// accepting a request alone never implicitly stops a live runtime.
     pub fn request_stop(&mut self) {
         self.stop_requested = true;
+    }
+
+    /// Queue ordinary settlement: the fixed no-op preflight first. It never
+    /// stops a live runtime by itself; an explicit Stop keeps priority.
+    pub fn request_settlement(&mut self) {
+        self.settle_requested = true;
+    }
+
+    /// Return this SAME broker only once the job is durably terminal and its
+    /// private members are retired. Otherwise the owner comes back unchanged.
+    /// Dropping the submission first joins its workers and releases the
+    /// store, source, Config and Update leases before the broker leaves.
+    pub fn into_broker(self) -> std::result::Result<Broker, Box<Self>> {
+        if !matches!(self.status, MutationStatus::Completed(_)) {
+            return Err(Box::new(self));
+        }
+        let Self {
+            submission, broker, ..
+        } = self;
+        drop(submission);
+        Ok(broker)
     }
 
     pub fn poll(&mut self) -> MutationStatus {
@@ -123,10 +154,30 @@ impl Mutation {
             }
         };
         if !self.stop_requested {
-            self.status = MutationStatus::Accepted(id);
+            if !self.settle_requested {
+                self.status = MutationStatus::Accepted(id);
+                return self.status;
+            }
+            self.status = match self.submission.poll_transition() {
+                TransitionStatus::Idle => match self.submission.begin_settlement() {
+                    Ok(()) => MutationStatus::Settling(id),
+                    Err(_) => MutationStatus::RecoveryRequired,
+                },
+                TransitionStatus::Pending => MutationStatus::Settling(id),
+                TransitionStatus::Completed => MutationStatus::Completed(id),
+                TransitionStatus::ChangeRequired => MutationStatus::ChangeRequired(id),
+                TransitionStatus::Refused => MutationStatus::SettlementRefused(id),
+                TransitionStatus::Stopping
+                | TransitionStatus::Closed
+                | TransitionStatus::Failed => MutationStatus::RecoveryRequired,
+            };
             return self.status;
         }
-        let phase = self.submission.poll_transition();
+        let phase = match self.submission.poll_transition() {
+            // A settlement that changed nothing leaves the job as accepted.
+            TransitionStatus::ChangeRequired | TransitionStatus::Refused => TransitionStatus::Idle,
+            other => other,
+        };
         // Every valid completion, including failed/runtime-error work, is sent
         // only after the subreaper proves ECHILD. Closure is not task success.
         let closed = matches!(native, None | Some(Status::Closed(_)));
@@ -160,7 +211,10 @@ impl Mutation {
                 MutationStatus::Stopping(id)
             }
             TransitionStatus::Closed => MutationStatus::Closed(id),
-            TransitionStatus::Failed => MutationStatus::RecoveryRequired,
+            TransitionStatus::Completed => MutationStatus::Completed(id),
+            TransitionStatus::ChangeRequired
+            | TransitionStatus::Refused
+            | TransitionStatus::Failed => MutationStatus::RecoveryRequired,
         };
         self.status
     }

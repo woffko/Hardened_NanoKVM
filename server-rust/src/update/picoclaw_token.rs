@@ -92,6 +92,12 @@ pub(crate) fn read() -> Result<String> {
         .ok_or_else(invalid)
 }
 
+/// Read-only snapshot for job classification: no sync, provisioning or repair.
+/// Absence is explicit and an unsafe store refuses, as for `read`.
+pub(crate) fn observe() -> Result<Option<Zeroizing<String>>> {
+    Ok(read_at(&fixed_parent()?, 0)?.map(|(token, _)| Zeroizing::new(token)))
+}
+
 fn ensure_at(parent: &File, uid: u32) -> Result<String> {
     let device = parent.metadata()?.dev();
     parent_at(parent, uid, device)?;

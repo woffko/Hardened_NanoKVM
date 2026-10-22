@@ -146,9 +146,52 @@ Disposable host fixtures cover live/absent/paused/error-completed native trees,
 an independently live backend, blocked acceptance/phase work, joined teardown,
 late uncertainty, changed private members, Stop/Closed publication failures and
 real SIGKILL during Stop publication. They do not establish production launch
-ordering, hardware execution or recovery. Ordinary no-op preflight/automatic
-quiescence, all six operation executors, transport/API/S96 integration,
-activation, finalization and recovery remain unimplemented.
+ordering, hardware execution or recovery. Automatic quiescence, the change paths
+of all six operation executors, transport/API/S96 integration, activation and
+recovery remain unimplemented.
+
+## Current Startup no-op settlement
+
+The startup-default transform is a pure shared module
+(`update::picoclaw_startup`) used by both the API writer and the job. It
+performs no I/O, entropy or provisioning: callers pass the tokens they selected
+or planned. Gateway-token preference is security settings, then the legacy
+security location, then the config copy.
+
+An owner queues ordinary settlement explicitly with `request_settlement`;
+accepting a request never starts it, and an explicit Stop keeps priority. The
+fixed joined `pico-job-settle` worker re-checks the exact accepted state and
+members. It then decodes the private source, takes a read-only snapshot of the
+internal credential and classifies the accepted pair.
+
+- **Canonical no-op.** The worker publishes a terminal Completed receipt
+  (outcome Noop, runtime Unchanged or Suppressed) into the job's ring slot. It
+  then retires payload and source, syncs, and retires the active fence last.
+  Each member is re-checked against its owned identity and content immediately
+  before its unlink. The pair's bytes, comments and inodes, its generation and a
+  live runtime with its launch association are untouched.
+- **Return of the broker.** Only a Completed status lets `into_broker` return
+  the same broker. Dropping the submission first joins its workers and releases
+  the store, source, Config and Update leases.
+- **Missing token or value change.** A missing gateway or internal token, or a
+  changed value, reports ChangeRequired. A missing Home or config, unparsable
+  documents, malformed local-tool policy or a different job kind reports
+  SettlementRefused. In both cases nothing is published or changed, and the job
+  stays accepted and fenced for a later change path or explicit Stop.
+- **Publication or retirement errors.** These latch RecoveryRequired. A durable
+  terminal receipt with remaining members stays fenced until checked recovery
+  retires the remainder; observation never re-runs the job.
+
+Disposable chroot fixtures cover:
+
+- absent and live runtimes;
+- comment and format preservation;
+- the change, missing-token and refused cases;
+- the explicit Stop that follows them;
+- injected failures before and after terminal publication and during each
+  retirement step.
+
+They are host checks, not physical power cuts or device acceptance.
 
 ## Authority and scope
 

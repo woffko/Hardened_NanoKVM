@@ -2930,14 +2930,13 @@ fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
         config: data,
         security: security_data,
     } = crate::update::picoclaw_config::read_pair(&config_path)?;
-    let raw: JsonValue = serde_json::from_slice(&data)
-        .map_err(|err| AppError::Internal(format!("failed to parse picoclaw config: {err}")))?;
-    let security = match security_data {
-        Some(data) => serde_yaml::from_slice(&data).map_err(|err| {
-            AppError::Internal(format!("failed to parse picoclaw security config: {err}"))
-        })?,
-        None => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-    };
+    let startup::Documents {
+        config: raw,
+        security,
+    } = startup::decode(
+        &data,
+        security_data.as_deref().map(|bytes| bytes.as_slice()),
+    )?;
 
     Ok(ConfigDocument {
         config_path,
@@ -3150,22 +3149,8 @@ fn save_config_document(
 // Never Debug/log these credential-bearing buffers. Startup comparison uses
 // canonical encodings, not the on-disk formatting/comments; unchanged inputs
 // must not replace the pair or change a running scope's exact-byte generation.
-#[derive(PartialEq, Eq)]
-struct ConfigEncoding {
-    config: zeroize::Zeroizing<Vec<u8>>,
-    security: zeroize::Zeroizing<String>,
-}
-
-fn encode_config_document(doc: &ConfigDocument) -> Result<ConfigEncoding> {
-    let config =
-        zeroize::Zeroizing::new(serde_json::to_vec_pretty(&doc.raw).map_err(|err| {
-            AppError::Internal(format!("failed to encode picoclaw config: {err}"))
-        })?);
-    let security =
-        zeroize::Zeroizing::new(serde_yaml::to_string(&doc.security).map_err(|err| {
-            AppError::Internal(format!("failed to encode picoclaw security: {err}"))
-        })?);
-    Ok(ConfigEncoding { config, security })
+fn encode_config_document(doc: &ConfigDocument) -> Result<startup::Encoding> {
+    startup::encode(&doc.raw, &doc.security)
 }
 
 #[cfg(all(test, feature = "sandbox-test-fixture"))]

@@ -1,6 +1,8 @@
 //! Fixed private acceptance publication, never a target mutation/recovery API.
 use super::*;
-use rustix::fs::{Mode, RenameFlags, ResolveFlags, fchmod, openat2, renameat_with};
+use rustix::fs::{
+    AtFlags, Mode, RenameFlags, ResolveFlags, fchmod, openat2, renameat_with, unlinkat,
+};
 use std::io::{Seek, SeekFrom, Write};
 
 enum Member {
@@ -24,6 +26,7 @@ enum Publication {
     Accepted,
     Stop,
     Closed,
+    Completed,
 }
 
 impl Publication {
@@ -33,6 +36,7 @@ impl Publication {
             Self::Accepted => "state",
             Self::Stop => "stop",
             Self::Closed => "closed",
+            Self::Completed => "completed",
         }
     }
 }
@@ -167,6 +171,59 @@ impl Source {
     }
 }
 
+/// Typed view of the private source captured at acceptance. It borrows the
+/// credential-bearing bytes; never Debug/log it.
+pub(super) struct SourceView<'a> {
+    pub(super) home_present: bool,
+    pub(super) config: Option<&'a [u8]>,
+    pub(super) security: Option<&'a [u8]>,
+}
+
+pub(super) fn decode_source(bytes: &[u8]) -> Result<SourceView<'_>> {
+    if bytes.len() < 128 || &bytes[..8] != b"NKPSRC02" {
+        return Err(invalid());
+    }
+    let flag = |index: usize| match bytes[index] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(invalid()),
+    };
+    let length = |offset: usize| -> Result<usize> {
+        Ok(u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| invalid())?,
+        ) as usize)
+    };
+    let (present, config_present, security_present, generation) =
+        (flag(8)?, flag(9)?, flag(10)?, flag(11)?);
+    let (home, config, security) = (length(40)?, length(44)?, length(48)?);
+    if bytes[52..64].iter().any(|byte| *byte != 0)
+        || (!generation && bytes[96..128].iter().any(|byte| *byte != 0))
+        || (!present && (config_present || security_present))
+        || (!config_present && config != 0)
+        || (!security_present && security != 0)
+        || !(1..=4095).contains(&home)
+    {
+        return Err(invalid());
+    }
+    let total = 128usize
+        .checked_add(home)
+        .and_then(|n| n.checked_add(config))
+        .and_then(|n| n.checked_add(security))
+        .ok_or_else(invalid)?;
+    if total != bytes.len() || bytes[128] != b'/' || bytes[128..128 + home].contains(&0) {
+        return Err(invalid());
+    }
+    let config_start = 128 + home;
+    let security_start = config_start + config;
+    Ok(SourceView {
+        home_present: present,
+        config: config_present.then(|| &bytes[config_start..security_start]),
+        security: security_present.then(|| &bytes[security_start..]),
+    })
+}
+
 pub(super) struct Store {
     parent: File,
     directory: File,
@@ -226,23 +283,31 @@ impl Store {
     }
 
     fn inventory(&self, accepted: bool) -> Result<()> {
+        self.inventory_exact([true, accepted, accepted, accepted])
+    }
+
+    /// Exactly these of state/active/payload/source; anything else fences.
+    fn inventory_exact(&self, expected: [bool; 4]) -> Result<()> {
         let mut found = [false; 4];
         for entry in rustix::fs::Dir::read_from(&self.directory).map_err(std::io::Error::from)? {
             let entry = entry.map_err(std::io::Error::from)?;
             let slot = match entry.file_name().to_bytes() {
                 b"." | b".." => continue,
                 b"state" => 0,
-                b"active" if accepted => 1,
-                b"payload" if accepted => 2,
-                b"source" if accepted => 3,
+                b"active" => 1,
+                b"payload" => 2,
+                b"source" => 3,
                 _ => return Err(fenced()),
             };
+            if !expected[slot] {
+                return Err(fenced());
+            }
             if found[slot] {
                 return Err(invalid());
             }
             found[slot] = true;
         }
-        if found != [true, accepted, accepted, accepted] {
+        if found != expected {
             return Err(invalid());
         }
         Ok(())
@@ -351,12 +416,37 @@ impl Store {
         touched: &mut bool,
         publication: Publication,
     ) -> Result<()> {
+        self.snapshot.sequence = record.sequence;
+        self.snapshot.active = Some(record);
+        self.commit(touched, publication)
+    }
+
+    /// Publish the job's terminal receipt into its ring slot and clear the
+    /// active record. The private members stay until `retire` checks them.
+    fn publish_terminal(&mut self, record: Record, touched: &mut bool) -> Result<()> {
+        if record.phase != Phase::Completed
+            || record.sequence != self.snapshot.sequence
+            || self
+                .snapshot
+                .active
+                .map(|active| (active.sequence, active.nonce))
+                != Some((record.sequence, record.nonce))
+        {
+            return Err(invalid());
+        }
+        let slot = ((record.sequence - 1) % RETAINED as u64) as usize;
+        self.snapshot.active = None;
+        self.snapshot.receipts[slot] = Some(record);
+        self.commit(touched, Publication::Completed)
+    }
+
+    // The in-memory snapshot already holds the intended value: a failure at
+    // any point leaves memory and disk unequal, which later checks fence.
+    fn commit(&mut self, touched: &mut bool, publication: Publication) -> Result<()> {
         #[cfg(test)]
         checkpoint(publication.label(), "begin")?;
         #[cfg(not(test))]
         let _ = publication;
-        self.snapshot.sequence = record.sequence;
-        self.snapshot.active = Some(record);
         let bytes = self.snapshot.encode()?;
         let file = self.write(Member::Next, bytes.as_slice(), touched)?;
         self.check_bound()?;
@@ -383,6 +473,43 @@ impl Store {
         #[cfg(test)]
         checkpoint(publication.label(), "durable")?;
         Ok(())
+    }
+}
+
+impl Store {
+    /// Exact retirement after a durable terminal receipt. Each member is
+    /// re-checked against its owned identity and content just before unlink;
+    /// the active fence goes last, after payload and source are durably gone.
+    fn retire(&mut self) -> Result<()> {
+        if self.snapshot.active.is_some() {
+            return Err(invalid());
+        }
+        self.check_bound()?;
+        self.inventory(true)?;
+        self.check_members()?;
+        for (slot, member) in [
+            (1, Member::Payload),
+            (2, Member::Source),
+            (0, Member::Active),
+        ] {
+            self.members[slot]
+                .as_mut()
+                .ok_or_else(invalid)?
+                .check(&self.directory, member.name())?;
+            unlinkat(&self.directory, member.name(), AtFlags::empty())
+                .map_err(std::io::Error::from)?;
+            #[cfg(test)]
+            checkpoint(member.name(), "retired")?;
+            if slot == 2 {
+                // Payload/source removal is durable before the fence goes.
+                self.directory.sync_all()?;
+                self.inventory_exact([true, true, false, false])?;
+            }
+            self.members[slot] = None;
+        }
+        self.directory.sync_all()?;
+        self.check_bound()?;
+        self.inventory(false)
     }
 }
 
@@ -490,6 +617,9 @@ pub(super) fn perform(
 }
 
 pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<TransitionStatus> {
+    if matches!(advance, Advance::Settle) {
+        return settle(payload);
+    }
     let store = payload.store.as_mut().ok_or_else(invalid)?;
     store.check_current()?;
     let mut record = store.snapshot.active.ok_or_else(invalid)?;
@@ -525,6 +655,57 @@ pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<Transit
     record.resume_allowed = false;
     store.publish(record, &mut payload.touched, publication)?;
     Ok(status)
+}
+
+/// Ordinary Startup settlement, entered only from Accepted without an explicit
+/// Stop. A canonical no-op records its terminal receipt and retires the job
+/// without stopping a live runtime or touching the pair; any other result
+/// leaves the accepted job exactly as it is.
+pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.home != payload.facts.home_fingerprint
+        || record.phase != Phase::Accepted
+    {
+        return Err(fenced());
+    }
+    if record.kind != Kind::Startup {
+        // The other fixed operations have no settlement executor yet.
+        return Ok(TransitionStatus::Refused);
+    }
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let (true, Some(config)) = (view.home_present, view.config) else {
+        // Startup never creates a missing Home or config.
+        return Ok(TransitionStatus::Refused);
+    };
+    let Ok(documents) = crate::update::picoclaw_startup::decode(config, view.security) else {
+        return Ok(TransitionStatus::Refused);
+    };
+    let internal = crate::update::picoclaw_token::observe()?;
+    let decision = match crate::update::picoclaw_startup::classify(
+        &documents,
+        internal.as_deref().map(String::as_str),
+    ) {
+        Ok(decision) => decision,
+        Err(_) => return Ok(TransitionStatus::Refused),
+    };
+    if decision != crate::update::picoclaw_startup::Decision::Noop {
+        return Ok(TransitionStatus::ChangeRequired);
+    }
+    record.phase = Phase::Completed;
+    record.outcome = Outcome::Noop;
+    record.runtime = if record.was_running && !record.resume_allowed {
+        Runtime::Suppressed
+    } else {
+        Runtime::Unchanged
+    };
+    store.publish_terminal(record, &mut payload.touched)?;
+    store.retire()?;
+    Ok(TransitionStatus::Completed)
 }
 
 #[cfg(test)]

@@ -130,6 +130,7 @@ struct Payload {
 enum Advance {
     Stop(JobId),
     Closed(ClosedPico),
+    Settle,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +139,13 @@ pub(crate) enum TransitionStatus {
     Pending,
     Stopping,
     Closed,
+    /// Ordinary settlement published the terminal receipt and retired the
+    /// job's private members. Only this proves the job is finished.
+    Completed,
+    /// Settlement found work to do; nothing was published or changed.
+    ChangeRequired,
+    /// Settlement cannot run for this accepted job; nothing was changed.
+    Refused,
     Failed,
 }
 
@@ -294,13 +302,24 @@ impl Submission {
         self.begin_transition(Advance::Closed(proof))
     }
 
+    /// One fixed ordinary-settlement worker; never an explicit Stop.
+    pub(crate) fn begin_settlement(&mut self) -> Result<()> {
+        self.begin_transition(Advance::Settle)
+    }
+
     fn begin_transition(&mut self, advance: Advance) -> Result<()> {
-        if !matches!(self.worker, Worker::Settled(Acceptance::Accepted(_)))
-            || !matches!(
-                self.transition,
-                TransitionWorker::Idle | TransitionWorker::Settled(TransitionStatus::Stopping)
-            )
-        {
+        let settle = matches!(advance, Advance::Settle);
+        let ready = match &self.transition {
+            TransitionWorker::Idle => true,
+            // Explicit Stop may follow a settlement that changed nothing.
+            TransitionWorker::Settled(
+                TransitionStatus::Stopping
+                | TransitionStatus::ChangeRequired
+                | TransitionStatus::Refused,
+            ) => !settle,
+            _ => false,
+        };
+        if !matches!(self.worker, Worker::Settled(Acceptance::Accepted(_))) || !ready {
             return Err(fenced());
         }
         self.transition = TransitionWorker::Settled(TransitionStatus::Failed);
@@ -314,7 +333,14 @@ impl Submission {
         }
         let owned = Arc::clone(&self.payload);
         let worker = thread::Builder::new()
-            .name("pico-job-stop".into())
+            .name(
+                if settle {
+                    "pico-job-settle"
+                } else {
+                    "pico-job-stop"
+                }
+                .into(),
+            )
             .spawn(move || {
                 let Ok(mut payload) = owned.lock() else {
                     return TransitionStatus::Failed;

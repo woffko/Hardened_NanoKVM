@@ -50,6 +50,9 @@ fn command(root: &Path, case: &str) -> Command {
     if let Some(point) = case.strip_prefix("kill:") {
         command.env("NANOKVM_PICO_ACCEPT_POINT", point);
     }
+    if let Some(point) = case.strip_prefix("settle-fail:") {
+        command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
+    }
     command
 }
 
@@ -184,6 +187,37 @@ fn malformed_completion_or_modified_private_input_never_becomes_a_closed_job() {
         "changed-state",
     ] {
         run(case);
+    }
+}
+
+#[test]
+fn startup_noop_settlement_publishes_a_terminal_receipt_and_returns_the_same_broker() {
+    for case in ["settle-noop-absent", "settle-noop-live"] {
+        run(case);
+    }
+}
+
+#[test]
+fn startup_settlement_that_needs_work_or_cannot_run_changes_nothing() {
+    for case in [
+        "settle-change-absent",
+        "settle-internal-absent",
+        "settle-refused-absent",
+        "settle-change-live",
+    ] {
+        run(case);
+    }
+}
+
+#[test]
+fn startup_settlement_publication_and_retirement_errors_keep_the_fence() {
+    for point in [
+        "completed-begin",
+        "completed-renamed",
+        "payload-retired",
+        "active-retired",
+    ] {
+        run(&format!("settle-fail:{point}"));
     }
 }
 
@@ -365,7 +399,7 @@ fn mutation_child() {
     let root = Path::new(&root);
     let case = std::env::var("NANOKVM_PICO_MUTATION_CASE").unwrap();
     let mut group = Group::default();
-    let live = case != "absent";
+    let live = case != "absent" && !case.ends_with("-absent") && !case.starts_with("settle-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -407,6 +441,7 @@ fn mutation_child() {
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
     jobs::prepare_factory_fixture();
+    let settle_pair = case.starts_with("settle-").then(|| settle_home(&case));
     let initial = record();
     let epoch = initial[8..24].try_into().unwrap();
     let mut broker = Broker::acquire().unwrap();
@@ -507,6 +542,12 @@ fn mutation_child() {
         }
         assert_eq!(mutation.broker.group.poll()[3], Some(Status::Running));
         assert!(record() == before);
+    }
+    if let Some(pair) = settle_pair {
+        settle_case(&case, mutation, live, &pair, &before);
+        settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
+        println!("pico-mutation-checked");
+        return;
     }
     if case == "parent-cleanup" {
         rustix::process::pidfd_send_signal(pico_owner.as_ref().unwrap(), Signal::KILL).unwrap();
@@ -690,4 +731,222 @@ fn mutation_child() {
     assert!(StateWriters::default().configuration().is_err());
     settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
     println!("pico-mutation-checked");
+}
+
+const HOME: &str = "/root/.picoclaw";
+
+struct SettlePair {
+    config: (Vec<u8>, u64),
+    security: Option<(Vec<u8>, u64)>,
+}
+
+fn private_write(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+// Synthetic credential-free pair: canonical defaults for the noop cases,
+// one drifted default or a missing token/config for the others.
+fn settle_home(case: &str) -> SettlePair {
+    use crate::update::picoclaw_startup as startup;
+    use std::os::unix::fs::MetadataExt;
+    if case != "settle-internal-absent" {
+        private_write(
+            Path::new("/etc/kvm/.picoclaw_internal_token"),
+            b"synthetic-internal-fixture\n",
+        );
+    }
+    if case == "settle-refused-absent" {
+        return SettlePair {
+            config: (Vec::new(), 0),
+            security: None,
+        };
+    }
+    fs::create_dir_all(HOME).unwrap();
+    fs::set_permissions(HOME, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = serde_json::json!({"agents": {"defaults": {"model": "fixture"}}});
+    let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    startup::apply(
+        &mut config,
+        &mut security,
+        "synthetic-gateway-fixture",
+        "synthetic-internal-fixture",
+    )
+    .unwrap();
+    if case.starts_with("settle-change-") {
+        config["gateway"]["port"] = serde_json::json!(1);
+    }
+    let encoded = startup::encode(&config, &security).unwrap();
+    // Original formatting/comments differ from canonical bytes on purpose: a
+    // no-op must keep them exactly as found.
+    let config_bytes = serde_json::to_vec(&config).unwrap();
+    let security_bytes = format!("# synthetic fixture comment\n{}", encoded.security.as_str());
+    private_write(&Path::new(HOME).join("config.json"), &config_bytes);
+    private_write(
+        &Path::new(HOME).join(".security.yml"),
+        security_bytes.as_bytes(),
+    );
+    let inode = |name: &str| fs::metadata(Path::new(HOME).join(name)).unwrap().ino();
+    SettlePair {
+        config: (config_bytes, inode("config.json")),
+        security: Some((security_bytes.into_bytes(), inode(".security.yml"))),
+    }
+}
+
+fn assert_pair_unchanged(pair: &SettlePair) {
+    use std::os::unix::fs::MetadataExt;
+    if pair.config.0.is_empty() {
+        assert!(!Path::new(HOME).exists());
+        return;
+    }
+    let config = Path::new(HOME).join("config.json");
+    assert!(fs::read(&config).unwrap() == pair.config.0);
+    assert_eq!(fs::metadata(&config).unwrap().ino(), pair.config.1);
+    let security = Path::new(HOME).join(".security.yml");
+    let (bytes, inode) = pair.security.as_ref().unwrap();
+    assert!(fs::read(&security).unwrap() == *bytes);
+    assert_eq!(fs::metadata(&security).unwrap().ino(), *inode);
+    assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
+}
+
+fn members_present() -> [bool; 3] {
+    ["active", "payload", "source"].map(|name| {
+        Path::new("/etc/kvm/picoclaw-operations")
+            .join(name)
+            .exists()
+    })
+}
+
+fn settle_until(mutation: &mut Mutation) -> MutationStatus {
+    let mut status = MutationStatus::Idle;
+    until(|| {
+        status = mutation.poll();
+        !matches!(
+            status,
+            MutationStatus::Settling(_) | MutationStatus::Accepted(_)
+        )
+    });
+    status
+}
+
+fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair, accepted: &[u8]) {
+    const RECEIPT: usize = 128 + 256;
+    mutation.request_settlement();
+    let status = settle_until(&mut mutation);
+    assert_pair_unchanged(pair);
+    if live {
+        assert_eq!(mutation.broker.group.poll()[3], Some(Status::Running));
+    }
+    if let Some(point) = case.strip_prefix("settle-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        for _ in 0..3 {
+            assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
+        }
+        let state = record();
+        match point {
+            "completed-begin" => {
+                assert!(state == accepted);
+                assert_eq!(members_present(), [true; 3]);
+            }
+            _ => {
+                // Terminal receipt is durable; the job stays fenced until
+                // checked recovery retires what remains, never re-runs it.
+                assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+                assert_eq!(state[RECEIPT + 169], 8);
+                assert_eq!(state[RECEIPT + 172], 2);
+                let expected = match point {
+                    "completed-renamed" => [true; 3],
+                    "payload-retired" => [true, false, true],
+                    _ => [false; 3],
+                };
+                assert_eq!(members_present(), expected);
+            }
+        }
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain settlement returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        if point != "active-retired" {
+            assert!(StateWriters::default().configuration().is_err());
+        }
+        return;
+    }
+    match case {
+        "settle-noop-absent" | "settle-noop-live" => {
+            let MutationStatus::Completed(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(id.sequence, 1);
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::Completed(id));
+            }
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 169], 8, "Completed");
+            assert_eq!(state[RECEIPT + 172], 2, "Noop");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert_eq!(state[RECEIPT + 170], u8::from(live));
+            assert_eq!(members_present(), [false; 3]);
+            let mut broker = match mutation.into_broker() {
+                Ok(broker) => broker,
+                Err(_) => panic!("completed settlement kept its broker"),
+            };
+            // The same owned scope keeps running with its launch generation.
+            if live {
+                assert_eq!(broker.group.poll()[3], Some(Status::Running));
+                assert!(
+                    broker.group.picoclaw_generation()
+                        == Some(crate::update::picoclaw_config::Generation::fixture(
+                            [0x31; 32]
+                        ))
+                );
+            }
+            // Admissions are free again and the store accepts new work.
+            drop(broker.prepare_picoclaw_submission().unwrap());
+            drop(ProcessLock::acquire().unwrap());
+            drop(StateWriters::default().configuration().unwrap());
+            assert_pair_unchanged(pair);
+            if live {
+                let admission = broker.runtime_permit().unwrap();
+                let crate::native_owner::broker::Shutdown::Draining(mut drain) =
+                    broker.shutdown(admission)
+                else {
+                    panic!("owned test cleanup was refused");
+                };
+                until(|| {
+                    drain.poll().unwrap() == crate::native_owner::controller::DrainStatus::Drained
+                });
+            }
+        }
+        _ => {
+            let expected = if case == "settle-refused-absent" {
+                MutationStatus::SettlementRefused
+            } else {
+                MutationStatus::ChangeRequired
+            };
+            let (MutationStatus::ChangeRequired(id) | MutationStatus::SettlementRefused(id)) =
+                status
+            else {
+                panic!("{case}: {status:?}");
+            };
+            assert_eq!(status, expected(id));
+            assert!(record() == accepted, "nothing was published");
+            assert_eq!(members_present(), [true; 3]);
+            let mut mutation = match mutation.into_broker() {
+                Ok(_) => panic!("unfinished job returned its broker"),
+                Err(mutation) => *mutation,
+            };
+            assert!(StateWriters::default().configuration().is_err());
+            // The accepted job can still take the explicit Stop path.
+            mutation.request_stop();
+            until(|| closed(&mut mutation));
+            assert_eq!(record()[128 + 169], 3);
+            assert_pair_unchanged(pair);
+            drop(mutation);
+            drop(ProcessLock::acquire().unwrap());
+            assert!(StateWriters::default().configuration().is_err());
+        }
+    }
 }
