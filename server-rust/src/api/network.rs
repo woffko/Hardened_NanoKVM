@@ -1254,6 +1254,13 @@ fn validate_static_network_config(req: &SetDnsReq) -> Result<StaticNetworkConfig
     ensure_usable_host_address(address, "invalid ip address")?;
     ensure_usable_host_address(gateway, "invalid router address")?;
     ensure_same_subnet(address, gateway, subnet_mask)?;
+    ensure_host_of_subnet(address, prefix, "invalid ip address")?;
+    ensure_host_of_subnet(gateway, prefix, "invalid router address")?;
+    if address == gateway {
+        return Err(AppError::BadRequest(
+            "the router cannot have this device's address".to_string(),
+        ));
+    }
 
     Ok(StaticNetworkConfig {
         interface: interface.to_string(),
@@ -1358,7 +1365,7 @@ fn parse_static_address(value: &str) -> Result<(Ipv4Addr, Option<u8>)> {
 fn validate_subnet_mask(value: Option<&str>, prefix: Option<u8>) -> Result<(Ipv4Addr, u8)> {
     let value = value.map(str::trim).filter(|value| !value.is_empty());
     match (value, prefix) {
-        (Some(mask), _) => {
+        (Some(mask), address_prefix) => {
             let mask = mask
                 .parse::<Ipv4Addr>()
                 .map_err(|_| AppError::BadRequest("invalid subnet mask".to_string()))?;
@@ -1366,6 +1373,12 @@ fn validate_subnet_mask(value: Option<&str>, prefix: Option<u8>) -> Result<(Ipv4
                 .ok_or_else(|| AppError::BadRequest("invalid subnet mask".to_string()))?;
             if prefix == 0 {
                 return Err(AppError::BadRequest("invalid subnet mask".to_string()));
+            }
+            // A mask and an address prefix that disagree are a mistake, not a choice.
+            if address_prefix.is_some_and(|address_prefix| address_prefix != prefix) {
+                return Err(AppError::BadRequest(
+                    "subnet mask and address prefix disagree".to_string(),
+                ));
             }
             Ok((mask, prefix))
         }
@@ -1395,6 +1408,19 @@ fn ensure_usable_host_address(address: Ipv4Addr, message: &str) -> Result<()> {
         || address.octets() == [255, 255, 255, 255]
     {
         return Err(AppError::BadRequest(message.to_string()));
+    }
+    Ok(())
+}
+
+/// With host bits to spare (/30 or shorter), the all-zero and all-one host
+/// parts name the subnet itself and its broadcast, never a host.
+fn ensure_host_of_subnet(address: Ipv4Addr, prefix: u8, message: &str) -> Result<()> {
+    if prefix <= 30 {
+        let host_mask = !u32::from(prefix_to_netmask(prefix));
+        let host = u32::from(address) & host_mask;
+        if host == 0 || host == host_mask {
+            return Err(AppError::BadRequest(message.to_string()));
+        }
     }
     Ok(())
 }
@@ -1972,6 +1998,38 @@ mod tests {
         assert_eq!(normalize_ipv6_mode(" SLAAC\n").unwrap(), IPV6_MODE_SLAAC);
         assert_eq!(normalize_ipv6_mode("dhcpv6").unwrap(), IPV6_MODE_DHCPV6);
         assert!(normalize_ipv6_mode("router-advertisements").is_err());
+    }
+
+    #[test]
+    fn a_static_address_must_be_a_host_of_its_subnet() {
+        let request = |address: &str, mask: Option<&str>, gateway: &str| SetDnsReq {
+            mode: "manual".into(),
+            servers: Vec::new(),
+            interface: Some("eth0".into()),
+            address: Some(address.into()),
+            subnet_mask: mask.map(str::to_string),
+            gateway: Some(gateway.into()),
+        };
+        validate_static_network_config(&request("192.0.2.10/24", None, "192.0.2.1")).unwrap();
+        validate_static_network_config(&request("192.0.2.10", Some("255.255.255.0"), "192.0.2.1"))
+            .unwrap();
+        // /31 has no network or broadcast address to avoid.
+        validate_static_network_config(&request("192.0.2.0/31", None, "192.0.2.1")).unwrap();
+        for (address, mask, gateway) in [
+            ("192.0.2.0/24", None, "192.0.2.1"),
+            ("192.0.2.255/24", None, "192.0.2.1"),
+            ("192.0.2.10/24", None, "192.0.2.255"),
+            ("192.0.2.10/24", None, "192.0.2.10"),
+            ("192.0.2.10/24", Some("255.255.0.0"), "192.0.2.1"),
+        ] {
+            assert!(
+                matches!(
+                    validate_static_network_config(&request(address, mask, gateway)),
+                    Err(AppError::BadRequest(_))
+                ),
+                "{address} {mask:?} {gateway}"
+            );
+        }
     }
 
     #[test]

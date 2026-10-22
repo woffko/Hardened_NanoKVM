@@ -29,7 +29,7 @@ async fn fixture() -> (tempfile::TempDir, AppState) {
     fs::create_dir_all(dir.path().join("usr/share/zoneinfo/Etc")).unwrap();
     fs::write(
         dir.path().join("usr/share/zoneinfo/Etc/UTC"),
-        b"fixture timezone",
+        b"TZif2 fixture timezone",
     )
     .unwrap();
     const SCRIPT: &[u8] = b"#!/bin/sh\nd=${0%/*}\ntag=${0##*/}\nprintf '%s\\n' \"$*\" >> \"$d/$tag.args\"\nif [ -f \"$d/$tag.block\" ]; then\n echo started > \"$d/$tag.started\"\n while [ ! -f \"$d/$tag.release\" ]; do sleep 0.01; done\nfi\nif [ -f \"$d/$tag.fail\" ]; then exit 1; fi\nexit 0\n";

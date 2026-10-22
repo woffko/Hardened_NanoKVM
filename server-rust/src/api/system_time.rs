@@ -228,11 +228,21 @@ fn normalize_timezone(value: &str, zoneinfo: &Path) -> Result<String> {
 
     let path = zoneinfo.join(&timezone);
     ensure_subpath(zoneinfo, &path)?;
-    if !path.is_file() {
+    // zoneinfo also holds text files such as leapseconds; only a compiled
+    // zone may become /etc/localtime.
+    if !path.is_file() || !is_compiled_zone(&path) {
         return Err(AppError::BadRequest("unknown timezone".to_string()));
     }
 
     Ok(timezone)
+}
+
+fn is_compiled_zone(path: &Path) -> bool {
+    let mut magic = [0_u8; 4];
+    fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
+        .is_ok()
+        && &magic == b"TZif"
 }
 
 fn normalize_servers<'a, I>(servers: I) -> Result<Vec<String>>
@@ -556,6 +566,21 @@ mod tests {
             Some("10.0.87.5")
         );
         assert_eq!(parse_route_gateway("00000000"), None);
+    }
+
+    #[test]
+    fn only_a_compiled_zone_is_a_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Europe")).unwrap();
+        fs::write(dir.path().join("Europe/Tallinn"), b"TZif2 compiled zone").unwrap();
+        fs::write(dir.path().join("leapseconds"), b"# leap second table").unwrap();
+        assert_eq!(
+            normalize_timezone("Europe/Tallinn", dir.path()).unwrap(),
+            "Europe/Tallinn"
+        );
+        for value in ["leapseconds", "Europe", "Europe/Nowhere", "../etc/passwd"] {
+            assert!(normalize_timezone(value, dir.path()).is_err(), "{value}");
+        }
     }
 
     #[test]

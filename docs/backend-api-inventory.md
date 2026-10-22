@@ -81,7 +81,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 
 | Method   | Path                    | Rust Status                                                                                                                                                                                                                                                                     |
 | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET/POST | `/api/system/time`      | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo`, writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
+| GET/POST | `/api/system/time`      | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo` (a compiled TZif zone only, never a text table such as `leapseconds`), writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
 | POST     | `/api/system/time/sync` | Implemented; runs `ntpdate -u` against the first configured NTP server, then restarts `ntpd`.                                                                                                                                                                                   |
 
 ### System Firewall
@@ -164,7 +164,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST       | `/api/network/wol`             | Implemented.                                                                  |
 | GET/DELETE | `/api/network/wol/mac`         | Implemented.                                                                  |
 | POST       | `/api/network/wol/mac/name`    | Implemented.                                                                  |
-| GET/POST   | `/api/network/dns`             | Implemented.                                                                  |
+| GET/POST   | `/api/network/dns`             | Implemented. A manual IPv4 address and its router must be hosts of their subnet (not its network or broadcast address), must differ, and a subnet mask must match an address prefix given with it. |
 | GET        | `/api/network/wifi`            | Implemented.                                                                  |
 | POST       | `/api/network/wifi/connect`    | Implemented.                                                                  |
 | POST       | `/api/network/wifi/disconnect` | Implemented.                                                                  |
