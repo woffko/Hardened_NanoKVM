@@ -21,8 +21,13 @@ No lifetime lock is held during device or network I/O.
 
 The timestamps on a cloned `Session` are response/admission snapshots. Long-lived
 consumers must use its lifetime, not a copied expiry timestamp or a fresh lookup
-by username. Expired store entries are still removed on validation; this change
-does not implement a bounded session table or periodic global pruning.
+by username.
+
+Expired store entries are removed on validation and at every login. The store
+keeps at most 32 live sessions. At the cap, a login revokes the session closest
+to expiry, which ends every transport that session captured. There is no
+periodic timer: an idle store keeps its expired entries until the next login,
+and they hold no credential use.
 
 `TransportSession::capture` requires a live `CurrentSession` when authentication
 is enabled. A missing extension is an error, not a bypass. Only the existing

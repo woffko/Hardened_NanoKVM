@@ -28,6 +28,10 @@ impl Session {
     }
 }
 
+/// Live sessions kept at once. At the cap the session closest to expiry is
+/// revoked, so repeated logins cannot grow the store without bound.
+const MAX_SESSIONS: usize = 32;
+
 #[derive(Debug, Default)]
 pub struct SessionStore {
     sessions: RwLock<HashMap<String, Session>>,
@@ -56,9 +60,23 @@ impl SessionStore {
             expires_at_unix,
             lifetime: SessionLifetime::new(expires_at),
         };
-        if let Some(previous) = self.sessions.write().await.insert(token, session.clone()) {
+        let mut sessions = self.sessions.write().await;
+        // Expired sessions go here as well, not only when presented again;
+        // `is_active` ends each one's lifetime and every transport it captured.
+        sessions.retain(|_, session| session.lifetime.is_active());
+        if sessions.len() >= MAX_SESSIONS
+            && let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.expires_at)
+                .map(|(token, _)| token.clone())
+            && let Some(evicted) = sessions.remove(&oldest)
+        {
+            evicted.lifetime.revoke();
+        }
+        if let Some(previous) = sessions.insert(token, session.clone()) {
             previous.lifetime.revoke();
         }
+        drop(sessions);
         session
     }
 
@@ -199,5 +217,36 @@ mod tests {
             store.issue("admin", 60).await.lifetime()
         };
         assert_eq!(captured.ended().await, SessionEnd::Revoked);
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_pruned_at_the_next_login_and_its_lifetime_ends() {
+        let store = SessionStore::new();
+        let expired = store.issue("admin", 0).await;
+        let capture = expired.lifetime.clone();
+        let live = store.issue("admin", 60).await;
+        assert_eq!(store.sessions.read().await.len(), 1);
+        assert!(!capture.is_active());
+        assert!(store.validate(&expired.token).await.is_none());
+        assert!(store.validate(&live.token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_store_is_capped_and_revokes_the_session_closest_to_expiry() {
+        let store = SessionStore::new();
+        let first = store.issue("admin", 60).await;
+        let capture = store.validate(&first.token).await.unwrap().lifetime();
+        let mut later = Vec::new();
+        for offset in 1..MAX_SESSIONS {
+            later.push(store.issue("admin", 60 + offset as u64).await);
+        }
+        assert_eq!(store.sessions.read().await.len(), MAX_SESSIONS);
+        let newest = store.issue("admin", 600).await;
+        assert_eq!(store.sessions.read().await.len(), MAX_SESSIONS);
+        assert!(store.validate(&first.token).await.is_none());
+        assert!(!capture.is_active(), "the evicted session's transports end");
+        for session in later.iter().chain([&newest]) {
+            assert!(store.validate(&session.token).await.is_some());
+        }
     }
 }
