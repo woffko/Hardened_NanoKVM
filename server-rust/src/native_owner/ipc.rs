@@ -23,7 +23,8 @@ mod picoclaw;
 #[path = "ipc_picoclaw_job.rs"]
 pub mod picoclaw_job;
 pub use picoclaw_job::{
-    JobChannel, JobCode, JobKind, JobReply, JobRequest, run_model_job, run_startup_job,
+    JobChannel, JobCode, JobKind, JobReply, JobRequest, run_model_job, run_remove_job,
+    run_startup_job,
 };
 
 #[cfg(test)]

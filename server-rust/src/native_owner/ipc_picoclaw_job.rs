@@ -26,11 +26,14 @@ const REPLY_MAGIC: &[u8; 8] = b"NKPJS001";
 // The executors wired to this transport; the store's kind codes.
 const MODEL: u8 = 2;
 const STARTUP: u8 = 3;
+const REMOVE: u8 = 6;
 
 /// What a submission asks the broker to settle.
 #[derive(Clone, PartialEq, Eq)]
 pub enum JobKind {
     Startup,
+    /// Exactly the managed executable, credential and pair; user data stays.
+    Remove,
     /// Bounded, trimmed fields; see `picoclaw_model::check_request`.
     Model {
         model: Zeroizing<String>,
@@ -44,6 +47,7 @@ impl std::fmt::Debug for JobKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Startup => "Startup",
+            Self::Remove => "Remove",
             Self::Model { .. } => "Model { .. }",
         })
     }
@@ -53,13 +57,14 @@ impl JobKind {
     fn code(&self) -> u8 {
         match self {
             Self::Startup => STARTUP,
+            Self::Remove => REMOVE,
             Self::Model { .. } => MODEL,
         }
     }
 
     fn fields(&self) -> [&str; 3] {
         match self {
-            Self::Startup => ["", "", ""],
+            Self::Startup | Self::Remove => ["", "", ""],
             Self::Model {
                 model,
                 api_base,
@@ -84,6 +89,7 @@ impl JobKind {
     fn request(self) -> PicoRequest {
         match self {
             Self::Startup => PicoRequest::Startup,
+            Self::Remove => PicoRequest::Remove,
             Self::Model {
                 model,
                 api_base,
@@ -270,6 +276,7 @@ pub(super) fn decode_request(bytes: &[u8]) -> Option<JobRequest> {
     match (bytes[8], bytes[9]) {
         (1, 0) if epoch == [0; 16] && sequence == 0 && nonce == [0; 16] => Some(JobRequest::Cursor),
         (2, STARTUP) => submit(JobKind::Startup),
+        (2, REMOVE) => submit(JobKind::Remove),
         (3, 0) if epoch != [0; 16] && nonce != [0; 16] && sequence != 0 => {
             Some(JobRequest::Observe(PicoJobId {
                 epoch,
@@ -644,6 +651,11 @@ fn nonce() -> io::Result<[u8; 16]> {
 /// Run one broker-owned Startup job to its durable end within `timeout`.
 pub fn run_startup_job(timeout: Duration) -> io::Result<JobReply> {
     run_job(JobKind::Startup, timeout)
+}
+
+/// Run one broker-owned Remove job to its durable end within `timeout`.
+pub fn run_remove_job(timeout: Duration) -> io::Result<JobReply> {
+    run_job(JobKind::Remove, timeout)
 }
 
 /// Run one broker-owned Model job; the fields must pass

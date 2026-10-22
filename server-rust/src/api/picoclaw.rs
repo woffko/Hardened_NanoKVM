@@ -544,16 +544,16 @@ pub async fn uninstall_runtime() -> Result<Response> {
         ));
     }
 
-    if let Err(err) = stop_runtime_inner().await {
-        return Ok(picoclaw_error(CODE_RUNTIME_START_FAILED, err));
+    // The broker quiesces a live runtime and removes exactly the managed
+    // executable, internal credential and configuration pair. The workspace
+    // and the rest of Home stay; any failure is reported, never ignored.
+    if let Err(err) = run_config_job(REMOVE_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_remove_job(CONFIG_JOB_TIMEOUT)
+    })
+    .await
+    {
+        return Ok(picoclaw_error(CODE_RUNTIME_START_FAILED, err.to_string()));
     }
-    if let Ok(config_path) = resolve_config_path() {
-        if let Some(parent) = config_path.parent() {
-            let _ = fs::remove_dir_all(parent);
-        }
-    }
-    let _ = fs::remove_file(PICOCLAW_BINARY_PATH);
-    let _ = fs::remove_dir_all(PICOCLAW_CACHE_DIR);
 
     set_runtime_status(RuntimeStatus {
         ready: false,
@@ -576,7 +576,7 @@ pub async fn uninstall_runtime() -> Result<Response> {
         installed: false,
         binary: PICOCLAW_BINARY_PATH.to_string(),
         download: PICOCLAW_DOWNLOAD_URL.to_string(),
-        output: "picoclaw uninstalled successfully".to_string(),
+        output: "picoclaw executable and configuration removed".to_string(),
         status: runtime_status(),
     }))
     .into_response())
@@ -3085,6 +3085,7 @@ fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> Stri
 const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_JOB_KIND: u8 = 2;
 const STARTUP_JOB_KIND: u8 = 3;
+const REMOVE_JOB_KIND: u8 = 6;
 
 enum JobDone {
     Done,

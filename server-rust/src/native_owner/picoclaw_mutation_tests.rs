@@ -53,6 +53,7 @@ fn command(root: &Path, case: &str) -> Command {
     if let Some(point) = case
         .strip_prefix("settle-fail:")
         .or_else(|| change_failure(case))
+        .or_else(|| case.strip_prefix("settle-remove-fail:"))
     {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
@@ -237,6 +238,29 @@ fn model_settlement_shares_the_executor_with_its_own_change_before_the_defaults(
     }
     for point in ["applying-renamed", "pair-published", "committed-renamed"] {
         run(&format!("settle-model-change-fail:{point}"));
+    }
+}
+
+#[test]
+fn removal_deletes_exactly_the_managed_files_and_keeps_the_workspace() {
+    for case in [
+        "settle-remove-noop-absent",
+        "settle-remove-absent",
+        "settle-remove-live",
+        "settle-remove-refused-absent",
+    ] {
+        run(case);
+    }
+    for point in [
+        "plan-durable",
+        "closed-renamed",
+        "applying-renamed",
+        "pair-removed",
+        "internal-removed",
+        "binary-removed",
+        "committed-renamed",
+    ] {
+        run(&format!("settle-remove-fail:{point}"));
     }
 }
 
@@ -496,7 +520,8 @@ fn mutation_child() {
         && !case.starts_with("settle-fail:")
         && !case.starts_with("settle-change-fail:")
         && !case.starts_with("settle-internal-fail:")
-        && !case.starts_with("settle-model-change-fail:");
+        && !case.starts_with("settle-model-change-fail:")
+        && !case.starts_with("settle-remove-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -625,9 +650,10 @@ fn mutation_child() {
         before[128 + 169],
         if case == "stop-during-accept" { 3 } else { 1 }
     );
+    // Resume permission starts from the running state, except for removal.
     assert_eq!(
         before[128 + 174],
-        u8::from(live && case != "stop-during-accept")
+        u8::from(live && case != "stop-during-accept" && !case.starts_with("settle-remove-"))
     );
     assert!(Broker::acquire().is_err() && ProcessLock::acquire().is_err());
     if case == "accepted-live" {
@@ -856,6 +882,9 @@ pub(crate) fn model_kind() -> crate::native_owner::broker::ipc::JobKind {
 
 // Startup jobs, or a Model job selecting the fixed synthetic model.
 fn request(case: &str) -> PicoRequest {
+    if case.starts_with("settle-remove-") {
+        return PicoRequest::Remove;
+    }
     if case.starts_with("settle-model-") {
         PicoRequest::Model {
             model: zeroize::Zeroizing::new(MODEL.into()),
@@ -923,13 +952,19 @@ fn private_write(path: &Path, bytes: &[u8]) {
 pub(crate) fn settle_home(case: &str) -> SettlePair {
     use crate::update::picoclaw_startup as startup;
     use std::os::unix::fs::MetadataExt;
-    if case != "settle-internal-absent" && !case.starts_with("settle-internal-fail:") {
+    if case != "settle-internal-absent"
+        && !case.starts_with("settle-internal-fail:")
+        && case != "settle-remove-noop-absent"
+    {
         private_write(
             Path::new("/etc/kvm/.picoclaw_internal_token"),
             format!("{INTERNAL}\n").as_bytes(),
         );
     }
-    if case.starts_with("settle-refused-") || case == "settle-model-refused-absent" {
+    if case.starts_with("settle-refused-")
+        || case == "settle-model-refused-absent"
+        || case == "settle-remove-noop-absent"
+    {
         return SettlePair {
             config: (Vec::new(), 0),
             security: None,
@@ -959,6 +994,9 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
         &Path::new(HOME).join(".security.yml"),
         security_bytes.as_bytes(),
     );
+    if case.starts_with("settle-remove-") {
+        remove_fixture(case);
+    }
     let inode = |name: &str| fs::metadata(Path::new(HOME).join(name)).unwrap().ino();
     SettlePair {
         config: (config_bytes, inode("config.json")),
@@ -981,6 +1019,39 @@ pub(crate) fn assert_pair_unchanged(pair: &SettlePair) {
     assert!(fs::read(&security).unwrap() == *bytes);
     assert_eq!(fs::metadata(&security).unwrap().ino(), *inode);
     assert!(!Path::new(HOME).join(".picoclaw-config-pair").exists());
+}
+
+const BINARY: &str = "/usr/bin/picoclaw";
+const AGENT: &[u8] = b"synthetic custom agent profile, kept by removal\n";
+
+// The managed executable (or a link in its place) and a user workspace file.
+fn remove_fixture(case: &str) {
+    fs::create_dir_all("/usr/bin").unwrap();
+    fs::set_permissions("/usr/bin", fs::Permissions::from_mode(0o755)).unwrap();
+    if case == "settle-remove-refused-absent" {
+        std::os::unix::fs::symlink("/producer-image", BINARY).unwrap();
+    } else {
+        fs::write(BINARY, b"synthetic runtime executable, never run\n").unwrap();
+        fs::set_permissions(BINARY, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let workspace = Path::new(HOME).join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    private_write(&workspace.join("AGENT.md"), AGENT);
+}
+
+// Which managed files are present: executable, credential, config, security.
+pub(crate) fn managed_present() -> [bool; 4] {
+    [
+        fs::symlink_metadata(BINARY).is_ok(),
+        Path::new("/etc/kvm/.picoclaw_internal_token").exists(),
+        Path::new(HOME).join("config.json").exists(),
+        Path::new(HOME).join(".security.yml").exists(),
+    ]
+}
+
+// User data in Home is never part of a removal.
+pub(crate) fn assert_workspace_kept() {
+    assert!(fs::read(Path::new(HOME).join("workspace/AGENT.md")).unwrap() == AGENT);
 }
 
 pub(crate) fn internal_on_disk() -> Option<String> {
@@ -1158,6 +1229,55 @@ fn settle_case(
         drop(StateWriters::default().configuration().unwrap());
         return;
     }
+    if let Some(point) = case.strip_prefix("settle-remove-fail:") {
+        assert_eq!(status, MutationStatus::RecoveryRequired);
+        for _ in 0..3 {
+            assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
+        }
+        let state = record();
+        let phase = match point {
+            "plan-durable" => 1,
+            "closed-renamed" => 3,
+            "committed-renamed" => 5,
+            _ => 4,
+        };
+        assert_eq!(state[128 + 169], phase);
+        assert_eq!(state[128 + 168], 6, "Remove");
+        assert_eq!(members_present(), [true; 3]);
+        assert!(plan_present(), "the removal stays bound to its plan");
+        // Pair, then credential, then executable: each step exactly once.
+        let present = match point {
+            "pair-removed" => [true, true, false, false],
+            "internal-removed" => [true, false, false, false],
+            "binary-removed" | "committed-renamed" => [false; 4],
+            _ => [true; 4],
+        };
+        assert_eq!(managed_present(), present);
+        assert_workspace_kept();
+        let mutation = match mutation.into_broker() {
+            Ok(_) => panic!("uncertain removal returned its broker"),
+            Err(mutation) => *mutation,
+        };
+        drop(mutation);
+        drop(ProcessLock::acquire().unwrap());
+        assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 174], 0, "a removal never resumes");
+        if phase < 4 {
+            assert_eq!(settled[RECEIPT + 172], 4, "Cancelled");
+            assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+            assert_eq!(managed_present(), [true; 4], "nothing was removed");
+        } else {
+            assert_eq!(settled[RECEIPT + 172], 1, "Changed");
+            assert_eq!(settled[RECEIPT + 173], 5, "runtime Removed");
+            assert_eq!(managed_present(), [false; 4], "the SAME plan completed");
+        }
+        assert_workspace_kept();
+        return;
+    }
     if let Some(point) = change_failure(case) {
         let new_internal = case.starts_with("settle-internal-fail:");
         assert_eq!(status, MutationStatus::RecoveryRequired);
@@ -1316,6 +1436,69 @@ fn settle_case(
             );
             assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
             drop(assert_released(mutation));
+        }
+        "settle-remove-noop-absent" => {
+            // Nothing managed is left: a no-op that changes and stops nothing.
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 168], 6, "Remove");
+            assert_eq!(state[RECEIPT + 172], 2, "Noop");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert_eq!(managed_present(), [false; 4]);
+            assert!(!plan_present());
+            drop(assert_released(mutation));
+        }
+        "settle-remove-refused-absent" => {
+            // A link in place of the executable refuses before any stop.
+            let MutationStatus::SettlementRefused(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 1, "runtime Unchanged");
+            assert_eq!(managed_present(), [true; 4]);
+            assert!(
+                fs::symlink_metadata(BINARY)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_pair_unchanged(pair);
+            assert_workspace_kept();
+            drop(assert_released(mutation));
+        }
+        "settle-remove-absent" | "settle-remove-live" => {
+            let MutationStatus::Completed(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::Completed(id));
+            }
+            let state = record();
+            assert!(state[128..RECEIPT].iter().all(|byte| *byte == 0));
+            assert_eq!(state[RECEIPT + 168], 6, "Remove");
+            assert_eq!(state[RECEIPT + 169], 8, "Completed");
+            assert_eq!(state[RECEIPT + 172], 1, "Changed");
+            assert_eq!(state[RECEIPT + 173], 5, "runtime Removed");
+            assert_eq!(state[RECEIPT + 170], u8::from(live));
+            assert_eq!(state[RECEIPT + 174], 0, "a removal never resumes");
+            assert_eq!(managed_present(), [false; 4]);
+            assert_eq!(members_present(), [false; 3]);
+            assert!(!plan_present());
+            // Home itself and its user data stay.
+            assert!(Path::new(HOME).is_dir());
+            assert_workspace_kept();
+            let mut broker = assert_released(mutation);
+            if live {
+                // The quiesced scope stays closed: nothing is relaunched.
+                assert!(matches!(
+                    broker.group.poll()[3],
+                    Some(Status::Closed(Completion::Stopped))
+                ));
+                shutdown(broker);
+            }
         }
         _ => {
             // A change applies its once-chosen plan exactly and records the

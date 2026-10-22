@@ -216,6 +216,33 @@ pub(super) fn recover(directory: &Directory) -> Result<()> {
     Ok(())
 }
 
+/// Remove exactly the expected pair under the caller's exclusive lease. Each
+/// present document must still equal its expected bytes; absence is done and
+/// a pending journal is never adopted. Durable before return.
+pub(super) fn remove(directory: &Directory, expected: [Option<&[u8]>; 2]) -> Result<()> {
+    if pending(directory)?.is_some() {
+        return Err(AppError::Conflict(
+            "picoclaw pair requires stopped recovery".into(),
+        ));
+    }
+    let current = snapshot(directory)?;
+    for (index, name) in [CONFIG, SECURITY].into_iter().enumerate() {
+        match (current[index].as_deref(), expected[index]) {
+            (None, _) => {}
+            (Some(actual), Some(wanted)) if actual.as_slice() == wanted => {
+                unlinkat(&directory.file, name, AtFlags::empty()).map_err(std::io::Error::from)?;
+            }
+            _ => {
+                return Err(AppError::Conflict(
+                    "picoclaw pair changed before removal".into(),
+                ));
+            }
+        }
+    }
+    directory.file.sync_all()?;
+    Ok(())
+}
+
 pub(super) fn publish(directory: &Directory, config: &[u8], security: Option<&[u8]>) -> Result<()> {
     if config.len() > MAX_FILE_BYTES || security.is_some_and(|bytes| bytes.len() > MAX_FILE_BYTES) {
         return Err(invalid());

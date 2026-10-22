@@ -18,6 +18,11 @@ fn job_frames_round_trip_and_refuse_every_unfixed_field() {
             nonce: [9; 16],
             kind: JobKind::Startup,
         },
+        JobRequest::Submit {
+            cursor,
+            nonce: [9; 16],
+            kind: JobKind::Remove,
+        },
         JobRequest::Observe(id),
     ] {
         let bytes = encode_request(&request);
@@ -195,11 +200,12 @@ mod endpoint {
     }
 
     #[test]
-    fn startup_and_model_jobs_run_through_the_real_job_endpoint_and_return_the_broker() {
+    fn configuration_jobs_run_through_the_real_job_endpoint_and_return_the_broker() {
         for case in [
             "settle-noop-absent",
             "settle-change-absent",
             "settle-model-change-absent",
+            "settle-remove-absent",
         ] {
             let root = fixture::root();
             let output = command(root.path(), case).output().unwrap();
@@ -232,12 +238,15 @@ mod endpoint {
     fn client_checks(case: &str, pair: &fixture::SettlePair) {
         let kind = if case.starts_with("settle-model-") {
             fixture::model_kind()
+        } else if case.starts_with("settle-remove-") {
+            JobKind::Remove
         } else {
             JobKind::Startup
         };
         let change = case != "settle-noop-absent";
         let reply = match &kind {
             JobKind::Startup => run_startup_job(Duration::from_secs(30)).unwrap(),
+            JobKind::Remove => run_remove_job(Duration::from_secs(30)).unwrap(),
             JobKind::Model {
                 model,
                 api_base,
@@ -252,20 +261,26 @@ mod endpoint {
         };
         assert_eq!(reply.code, JobCode::Ok, "{reply:?}");
         assert_eq!(reply.sequence, 1);
-        assert_eq!(
-            reply.receipt,
-            [
-                kind.code(),
-                8,
-                if change { 1 } else { 2 },
-                if change { 2 } else { 1 }
-            ],
-            "Completed with Changed/NotRequested or Noop/Unchanged"
-        );
-        if change {
-            fixture::assert_pair_desired(pair, fixture::INTERNAL);
+        if kind == JobKind::Remove {
+            assert_eq!(reply.receipt, [6, 8, 1, 5], "Completed Changed/Removed");
+            assert_eq!(fixture::managed_present(), [false; 4]);
+            fixture::assert_workspace_kept();
         } else {
-            fixture::assert_pair_unchanged(pair);
+            assert_eq!(
+                reply.receipt,
+                [
+                    kind.code(),
+                    8,
+                    if change { 1 } else { 2 },
+                    if change { 2 } else { 1 }
+                ],
+                "Completed with Changed/NotRequested or Noop/Unchanged"
+            );
+            if change {
+                fixture::assert_pair_desired(pair, fixture::INTERNAL);
+            } else {
+                fixture::assert_pair_unchanged(pair);
+            }
         }
         assert_eq!(fixture::members_present(), [false; 3]);
         let wait = Duration::from_secs(5);

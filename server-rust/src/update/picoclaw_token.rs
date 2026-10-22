@@ -3,7 +3,9 @@ use super::{restore_fs, state_writers::ConfigPermit};
 use crate::{AppError, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::{OsRng, RngCore};
-use rustix::fs::{AtFlags, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags, fstatfs, linkat, openat2};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags, fstatfs, linkat, openat2, unlinkat,
+};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -96,6 +98,35 @@ pub(crate) fn read() -> Result<String> {
 /// Absence is explicit and an unsafe store refuses, as for `read`.
 pub(crate) fn observe() -> Result<Option<Zeroizing<String>>> {
     Ok(read_at(&fixed_parent()?, 0)?.map(|(token, _)| Zeroizing::new(token)))
+}
+
+/// The stored credential's identity for a removal plan, never its value.
+pub(crate) fn observe_identity() -> Result<Option<super::picoclaw_runtime::Asset>> {
+    read_at(&fixed_parent()?, 0)?
+        .map(|(_, file)| Ok(super::picoclaw_runtime::Asset::of(&file.metadata()?)))
+        .transpose()
+}
+
+/// Revoke exactly the planned credential, durably; a later Startup job
+/// provisions a new one. Absence is done; another value refuses and stays.
+pub(crate) fn remove(
+    _permit: &ConfigPermit,
+    planned: super::picoclaw_runtime::Asset,
+) -> Result<()> {
+    let parent = fixed_parent()?;
+    match read_at(&parent, 0)? {
+        None => {}
+        Some((_, file)) if super::picoclaw_runtime::Asset::of(&file.metadata()?) == planned => {
+            unlinkat(&parent, NAME, AtFlags::empty()).map_err(std::io::Error::from)?;
+        }
+        Some(_) => {
+            return Err(AppError::Conflict(
+                "picoclaw internal credential changed".into(),
+            ));
+        }
+    }
+    parent.sync_all()?;
+    Ok(())
 }
 
 /// One new internal credential value; nothing is stored by this call.

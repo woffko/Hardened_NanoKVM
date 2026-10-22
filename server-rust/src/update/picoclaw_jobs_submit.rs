@@ -129,6 +129,7 @@ struct Payload {
     facts: Facts,
     request: Option<Request>,
     plan: Option<accept::Plan>,
+    removal: Option<accept::Removal>,
     touched: bool,
 }
 
@@ -167,6 +168,8 @@ pub(crate) enum TransitionStatus {
     Refused,
     /// The planned change is installed; carries the installed generation.
     Committed(super::super::Generation),
+    /// The planned removal is durably done; there is nothing to resume.
+    Removed,
     /// Resume intent is durable; the owner may launch the runtime now.
     Activating,
     /// The accepted source changed before apply: terminal failure receipt,
@@ -242,6 +245,7 @@ impl Submission {
                 },
                 request: None,
                 plan: None,
+                removal: None,
                 touched: false,
             })),
         }
@@ -405,7 +409,11 @@ impl Submission {
             (Advance::Activate, Some(TransitionStatus::Committed(_))) => true,
             (
                 Advance::Finish(_),
-                Some(TransitionStatus::Committed(_) | TransitionStatus::Activating),
+                Some(
+                    TransitionStatus::Committed(_)
+                    | TransitionStatus::Activating
+                    | TransitionStatus::Removed,
+                ),
             ) => true,
             _ => false,
         };

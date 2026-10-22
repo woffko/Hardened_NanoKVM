@@ -362,6 +362,73 @@ pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
     })
 }
 
+const REMOVAL_MAGIC: &[u8; 8] = b"NKPRMV01";
+const REMOVAL_BYTES: usize = 224;
+
+/// The managed files a Remove job deletes besides the accepted pair, bound to
+/// their exact identities when the job was settled. Absent means nothing to do.
+pub(super) struct Removal {
+    pub(super) binary: Option<crate::update::picoclaw_runtime::Asset>,
+    pub(super) token: Option<crate::update::picoclaw_runtime::Asset>,
+}
+
+fn encode_removal(record: &Record, removal: &Removal) -> [u8; REMOVAL_BYTES] {
+    use crate::update::picoclaw_runtime::Asset;
+    let mut bytes = [0; REMOVAL_BYTES];
+    bytes[..8].copy_from_slice(REMOVAL_MAGIC);
+    bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[16..32].copy_from_slice(&record.nonce);
+    bytes[32..64].copy_from_slice(&record.source);
+    for (offset, asset) in [(64, removal.binary), (128, removal.token)] {
+        if let Some(asset) = asset {
+            bytes[offset] = 1;
+            bytes[offset + 8..offset + 8 + Asset::BYTES].copy_from_slice(&asset.encode());
+        }
+    }
+    let hash = private_digest(b"NanoKVM Pico removal plan v1\0", &bytes[..192]);
+    bytes[192..].copy_from_slice(&hash);
+    bytes
+}
+
+pub(super) fn decode_removal(record: &Record, bytes: &[u8]) -> Result<Removal> {
+    use crate::update::picoclaw_runtime::Asset;
+    if bytes.len() != REMOVAL_BYTES
+        || &bytes[..8] != REMOVAL_MAGIC
+        || private_digest(b"NanoKVM Pico removal plan v1\0", &bytes[..192]) != bytes[192..]
+        || bytes[8..16] != record.sequence.to_le_bytes()
+        || bytes[16..32] != record.nonce
+        || bytes[32..64] != record.source
+    {
+        return Err(invalid());
+    }
+    let asset = |offset: usize| -> Result<Option<Asset>> {
+        if bytes[offset + 1..offset + 8].iter().any(|byte| *byte != 0) {
+            return Err(invalid());
+        }
+        let identity: &[u8; Asset::BYTES] = bytes[offset + 8..offset + 8 + Asset::BYTES]
+            .try_into()
+            .map_err(|_| invalid())?;
+        match bytes[offset] {
+            0 if identity.iter().all(|byte| *byte == 0) => Ok(None),
+            1 => Ok(Some(Asset::decode(identity))),
+            _ => Err(invalid()),
+        }
+    };
+    Ok(Removal {
+        binary: asset(64)?,
+        token: asset(128)?,
+    })
+}
+
+// The plan member of a job, by the job's kind.
+fn check_plan(record: &Record, bytes: &[u8]) -> Result<()> {
+    if record.kind == Kind::Remove {
+        decode_removal(record, bytes).map(|_| ())
+    } else {
+        decode_plan(record, bytes).map(|_| ())
+    }
+}
+
 pub(super) struct Store {
     parent: File,
     directory: File,
@@ -673,12 +740,11 @@ impl Store {
     }
 
     /// Persist the once-chosen change before any stop or publication.
-    fn write_plan(&mut self, record: &Record, plan: &Plan, touched: &mut bool) -> Result<()> {
+    fn write_plan(&mut self, bytes: &[u8], touched: &mut bool) -> Result<()> {
         if self.members[3].is_some() {
             return Err(fenced());
         }
-        let bytes = encode_plan(record, plan)?;
-        self.members[3] = Some(self.write(Member::Plan, bytes.as_slice(), touched)?);
+        self.members[3] = Some(self.write(Member::Plan, bytes, touched)?);
         self.inventory_owned()?;
         self.check_members()
     }
@@ -889,6 +955,37 @@ fn refuse(store: &mut Store, mut record: Record, touched: &mut bool) -> Result<T
     Ok(TransitionStatus::Refused)
 }
 
+/// Remove: delete exactly the managed executable, NanoKVM's internal
+/// credential and the accepted pair; the workspace and the rest of Home stay.
+/// Nothing managed left is a no-op that never stops a live runtime.
+fn settle_removal(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let (Ok(binary), Ok(token)) = (
+        crate::update::picoclaw_runtime::observe(),
+        crate::update::picoclaw_token::observe_identity(),
+    ) else {
+        return refuse(store, record, &mut payload.touched);
+    };
+    if binary.is_none() && token.is_none() && view.config.is_none() && view.security.is_none() {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Noop;
+        record.runtime = if record.was_running && !record.resume_allowed {
+            Runtime::Suppressed
+        } else {
+            Runtime::Unchanged
+        };
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Completed);
+    }
+    let removal = Removal { binary, token };
+    store.write_plan(&encode_removal(&record, &removal), &mut payload.touched)?;
+    payload.removal = Some(removal);
+    Ok(TransitionStatus::Planned)
+}
+
 /// Ordinary Startup settlement, entered only from Accepted without an explicit
 /// Stop. A canonical no-op records its terminal receipt and retires the job
 /// without stopping a live runtime or touching the pair. A refusal does the
@@ -903,6 +1000,9 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.phase != Phase::Accepted
     {
         return Err(fenced());
+    }
+    if record.kind == Kind::Remove {
+        return settle_removal(payload, record);
     }
     if !matches!(record.kind, Kind::Startup | Kind::Model) {
         // The other fixed operations have no settlement executor yet.
@@ -951,7 +1051,10 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
             internal,
             internal_new,
         };
-        store.write_plan(&record, &plan, &mut payload.touched)?;
+        store.write_plan(
+            encode_plan(&record, &plan)?.as_slice(),
+            &mut payload.touched,
+        )?;
         payload.plan = Some(plan);
         return Ok(TransitionStatus::Planned);
     }
@@ -980,10 +1083,13 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
         || record.boot != payload.facts.boot
         || record.home != payload.facts.home_fingerprint
         || record.phase != Phase::Closed
-        || !matches!(record.kind, Kind::Startup | Kind::Model)
+        || !matches!(record.kind, Kind::Startup | Kind::Model | Kind::Remove)
         || store.members[3].is_none()
     {
         return Err(fenced());
+    }
+    if record.kind == Kind::Remove {
+        return apply_removal(payload, record);
     }
     let plan = payload.plan.as_ref().ok_or_else(invalid)?;
     let source = payload.source.as_ref().ok_or_else(invalid)?;
@@ -1030,6 +1136,56 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     ))
 }
 
+/// Delete exactly the planned files of a quiesced Remove job. Under the job's
+/// exclusive Home lease the pair, executable and credential are revalidated;
+/// any difference ends the job as a terminal failure with nothing deleted.
+/// Applying is durable before the first deletion; each is idempotent.
+fn apply_removal(payload: &mut Payload, mut record: Record) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    let removal = payload.removal.as_ref().ok_or_else(invalid)?;
+    let source = payload.source.as_ref().ok_or_else(invalid)?;
+    source.lock_exclusive()?;
+    let view = decode_source(source.bytes.as_slice())?;
+    // Without its Home the pair was absent; the lease is on an ancestor then.
+    let current = if view.home_present {
+        super::super::super::pair::read_source(&source.directory)?
+    } else {
+        [None, None]
+    };
+    let unchanged = current[0].as_deref().map(Vec::as_slice) == view.config
+        && current[1].as_deref().map(Vec::as_slice) == view.security
+        && crate::update::picoclaw_runtime::observe()? == removal.binary
+        && crate::update::picoclaw_token::observe_identity()? == removal.token;
+    if !unchanged {
+        record.phase = Phase::Completed;
+        record.outcome = Outcome::Failed;
+        record.runtime = Runtime::NotRequested;
+        store.publish_terminal(record, &mut payload.touched)?;
+        store.retire()?;
+        return Ok(TransitionStatus::Superseded);
+    }
+    record.phase = Phase::Applying;
+    store.publish(record, &mut payload.touched, Publication::Applying)?;
+    if view.home_present {
+        super::super::super::pair::remove(&source.directory, [view.config, view.security])?;
+    }
+    #[cfg(test)]
+    checkpoint("pair", "removed")?;
+    if let Some(token) = removal.token {
+        crate::update::picoclaw_token::remove(&payload._configuration, token)?;
+    }
+    #[cfg(test)]
+    checkpoint("internal", "removed")?;
+    if let Some(binary) = removal.binary {
+        crate::update::picoclaw_runtime::remove(binary)?;
+    }
+    #[cfg(test)]
+    checkpoint("binary", "removed")?;
+    record.phase = Phase::Committed;
+    store.publish(record, &mut payload.touched, Publication::Committed)?;
+    Ok(TransitionStatus::Removed)
+}
+
 /// Record the intent to resume before the native launch.
 pub(super) fn activate(payload: &mut Payload) -> Result<TransitionStatus> {
     let store = payload.store.as_mut().ok_or_else(invalid)?;
@@ -1055,11 +1211,15 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
     let mut record = store.snapshot.active.ok_or_else(invalid)?;
     if record.uncertain
         || record.boot != payload.facts.boot
-        || !matches!(record.kind, Kind::Startup | Kind::Model)
+        || !matches!(record.kind, Kind::Startup | Kind::Model | Kind::Remove)
     {
         return Err(fenced());
     }
     record.runtime = match (record.phase, resume) {
+        (Phase::Committed, RuntimeResult::NotRequested) if record.kind == Kind::Remove => {
+            Runtime::Removed
+        }
+        _ if record.kind == Kind::Remove => return Err(fenced()),
         (Phase::Activating, RuntimeResult::Resumed) => Runtime::Resumed,
         (Phase::Activating, RuntimeResult::ResumeFailed) => Runtime::ResumeFailed,
         (Phase::Committed | Phase::Activating, RuntimeResult::Suppressed) if record.was_running => {
@@ -1248,20 +1408,14 @@ fn check_binding(record: &Record, epoch: [u8; 16], contents: &Contents) -> Resul
         return Err(invalid());
     }
     if let Some(plan) = &contents[3] {
-        decode_plan(record, plan)?;
+        check_plan(record, plan)?;
     }
     Ok(())
 }
 
-// Finish the SAME durable plan of an interrupted Applying job under the job's
-// own Home identity: the pair is still the accepted source or already the plan
-// (an interrupted pair journal is completed first), the credential the planned
-// value or absent for a new one. Anything else keeps the fence.
-fn complete_startup_apply(
-    configuration: &ConfigPermit,
-    plan: &Plan,
-    bytes: Zeroizing<Vec<u8>>,
-) -> Result<bool> {
+// The job's own Home again, by the source's path and only with its exact
+// recorded identity (device, inode, owner and mode); `None` otherwise.
+fn reopen_source(bytes: Zeroizing<Vec<u8>>) -> Result<Option<Source>> {
     use std::os::unix::ffi::OsStrExt as _;
     let directory = Directory::open(
         Path::new(std::ffi::OsStr::from_bytes(decode_source(&bytes)?.home)),
@@ -1273,9 +1427,48 @@ fn complete_startup_apply(
         || bytes[32..36] != m.uid().to_le_bytes()
         || bytes[36..40] != m.mode().to_le_bytes()
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let source = Source { directory, bytes };
+    Ok(Some(Source { directory, bytes }))
+}
+
+// Finish the SAME planned removal of an interrupted Applying job: each file
+// is gone already or still exactly its planned or accepted self. A changed
+// file refuses and keeps the fence.
+fn complete_removal(
+    configuration: &ConfigPermit,
+    removal: &Removal,
+    bytes: Zeroizing<Vec<u8>>,
+) -> Result<bool> {
+    if decode_source(&bytes)?.home_present {
+        let Some(source) = reopen_source(bytes)? else {
+            return Ok(false);
+        };
+        source.lock_exclusive()?;
+        let view = decode_source(source.bytes.as_slice())?;
+        super::super::super::pair::remove(&source.directory, [view.config, view.security])?;
+    }
+    if let Some(token) = removal.token {
+        crate::update::picoclaw_token::remove(configuration, token)?;
+    }
+    if let Some(binary) = removal.binary {
+        crate::update::picoclaw_runtime::remove(binary)?;
+    }
+    Ok(true)
+}
+
+// Finish the SAME durable plan of an interrupted Applying job under the job's
+// own Home identity: the pair is still the accepted source or already the plan
+// (an interrupted pair journal is completed first), the credential the planned
+// value or absent for a new one. Anything else keeps the fence.
+fn complete_startup_apply(
+    configuration: &ConfigPermit,
+    plan: &Plan,
+    bytes: Zeroizing<Vec<u8>>,
+) -> Result<bool> {
+    let Some(source) = reopen_source(bytes)? else {
+        return Ok(false);
+    };
     source.lock_exclusive()?;
     super::super::super::pair::recover(&source.directory)?;
     let view = decode_source(source.bytes.as_slice())?;
@@ -1377,6 +1570,22 @@ pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
             }
             record.outcome = Outcome::Changed;
             startup_runtime(&mut record);
+        }
+        (Phase::Applying, Kind::Remove) => {
+            let source = contents[2].take();
+            let (Some(plan), Some(source)) = (&contents[3], source) else {
+                return Ok(false);
+            };
+            let removal = decode_removal(&record, plan)?;
+            if !complete_removal(configuration, &removal, source)? {
+                return Ok(false);
+            }
+            record.outcome = Outcome::Changed;
+            record.runtime = Runtime::Removed;
+        }
+        (Phase::Committed, Kind::Remove) => {
+            record.outcome = Outcome::Changed;
+            record.runtime = Runtime::Removed;
         }
         (Phase::Committed, Kind::Startup | Kind::Model) => {
             record.outcome = Outcome::Changed;

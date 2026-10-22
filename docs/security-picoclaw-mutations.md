@@ -286,6 +286,43 @@ Applying, after the pair and after Committed, each settled at a later boot.
 
 The backend's model update runs this job over the job transport (below).
 
+## Current Remove settlement
+
+The Remove job deletes exactly the managed runtime assets:
+
+- the accepted configuration pair (`config.json` and `.security.yml`), only
+  while each still equals its accepted bytes;
+- NanoKVM's internal credential, so a removed runtime's token is revoked; a
+  later Startup job provisions a new one;
+- the fixed runtime executable `/usr/bin/picoclaw`.
+
+The workspace and every other file in Home stay, as the uninstall dialog
+promises ("the executable and all configuration files"). The installer's
+download cache is scratch of the installer and is not part of a removal.
+
+Settlement records the executable's and the credential's exact identities
+(device, inode, size, modification and change times) in a protected removal
+plan, bound to the job and its accepted source, before anything is stopped. A
+link, directory or foreign file in place of either refuses. With nothing
+managed left the job is a no-op that never stops a live runtime.
+
+A live runtime is quiesced first; Remove never keeps resume permission, so
+nothing is relaunched. Under the job's exclusive Home lease the pair,
+executable and credential are revalidated; any difference ends the job as a
+terminal failure with nothing deleted. Applying is durable before the first
+deletion. Pair, credential and executable are then removed in that order,
+each re-checked just before its unlink and synced. The receipt is Changed with
+runtime Removed.
+
+An interrupted removal settles at a later boot with the SAME plan: each file is
+already gone, or still exactly its planned or accepted self and is removed;
+anything else keeps the fence.
+
+Chroot fixtures cover the no-op, absent and live removals, a link in place of
+the executable, and failures after the plan, Closed, Applying and each
+deletion, as well as Committed, each settled at a later boot with the
+workspace kept.
+
 ## Current prior-boot settlement
 
 A job that a previous kernel boot left behind would otherwise keep the fence
@@ -327,6 +364,8 @@ Settlement by durable phase:
   NotRequested. Recovery never starts a runtime.
 - **Activating (Startup or Model).** The relaunched scope cannot have survived the
   boot: Changed with ResumeFailed.
+- **Applying or Committed (Remove).** The SAME removal plan completes, as
+  described in Current Remove settlement: Changed with Removed.
 - **Any other phase or kind.** No executor exists; the fence remains.
 
 Each settled job then retires payload, source and plan, syncs, and retires the
@@ -364,9 +403,9 @@ with matching peer credentials. Each datagram is one request with a fixed
 64-byte header:
 
 - Cursor: the next submission cursor of an idle store.
-- Submit(cursor, nonce, kind): Startup, or Model with its three bounded
-  fields after the header. Their lengths must account for the datagram
-  exactly, and the fields must pass the model request check.
+- Submit(cursor, nonce, kind): Startup, Remove, or Model with its three
+  bounded fields after the header. Their lengths must account for the
+  datagram exactly, and the fields must pass the model request check.
 - Observe(job id).
 
 Each reply is one fixed 64-byte frame: a result code, the cursor or job
@@ -406,7 +445,9 @@ client nonce, so it is known before acceptance.
 **Backend callers.** `ensure_startup_defaults` (gateway session start and
 runtime start) runs a Startup job through `run_startup_job`, and the model
 update runs a Model job through `run_model_job`, after the same field check.
-Neither handler writes the pair. A lost reply re-observes the same job; only
+The uninstall runs a Remove job through `run_remove_job` and reports any
+failure instead of ignoring it. No handler writes or deletes the pair, the
+credential or the executable. A lost reply re-observes the same job; only
 an explicit non-acceptance leads to a fresh submission. A Changed or Noop
 receipt of the job's own kind is success, and a superseded change is retried
 once. Refusal, Busy and RecoveryRequired are errors with fixed text.
@@ -414,16 +455,16 @@ once. Refusal, Busy and RecoveryRequired are errors with fixed text.
 The legacy in-handler writers are removed. The direct pair writer and the
 token provisioning helper remain only as test fixtures.
 
-A chroot fixture runs the real daemon loop over its real endpoint for Startup
-and Model jobs. It covers no-op and change jobs with their exact receipts, the
+A chroot fixture runs the real daemon loop over its real endpoint for Startup,
+Model and Remove jobs. It covers no-op and change jobs with their exact receipts, the
 broker's return, identical resubmission, a different request with the same
 identity, a stale cursor, an unknown id, a malformed datagram, and free
 admissions afterwards.
 
 Still open:
 
-- the profile, onboarding, install and remove executors, and their API and
-  S96 callers;
+- the profile, onboarding and install executors, and their API and S96
+  callers;
 - a pending pair journal still refuses acceptance, as it refused the legacy
   writer. Stopped recovery of that journal inside the job is not implemented.
 
