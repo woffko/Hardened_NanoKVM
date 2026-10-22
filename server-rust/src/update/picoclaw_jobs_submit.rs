@@ -15,6 +15,11 @@ use std::{
 #[path = "picoclaw_jobs_accept.rs"]
 mod accept;
 
+/// Early-boot settlement of a job a previous kernel boot left behind.
+pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
+    accept::recover_prior_boot(configuration)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub epoch: [u8; 16],

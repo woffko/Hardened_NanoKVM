@@ -1,8 +1,12 @@
 //! Admission reader/fence and explicit image-factory empty-store bootstrap.
 //! No query initializes/repairs state or supplies native closure authority.
-//! Production acceptance, payload publication and typed recovery are not wired.
+//! The only recovery is the typed early-boot settlement of a job a previous
+//! kernel boot left behind; same-boot jobs stay with their native owner.
 use super::{Directory, Revision};
-use crate::{AppError, Result, update::restore_fs};
+use crate::{
+    AppError, Result,
+    update::{operation_lock::ProcessLock, restore_fs, state_writers::ConfigPermit},
+};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, os::unix::fs::MetadataExt, path::Path};
@@ -10,7 +14,6 @@ use zeroize::Zeroizing;
 
 #[path = "picoclaw_jobs_bootstrap.rs"]
 mod bootstrap;
-pub(crate) use bootstrap::prepare;
 #[cfg(test)]
 pub(crate) use bootstrap::prepare_fixture;
 
@@ -34,6 +37,30 @@ const BYTES: usize = PREFIX + 32;
 
 fn invalid() -> AppError {
     AppError::Config("invalid or unsafe Pico mutation journal".into())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Stands in for a later kernel boot in recovery tests.
+    pub(crate) static TEST_BOOT: std::cell::Cell<Option<[u8; 16]>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The current kernel boot's job tag, as the native broker computes it.
+fn current_boot() -> Result<[u8; 16]> {
+    #[cfg(test)]
+    if let Some(boot) = TEST_BOOT.with(std::cell::Cell::get) {
+        return Ok(boot);
+    }
+    crate::native_owner::broker::current_pico_boot_tag()
+        .map_err(|_| AppError::Internal("kernel boot identity unavailable".into()))
+}
+
+/// Early-boot entry under Update and Config: settle a job that a previous
+/// kernel boot left behind, then factory enrollment and the normal fence.
+pub(crate) fn prepare(configuration: &ConfigPermit, update: &ProcessLock) -> Result<()> {
+    submit::recover_prior_boot(configuration)?;
+    bootstrap::prepare(configuration, update)
 }
 
 fn fenced() -> AppError {

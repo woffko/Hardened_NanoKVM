@@ -221,6 +221,7 @@ impl Source {
 /// Typed view of the private source captured at acceptance. It borrows the
 /// credential-bearing bytes; never Debug/log it.
 pub(super) struct SourceView<'a> {
+    pub(super) home: &'a [u8],
     pub(super) home_present: bool,
     pub(super) config: Option<&'a [u8]>,
     pub(super) security: Option<&'a [u8]>,
@@ -265,6 +266,7 @@ pub(super) fn decode_source(bytes: &[u8]) -> Result<SourceView<'_>> {
     let config_start = 128 + home;
     let security_start = config_start + config;
     Ok(SourceView {
+        home: &bytes[128..128 + home],
         home_present: present,
         config: config_present.then(|| &bytes[config_start..security_start]),
         security: security_present.then(|| &bytes[security_start..]),
@@ -315,7 +317,6 @@ pub(super) fn encode_plan(record: &Record, plan: &Plan) -> Result<Zeroizing<Vec<
     Ok(bytes)
 }
 
-#[cfg(test)]
 pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
     if bytes.len() < PLAN_HEADER + 32 || &bytes[..8] != PLAN_MAGIC {
         return Err(invalid());
@@ -636,7 +637,15 @@ impl Store {
         }
         self.check_bound()?;
         self.inventory_owned()?;
-        self.check_members()?;
+        for (owned, name) in self
+            .members
+            .iter_mut()
+            .zip(["active", "payload", "source", "plan"])
+        {
+            if let Some(owned) = owned {
+                owned.check(&self.directory, name)?;
+            }
+        }
         for (slot, member) in [
             (1, Member::Payload),
             (2, Member::Source),
@@ -1019,8 +1028,326 @@ pub(super) fn finish(payload: &mut Payload, resume: RuntimeResult) -> Result<Tra
     Ok(TransitionStatus::Completed)
 }
 
+// ---- Prior-boot recovery ------------------------------------------------
+
+const PAYLOAD_LIMIT: usize = super::super::super::MAX_FILE_BYTES;
+const SOURCE_LIMIT: usize = 128 + 4095 + 2 * super::super::super::MAX_FILE_BYTES;
+const PLAN_LIMIT: usize = PLAN_HEADER + 2 * super::super::super::MAX_FILE_BYTES + 256 + 32;
+
+type Contents = [Option<Zeroizing<Vec<u8>>>; 4];
+
+// One existing private member read exactly once, kept as the owned identity
+// that retirement re-checks immediately before its unlink.
+fn adopt_member(
+    directory: &File,
+    name: &str,
+    limit: usize,
+    device: u64,
+) -> Result<Option<(OwnedMember, Zeroizing<Vec<u8>>)>> {
+    let pinned = match restore_fs::open_beneath(directory, name, OFlags::PATH) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let m = pinned.metadata()?;
+    if !m.is_file()
+        || m.uid() != 0
+        || m.dev() != device
+        || m.nlink() != 1
+        || m.mode() & 0o7777 != 0o600
+        || m.len() > limit as u64
+    {
+        return Err(invalid());
+    }
+    let revision = Revision::from(&m);
+    let mut file = restore_fs::open_beneath(directory, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
+    if Revision::from(&file.metadata()?) != revision {
+        return Err(invalid());
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(m.len() as usize));
+    (&mut file).take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != m.len() || Revision::from(&file.metadata()?) != revision {
+        return Err(invalid());
+    }
+    let hash = Sha256::digest(bytes.as_slice()).into();
+    Ok(Some((
+        OwnedMember {
+            file,
+            revision,
+            hash,
+        },
+        bytes,
+    )))
+}
+
+impl Store {
+    /// Recovery-only opener: unlike `open`, an active record and its private
+    /// members are expected. Only the fixed names are accepted.
+    fn open_for_recovery() -> Result<Option<(Self, Contents)>> {
+        let parent = Directory::open(Path::new("/etc/kvm"), false)?.file;
+        bootstrap::check_next_absent(&parent)?;
+        let Some(anchor) = bootstrap::read_anchor(&parent, 0)? else {
+            return Ok(None);
+        };
+        let bootstrap::Anchor::Ready(epoch) = anchor.0 else {
+            return Ok(None);
+        };
+        let directory =
+            restore_fs::open_beneath(&parent, DIRECTORY, OFlags::RDONLY | OFlags::DIRECTORY)?;
+        let m = directory.metadata()?;
+        if m.uid() != 0 || m.dev() != parent.metadata()?.dev() || m.mode() & 0o7777 != 0o700 {
+            return Err(invalid());
+        }
+        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK {
+                fenced()
+            } else {
+                std::io::Error::from(error).into()
+            }
+        })?;
+        let (bytes, revision) =
+            bootstrap::read_member::<BYTES>(&directory, STATE, 0)?.ok_or_else(invalid)?;
+        let snapshot = Snapshot::decode(bytes.as_slice())?;
+        if snapshot.epoch != epoch {
+            return Err(invalid());
+        }
+        let mut members = [None, None, None, None];
+        let mut contents: Contents = [None, None, None, None];
+        for (slot, (name, limit)) in [
+            ("active", 352),
+            ("payload", PAYLOAD_LIMIT),
+            ("source", SOURCE_LIMIT),
+            ("plan", PLAN_LIMIT),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some((owned, bytes)) = adopt_member(&directory, name, limit, m.dev())? {
+                members[slot] = Some(owned);
+                contents[slot] = Some(bytes);
+            }
+        }
+        let store = Self {
+            parent,
+            directory,
+            identity: (m.dev(), m.ino()),
+            anchor,
+            revision,
+            snapshot,
+            members,
+        };
+        store.inventory_owned()?;
+        store.check_bound()?;
+        Ok(Some((store, contents)))
+    }
+}
+
+// Every present member must belong to exactly this job: the active intent
+// embeds its accepted record, payload and source match the bound digests and
+// the plan its own binding. Foreign or damaged data is never adopted.
+fn check_binding(record: &Record, epoch: [u8; 16], contents: &Contents) -> Result<()> {
+    if let Some(active) = &contents[0] {
+        if active.len() != 352
+            || &active[..8] != b"NKPINT01"
+            || active[8..24] != epoch
+            || active[24..32] != record.sequence.wrapping_sub(1).to_le_bytes()
+            || active[32..64].iter().any(|byte| *byte != 0)
+            || private_digest(b"NanoKVM Pico active intent v1\0", &active[..320]) != active[320..]
+        {
+            return Err(invalid());
+        }
+        let accepted = Record::decode(&active[64..320])?;
+        if accepted.phase != Phase::Accepted
+            || (
+                accepted.sequence,
+                accepted.nonce,
+                accepted.boot,
+                accepted.home,
+                accepted.support,
+                accepted.request,
+                accepted.source,
+                accepted.was_running,
+            ) != (
+                record.sequence,
+                record.nonce,
+                record.boot,
+                record.home,
+                record.support,
+                record.request,
+                record.source,
+                record.was_running,
+            )
+            || accepted.kind != record.kind
+            // Resume permission only ever falls after acceptance.
+            || (record.resume_allowed && !accepted.resume_allowed)
+        {
+            return Err(invalid());
+        }
+    }
+    if let Some(payload) = &contents[1]
+        && private_digest(b"NanoKVM Pico request v1\0", payload) != record.request
+    {
+        return Err(invalid());
+    }
+    if let Some(source) = &contents[2]
+        && private_digest(b"NanoKVM Pico source v2\0", source) != record.source
+    {
+        return Err(invalid());
+    }
+    if let Some(plan) = &contents[3] {
+        decode_plan(record, plan)?;
+    }
+    Ok(())
+}
+
+// Finish the SAME durable plan of an interrupted Applying job under the job's
+// own Home identity: the pair is still the accepted source or already the plan
+// (an interrupted pair journal is completed first), the credential the planned
+// value or absent for a new one. Anything else keeps the fence.
+fn complete_startup_apply(
+    configuration: &ConfigPermit,
+    plan: &Plan,
+    bytes: Zeroizing<Vec<u8>>,
+) -> Result<bool> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let directory = Directory::open(
+        Path::new(std::ffi::OsStr::from_bytes(decode_source(&bytes)?.home)),
+        false,
+    )?;
+    let m = directory.file.metadata()?;
+    if bytes[16..24] != m.dev().to_le_bytes()
+        || bytes[24..32] != m.ino().to_le_bytes()
+        || bytes[32..36] != m.uid().to_le_bytes()
+        || bytes[36..40] != m.mode().to_le_bytes()
+    {
+        return Ok(false);
+    }
+    let source = Source { directory, bytes };
+    source.lock_exclusive()?;
+    super::super::super::pair::recover(&source.directory)?;
+    let view = decode_source(source.bytes.as_slice())?;
+    let current = super::super::super::pair::read_source(&source.directory)?;
+    let equals = |config: Option<&[u8]>, security: Option<&[u8]>| {
+        current[0].as_deref().map(Vec::as_slice) == config
+            && current[1].as_deref().map(Vec::as_slice) == security
+    };
+    let applied = equals(Some(&plan.config), Some(&plan.security));
+    if !applied && !equals(view.config, view.security) {
+        return Ok(false);
+    }
+    if plan.internal_new {
+        crate::update::picoclaw_token::install(configuration, plan.internal.as_str())?;
+    } else if crate::update::picoclaw_token::observe()?
+        .as_deref()
+        .map(String::as_str)
+        != Some(plan.internal.as_str())
+    {
+        return Ok(false);
+    }
+    if !applied {
+        super::super::super::pair::publish(&source.directory, &plan.config, Some(&plan.security))?;
+    }
+    let installed = super::super::super::pair::read_installed(&source.directory)?;
+    if installed.config.as_slice() != plan.config.as_slice()
+        || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice())
+    {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
+/// Settle a job left by a PREVIOUS kernel boot, at early boot under Update
+/// and Config: its native scope cannot have survived. Only fixed steps run;
+/// never new entropy, a fresh classification or adoption of foreign data.
+/// `false` means nothing was settled and the normal fence decides.
+pub(super) fn recover_prior_boot(configuration: &ConfigPermit) -> Result<bool> {
+    let Some((mut store, mut contents)) = Store::open_for_recovery()? else {
+        return Ok(false);
+    };
+    let epoch = store.snapshot.epoch;
+    let mut touched = false;
+    let Some(mut record) = store.snapshot.active else {
+        // Completion pending: members left behind a durable terminal receipt.
+        // Members of an unpublished acceptance belong to no receipt and keep
+        // the fence, as does anything else that does not bind to the head.
+        let sequence = store.snapshot.sequence;
+        let Some(receipt) = sequence
+            .checked_sub(1)
+            .and_then(|index| store.snapshot.receipts[(index % RETAINED as u64) as usize])
+            .filter(|receipt| receipt.sequence == sequence)
+        else {
+            return Ok(false);
+        };
+        if store.members.iter().all(Option::is_none)
+            || contents[0]
+                .as_ref()
+                .is_some_and(|active| active.get(64..72) != Some(&sequence.to_le_bytes()[..]))
+        {
+            return Ok(false);
+        }
+        check_binding(&receipt, epoch, &contents)?;
+        store.retire()?;
+        return Ok(true);
+    };
+    // Same boot: the owned native scope may still exist, so only its broker
+    // may settle the job. Uncertain or incomplete jobs are never adopted.
+    if record.uncertain
+        || contents[..3].iter().any(Option::is_none)
+        || record.boot == super::super::current_boot()?
+    {
+        return Ok(false);
+    }
+    check_binding(&record, epoch, &contents)?;
+    let startup_runtime = |record: &mut Record| {
+        record.runtime = if record.was_running {
+            record.resume_allowed = false;
+            Runtime::Suppressed
+        } else {
+            Runtime::NotRequested
+        };
+    };
+    match (record.phase, record.kind) {
+        // No target change began: the job is cancelled.
+        (Phase::Accepted | Phase::Stopping | Phase::Closed, _) => {
+            record.outcome = Outcome::Cancelled;
+            record.runtime = Runtime::NotRequested;
+            record.resume_allowed = false;
+        }
+        (Phase::Applying, Kind::Startup) => {
+            let source = contents[2].take();
+            let (Some(plan), Some(source)) = (&contents[3], source) else {
+                return Ok(false);
+            };
+            let plan = decode_plan(&record, plan)?;
+            if !complete_startup_apply(configuration, &plan, source)? {
+                return Ok(false);
+            }
+            record.outcome = Outcome::Changed;
+            startup_runtime(&mut record);
+        }
+        (Phase::Committed, Kind::Startup) => {
+            record.outcome = Outcome::Changed;
+            startup_runtime(&mut record);
+        }
+        // The relaunched scope did not survive this boot.
+        (Phase::Activating, Kind::Startup) => {
+            record.outcome = Outcome::Changed;
+            record.runtime = Runtime::ResumeFailed;
+        }
+        _ => return Ok(false),
+    }
+    record.phase = Phase::Completed;
+    store.publish_terminal(record, &mut touched)?;
+    store.retire()?;
+    Ok(true)
+}
+
 #[cfg(test)]
 fn checkpoint(member: &str, phase: &str) -> Result<()> {
+    // An emulated later boot does not inherit this process's fault injection.
+    if super::super::TEST_BOOT.with(std::cell::Cell::get).is_some() {
+        return Ok(());
+    }
     let point = format!("{member}-{phase}");
     if std::env::var("NANOKVM_PICO_ACCEPT_FAIL").as_deref() == Ok(point.as_str()) {
         return Err(invalid());

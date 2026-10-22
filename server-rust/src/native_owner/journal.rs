@@ -65,6 +65,22 @@ impl From<io::Error> for Error {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Epoch([u8; 36]);
+
+fn pico_boot_tag(epoch: &Epoch) -> [u8; 16] {
+    let mut hash = Sha256::new();
+    hash.update(b"NanoKVM Pico job kernel epoch v1\0");
+    hash.update(epoch.0);
+    let full = hash.finalize();
+    let mut boot = [0; 16];
+    boot.copy_from_slice(&full[..16]);
+    boot
+}
+
+/// The current kernel boot's Pico job tag, without a broker lease. Equality
+/// with a job's tag means its native scope may still exist in this boot.
+pub(super) fn current_pico_boot_tag() -> Result<[u8; 16], Error> {
+    Ok(pico_boot_tag(&Epoch::current()?))
+}
 impl Epoch {
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let text = std::str::from_utf8(bytes).map_err(|_| Error::Invalid)?;
@@ -260,13 +276,7 @@ impl Store {
     }
 
     pub(super) fn pico_boot_tag(&self) -> [u8; 16] {
-        let mut hash = Sha256::new();
-        hash.update(b"NanoKVM Pico job kernel epoch v1\0");
-        hash.update(self.epoch.0);
-        let full = hash.finalize();
-        let mut boot = [0; 16];
-        boot.copy_from_slice(&full[..16]);
-        boot
+        pico_boot_tag(&self.epoch)
     }
 
     #[cfg(test)]

@@ -52,11 +52,23 @@ fn command(root: &Path, case: &str) -> Command {
     }
     if let Some(point) = case
         .strip_prefix("settle-fail:")
-        .or_else(|| case.strip_prefix("settle-change-fail:"))
+        .or_else(|| change_failure(case))
     {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
     command
+}
+
+// A Startup change interrupted at one fixed point: absent runtime, absent
+// internal credential, or a live runtime quiesced for the change.
+fn change_failure(case: &str) -> Option<&str> {
+    [
+        "settle-change-fail:",
+        "settle-internal-fail:",
+        "settle-change-live-fail:",
+    ]
+    .into_iter()
+    .find_map(|prefix| case.strip_prefix(prefix))
 }
 
 fn root() -> tempfile::TempDir {
@@ -220,7 +232,7 @@ fn startup_settlement_refuses_or_supersedes_without_changing_the_pair() {
 }
 
 #[test]
-fn startup_settlement_publication_and_retirement_errors_keep_the_fence() {
+fn startup_settlement_errors_stay_fenced_in_their_boot_and_settle_exactly_later() {
     for point in [
         "completed-begin",
         "completed-renamed",
@@ -232,14 +244,22 @@ fn startup_settlement_publication_and_retirement_errors_keep_the_fence() {
 }
 
 #[test]
-fn startup_apply_errors_keep_the_fence_with_an_exact_partial_state() {
+fn startup_change_errors_keep_an_exact_fenced_state_until_a_later_boot_settles_it() {
     for point in [
+        "plan-durable",
+        "closed-renamed",
         "applying-renamed",
         "internal-installed",
         "pair-published",
         "committed-renamed",
     ] {
         run(&format!("settle-change-fail:{point}"));
+    }
+    for point in ["applying-renamed", "internal-installed"] {
+        run(&format!("settle-internal-fail:{point}"));
+    }
+    for point in ["committed-renamed", "activating-renamed"] {
+        run(&format!("settle-change-live-fail:{point}"));
     }
 }
 
@@ -405,8 +425,38 @@ impl Drop for Paused {
     }
 }
 
+const RECEIPT: usize = 128 + 256;
+
 fn record() -> Vec<u8> {
     fs::read("/etc/kvm/picoclaw-operations/state").unwrap()
+}
+
+// Early S02 of the SAME kernel boot: an active job stays with its native
+// owner, so nothing is settled and the fence remains.
+fn activate_same_boot_fenced(state: &[u8]) {
+    assert!(matches!(
+        crate::native_owner::broker::boot::activate_early(),
+        Err(crate::native_owner::broker::JournalError::Busy)
+    ));
+    assert!(
+        record() == state,
+        "the same boot never settles an active job"
+    );
+}
+
+// Early S02 of an emulated later kernel boot: the job settles exactly once
+// and every private member is retired.
+fn activate_later_boot() -> Vec<u8> {
+    jobs::TEST_BOOT.with(|boot| boot.set(Some([0x5a; 16])));
+    crate::native_owner::broker::boot::activate_early().unwrap();
+    let settled = record();
+    assert_eq!(members_present(), [false; 3]);
+    assert!(!plan_present());
+    crate::native_owner::broker::boot::activate_early().unwrap();
+    assert!(record() == settled, "a repeated early boot changes nothing");
+    drop(StateWriters::default().configuration().unwrap());
+    jobs::TEST_BOOT.with(|boot| boot.set(None));
+    settled
 }
 
 fn closed(mutation: &mut Mutation) -> bool {
@@ -424,7 +474,8 @@ fn mutation_child() {
     let live = case != "absent"
         && !case.ends_with("-absent")
         && !case.starts_with("settle-fail:")
-        && !case.starts_with("settle-change-fail:");
+        && !case.starts_with("settle-change-fail:")
+        && !case.starts_with("settle-internal-fail:");
     // Fixture binaries/real descendant tree start before chroot so the host
     // interpreter is available. This tests closure, not production launch order.
     if live {
@@ -756,6 +807,19 @@ fn mutation_child() {
     drop(ProcessLock::acquire().unwrap());
     assert!(StateWriters::default().configuration().is_err());
     settle_fixture([pico_leaf, backend_leaf], [pico_owner, backend_owner]);
+    if case.starts_with("fail:") {
+        // Its processes gone as after a power cut, the same boot still keeps
+        // the job fenced; a later boot cancels it with nothing applied.
+        let state = record();
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 170], 1, "was running");
+        assert_eq!(settled[RECEIPT + 172], 4, "Cancelled");
+        assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+        assert_eq!(settled[RECEIPT + 174], 0, "no resume");
+    }
     println!("pico-mutation-checked");
 }
 
@@ -810,7 +874,7 @@ fn private_write(path: &Path, bytes: &[u8]) {
 fn settle_home(case: &str) -> SettlePair {
     use crate::update::picoclaw_startup as startup;
     use std::os::unix::fs::MetadataExt;
-    if case != "settle-internal-absent" {
+    if case != "settle-internal-absent" && !case.starts_with("settle-internal-fail:") {
         private_write(
             Path::new("/etc/kvm/.picoclaw_internal_token"),
             format!("{INTERNAL}\n").as_bytes(),
@@ -943,7 +1007,6 @@ fn settle_case(
     accepted: &[u8],
     fixture: Option<&std::path::PathBuf>,
 ) {
-    const RECEIPT: usize = 128 + 256;
     if let Some(program) = fixture {
         mutation.launch_fixture = Some((
             program.clone(),
@@ -1009,25 +1072,56 @@ fn settle_case(
         if point != "active-retired" {
             assert!(StateWriters::default().configuration().is_err());
         }
+        let settled = if point == "completed-begin" {
+            activate_same_boot_fenced(&state);
+            let settled = activate_later_boot();
+            assert_eq!(settled[RECEIPT + 172], 4, "Cancelled");
+            assert_eq!(settled[RECEIPT + 173], 2, "runtime NotRequested");
+            settled
+        } else {
+            // A durable terminal receipt only needs its exact retirement
+            // finished, already in this boot; the receipt is never rewritten.
+            crate::native_owner::broker::boot::activate_early().unwrap();
+            assert!(record() == state);
+            assert_eq!(members_present(), [false; 3]);
+            state
+        };
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_pair_unchanged(pair);
+        drop(StateWriters::default().configuration().unwrap());
         return;
     }
-    if let Some(point) = case.strip_prefix("settle-change-fail:") {
+    if let Some(point) = change_failure(case) {
+        let new_internal = case.starts_with("settle-internal-fail:");
         assert_eq!(status, MutationStatus::RecoveryRequired);
         for _ in 0..3 {
             assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
         }
         let state = record();
-        assert_eq!(
-            state[128 + 169],
-            if point == "committed-renamed" { 5 } else { 4 }
-        );
+        let phase = match point {
+            "plan-durable" => 1,
+            "closed-renamed" => 3,
+            "committed-renamed" => 5,
+            "activating-renamed" => 7,
+            _ => 4,
+        };
+        assert_eq!(state[128 + 169], phase);
+        assert_eq!(state[128 + 174], u8::from(live), "quiescence keeps resume");
         assert_eq!(members_present(), [true; 3]);
         assert!(plan_present(), "the change stays bound to its plan");
-        assert_eq!(internal_on_disk().as_deref(), Some(INTERNAL));
-        if matches!(point, "applying-renamed" | "internal-installed") {
-            assert_pair_unchanged(pair);
+        let planned = internal_on_disk();
+        match (new_internal, point) {
+            (false, _) => assert_eq!(planned.as_deref(), Some(INTERNAL)),
+            (true, "applying-renamed") => assert_eq!(planned, None),
+            (true, _) => assert!(planned.as_deref().is_some_and(|value| {
+                crate::update::picoclaw_token::valid_token(value) && value != INTERNAL
+            })),
+        }
+        if phase >= 5 || point == "pair-published" {
+            assert_pair_desired(pair, planned.as_deref().unwrap());
         } else {
-            assert_pair_desired(pair, INTERNAL);
+            assert_pair_unchanged(pair);
         }
         let mutation = match mutation.into_broker() {
             Ok(_) => panic!("uncertain apply returned its broker"),
@@ -1036,6 +1130,39 @@ fn settle_case(
         drop(mutation);
         drop(ProcessLock::acquire().unwrap());
         assert!(StateWriters::default().configuration().is_err());
+        activate_same_boot_fenced(&state);
+        let settled = activate_later_boot();
+        assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
+        assert_eq!(settled[RECEIPT + 169], 8, "Completed");
+        assert_eq!(settled[RECEIPT + 170], u8::from(live));
+        let (outcome, runtime, resume) = match phase {
+            // No target change began: cancelled, pair and credential kept.
+            1 | 3 => (4, 2, 0),
+            // The relaunched scope cannot have survived the boot.
+            7 => (1, 4, 1),
+            // The SAME plan completed; recovery never resumes a runtime.
+            _ if live => (1, 6, 0),
+            _ => (1, 2, 0),
+        };
+        assert_eq!(settled[RECEIPT + 172], outcome, "outcome");
+        assert_eq!(settled[RECEIPT + 173], runtime, "runtime result");
+        assert_eq!(settled[RECEIPT + 174], resume, "resume permission");
+        if outcome == 4 {
+            assert_pair_unchanged(pair);
+            assert_eq!(internal_on_disk(), planned);
+            return;
+        }
+        let internal = internal_on_disk().unwrap();
+        if new_internal {
+            assert!(crate::update::picoclaw_token::valid_token(&internal));
+            assert_ne!(internal, INTERNAL);
+        } else {
+            assert_eq!(internal, INTERNAL);
+        }
+        if let Some(planned) = &planned {
+            assert_eq!(&internal, planned, "never a second new credential");
+        }
+        assert_pair_desired(pair, &internal);
         return;
     }
     match case {

@@ -70,6 +70,11 @@ pub(crate) fn check_update_admission() -> Result<(), JournalError> {
     journal::Store::check_update_admission()
 }
 
+/// Current kernel boot tag for prior-boot Pico job recovery at early boot.
+pub(crate) fn current_pico_boot_tag() -> Result<[u8; 16], JournalError> {
+    journal::current_pico_boot_tag()
+}
+
 impl Broker {
     /// Moves this same native owner into the job. Refusal returns it intact;
     /// neither acceptance nor a public status is a native closure capability.

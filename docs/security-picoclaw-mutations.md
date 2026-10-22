@@ -1,10 +1,10 @@
 # PicoClaw mutation jobs: protocol decision, implementation in progress
 
 This is the protocol selected for the stopped-mutation handoff. It is not an
-activation or acceptance report. Broker-library acceptance and explicit Stop/Closed
-publication now exist,
-but ordinary model/profile/install/uninstall writers, new transport, execution
-and recovery paths are not yet migrated.
+activation or acceptance report. Broker-library acceptance, explicit Stop/Closed
+publication, the Startup executor and its prior-boot settlement now exist, but
+ordinary model/profile/install/uninstall writers, new transport, the other
+executors and same-boot recovery are not yet migrated.
 The legacy onboarding completion boolean is not a durable job receipt.
 
 ## Current connected reader, fence and factory bootstrap
@@ -174,13 +174,14 @@ internal credential and classifies the accepted pair.
   the same broker. Dropping the submission first joins its workers and releases
   the store, source, Config and Update leases.
 - **Missing token or value change.** A missing gateway or internal token, or a
-  changed value, reports ChangeRequired. A missing Home or config, unparsable
-  documents, malformed local-tool policy or a different job kind reports
-  SettlementRefused. In both cases nothing is published or changed, and the job
-  stays accepted and fenced for a later change path or explicit Stop.
+  changed value, continues as the change settlement below.
+- **Refused.** A missing Home or config, unparsable documents, malformed
+  local-tool policy or a different job kind reports SettlementRefused. Nothing
+  is published or changed, and the job stays accepted and fenced for an
+  explicit Stop.
 - **Publication or retirement errors.** These latch RecoveryRequired. A durable
-  terminal receipt with remaining members stays fenced until checked recovery
-  retires the remainder; observation never re-runs the job.
+  terminal receipt with remaining members stays fenced until early boot retires
+  the remainder exactly; observation never re-runs the job.
 
 Disposable chroot fixtures cover:
 
@@ -246,8 +247,78 @@ Chroot fixtures cover:
 - injected failures after Applying, after the credential, after the pair and
   after Committed. Each keeps the fence with its exact partial state.
 
-Crash recovery of Applying, Committed and Activating jobs, the other five
-executors, and the transport/API/S96 wiring are not implemented yet.
+Settlement after a reboot is described next. Same-boot recovery, the other
+five executors and the transport/API/S96 wiring are not implemented yet.
+
+## Current prior-boot settlement
+
+A job that a previous kernel boot left behind would otherwise keep the fence
+closed for every later boot: early S02 activation and backend boot support
+both take Config through the bootstrap path, and that path refuses an active
+job. Early boot therefore settles such a job first, under the Update and
+Config it already holds and before enrollment and the normal fence run.
+
+**Authority.** The job's boot tag is compared with the current kernel boot's
+tag, computed exactly as the native broker computes it from the kernel boot
+identity. A different tag proves that the job's native scope cannot have
+survived. A job of the SAME boot is left for its native owner: the scope may
+still exist, so nothing is settled and the fence remains. An uncertain record
+is never adopted.
+
+**Exact binding.** The recovery opener takes the store's exclusive lease,
+requires a Ready anchor with the matching epoch, and reads each fixed member
+once with root/0600/single-link/size checks. Its inventory must equal the
+members found. Every present member must belong to the job: the active intent
+embeds the accepted record (sequence, nonce, boot, Home, support, request,
+source, kind, initial runtime facts; resume permission may only have fallen),
+payload and source match the record's digests, and the plan its own binding.
+Foreign or damaged data refuses; nothing is cleaned or rewritten by
+observation.
+
+Settlement by durable phase:
+
+- **Accepted, Stopping or Closed.** No target change began. The job records a
+  terminal Cancelled receipt (runtime NotRequested, resume lowered).
+- **Applying (Startup).** The SAME durable plan completes under the job's own
+  Home identity (device, inode, owner and mode must match the source). An
+  interrupted pair journal is completed first. The pair must then be either
+  the accepted source or already the plan, and the credential either the
+  planned value or, for a new one, absent; the plan's value is installed and
+  the plan's pair published only where missing. Any other state keeps the
+  fence. No entropy is drawn and no classification is repeated.
+- **Committed (Startup).** The change is complete. The receipt records Changed
+  with Suppressed (resume lowered) for a previously running runtime, otherwise
+  NotRequested. Recovery never starts a runtime.
+- **Activating (Startup).** The relaunched scope cannot have survived the
+  boot: Changed with ResumeFailed.
+- **Any other phase or kind.** No executor exists; the fence remains.
+
+Each settled job then retires payload, source and plan, syncs, and retires the
+active fence last, re-checking every member just before its unlink.
+
+**Completion pending.** A durable terminal receipt whose members were not all
+retired needs only that exact retirement. It is finished in any boot, because
+the outcome is already recorded and no native work remains; the receipt itself
+is never rewritten. Members that do not belong to the head receipt, such as an
+unpublished acceptance, keep the fence.
+
+**Still fenced.** A staged `.state.next` from an interrupted publication, a
+partial or damaged member, an interrupted acceptance and a same-boot owner
+loss are preserved and refused, not cleaned. Explicit recovery of those
+states remains to be implemented.
+
+Chroot fixtures run the real early S02 entry after each injected failure:
+first in the same boot, which must stay fenced with the state unchanged, then
+in an emulated later boot, which must settle once and change nothing when
+repeated. They cover:
+
+- each Startup failure point from the durable plan through Activating, with
+  existing and new internal credentials and with a live quiesced runtime;
+- terminal publication and each retirement step;
+- the explicit Stop and Closed publication failures, after their fixture
+  processes are gone.
+
+They are host checks, not physical power cuts or device acceptance.
 
 ## Authority and scope
 
@@ -307,8 +378,8 @@ Unknown state-publication sync cannot remove the fence. If final fence-unlink
 sync is unknown, either the fence remains and recovery is conservative, or it
 is absent beside an already durable completed state. Recovery may retire the
 exact remaining fence; it must never repeat the mutation from observation.
-The acceptance producer implements initial intent publication only; finalization
-and exact retirement remain required and unimplemented.
+Terminal publication and exact retirement are implemented for the Startup job,
+including early-boot completion of an interrupted retirement.
 
 Credential-bearing payload and source snapshots stay in protected 0600 files
 and bounded zeroizing buffers. They are not argv, environment, log, Debug or
@@ -344,15 +415,18 @@ or `Resumed`. This flag is not permission to restart: current runtime admission
 and all settlement checks are still required. The reader checks these record
 shapes and the acceptance producer writes the initial permission. The retained
 library owner implements monotonic explicit-Stop suppression and
-Accepted/Stopping-to-Closed publication. Ordinary automatic-quiesce transitions, session
-revocation integration and durable HTTP acknowledgements remain unimplemented.
+Accepted/Stopping-to-Closed publication. Automatic quiescence of a planned
+change keeps the permission. Session revocation integration and durable HTTP
+acknowledgements remain unimplemented.
 
 Failure before any mutation can become a terminal failed/cancelled receipt only
 after native closure and exact scratch/payload retirement. Once mutation may
 have begun, an error, worker panic, process death or unknown sync result remains
 nonterminal and fenced until operation-specific checked settlement. A returned
 Err, worker join, reconnect, timeout or new boot cannot clear that fence.
-Observation never performs mutation/recovery or retries a worker.
+Observation never performs mutation/recovery or retries a worker. For the
+Startup job, early boot of a later kernel performs that checked settlement
+(see Current prior-boot settlement).
 
 ## Onboarding settlement
 

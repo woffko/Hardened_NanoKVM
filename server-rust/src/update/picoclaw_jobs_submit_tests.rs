@@ -294,6 +294,41 @@ pub(crate) fn setup() {
     crate::native_owner::broker::boot::activate_early().unwrap();
 }
 
+// Early S02 of the same boot keeps an accepted job fenced. A later boot
+// cancels a durably accepted job exactly; an unpublished acceptance or a
+// staged state is preserved and stays fenced.
+fn prior_boot_settlement(case: &str) {
+    let store = Path::new("/etc/kvm").join(DIRECTORY);
+    let before = fs::read(store.join(STATE)).unwrap();
+    let busy = || {
+        matches!(
+            crate::native_owner::broker::boot::activate_early(),
+            Err(crate::native_owner::broker::JournalError::Busy)
+        )
+    };
+    assert!(busy());
+    assert!(fs::read(store.join(STATE)).unwrap() == before);
+    super::super::TEST_BOOT.with(|boot| boot.set(Some([0x5a; 16])));
+    if case.starts_with("accept:") || case.starts_with("fail:state-") {
+        crate::native_owner::broker::boot::activate_early().unwrap();
+        let settled = state();
+        assert!(settled.active.is_none());
+        assert_eq!(settled.sequence, 1);
+        let receipt = settled.receipts[0].unwrap();
+        assert!(receipt.phase == Phase::Completed && receipt.outcome == Outcome::Cancelled);
+        assert!(receipt.runtime == Runtime::NotRequested && !receipt.resume_allowed);
+        for member in ["active", "payload", "source", "plan"] {
+            assert!(!store.join(member).exists());
+        }
+        drop(StateWriters::default().configuration().unwrap());
+    } else {
+        assert!(busy());
+        assert!(fs::read(store.join(STATE)).unwrap() == before);
+        assert!(store.join("active").exists());
+    }
+    super::super::TEST_BOOT.with(|boot| boot.set(None));
+}
+
 fn state() -> Snapshot {
     Snapshot::decode(&fs::read(Path::new("/etc/kvm").join(DIRECTORY).join(STATE)).unwrap()).unwrap()
 }
@@ -644,6 +679,8 @@ fn private_submit_child() {
                 .join("active")
                 .exists()
         );
+        drop(broker);
+        prior_boot_settlement(&case);
     } else {
         let fenced_store = case.starts_with("reject:store-") || case.starts_with("reject:anchor-");
         if fenced_store {
