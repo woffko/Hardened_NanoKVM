@@ -205,6 +205,55 @@ fn fixed_record_roundtrip_and_every_corrupted_byte_is_rejected() {
 }
 
 #[test]
+fn a_record_republished_during_a_status_read_is_read_again_not_refused() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let fixture = Fixture::new(Phase::Prepared, Position::Prepared);
+    let bytes = fixture.record.encode().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    };
+    write(STATE);
+    let directory = File::open(dir.path()).unwrap();
+    let device = directory.metadata().unwrap().dev();
+    let uid = nix::unistd::geteuid().as_raw();
+    let done = Arc::new(AtomicBool::new(false));
+    // A publisher renames 100 fresh records over `state`, as `publish` does,
+    // 5 ms apart: far more often than an install ever publishes.
+    let publisher = std::thread::spawn({
+        let done = Arc::clone(&done);
+        let next = write(".state-next");
+        let state = dir.path().join(STATE);
+        let bytes = bytes.to_vec();
+        move || {
+            for _ in 0..100 {
+                fs::write(&next, &bytes).unwrap();
+                fs::set_permissions(&next, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::rename(&next, &state).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            done.store(true, Ordering::Relaxed);
+        }
+    });
+    let mut reads = 0_usize;
+    while !done.load(Ordering::Relaxed) {
+        match read_live_record_at(&directory, device, uid) {
+            Ok(record) => assert!(record == fixture.record),
+            Err(error) => panic!("a republished record was refused: {error:?}"),
+        }
+        reads += 1;
+    }
+    publisher.join().unwrap();
+    assert!(reads > 100, "{reads} reads");
+}
+
+#[test]
 fn checksum_cannot_make_invalid_context_or_reserved_fields_valid() {
     let fixture = Fixture::new(Phase::Prepared, Position::Prepared);
     let original = fixture.record.encode().unwrap();

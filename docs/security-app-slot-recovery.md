@@ -379,8 +379,12 @@ store flock, so another process can read a canonical snapshot while the installe
 owns EX. It checks exact directory ownership/modes and the same single-link,
 mode0600, 512-byte regular record. A history/current/history lookup closes the
 single archival-rename observation gap without scanning or selecting orphan
-directories. Unknown IDs return no result; unsafe/corrupt entries return an
-error without repair. Archived records are historical context, not assertions
+directories. The installer may publish a new current record during the read:
+its rename unlinks the pinned inode, or makes the name refer to another one.
+The read then starts again, up to 8 times, instead of reporting the normal
+publish as unsafe. Unknown IDs return no result; unsafe/corrupt entries return an
+error without repair. Locked readers (installer, recovery) still refuse a
+record replaced under them. Archived records are historical context, not assertions
 about today's live slot or rootfs device identity.
 
 `Committed` still means durable publication, not accepted runtime health.

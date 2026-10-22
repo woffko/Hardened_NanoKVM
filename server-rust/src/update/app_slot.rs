@@ -1145,10 +1145,37 @@ fn fixed_store_root() -> Result<Option<(File, File)>> {
 }
 
 fn read_record_at(directory: &File, device: u64, uid: u32) -> Result<Record> {
+    // Writers and recovery hold the store lock: a replaced inode here is not a
+    // normal publish, so it stays Unsafe.
+    read_record_once(directory, device, uid)?.ok_or(SlotError::Unsafe)
+}
+
+/// Reads of a record that a live install may republish, without the store
+/// lock. A publish renames a new immutable record over `state`; a reader that
+/// pinned the old inode then reopens a different one. That is a newer record,
+/// not an unsafe object: read again, a bounded number of times.
+fn read_live_record_at(directory: &File, device: u64, uid: u32) -> Result<Record> {
+    for _ in 0..LIVE_RECORD_READS {
+        if let Some(record) = read_record_once(directory, device, uid)? {
+            return Ok(record);
+        }
+    }
+    Err(SlotError::Unsafe)
+}
+
+const LIVE_RECORD_READS: usize = 8;
+
+/// `None` when `state` was replaced during the read: the pinned or reopened
+/// inode was unlinked, or the name now refers to another inode.
+fn read_record_once(directory: &File, device: u64, uid: u32) -> Result<Option<Record>> {
     // Reject special files before opening them for I/O, then require the same
     // exact inode after reopening. A journal path is never a device selector.
     let pinned = restore_fs::open_beneath(directory, STATE, OFlags::PATH)?;
     let metadata = pinned.metadata()?;
+    // A rename over `state` after the pin unlinks the pinned inode.
+    if metadata.nlink() == 0 {
+        return Ok(None);
+    }
     if !metadata.is_file()
         || metadata.uid() != uid
         || metadata.dev() != device
@@ -1160,16 +1187,16 @@ fn read_record_at(directory: &File, device: u64, uid: u32) -> Result<Record> {
     }
     let mut file = restore_fs::open_beneath(directory, STATE, OFlags::RDONLY | OFlags::NONBLOCK)?;
     let reopened = file.metadata()?;
+    if (reopened.dev(), reopened.ino()) != (metadata.dev(), metadata.ino()) || reopened.nlink() == 0
+    {
+        return Ok(None);
+    }
     if (
-        reopened.dev(),
-        reopened.ino(),
         reopened.uid(),
         reopened.mode(),
         reopened.nlink(),
         reopened.len(),
     ) != (
-        metadata.dev(),
-        metadata.ino(),
         metadata.uid(),
         metadata.mode(),
         metadata.nlink(),
@@ -1182,7 +1209,7 @@ fn read_record_at(directory: &File, device: u64, uid: u32) -> Result<Record> {
     if file.read(&mut [0])? != 0 {
         return Err(SlotError::Invalid);
     }
-    Record::decode(&bytes)
+    Record::decode(&bytes).map(Some)
 }
 
 struct Layout {

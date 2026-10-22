@@ -222,7 +222,8 @@ fn job_at(
     }
     if let Some(current) = open_optional(directory, CURRENT)? {
         protected_directory(&current, device, uid, true)?;
-        let record = read_record_at(&current, device, uid)?;
+        // A live install may republish the current record during this read.
+        let record = read_live_record_at(&current, device, uid)?;
         if record.transaction == transaction {
             return Ok(Some(summary(record, false)));
         }
