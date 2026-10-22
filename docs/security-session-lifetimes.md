@@ -43,7 +43,8 @@ authorization remain separate boundaries.
 | Direct H.264 | Revocation interrupts frame receive and socket-send waiting; transport close is bounded to 250 ms and its client guard is released. | An already admitted/in-flight send can have effects before closure. This is not physical stream or slow-network acceptance. |
 | HID WebSocket | Socket/event/queue waits observe the lifetime; pending reports are discarded; the current blocking I/O is joined before owner-specific cleanup. | An already-started device operation is not preempted. Failed compensation remains uncertain, not a verified key release. |
 | WebRTC | Live signaling/RTCP/media authority, bounded admission, retained peer/producer tasks and joined normal cleanup. | Connected RTP/backpressure, physical video and complete backend shutdown remain unaccepted; see [WebRTC ownership](security-webrtc-lifetimes.md). |
-| Terminal unlock ticket | Consuming a ticket also requires its captured session to remain live. | The terminal connection itself is not yet integrated with the live lifetime. |
+| Terminal unlock ticket | Consuming a ticket also requires its captured session to remain live. | A ticket admits one terminal connection or one script upload/run. |
+| Terminal PTY | The connection waits on the session's lifetime, so logout, a password change or expiry close it with 1008, and a renewal keeps it. Cleanup then signals every live process in the shell's PTY session, by pidfd, before the shell is reaped. | A process that called `setsid()` itself leaves the session and is not reached; there are no cgroups. |
 
 HID retains separate bounded keyboard and mouse queues and the existing packet
 formats. The shared report worker checks authority again after acquiring the
@@ -64,8 +65,8 @@ preemption or complete device-reset reconciliation is claimed.
 
 ## Remaining integration and acceptance
 
-Terminal/PTY, Pico gateway and delegated task authority, pending privileged
-operations and complete app/runtime shutdown still need integration. WebRTC now
+Pico gateway and delegated task authority, pending privileged operations and
+complete app/runtime shutdown still need integration. WebRTC now
 has component ownership/lifetime integration, but its remaining connected-peer,
 backpressure, process-signal and device gates are not closed.
 Durable installation jobs must follow their retained transaction stop/drain
