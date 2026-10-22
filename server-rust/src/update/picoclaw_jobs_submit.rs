@@ -124,12 +124,13 @@ struct Payload {
     _update: ProcessLock,
     facts: Facts,
     request: Option<Request>,
+    plan: Option<accept::Plan>,
     touched: bool,
 }
 
 enum Advance {
-    Stop(JobId),
-    Closed(ClosedPico),
+    Stop { id: JobId, explicit: bool },
+    Closed { proof: ClosedPico, explicit: bool },
     Settle,
 }
 
@@ -142,8 +143,9 @@ pub(crate) enum TransitionStatus {
     /// Ordinary settlement published the terminal receipt and retired the
     /// job's private members. Only this proves the job is finished.
     Completed,
-    /// Settlement found work to do; nothing was published or changed.
-    ChangeRequired,
+    /// Settlement found work to do and made its once-chosen plan durable;
+    /// no runtime was stopped and no target was changed.
+    Planned,
     /// Settlement cannot run for this accepted job; nothing was changed.
     Refused,
     Failed,
@@ -215,6 +217,7 @@ impl Submission {
                     running_generation,
                 },
                 request: None,
+                plan: None,
                 touched: false,
             })),
         }
@@ -294,12 +297,47 @@ impl Submission {
         }
     }
 
+    /// Explicit administrative Stop: durably lowers resume permission.
     pub(crate) fn persist_stop(&mut self, id: JobId) -> Result<()> {
-        self.begin_transition(Advance::Stop(id))
+        self.begin_transition(Advance::Stop { id, explicit: true })
     }
 
     pub(crate) fn persist_closed(&mut self, proof: ClosedPico) -> Result<()> {
-        self.begin_transition(Advance::Closed(proof))
+        self.begin_transition(Advance::Closed {
+            proof,
+            explicit: true,
+        })
+    }
+
+    /// Automatic quiescence of a planned change: resume permission is kept.
+    pub(crate) fn persist_quiesce(&mut self, id: JobId) -> Result<()> {
+        self.begin_transition(Advance::Stop {
+            id,
+            explicit: false,
+        })
+    }
+
+    pub(crate) fn persist_quiesced(&mut self, proof: ClosedPico) -> Result<()> {
+        self.begin_transition(Advance::Closed {
+            proof,
+            explicit: false,
+        })
+    }
+
+    /// The accepted job's current resume permission, read only while no
+    /// worker owns the payload. `None` means it cannot be observed now.
+    pub(crate) fn resume_allowed(&self) -> Option<bool> {
+        if matches!(self.transition, TransitionWorker::Running(_))
+            || matches!(self.worker, Worker::Running(_))
+        {
+            return None;
+        }
+        let payload = self.payload.try_lock().ok()?;
+        payload
+            .store
+            .as_ref()?
+            .active_record()
+            .map(|record| record.resume_allowed)
     }
 
     /// One fixed ordinary-settlement worker; never an explicit Stop.
@@ -311,10 +349,12 @@ impl Submission {
         let settle = matches!(advance, Advance::Settle);
         let ready = match &self.transition {
             TransitionWorker::Idle => true,
-            // Explicit Stop may follow a settlement that changed nothing.
+            // Stop/close may follow settlement, and an explicit Stop may
+            // lower a quiesced job's resume permission in place.
             TransitionWorker::Settled(
                 TransitionStatus::Stopping
-                | TransitionStatus::ChangeRequired
+                | TransitionStatus::Closed
+                | TransitionStatus::Planned
                 | TransitionStatus::Refused,
             ) => !settle,
             _ => false,

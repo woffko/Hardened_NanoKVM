@@ -98,6 +98,15 @@ pub(crate) fn observe() -> Result<Option<Zeroizing<String>>> {
     Ok(read_at(&fixed_parent()?, 0)?.map(|(token, _)| Zeroizing::new(token)))
 }
 
+/// One new internal credential value; nothing is stored by this call.
+pub(crate) fn new_value() -> Result<Zeroizing<String>> {
+    let mut entropy = Zeroizing::new([0_u8; 32]);
+    OsRng
+        .try_fill_bytes(entropy.as_mut())
+        .map_err(|_| AppError::Internal("internal credential entropy unavailable".into()))?;
+    Ok(Zeroizing::new(URL_SAFE_NO_PAD.encode(entropy.as_ref())))
+}
+
 fn ensure_at(parent: &File, uid: u32) -> Result<String> {
     let device = parent.metadata()?.dev();
     parent_at(parent, uid, device)?;
@@ -106,11 +115,7 @@ fn ensure_at(parent: &File, uid: u32) -> Result<String> {
         parent.sync_all()?;
         return Ok(token);
     }
-    let mut entropy = Zeroizing::new([0_u8; 32]);
-    OsRng
-        .try_fill_bytes(entropy.as_mut())
-        .map_err(|_| AppError::Internal("internal credential entropy unavailable".into()))?;
-    let token = Zeroizing::new(URL_SAFE_NO_PAD.encode(entropy.as_ref()));
+    let token = new_value()?;
     let mut file: File = openat2(
         parent,
         ".",

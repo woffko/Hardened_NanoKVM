@@ -17,8 +17,9 @@ pub enum MutationStatus {
     Closed(PicoJobId),
     /// Ordinary settlement is running in its fixed joined worker.
     Settling(PicoJobId),
-    /// Settlement found work to do; nothing was published or changed yet.
-    ChangeRequired(PicoJobId),
+    /// The change's plan is durable and the SAME owned scope is proven
+    /// closed with resume permission kept; the change is not applied yet.
+    Quiesced(PicoJobId),
     /// Settlement cannot run for this job; it stays accepted and fenced.
     SettlementRefused(PicoJobId),
     /// Terminal receipt published and private members retired.
@@ -153,70 +154,113 @@ impl Mutation {
                 return self.status;
             }
         };
-        if !self.stop_requested {
-            if !self.settle_requested {
-                self.status = MutationStatus::Accepted(id);
-                return self.status;
-            }
-            self.status = match self.submission.poll_transition() {
-                TransitionStatus::Idle => match self.submission.begin_settlement() {
-                    Ok(()) => MutationStatus::Settling(id),
-                    Err(_) => MutationStatus::RecoveryRequired,
-                },
-                TransitionStatus::Pending => MutationStatus::Settling(id),
-                TransitionStatus::Completed => MutationStatus::Completed(id),
-                TransitionStatus::ChangeRequired => MutationStatus::ChangeRequired(id),
-                TransitionStatus::Refused => MutationStatus::SettlementRefused(id),
-                TransitionStatus::Stopping
-                | TransitionStatus::Closed
-                | TransitionStatus::Failed => MutationStatus::RecoveryRequired,
-            };
-            return self.status;
-        }
-        let phase = match self.submission.poll_transition() {
-            // A settlement that changed nothing leaves the job as accepted.
-            TransitionStatus::ChangeRequired | TransitionStatus::Refused => TransitionStatus::Idle,
-            other => other,
-        };
         // Every valid completion, including failed/runtime-error work, is sent
         // only after the subreaper proves ECHILD. Closure is not task success.
         let closed = matches!(native, None | Some(Status::Closed(_)));
-        self.status = match phase {
-            TransitionStatus::Idle | TransitionStatus::Stopping if closed => {
-                let proof = ClosedPico {
-                    id,
-                    boot: self.broker.journal.pico_boot_tag(),
-                    home: self.broker.group.home.fingerprint(),
-                };
-                if self.submission.persist_closed(proof).is_ok() {
-                    MutationStatus::StopPending(id)
-                } else {
-                    MutationStatus::RecoveryRequired
-                }
+        let phase = self.submission.poll_transition();
+        self.status = if self.stop_requested {
+            self.explicit_stop(id, phase, native, closed)
+        } else if self.settle_requested {
+            self.settle(id, phase, native, closed)
+        } else {
+            MutationStatus::Accepted(id)
+        };
+        self.status
+    }
+
+    fn proof(&self, id: PicoJobId) -> ClosedPico {
+        ClosedPico {
+            id,
+            boot: self.broker.journal.pico_boot_tag(),
+            home: self.broker.group.home.fingerprint(),
+        }
+    }
+
+    // Ordinary settlement: no-op preflight first, then a durable plan, then
+    // automatic quiescence of the SAME scope that keeps resume permission.
+    fn settle(
+        &mut self,
+        id: PicoJobId,
+        phase: TransitionStatus,
+        native: Option<Status>,
+        closed: bool,
+    ) -> MutationStatus {
+        let started = match phase {
+            TransitionStatus::Idle => self.submission.begin_settlement(),
+            TransitionStatus::Pending => return MutationStatus::Settling(id),
+            TransitionStatus::Completed => return MutationStatus::Completed(id),
+            TransitionStatus::Refused => return MutationStatus::SettlementRefused(id),
+            TransitionStatus::Closed => return MutationStatus::Quiesced(id),
+            TransitionStatus::Planned | TransitionStatus::Stopping if closed => {
+                let proof = self.proof(id);
+                self.submission.persist_quiesced(proof)
             }
-            TransitionStatus::Idle => {
-                if native != Some(Status::Running) {
-                    MutationStatus::RecoveryRequired
-                } else if self.submission.persist_stop(id).is_ok() {
-                    MutationStatus::StopPending(id)
-                } else {
-                    MutationStatus::RecoveryRequired
-                }
+            TransitionStatus::Planned if native == Some(Status::Running) => {
+                self.submission.persist_quiesce(id)
             }
-            TransitionStatus::Pending => MutationStatus::StopPending(id),
             TransitionStatus::Stopping => {
+                // Durable Stopping precedes the native Stop, as for Stop.
+                self.broker.group.stop_picoclaw();
+                return MutationStatus::Settling(id);
+            }
+            TransitionStatus::Planned | TransitionStatus::Failed => {
+                return MutationStatus::RecoveryRequired;
+            }
+        };
+        match started {
+            Ok(()) => MutationStatus::Settling(id),
+            Err(_) => MutationStatus::RecoveryRequired,
+        }
+    }
+
+    // Explicit administrative Stop: resume permission is lowered durably
+    // before any native Stop, also in place for an already quiesced job, and
+    // a settled state is never re-published.
+    fn explicit_stop(
+        &mut self,
+        id: PicoJobId,
+        phase: TransitionStatus,
+        native: Option<Status>,
+        closed: bool,
+    ) -> MutationStatus {
+        let resume = self.submission.resume_allowed();
+        let started = match phase {
+            TransitionStatus::Pending => return MutationStatus::StopPending(id),
+            TransitionStatus::Completed => return MutationStatus::Completed(id),
+            TransitionStatus::Closed if resume == Some(false) => {
+                return MutationStatus::Closed(id);
+            }
+            TransitionStatus::Closed if resume == Some(true) => {
+                let proof = self.proof(id);
+                self.submission.persist_closed(proof)
+            }
+            TransitionStatus::Idle
+            | TransitionStatus::Planned
+            | TransitionStatus::Refused
+            | TransitionStatus::Stopping
+                if closed =>
+            {
+                let proof = self.proof(id);
+                self.submission.persist_closed(proof)
+            }
+            TransitionStatus::Stopping if resume == Some(true) => self.submission.persist_stop(id),
+            TransitionStatus::Stopping if resume == Some(false) => {
                 // This worker result is after checked state+directory sync.
                 // request_stop itself and a disconnected caller grant no ack.
                 self.broker.group.stop_picoclaw();
-                MutationStatus::Stopping(id)
+                return MutationStatus::Stopping(id);
             }
-            TransitionStatus::Closed => MutationStatus::Closed(id),
-            TransitionStatus::Completed => MutationStatus::Completed(id),
-            TransitionStatus::ChangeRequired
-            | TransitionStatus::Refused
-            | TransitionStatus::Failed => MutationStatus::RecoveryRequired,
+            TransitionStatus::Idle | TransitionStatus::Planned | TransitionStatus::Refused
+                if native == Some(Status::Running) =>
+            {
+                self.submission.persist_stop(id)
+            }
+            _ => return MutationStatus::RecoveryRequired,
         };
-        self.status
+        match started {
+            Ok(()) => MutationStatus::StopPending(id),
+            Err(_) => MutationStatus::RecoveryRequired,
+        }
     }
 }
 

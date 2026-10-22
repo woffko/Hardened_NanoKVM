@@ -198,7 +198,7 @@ fn startup_noop_settlement_publishes_a_terminal_receipt_and_returns_the_same_bro
 }
 
 #[test]
-fn startup_settlement_that_needs_work_or_cannot_run_changes_nothing() {
+fn startup_change_settlement_plans_once_and_quiesces_without_applying() {
     for case in [
         "settle-change-absent",
         "settle-internal-absent",
@@ -834,7 +834,8 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
     mutation.request_settlement();
     let status = settle_until(&mut mutation);
     assert_pair_unchanged(pair);
-    if live {
+    // Only a planned change quiesces the runtime; every other result keeps it.
+    if live && !case.starts_with("settle-change-") {
         assert_eq!(mutation.broker.group.poll()[3], Some(Status::Running));
     }
     if let Some(point) = case.strip_prefix("settle-fail:") {
@@ -920,20 +921,13 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
                 });
             }
         }
-        _ => {
-            let expected = if case == "settle-refused-absent" {
-                MutationStatus::SettlementRefused
-            } else {
-                MutationStatus::ChangeRequired
-            };
-            let (MutationStatus::ChangeRequired(id) | MutationStatus::SettlementRefused(id)) =
-                status
-            else {
+        "settle-refused-absent" => {
+            let MutationStatus::SettlementRefused(_) = status else {
                 panic!("{case}: {status:?}");
             };
-            assert_eq!(status, expected(id));
             assert!(record() == accepted, "nothing was published");
             assert_eq!(members_present(), [true; 3]);
+            assert!(!Path::new("/etc/kvm/picoclaw-operations/plan").exists());
             let mut mutation = match mutation.into_broker() {
                 Ok(_) => panic!("unfinished job returned its broker"),
                 Err(mutation) => *mutation,
@@ -948,5 +942,86 @@ fn settle_case(case: &str, mut mutation: Mutation, live: bool, pair: &SettlePair
             drop(ProcessLock::acquire().unwrap());
             assert!(StateWriters::default().configuration().is_err());
         }
+        _ => {
+            // A change makes its once-chosen plan durable, then quiesces the
+            // SAME scope without lowering resume permission. Nothing is applied.
+            let MutationStatus::Quiesced(id) = status else {
+                panic!("{case}: {status:?}");
+            };
+            for _ in 0..3 {
+                assert_eq!(mutation.poll(), MutationStatus::Quiesced(id));
+            }
+            let quiesced = record();
+            assert_eq!(quiesced[128 + 169], 3, "Closed");
+            assert_eq!(quiesced[128 + 170], u8::from(live), "was_running");
+            assert_eq!(quiesced[128 + 174], u8::from(live), "resume kept");
+            assert_eq!(members_present(), [true; 3]);
+            assert_plan(case, id);
+            if live {
+                assert_eq!(
+                    mutation.broker.group.poll()[3],
+                    Some(Status::Closed(Completion::Stopped))
+                );
+            }
+            let mut mutation = match mutation.into_broker() {
+                Ok(_) => panic!("unapplied change returned its broker"),
+                Err(mutation) => *mutation,
+            };
+            assert!(StateWriters::default().configuration().is_err());
+            // An explicit Stop now lowers resume in place exactly once; with
+            // nothing to lower it is observed without re-publication.
+            mutation.request_stop();
+            until(|| closed(&mut mutation));
+            let stopped = record();
+            assert_eq!(stopped[128 + 169], 3);
+            assert_eq!(stopped[128 + 174], 0);
+            if !live {
+                assert!(stopped == quiesced);
+            }
+            mutation.request_stop();
+            assert!(closed(&mut mutation));
+            assert!(record() == stopped);
+            assert_pair_unchanged(pair);
+            drop(mutation);
+            drop(ProcessLock::acquire().unwrap());
+            assert!(StateWriters::default().configuration().is_err());
+        }
     }
+}
+
+fn assert_plan(case: &str, id: PicoJobId) {
+    use crate::update::picoclaw_startup as startup;
+    use std::os::unix::fs::MetadataExt;
+    let path = Path::new("/etc/kvm/picoclaw-operations/plan");
+    let metadata = fs::metadata(path).unwrap();
+    assert_eq!(metadata.mode() & 0o7777, 0o600);
+    assert_eq!(metadata.nlink(), 1);
+    let plan = fs::read(path).unwrap();
+    assert_eq!(&plan[..8], b"NKPPLN01");
+    assert_eq!(plan[8..16], id.sequence.to_le_bytes());
+    assert_eq!(plan[16..32], id.nonce);
+    let internal_new = case == "settle-internal-absent";
+    assert_eq!(plan[64], u8::from(internal_new));
+    let length =
+        |offset: usize| u32::from_le_bytes(plan[offset..offset + 4].try_into().unwrap()) as usize;
+    let (config, security, internal) = (length(68), length(72), length(76));
+    assert_eq!(96 + config + security + internal + 32, plan.len());
+    let internal_value =
+        std::str::from_utf8(&plan[96 + config + security..96 + config + security + internal])
+            .unwrap();
+    if internal_new {
+        assert!(crate::update::picoclaw_token::valid_token(internal_value));
+        assert_ne!(internal_value, "synthetic-internal-fixture");
+        // Still not provisioned: nothing outside the job store changed.
+        assert!(!Path::new("/etc/kvm/.picoclaw_internal_token").exists());
+    } else {
+        assert_eq!(internal_value, "synthetic-internal-fixture");
+    }
+    let config_bytes = fs::read(Path::new(HOME).join("config.json")).unwrap();
+    let security_bytes = fs::read(Path::new(HOME).join(".security.yml")).unwrap();
+    let documents = startup::decode(&config_bytes, Some(&security_bytes)).unwrap();
+    let desired =
+        startup::desired(&documents, "synthetic-gateway-fixture", internal_value).unwrap();
+    assert!(plan[96..96 + config] == desired.config[..]);
+    assert!(plan[96 + config..96 + config + security] == *desired.security.as_bytes());
 }

@@ -669,3 +669,42 @@ fn private_submit_child() {
     }
     println!("fixed-pico-acceptance-checked");
 }
+
+#[test]
+fn startup_plan_codec_round_trips_and_rejects_foreign_or_damaged_plans() {
+    let record = super::super::tests::record(5, Phase::Accepted);
+    let plan = accept::Plan {
+        config: Zeroizing::new(b"{\"synthetic\": 1}".to_vec()),
+        security: Zeroizing::new(b"synthetic: yes\n".to_vec()),
+        internal: Zeroizing::new("synthetic-internal-value".into()),
+        internal_new: true,
+    };
+    let bytes = accept::encode_plan(&record, &plan).unwrap();
+    assert_eq!(&bytes[..8], b"NKPPLN01");
+    let decoded = accept::decode_plan(&record, &bytes).unwrap();
+    assert!(decoded.config == plan.config);
+    assert!(decoded.security == plan.security);
+    assert!(decoded.internal == plan.internal);
+    assert!(decoded.internal_new);
+    // Bound to its exact job and source: another job/source cannot adopt it.
+    for mutate in [
+        |r: &mut Record| r.sequence += 1,
+        |r: &mut Record| r.nonce[0] ^= 1,
+        |r: &mut Record| r.source[0] ^= 1,
+    ] {
+        let mut other = record;
+        mutate(&mut other);
+        assert!(accept::decode_plan(&other, &bytes).is_err());
+    }
+    for index in [0, 8, 64, 70, 96, bytes.len() - 1] {
+        let mut damaged = bytes.to_vec();
+        damaged[index] ^= 1;
+        assert!(accept::decode_plan(&record, &damaged).is_err());
+    }
+    assert!(accept::decode_plan(&record, &bytes[..bytes.len() - 1]).is_err());
+    let invalid = accept::Plan {
+        internal: Zeroizing::new("has space".into()),
+        ..plan
+    };
+    assert!(accept::encode_plan(&record, &invalid).is_err());
+}

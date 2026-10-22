@@ -9,6 +9,7 @@ enum Member {
     Active,
     Payload,
     Source,
+    Plan,
     Next,
 }
 impl Member {
@@ -17,6 +18,7 @@ impl Member {
             Self::Active => "active",
             Self::Payload => "payload",
             Self::Source => "source",
+            Self::Plan => "plan",
             Self::Next => ".state.next",
         }
     }
@@ -224,6 +226,96 @@ pub(super) fn decode_source(bytes: &[u8]) -> Result<SourceView<'_>> {
     })
 }
 
+const PLAN_MAGIC: &[u8; 8] = b"NKPPLN01";
+const PLAN_HEADER: usize = 96;
+
+/// Credential-bearing desired pair and internal value, chosen once before any
+/// stop or publication so a retry or crash replays the same change. Never
+/// Debug/log it; the durable copy is a protected 0600 member.
+pub(super) struct Plan {
+    pub(super) config: Zeroizing<Vec<u8>>,
+    pub(super) security: Zeroizing<Vec<u8>>,
+    pub(super) internal: Zeroizing<String>,
+    pub(super) internal_new: bool,
+}
+
+pub(super) fn encode_plan(record: &Record, plan: &Plan) -> Result<Zeroizing<Vec<u8>>> {
+    let internal = plan.internal.as_bytes();
+    if plan.config.len() > super::super::super::MAX_FILE_BYTES
+        || plan.security.len() > super::super::super::MAX_FILE_BYTES
+        || !crate::update::picoclaw_token::valid_token(plan.internal.as_str())
+    {
+        return Err(invalid());
+    }
+    let size = PLAN_HEADER + plan.config.len() + plan.security.len() + internal.len() + 32;
+    let mut bytes = Zeroizing::new(vec![0; PLAN_HEADER]);
+    bytes.reserve(size - PLAN_HEADER);
+    bytes[..8].copy_from_slice(PLAN_MAGIC);
+    bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
+    bytes[16..32].copy_from_slice(&record.nonce);
+    bytes[32..64].copy_from_slice(&record.source);
+    bytes[64] = u8::from(plan.internal_new);
+    for (offset, length) in [
+        (68, plan.config.len()),
+        (72, plan.security.len()),
+        (76, internal.len()),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&(length as u32).to_le_bytes());
+    }
+    bytes.extend_from_slice(&plan.config);
+    bytes.extend_from_slice(&plan.security);
+    bytes.extend_from_slice(internal);
+    let hash = private_digest(b"NanoKVM Pico startup plan v1\0", &bytes);
+    bytes.extend_from_slice(&hash);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
+    if bytes.len() < PLAN_HEADER + 32 || &bytes[..8] != PLAN_MAGIC {
+        return Err(invalid());
+    }
+    let (body, hash) = bytes.split_at(bytes.len() - 32);
+    if private_digest(b"NanoKVM Pico startup plan v1\0", body) != hash
+        || bytes[8..16] != record.sequence.to_le_bytes()
+        || bytes[16..32] != record.nonce
+        || bytes[32..64] != record.source
+        || bytes[64] > 1
+        || bytes[65..68].iter().any(|byte| *byte != 0)
+        || bytes[80..PLAN_HEADER].iter().any(|byte| *byte != 0)
+    {
+        return Err(invalid());
+    }
+    let length = |offset: usize| -> Result<usize> {
+        Ok(u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| invalid())?,
+        ) as usize)
+    };
+    let (config, security, internal) = (length(68)?, length(72)?, length(76)?);
+    if PLAN_HEADER
+        .checked_add(config)
+        .and_then(|n| n.checked_add(security))
+        .and_then(|n| n.checked_add(internal))
+        != Some(body.len())
+    {
+        return Err(invalid());
+    }
+    let config_end = PLAN_HEADER + config;
+    let security_end = config_end + security;
+    let internal = std::str::from_utf8(&body[security_end..]).map_err(|_| invalid())?;
+    if !crate::update::picoclaw_token::valid_token(internal) {
+        return Err(invalid());
+    }
+    Ok(Plan {
+        config: Zeroizing::new(body[PLAN_HEADER..config_end].to_vec()),
+        security: Zeroizing::new(body[config_end..security_end].to_vec()),
+        internal: Zeroizing::new(internal.to_string()),
+        internal_new: bytes[64] == 1,
+    })
+}
+
 pub(super) struct Store {
     parent: File,
     directory: File,
@@ -231,7 +323,7 @@ pub(super) struct Store {
     anchor: (bootstrap::Anchor, Revision),
     revision: Revision,
     snapshot: Snapshot,
-    members: [Option<OwnedMember>; 3],
+    members: [Option<OwnedMember>; 4],
 }
 
 impl Drop for Store {
@@ -269,7 +361,7 @@ impl Store {
             anchor,
             revision,
             snapshot,
-            members: [None, None, None],
+            members: [None, None, None, None],
         };
         store.inventory(false)?;
         store.check_bound()?;
@@ -283,12 +375,18 @@ impl Store {
     }
 
     fn inventory(&self, accepted: bool) -> Result<()> {
-        self.inventory_exact([true, accepted, accepted, accepted])
+        self.inventory_exact([true, accepted, accepted, accepted, false])
     }
 
-    /// Exactly these of state/active/payload/source; anything else fences.
-    fn inventory_exact(&self, expected: [bool; 4]) -> Result<()> {
-        let mut found = [false; 4];
+    /// State plus exactly the private members this store currently owns.
+    fn inventory_owned(&self) -> Result<()> {
+        let owned = self.members.each_ref().map(Option::is_some);
+        self.inventory_exact([true, owned[0], owned[1], owned[2], owned[3]])
+    }
+
+    /// Exactly these of state/active/payload/source/plan; anything else fences.
+    fn inventory_exact(&self, expected: [bool; 5]) -> Result<()> {
+        let mut found = [false; 5];
         for entry in rustix::fs::Dir::read_from(&self.directory).map_err(std::io::Error::from)? {
             let entry = entry.map_err(std::io::Error::from)?;
             let slot = match entry.file_name().to_bytes() {
@@ -297,6 +395,7 @@ impl Store {
                 b"active" => 1,
                 b"payload" => 2,
                 b"source" => 3,
+                b"plan" => 4,
                 _ => return Err(fenced()),
             };
             if !expected[slot] {
@@ -387,21 +486,23 @@ impl Store {
     }
 
     fn check_members(&mut self) -> Result<()> {
-        for (name, owned) in ["active", "payload", "source"]
+        if self.members[..3].iter().any(Option::is_none) {
+            return Err(invalid());
+        }
+        for (name, owned) in ["active", "payload", "source", "plan"]
             .into_iter()
             .zip(&mut self.members)
         {
-            owned
-                .as_mut()
-                .ok_or_else(invalid)?
-                .check(&self.directory, name)?;
+            if let Some(owned) = owned {
+                owned.check(&self.directory, name)?;
+            }
         }
         Ok(())
     }
 
     fn check_current(&mut self) -> Result<()> {
         self.check_bound()?;
-        self.inventory(true)?;
+        self.inventory_owned()?;
         let (bytes, revision) =
             bootstrap::read_member::<BYTES>(&self.directory, STATE, 0)?.ok_or_else(invalid)?;
         if revision != self.revision || bytes.as_slice() != self.snapshot.encode()?.as_slice() {
@@ -468,7 +569,7 @@ impl Store {
         if revision != self.revision || published.as_slice() != bytes.as_slice() {
             return Err(invalid());
         }
-        self.inventory(true)?;
+        self.inventory_owned()?;
         self.check_members()?;
         #[cfg(test)]
         checkpoint(publication.label(), "durable")?;
@@ -477,6 +578,10 @@ impl Store {
 }
 
 impl Store {
+    pub(super) fn active_record(&self) -> Option<Record> {
+        self.snapshot.active
+    }
+
     /// Exact retirement after a durable terminal receipt. Each member is
     /// re-checked against its owned identity and content just before unlink;
     /// the active fence goes last, after payload and source are durably gone.
@@ -485,31 +590,43 @@ impl Store {
             return Err(invalid());
         }
         self.check_bound()?;
-        self.inventory(true)?;
+        self.inventory_owned()?;
         self.check_members()?;
         for (slot, member) in [
             (1, Member::Payload),
             (2, Member::Source),
+            (3, Member::Plan),
             (0, Member::Active),
         ] {
-            self.members[slot]
-                .as_mut()
-                .ok_or_else(invalid)?
-                .check(&self.directory, member.name())?;
+            let Some(owned) = self.members[slot].as_mut() else {
+                continue;
+            };
+            owned.check(&self.directory, member.name())?;
             unlinkat(&self.directory, member.name(), AtFlags::empty())
                 .map_err(std::io::Error::from)?;
             #[cfg(test)]
             checkpoint(member.name(), "retired")?;
-            if slot == 2 {
-                // Payload/source removal is durable before the fence goes.
-                self.directory.sync_all()?;
-                self.inventory_exact([true, true, false, false])?;
-            }
             self.members[slot] = None;
+            if slot == 3 || (slot == 2 && self.members[3].is_none()) {
+                // Private payload/source/plan removal is durable before the fence goes.
+                self.directory.sync_all()?;
+                self.inventory_owned()?;
+            }
         }
         self.directory.sync_all()?;
         self.check_bound()?;
         self.inventory(false)
+    }
+
+    /// Persist the once-chosen change before any stop or publication.
+    fn write_plan(&mut self, record: &Record, plan: &Plan, touched: &mut bool) -> Result<()> {
+        if self.members[3].is_some() {
+            return Err(fenced());
+        }
+        let bytes = encode_plan(record, plan)?;
+        self.members[3] = Some(self.write(Member::Plan, bytes.as_slice(), touched)?);
+        self.inventory_owned()?;
+        self.check_members()
     }
 }
 
@@ -634,25 +751,37 @@ pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<Transit
     {
         return Err(fenced());
     }
-    let (publication, status) = match advance {
-        Advance::Stop(expected)
-            if expected == id && record.phase == Phase::Accepted && record.was_running =>
+    // An explicit Stop lowers resume permission durably; it can only fall and
+    // stays distinct from initial was_running. Automatic quiescence keeps it,
+    // and is only allowed for a change whose plan is already durable. A
+    // repeated explicit request may lower it in place but never re-publish.
+    let (explicit, publication, status) = match advance {
+        Advance::Stop {
+            id: expected,
+            explicit,
+        } if expected == id
+            && record.was_running
+            && (record.phase == Phase::Accepted
+                || (explicit && record.phase == Phase::Stopping && record.resume_allowed)) =>
         {
             record.phase = Phase::Stopping;
-            (Publication::Stop, TransitionStatus::Stopping)
+            (explicit, Publication::Stop, TransitionStatus::Stopping)
         }
-        Advance::Closed(proof)
+        Advance::Closed { proof, explicit }
             if proof.matches(id, record.boot, record.home)
-                && matches!(record.phase, Phase::Accepted | Phase::Stopping) =>
+                && (matches!(record.phase, Phase::Accepted | Phase::Stopping)
+                    || (explicit && record.phase == Phase::Closed && record.resume_allowed)) =>
         {
             record.phase = Phase::Closed;
-            (Publication::Closed, TransitionStatus::Closed)
+            (explicit, Publication::Closed, TransitionStatus::Closed)
         }
         _ => return Err(fenced()),
     };
-    // This path is an explicit Stop, not an ordinary automatic quiesce. The
-    // permission can only fall and remains distinct from initial was_running.
-    record.resume_allowed = false;
+    if explicit {
+        record.resume_allowed = false;
+    } else if store.members[3].is_none() {
+        return Err(fenced());
+    }
     store.publish(record, &mut payload.touched, publication)?;
     Ok(status)
 }
@@ -694,7 +823,29 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         Err(_) => return Ok(TransitionStatus::Refused),
     };
     if decision != crate::update::picoclaw_startup::Decision::Noop {
-        return Ok(TransitionStatus::ChangeRequired);
+        // Select missing tokens exactly once and make the whole change durable
+        // before any stop: a retry or crash replays this plan, never new entropy.
+        let gateway = crate::update::picoclaw_startup::existing_gateway_token(
+            &documents.config,
+            &documents.security,
+        )
+        .map(Zeroizing::new)
+        .unwrap_or_else(|| Zeroizing::new(crate::auth::token::random_token(36)));
+        let internal_new = internal.is_none();
+        let internal = match internal {
+            Some(value) => value,
+            None => crate::update::picoclaw_token::new_value()?,
+        };
+        let desired = crate::update::picoclaw_startup::desired(&documents, &gateway, &internal)?;
+        let plan = Plan {
+            config: desired.config,
+            security: Zeroizing::new(desired.security.as_bytes().to_vec()),
+            internal,
+            internal_new,
+        };
+        store.write_plan(&record, &plan, &mut payload.touched)?;
+        payload.plan = Some(plan);
+        return Ok(TransitionStatus::Planned);
     }
     record.phase = Phase::Completed;
     record.outcome = Outcome::Noop;
