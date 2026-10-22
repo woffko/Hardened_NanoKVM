@@ -262,7 +262,7 @@ fn actual_sigkill_before_and_after_journal_rename_never_reopens_writer_admission
     }
 }
 
-fn setup() {
+pub(crate) fn setup() {
     for (name, bytes) in crate::update::app_bootstrap::BOOT_SCRIPTS {
         let path = Path::new("/etc/init.d").join(name);
         fs::write(&path, bytes).unwrap();

@@ -181,3 +181,23 @@ fn selective_pico_stop_joins_its_real_tree_without_stopping_a_real_backend_tree(
     assert!(exited(&backend_leaf));
     assert!(drain.all_owner_processes_reaped());
 }
+
+#[cfg(feature = "sandbox-test-fixture")]
+#[test]
+fn invalid_picoclaw_control_proves_runtime_error_closure_only_after_joining_its_tree() {
+    let root = tempfile::tempdir().unwrap();
+    let mut group = Group::default();
+    group
+        .start_command(Role::Picoclaw, command(root.path(), "tree"))
+        .unwrap();
+    until(|| group.poll()[3] == Some(Status::Running) && root.path().join("leaf.pid").exists());
+    let descendant = leaf(root.path());
+    assert!(!exited(&descendant));
+    group.fail_picoclaw_control_for_test();
+    until(|| group.poll()[3] == Some(Status::Closed(Completion::RuntimeError)));
+    assert!(exited(&descendant));
+    assert!(!group.uncertainty_latched());
+    let mut drain = group.begin_native_drain();
+    assert_eq!(drain.poll(), DrainStatus::Drained);
+    assert!(drain.all_owner_processes_reaped());
+}

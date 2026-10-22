@@ -1,6 +1,7 @@
 //! Retained, fixed-kind acceptance work. No native execution/settlement API.
 use super::*;
 use crate::{
+    native_owner::broker::picoclaw_mutation::ClosedPico,
     native_owner::picoclaw_home::Home,
     update::{operation_lock::ProcessLock, state_writers::ConfigPermit},
 };
@@ -126,6 +127,26 @@ struct Payload {
     touched: bool,
 }
 
+enum Advance {
+    Stop(JobId),
+    Closed(ClosedPico),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransitionStatus {
+    Idle,
+    Pending,
+    Stopping,
+    Closed,
+    Failed,
+}
+
+enum TransitionWorker {
+    Idle,
+    Running(JoinHandle<TransitionStatus>),
+    Settled(TransitionStatus),
+}
+
 enum Worker {
     Idle,
     Running(JoinHandle<Acceptance>),
@@ -138,12 +159,21 @@ enum Worker {
 pub struct Submission {
     worker: Worker,
     payload: Arc<Mutex<Payload>>,
+    transition: TransitionWorker,
     #[cfg(test)]
     fixture: Option<Fixture>,
 }
 
 #[cfg(test)]
 enum Fixture {
+    Block(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
+    Fail,
+    Panic,
+    SpawnFailure,
+}
+
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+pub(crate) enum WorkFixture {
     Block(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
     Fail,
     Panic,
@@ -161,6 +191,7 @@ impl Submission {
     ) -> Self {
         Self {
             worker: Worker::Idle,
+            transition: TransitionWorker::Idle,
             #[cfg(test)]
             fixture: None,
             payload: Arc::new(Mutex::new(Payload {
@@ -254,17 +285,126 @@ impl Submission {
             _ => Acceptance::RecoveryRequired,
         }
     }
+
+    pub(crate) fn persist_stop(&mut self, id: JobId) -> Result<()> {
+        self.begin_transition(Advance::Stop(id))
+    }
+
+    pub(crate) fn persist_closed(&mut self, proof: ClosedPico) -> Result<()> {
+        self.begin_transition(Advance::Closed(proof))
+    }
+
+    fn begin_transition(&mut self, advance: Advance) -> Result<()> {
+        if !matches!(self.worker, Worker::Settled(Acceptance::Accepted(_)))
+            || !matches!(
+                self.transition,
+                TransitionWorker::Idle | TransitionWorker::Settled(TransitionStatus::Stopping)
+            )
+        {
+            return Err(fenced());
+        }
+        self.transition = TransitionWorker::Settled(TransitionStatus::Failed);
+        #[cfg(test)]
+        let fixture = self.fixture.take();
+        #[cfg(test)]
+        if matches!(fixture, Some(Fixture::SpawnFailure)) {
+            return Err(AppError::Internal(
+                "Pico stop publication unavailable".into(),
+            ));
+        }
+        let owned = Arc::clone(&self.payload);
+        let worker = thread::Builder::new()
+            .name("pico-job-stop".into())
+            .spawn(move || {
+                let Ok(mut payload) = owned.lock() else {
+                    return TransitionStatus::Failed;
+                };
+                match catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    match fixture {
+                        Some(Fixture::Block(entered, resume)) => {
+                            entered.send(()).map_err(|_| invalid())?;
+                            resume.recv().map_err(|_| invalid())?;
+                        }
+                        Some(Fixture::Fail) => return Err(invalid()),
+                        Some(Fixture::Panic) => panic!("fixture Pico stop worker failure"),
+                        Some(Fixture::SpawnFailure) | None => {}
+                    }
+                    accept::advance(&mut payload, advance)
+                })) {
+                    Ok(Ok(status)) => status,
+                    _ => TransitionStatus::Failed,
+                }
+            })
+            .map_err(|_| AppError::Internal("Pico stop publication unavailable".into()))?;
+        self.transition = TransitionWorker::Running(worker);
+        Ok(())
+    }
+
+    pub(crate) fn poll_transition(&mut self) -> TransitionStatus {
+        match &self.transition {
+            TransitionWorker::Idle => return TransitionStatus::Idle,
+            TransitionWorker::Settled(status) => return *status,
+            TransitionWorker::Running(worker) if !worker.is_finished() => {
+                return TransitionStatus::Pending;
+            }
+            TransitionWorker::Running(_) => {}
+        }
+        if let TransitionWorker::Running(worker) = std::mem::replace(
+            &mut self.transition,
+            TransitionWorker::Settled(TransitionStatus::Failed),
+        ) {
+            self.transition =
+                TransitionWorker::Settled(worker.join().unwrap_or(TransitionStatus::Failed));
+        }
+        match self.transition {
+            TransitionWorker::Settled(status) => status,
+            _ => TransitionStatus::Failed,
+        }
+    }
+
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
+    pub(crate) fn fixture_image(&mut self, image: File) {
+        assert!(matches!(self.worker, Worker::Idle));
+        Arc::get_mut(&mut self.payload)
+            .unwrap()
+            .get_mut()
+            .unwrap()
+            .facts
+            .image = image;
+    }
+
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
+    pub(crate) fn fixture_work(&mut self, fixture: WorkFixture) {
+        assert!(matches!(
+            self.worker,
+            Worker::Idle | Worker::Settled(Acceptance::Accepted(_))
+        ));
+        assert!(matches!(self.transition, TransitionWorker::Idle));
+        self.fixture = Some(match fixture {
+            WorkFixture::Block(entered, resume) => Fixture::Block(entered, resume),
+            WorkFixture::Fail => Fixture::Fail,
+            WorkFixture::Panic => Fixture::Panic,
+            WorkFixture::SpawnFailure => Fixture::SpawnFailure,
+        });
+    }
 }
 
 #[cfg(test)]
 #[path = "picoclaw_jobs_submit_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 impl Drop for Submission {
     fn drop(&mut self) {
         if let Worker::Running(worker) = std::mem::replace(
             &mut self.worker,
             Worker::Settled(Acceptance::RecoveryRequired),
+        ) {
+            let _ = worker.join();
+        }
+        if let TransitionWorker::Running(worker) = std::mem::replace(
+            &mut self.transition,
+            TransitionWorker::Settled(TransitionStatus::Failed),
         ) {
             let _ = worker.join();
         }

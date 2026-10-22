@@ -16,6 +16,11 @@ pub(crate) use bootstrap::prepare_fixture;
 
 #[path = "picoclaw_jobs_submit.rs"]
 mod submit;
+pub(crate) use submit::TransitionStatus;
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+pub(crate) use submit::WorkFixture;
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+pub(crate) use submit::tests::setup as prepare_factory_fixture;
 pub use submit::{Acceptance, Cursor, JobId, Profile, Request, Submission};
 
 const DIRECTORY: &str = "picoclaw-operations";

@@ -513,6 +513,18 @@ impl Group {
             cell.stop();
         }
     }
+
+    #[cfg(all(test, feature = "sandbox-test-fixture"))]
+    pub(super) fn fail_picoclaw_control_for_test(&mut self) {
+        // Exercise the real subreaper's RuntimeError cleanup, not a forged
+        // completion receipt. This fixed invalid input is never production API.
+        self.cells[Role::Picoclaw.index()]
+            .as_mut()
+            .unwrap()
+            .control
+            .write_all(b"X")
+            .unwrap();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

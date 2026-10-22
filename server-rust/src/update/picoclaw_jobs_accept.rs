@@ -20,6 +20,55 @@ impl Member {
     }
 }
 
+enum Publication {
+    Accepted,
+    Stop,
+    Closed,
+}
+
+impl Publication {
+    #[cfg(test)]
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Accepted => "state",
+            Self::Stop => "stop",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+struct OwnedMember {
+    file: File,
+    revision: Revision,
+    hash: [u8; 32],
+}
+
+impl OwnedMember {
+    fn check(&mut self, directory: &File, name: &str) -> Result<()> {
+        if Revision::from(&self.file.metadata()?) != self.revision
+            || Revision::from(&restore_fs::open_beneath(directory, name, OFlags::PATH)?.metadata()?)
+                != self.revision
+        {
+            return Err(invalid());
+        }
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut hash = Sha256::new();
+        let length = std::io::copy(
+            &mut (&mut self.file).take(self.revision.bytes + 1),
+            &mut hash,
+        )?;
+        if length != self.revision.bytes
+            || hash.finalize().as_slice() != self.hash
+            || Revision::from(&self.file.metadata()?) != self.revision
+            || Revision::from(&restore_fs::open_beneath(directory, name, OFlags::PATH)?.metadata()?)
+                != self.revision
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 fn private_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(domain);
@@ -119,7 +168,7 @@ pub(super) struct Store {
     anchor: (bootstrap::Anchor, Revision),
     revision: Revision,
     snapshot: Snapshot,
-    members: [Option<File>; 3],
+    members: [Option<OwnedMember>; 3],
 }
 
 impl Drop for Store {
@@ -217,7 +266,7 @@ impl Store {
         Ok(())
     }
 
-    fn write(&self, member: Member, bytes: &[u8], touched: &mut bool) -> Result<File> {
+    fn write(&self, member: Member, bytes: &[u8], touched: &mut bool) -> Result<OwnedMember> {
         self.check_bound()?;
         let mut file: File = openat2(
             &self.directory,
@@ -259,10 +308,47 @@ impl Store {
         self.directory.sync_all()?;
         #[cfg(test)]
         checkpoint(member.name(), "durable")?;
-        Ok(file)
+        Ok(OwnedMember {
+            file,
+            revision: before,
+            hash: Sha256::digest(bytes).into(),
+        })
     }
 
-    fn publish(&mut self, record: Record, touched: &mut bool) -> Result<()> {
+    fn check_members(&mut self) -> Result<()> {
+        for (name, owned) in ["active", "payload", "source"]
+            .into_iter()
+            .zip(&mut self.members)
+        {
+            owned
+                .as_mut()
+                .ok_or_else(invalid)?
+                .check(&self.directory, name)?;
+        }
+        Ok(())
+    }
+
+    fn check_current(&mut self) -> Result<()> {
+        self.check_bound()?;
+        self.inventory(true)?;
+        let (bytes, revision) =
+            bootstrap::read_member::<BYTES>(&self.directory, STATE, 0)?.ok_or_else(invalid)?;
+        if revision != self.revision || bytes.as_slice() != self.snapshot.encode()?.as_slice() {
+            return Err(invalid());
+        }
+        self.check_members()
+    }
+
+    fn publish(
+        &mut self,
+        record: Record,
+        touched: &mut bool,
+        publication: Publication,
+    ) -> Result<()> {
+        #[cfg(test)]
+        checkpoint(publication.label(), "begin")?;
+        #[cfg(not(test))]
+        let _ = publication;
         self.snapshot.sequence = record.sequence;
         self.snapshot.active = Some(record);
         let bytes = self.snapshot.encode()?;
@@ -277,34 +363,19 @@ impl Store {
         )
         .map_err(std::io::Error::from)?;
         #[cfg(test)]
-        checkpoint(STATE, "renamed")?;
+        checkpoint(publication.label(), "renamed")?;
         self.directory.sync_all()?;
-        self.revision = Revision::from(&file.metadata()?);
+        self.revision = Revision::from(&file.file.metadata()?);
         self.check_bound()?;
-        let (bytes, revision) =
+        let (published, revision) =
             bootstrap::read_member::<BYTES>(&self.directory, STATE, 0)?.ok_or_else(invalid)?;
-        let state = Snapshot::decode(bytes.as_slice())?;
-        if revision != self.revision
-            || state.active != Some(record)
-            || state.sequence != record.sequence
-        {
+        if revision != self.revision || published.as_slice() != bytes.as_slice() {
             return Err(invalid());
         }
         self.inventory(true)?;
-        for (name, owned) in ["active", "payload", "source"]
-            .into_iter()
-            .zip(&self.members)
-        {
-            let file = owned.as_ref().ok_or_else(invalid)?;
-            if Revision::from(
-                &restore_fs::open_beneath(&self.directory, name, OFlags::PATH)?.metadata()?,
-            ) != Revision::from(&file.metadata()?)
-            {
-                return Err(invalid());
-            }
-        }
+        self.check_members()?;
         #[cfg(test)]
-        checkpoint(STATE, "durable")?;
+        checkpoint(publication.label(), "durable")?;
         Ok(())
     }
 }
@@ -404,12 +475,50 @@ pub(super) fn perform(
         source.bytes.as_slice(),
         &mut payload.touched,
     )?);
-    store.publish(record, &mut payload.touched)?;
+    store.publish(record, &mut payload.touched, Publication::Accepted)?;
     Ok(Acceptance::Accepted(JobId {
         epoch: cursor.epoch,
         sequence,
         nonce,
     }))
+}
+
+pub(super) fn advance(payload: &mut Payload, advance: Advance) -> Result<TransitionStatus> {
+    let store = payload.store.as_mut().ok_or_else(invalid)?;
+    store.check_current()?;
+    let mut record = store.snapshot.active.ok_or_else(invalid)?;
+    let id = JobId {
+        epoch: store.snapshot.epoch,
+        sequence: record.sequence,
+        nonce: record.nonce,
+    };
+    if record.uncertain
+        || record.boot != payload.facts.boot
+        || record.home != payload.facts.home_fingerprint
+    {
+        return Err(fenced());
+    }
+    let (publication, status) = match advance {
+        Advance::Stop(expected)
+            if expected == id && record.phase == Phase::Accepted && record.was_running =>
+        {
+            record.phase = Phase::Stopping;
+            (Publication::Stop, TransitionStatus::Stopping)
+        }
+        Advance::Closed(proof)
+            if proof.matches(id, record.boot, record.home)
+                && matches!(record.phase, Phase::Accepted | Phase::Stopping) =>
+        {
+            record.phase = Phase::Closed;
+            (Publication::Closed, TransitionStatus::Closed)
+        }
+        _ => return Err(fenced()),
+    };
+    // This path is an explicit Stop, not an ordinary automatic quiesce. The
+    // permission can only fall and remains distinct from initial was_running.
+    record.resume_allowed = false;
+    store.publish(record, &mut payload.touched, publication)?;
+    Ok(status)
 }
 
 #[cfg(test)]

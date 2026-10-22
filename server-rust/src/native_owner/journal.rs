@@ -256,12 +256,17 @@ impl Store {
         )
         .map_err(|_| Error::Io)?
         .into();
+        Ok((self.pico_boot_tag(), executable))
+    }
+
+    pub(super) fn pico_boot_tag(&self) -> [u8; 16] {
         let mut hash = Sha256::new();
         hash.update(b"NanoKVM Pico job kernel epoch v1\0");
         hash.update(self.epoch.0);
-        let full: [u8; 32] = hash.finalize().into();
-        let boot = full[..16].try_into().map_err(|_| Error::Invalid)?;
-        Ok((boot, executable))
+        let full = hash.finalize();
+        let mut boot = [0; 16];
+        boot.copy_from_slice(&full[..16]);
+        boot
     }
 
     #[cfg(test)]

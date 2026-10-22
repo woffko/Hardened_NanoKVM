@@ -13,11 +13,17 @@ pub use crate::update::picoclaw_config::jobs::{
     Request as PicoRequest, Submission as PicoSubmission,
 };
 pub use journal::Error as JournalError;
+#[path = "picoclaw_mutation.rs"]
+pub(crate) mod picoclaw_mutation;
 #[cfg(all(test, feature = "sandbox-test-fixture"))]
 pub(crate) use journal::app_recovery::closed_fixture as app_recovery_closed_fixture;
 pub(crate) use journal::app_recovery::{FencedAppRecovery, ReadyAppRecovery};
 pub use journal::boot;
 pub use journal::recovery;
+pub use picoclaw_mutation::{
+    Mutation as PicoMutation, MutationAdmission as PicoMutationAdmission,
+    MutationStatus as PicoMutationStatus,
+};
 #[path = "app_install.rs"]
 pub mod app_install;
 #[path = "ipc.rs"]
@@ -65,6 +71,15 @@ pub(crate) fn check_update_admission() -> Result<(), JournalError> {
 }
 
 impl Broker {
+    /// Moves this same native owner into the job. Refusal returns it intact;
+    /// neither acceptance nor a public status is a native closure capability.
+    pub fn begin_picoclaw_mutation(mut self) -> PicoMutationAdmission {
+        match self.prepare_picoclaw_submission() {
+            Ok(submission) => PicoMutationAdmission::Owned(PicoMutation::new(self, submission)),
+            Err(_) => PicoMutationAdmission::Refused(self),
+        }
+    }
+
     /// Prepare an owned acceptance worker, not a native closure/execute ticket.
     /// HTTP/S96 are not wired to this API until their correlated transport moves
     /// together. The caller retains this owner across disconnects and errors.

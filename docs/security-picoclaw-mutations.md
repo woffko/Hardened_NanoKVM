@@ -1,7 +1,8 @@
 # PicoClaw mutation jobs: protocol decision, implementation in progress
 
 This is the protocol selected for the stopped-mutation handoff. It is not an
-activation or acceptance report. A broker-library acceptance producer now exists,
+activation or acceptance report. Broker-library acceptance and explicit Stop/Closed
+publication now exist,
 but ordinary model/profile/install/uninstall writers, new transport, execution
 and recovery paths are not yet migrated.
 The legacy onboarding completion boolean is not a durable job receipt.
@@ -50,7 +51,7 @@ than factory seeding from an app archive. Raw preservation/recovery must carry
 anchor and store together, and is not implemented by this bootstrap.
 
 Existing onboarding does not publish these records yet. There is still NO
-phase-transition/execution API, retirement or job recovery bypass. Ordinary
+target-execution API, retirement or job recovery bypass. Ordinary
 unmanaged Pico writers and OS-level H2 isolation remain outside this connected
 cooperative fence.
 
@@ -79,8 +80,8 @@ The fixed immutable `active` intent is published and synced first, then private
 Only final directory sync, reread and identity/inventory checks permit the exact
 accepted ID acknowledgement. Every newly created file is mode 0600; unknown
 write/sync/rename results retain evidence and the durable admission fence. No
-acceptance path mutates a target, stops/restarts Pico, removes evidence, advances
-a phase or clears an accepted job.
+acceptance path mutates a target, stops/restarts Pico, removes evidence or clears
+an accepted job. Stop/Closed uses the separate retained owner described below.
 
 The epoch/head/nonce checks reject wraparound, future/stale requests and changed
 payload or Home reuse. An exact retained terminal replay observes its old ID;
@@ -93,6 +94,43 @@ default/custom absent or present Home, orphan YAML, protected source/store
 rejection, retained owner on fail/spawn/panic, ten publication error boundaries
 and real SIGKILL at five pre/post-state-rename points. They are host process-death
 checks, not physical power cuts, target execution or completed mutation recovery.
+
+## Current owned explicit Stop and Closed publication
+
+`Broker::begin_picoclaw_mutation` consumes the same broker into `PicoMutation`;
+refused admission returns that broker intact. The owner retains its submission,
+Update/Config/store/source leases and native Group. It exposes no extraction,
+restart, arbitrary worker, phase selector or target mutation API. All acceptance
+and phase workers are joined before the broker may be dropped. The standalone
+acceptance API remains acceptance-only; it is not native closure authority.
+
+Accepting a job does not stop a live runtime. An explicit administrative
+`request_stop` only queues intent; it is not an acknowledgement. The fixed worker
+checks the exact current state and immutable private active/payload/source
+identities and bytes, then durably publishes Stopping with `resume_allowed=false`.
+Only after successful checked publication does the owner send native Stop.
+Control-loop polls never join unfinished workers or wait on their filesystem I/O.
+
+The same retained Group must report its completion receipt, matching owner reap
+and control EOF before a private noncopyable job/boot/Home-bound closure proof
+can publish Closed. A valid FailedExit or RuntimeError proves tree closure,
+not successful Pico work: the native subreaper emits those receipts only after
+kernel ECHILD. A Group with no owned Pico cell can skip Stopping and publish
+Closed directly. An absent PID or unrelated process status is not used as proof.
+Neither path proves unmanaged/legacy process closure or all-writer/raw quiescence.
+
+Spawn/work/panic/publication errors and native uncertainty retain the fence;
+late worker success cannot clear a latched RecoveryRequired. Repeated Stop cannot
+reenable resume. Dropping even a closed owner does not finalize/retire its active
+job. Closed remains nonterminal and protected until future checked settlement.
+
+Disposable host fixtures cover live/absent/paused/error-completed native trees,
+an independently live backend, blocked acceptance/phase work, joined teardown,
+late uncertainty, changed private members, Stop/Closed publication failures and
+real SIGKILL during Stop publication. They do not establish production launch
+ordering, hardware execution or recovery. Ordinary no-op preflight/automatic
+quiescence, all six operation executors, transport/API/S96 integration,
+activation, finalization and recovery remain unimplemented.
 
 ## Authority and scope
 
@@ -187,8 +225,10 @@ observation, recovery or a new boot. A previously running job whose restart was
 suppressed records the distinct runtime result `Suppressed`, not `NotRequested`
 or `Resumed`. This flag is not permission to restart: current runtime admission
 and all settlement checks are still required. The reader checks these record
-shapes and the acceptance producer writes the initial permission, but monotonic
-transition enforcement and Stop/revoke acknowledgement remain unimplemented.
+shapes and the acceptance producer writes the initial permission. The retained
+library owner implements monotonic explicit-Stop suppression and
+Accepted/Stopping-to-Closed publication. Ordinary automatic-quiesce transitions, session
+revocation integration and durable HTTP acknowledgements remain unimplemented.
 
 Failure before any mutation can become a terminal failed/cancelled receipt only
 after native closure and exact scratch/payload retirement. Once mutation may
