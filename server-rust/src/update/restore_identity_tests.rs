@@ -13,7 +13,7 @@ use tempfile::{TempDir, tempdir};
 
 // Owner-sensitive builder tests run in one exact disposable mapped-root test.
 // No real host identity or parent namespaces/resources are changed.
-fn preflight_namespace(name: &str) -> bool {
+pub(crate) fn preflight_namespace(name: &str) -> bool {
     if std::env::var_os("NANOKVM_PREFLIGHT_OWNER_FIXTURE").is_some() {
         return true;
     }
@@ -191,7 +191,7 @@ fn owned_ssh_job_cleans_typed_identity_on_success_cancel_transfer_and_native_fai
         // NOT validate SSH/images: the test establishes lifecycle/cleanup only.
         let helper = PinnedSshHelper::host_fixture(Path::new(program), target.path());
         let result = SshPreflightJob {
-            helper,
+            helper: &helper,
             identity: prepared,
             images: if bad_images {
                 [File::open("/dev/null").unwrap(), image(65537)]

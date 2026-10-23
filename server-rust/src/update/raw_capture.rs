@@ -3,23 +3,28 @@
 //! authorizes a partition write; the writer and the early restore check again.
 
 use super::{
+    raw_transport::TransferContext,
     restore_accounts::SignedAccounts,
     restore_archive::{self, CapturedArchive, RestoreArchiveError},
     restore_capsule::{
         CapsuleError, RestoreSecret, open_capsule, prepare_capsule,
         ticket::{Binding, BootId, RestoreTicket, TicketError},
     },
+    restore_effective::RootContext,
     restore_identity::{self, IdentityCheckedRestore, RestoreIdentityError},
-    restore_job::JobError,
+    restore_job::{self, Check, JobError, PinnedSshHelper, SshPreflightJob},
     restore_native::AccountFiles,
+    restore_preflight::{PrepareRootError, PreparedSshRoot, prepare_sshd_root},
 };
 use crate::config::Config;
 use rand_core::{OsRng, RngCore};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, fsync, openat, renameat_with, unlinkat};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
+    fs::{self, DirBuilder, File},
     io::{self, Seek, Write},
+    net::IpAddr,
+    os::unix::fs::DirBuilderExt,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -47,6 +52,10 @@ pub enum CaptureError {
     Changed,
     #[error("raw update capture was cancelled")]
     Cancelled,
+    #[error(transparent)]
+    Preflight(#[from] PrepareRootError),
+    #[error("the SSH probe context is invalid")]
+    Context,
 }
 type Result<T> = std::result::Result<T, CaptureError>;
 
@@ -81,6 +90,99 @@ pub trait TargetImage {
         restore: &mut IdentityCheckedRestore,
         cancel: &AtomicBool,
     ) -> Result<()>;
+}
+
+/// The production target image. The pinned sandbox reads the authenticated
+/// read-only image descriptors; nothing from the image runs outside it.
+pub struct SandboxImage<'a> {
+    pub helper: &'a PinnedSshHelper,
+    pub images: &'a [File; 2],
+    pub transfer: &'a TransferContext,
+    /// Empty private directory; the child mounts the image in its namespace.
+    pub mountpoint: &'a Path,
+    /// Private directory on the root filesystem for the prepared sshd roots.
+    pub ssh_roots: &'a Path,
+    pub hostname: &'a str,
+}
+
+impl TargetImage for SandboxImage<'_> {
+    fn signed_accounts(&mut self, cancel: &AtomicBool) -> Result<SignedAccounts> {
+        Ok(restore_job::export_signed_accounts(
+            self.helper,
+            self.images,
+            self.transfer,
+            self.mountpoint,
+            cancel,
+        )?)
+    }
+
+    /// The image's sshd must accept the restored configuration, report an
+    /// effective policy for a root connection, and prove possession of every
+    /// restored host key. No particular policy value is required.
+    fn check_ssh(
+        &mut self,
+        restore: &mut IdentityCheckedRestore,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        let checks = [
+            Check::Syntax,
+            Check::Effective(probe_context(self.hostname)?),
+            Check::HostKeys,
+        ];
+        let Self {
+            helper,
+            images,
+            transfer,
+            mountpoint,
+            ..
+        } = *self;
+        run_ssh_checks(restore, self.ssh_roots, checks, |identity, check| {
+            SshPreflightJob {
+                helper,
+                identity,
+                images: [images[0].try_clone()?, images[1].try_clone()?],
+                transfer: transfer.clone(),
+                image_mountpoint: mountpoint.to_path_buf(),
+                check,
+            }
+            .run(cancel)?;
+            Ok(())
+        })
+    }
+}
+
+/// One fresh, empty private sshd root per check, removed after its job. A
+/// root that does not empty (unknown recovery entries) stays for inspection.
+fn run_ssh_checks(
+    restore: &mut IdentityCheckedRestore,
+    ssh_roots: &Path,
+    checks: impl IntoIterator<Item = Check>,
+    mut run: impl FnMut(PreparedSshRoot, Check) -> Result<()>,
+) -> Result<()> {
+    for (index, check) in checks.into_iter().enumerate() {
+        let root = ssh_roots.join(format!("check-{index}"));
+        DirBuilder::new().mode(0o700).create(&root)?;
+        let result = prepare_sshd_root(restore, &root)
+            .map_err(CaptureError::from)
+            .and_then(|identity| run(identity, check));
+        let removed = fs::remove_dir(&root);
+        result?;
+        removed?;
+    }
+    Ok(())
+}
+
+/// A root connection from a documentation address: the default Match branch,
+/// independent of the device's networks.
+fn probe_context(hostname: &str) -> Result<RootContext> {
+    RootContext::new(
+        hostname,
+        IpAddr::from([192, 0, 2, 10]),
+        IpAddr::from([192, 0, 2, 1]),
+        22,
+        None,
+    )
+    .map_err(|_| CaptureError::Context)
 }
 
 /// Inputs from the authenticated metadata and the live system. The caller holds

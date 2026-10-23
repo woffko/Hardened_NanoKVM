@@ -1136,6 +1136,19 @@ owner and the writer drain, refuses a pending credential or Pico pair journal,
 publishes the ticket and starts the writer; none of that is wired yet. Host
 tests stub the image (accounts and SSH result) and run the rest for real.
 
+`raw_capture::SandboxImage` is the production `TargetImage`. Its accounts come
+from the sandbox export. Its SSH check runs three `SshPreflightJob`s against the
+image: syntax, the effective policy of a fixed root connection from the
+documentation address 192.0.2.10 to 192.0.2.1:22 (the default Match branch,
+independent of the device's networks), and possession of every restored host
+key. Every job must succeed; no particular policy value is required, because
+the restored configuration is carried as it is. Each job gets its own fresh
+empty private root on the root filesystem, removed after the job; a root that
+does not empty keeps its unknown entries for inspection and fails the check.
+`SshPreflightJob` now borrows the pinned helper, so one captured helper serves
+all jobs. Host tests run the check sequence with a stub job inside a
+mapped-root user namespace; the real jobs need the target.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative

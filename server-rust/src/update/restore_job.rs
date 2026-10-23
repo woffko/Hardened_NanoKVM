@@ -181,8 +181,8 @@ impl Backend<'_> {
 /// Consumes identity staging and both already authenticated readonly snapshots.
 /// Context/hash/modes do NOT verify their signatures or authorize partition I/O.
 /// The caller must protect the outer directories and own the common lock.
-pub struct SshPreflightJob {
-    pub helper: PinnedSshHelper,
+pub struct SshPreflightJob<'a> {
+    pub helper: &'a PinnedSshHelper,
     pub identity: PreparedSshRoot,
     pub images: [File; 2],
     pub transfer: TransferContext,
@@ -190,7 +190,7 @@ pub struct SshPreflightJob {
     pub check: Check,
 }
 
-impl SshPreflightJob {
+impl SshPreflightJob<'_> {
     /// Synchronous by design: cancellation is a signal, not dropping a future.
     /// Child ownership never escapes; kill/reap precedes checked cleanup on
     /// success/error and best-effort root Drop on unwind. Uninterruptible kernel I/O can delay reap;
@@ -205,7 +205,7 @@ impl SshPreflightJob {
             check,
         } = self;
         let backend = Backend::Image {
-            helper: &helper,
+            helper,
             images: &images,
             transfer: &transfer,
             mountpoint: &image_mountpoint,

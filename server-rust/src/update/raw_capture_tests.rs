@@ -260,3 +260,112 @@ mod composed {
         ));
     }
 }
+
+mod ssh_checks {
+    use super::*;
+    use crate::update::restore_identity::{
+        check_identity,
+        tests::{CONFIG_PATH, CWD, fixture, preflight_namespace, signed_accounts},
+    };
+
+    fn checked_fixture(staging: &Path) -> IdentityCheckedRestore {
+        let (source, config) = fixture();
+        let signed = signed_accounts();
+        let mut archive = restore_identity::capture_effective(
+            source.path(),
+            staging,
+            &config,
+            Path::new(CWD),
+            Path::new(CONFIG_PATH),
+            &signed,
+        )
+        .unwrap();
+        let capsules = private();
+        let directory = File::open(capsules.path()).unwrap();
+        let sealed = seal_capsule(&mut archive, VERSION, &directory).unwrap();
+        let mut file = File::open(capsules.path().join(sealed.name())).unwrap();
+        let payload = open_capsule(&sealed.secret, &mut file, staging).unwrap();
+        check_identity(restore_archive::validate(payload).unwrap(), &signed).unwrap()
+    }
+
+    fn kind(check: &Check) -> &'static str {
+        match check {
+            Check::Syntax => "syntax",
+            Check::Effective(_) => "effective",
+            Check::HostKeys => "host-keys",
+        }
+    }
+
+    #[test]
+    fn every_check_gets_its_own_empty_root_and_leaves_none_behind() {
+        if !preflight_namespace(concat!(
+            module_path!(),
+            "::every_check_gets_its_own_empty_root_and_leaves_none_behind"
+        )) {
+            return;
+        }
+        let (staging, roots) = (private(), private());
+        let mut restore = checked_fixture(staging.path());
+        let checks = [
+            Check::Syntax,
+            Check::Effective(probe_context("kvm-test").unwrap()),
+            Check::HostKeys,
+        ];
+        let mut seen = Vec::new();
+        run_ssh_checks(&mut restore, roots.path(), checks, |identity, check| {
+            let root = identity.checked_path().unwrap().to_path_buf();
+            assert_eq!(names(roots.path()), [format!("check-{}", seen.len())]);
+            assert!(root.join("etc/passwd").is_file(), "{}", root.display());
+            seen.push(kind(&check));
+            identity.cleanup().unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, ["syntax", "effective", "host-keys"]);
+        assert!(names(roots.path()).is_empty());
+
+        // A failing check stops the sequence; its root is still removed.
+        let mut seen = Vec::new();
+        let result = run_ssh_checks(
+            &mut restore,
+            roots.path(),
+            [Check::Syntax, Check::HostKeys],
+            |identity, check| {
+                seen.push(kind(&check));
+                identity.cleanup().unwrap();
+                Err(CaptureError::Image(JobError::Native))
+            },
+        );
+        assert!(matches!(result, Err(CaptureError::Image(JobError::Native))));
+        assert_eq!(seen, ["syntax"]);
+        assert!(names(roots.path()).is_empty());
+
+        // Unknown entries left in a root are preserved, and the error wins.
+        let result = run_ssh_checks(
+            &mut restore,
+            roots.path(),
+            [Check::Syntax],
+            |identity, _| {
+                let root = identity.checked_path().unwrap().to_path_buf();
+                identity.cleanup().unwrap();
+                fs::write(root.join("unknown"), b"keep").unwrap();
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(CaptureError::Io(_))));
+        assert_eq!(
+            fs::read(roots.path().join("check-0/unknown")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn the_probe_context_is_a_fixed_root_profile_on_documentation_addresses() {
+        assert!(probe_context("kvm-test").is_ok());
+        assert!(matches!(probe_context(""), Err(CaptureError::Context)));
+        assert!(matches!(
+            probe_context("bad host"),
+            Err(CaptureError::Context)
+        ));
+    }
+}
