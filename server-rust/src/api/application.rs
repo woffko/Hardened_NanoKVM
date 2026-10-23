@@ -1038,7 +1038,7 @@ pub(crate) fn current_app_version() -> String {
 
 /// The offline API's handoff for fixture archive bytes: the same verified
 /// candidate preparation and installer submission as `offline_update`.
-#[cfg(test)]
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
 pub(crate) fn submit_manual_fixture(
     stage: AppStage,
     bytes: &[u8],
