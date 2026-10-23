@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
     fs, io,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -23,11 +23,12 @@ use crate::{
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
     update::{
+        app_install_lease::{Handoff, Sender},
+        app_slot::{self, SlotError},
         app_stage::{AppArchive, AppDownload, AppStage, MAX_ARCHIVE_BYTES as MAX_UPDATE_BYTES},
         keys::verify_metadata_signature,
         operation::{Kind, Snapshot, UpdateOwner},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE},
-        state_writers::WriterDrain,
     },
 };
 
@@ -35,8 +36,6 @@ use crate::{
 mod job;
 pub use job::status as job_status;
 
-const APP_DIR: &str = "/kvmapp";
-const BACKUP_DIR: &str = "/root/old";
 const APP_VERSION_FILE: &str = "/kvmapp/version";
 const DEFAULT_APP_VERSION: &str = "0.1.0";
 const PREVIEW_UPDATES_FLAG: &str = "/etc/kvm/preview_updates";
@@ -51,6 +50,14 @@ const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const APP_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const APP_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
 const MAX_APP_VERSION_BYTES: u64 = 128;
+
+/// The installer's transaction for an accepted handoff, observed at
+/// `/api/application/update/jobs/{transactionId}`. Not an installation result.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSubmittedRsp {
+    pub transaction_id: String,
+}
 
 #[derive(Debug, Serialize)]
 pub struct VersionRsp {
@@ -181,7 +188,9 @@ pub async fn set_preview(Json(req): Json<SetPreviewReq>) -> Result<impl IntoResp
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()>>> {
+pub async fn update(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<UpdateSubmittedRsp>>> {
     if system_firewall::paranoid_mode_enabled() {
         return Err(AppError::BadRequest(
             system_firewall::paranoid_blocked_message().to_string(),
@@ -189,7 +198,7 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
     }
 
     let owner = state.updates.acquire(Kind::ApplicationOnline)?;
-    owner
+    let transaction = owner
         .run(move |job| async move {
             let config = job.blocking("read app update policy", Config::read).await?;
             let verified = get_latest(is_preview_enabled(), &config).await?;
@@ -213,7 +222,8 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
             let verified =
                 authenticate_app_metadata(verified.metadata, verified.signature, &config).await?;
             check_forward(&current_app_version(), &verified.latest.version)?;
-            job.blocking("verify and install app", move || {
+            let handoff = job.prepare_install_handoff(writers)?;
+            job.blocking("verify and hand over app", move || {
                 let archive = archive
                     .finish_online(
                         verified.latest.size,
@@ -226,28 +236,26 @@ pub async fn update(State(state): State<AppState>) -> Result<Json<ApiResponse<()
                             error.into()
                         }
                     })?;
-                install_package(
+                submit_package(
                     archive,
                     stage,
                     InstallAuthority::OnlineMetadata(verified),
-                    writers,
+                    handoff,
                 )
             })
-            .await?;
-            restart_nanokvm_after_response(job);
-            Ok(())
+            .await
         })
         .await?;
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(Json(ApiResponse::ok(submitted(transaction))))
 }
 
 pub async fn offline_update(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<ApiResponse<()>>> {
+) -> Result<Json<ApiResponse<UpdateSubmittedRsp>>> {
     let owner = state.updates.acquire(Kind::ApplicationOffline)?;
-    owner
+    let transaction = owner
         .run(move |job| async move {
             let (stage, archive) = job
                 .blocking("prepare private offline app staging", || {
@@ -263,16 +271,21 @@ pub async fn offline_update(
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
             let writers = state.drain_writers(WRITER_DRAIN_TIMEOUT).await?;
-            job.blocking("install offline app", move || {
-                install_package(archive, stage, InstallAuthority::ManualImport, writers)
+            let handoff = job.prepare_install_handoff(writers)?;
+            job.blocking("hand over offline app", move || {
+                submit_package(archive, stage, InstallAuthority::ManualImport, handoff)
             })
-            .await?;
-            restart_nanokvm_after_response(job);
-            Ok(())
+            .await
         })
         .await?;
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(Json(ApiResponse::ok(submitted(transaction))))
+}
+
+fn submitted(transaction: [u8; 16]) -> UpdateSubmittedRsp {
+    UpdateSubmittedRsp {
+        transaction_id: format!("{:032x}", u128::from_be_bytes(transaction)),
+    }
 }
 
 async fn get_latest(preview: bool, config: &Config) -> Result<VerifiedAppMetadata> {
@@ -615,48 +628,49 @@ fn prepare_app_candidate(
     })
 }
 
-fn install_package(
+/// Hands a verified candidate to the independent installer in the native
+/// broker. The prepared record is durable before the handoff; the installer
+/// then stops this backend for its frozen trial, so nothing here waits for an
+/// outcome. A queued handoff is not acceptance: observe the returned
+/// transaction instead of submitting again.
+fn submit_package(
     source: AppArchive,
     stage: AppStage,
     authority: InstallAuthority,
-    _writers: WriterDrain,
-) -> Result<()> {
-    // Own the complete barrier, not just a handler-local borrow. Blocking work
-    // can outlive its waiter and must exclude enrolled writers until it ends.
+    handoff: Handoff,
+) -> Result<[u8; 16]> {
     let candidate = prepare_app_candidate(source, stage, &authority)?;
-    let crate::update::app_slot::CandidateInput {
-        root: update_root,
-        mut stage,
-        ..
-    } = candidate.into_slot();
+    // A prepared record that no installer accepts blocks further updates until
+    // boot recovery retires it, so refuse first when nobody is listening.
+    drop(connect_installer()?);
+    let prepared = app_slot::prepare(candidate, handoff).map_err(slot_error)?;
+    let transaction = prepared.transaction();
+    // Connect again: the installer drops an idle offer after five seconds,
+    // and preparation syncs the whole candidate first.
+    connect_installer()?
+        .send(prepared.into_handoff())
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "the installer did not take update {:032x} ({error}); check its job status, \
+                 do not submit it again",
+                u128::from_be_bytes(transaction)
+            ))
+        })?;
+    Ok(transaction)
+}
 
-    // Startup attempts a fixed independent bootstrap. Recheck its exact bytes
-    // and absence of any journal while this job owns app/system admission.
-    // This prerequisite does not make the remaining legacy swap crash-safe.
-    #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
-    crate::update::app_bootstrap::check_before_legacy_install()?;
+fn connect_installer() -> Result<Sender> {
+    Sender::connect_broker()
+        .map_err(|error| AppError::Conflict(format!("the app installer is not available: {error}")))
+}
 
-    // From the first live-slot/backup mutation onward, retain the candidate on
-    // every error (including failed backup restore). No cleanup is recovery.
-    stage.preserve_recovery();
-    let app_dir = Path::new(APP_DIR);
-    let backup_dir = Path::new(BACKUP_DIR);
-    remove_dir_if_exists(backup_dir)?;
-    if app_dir.exists() {
-        move_path(app_dir, backup_dir)?;
+fn slot_error(error: SlotError) -> AppError {
+    match error {
+        SlotError::Busy => AppError::Conflict(
+            "another app update transaction is recorded; check its job status".into(),
+        ),
+        other => AppError::Internal(format!("app update preparation failed: {other}")),
     }
-
-    if let Err(err) = move_path(&update_root, app_dir) {
-        tracing::error!(error = %err, "failed to move update into place");
-        if let Err(restore_err) = restore_backup(app_dir, backup_dir) {
-            tracing::error!(error = %restore_err, "failed to restore old kvmapp after update error");
-        }
-        return Err(AppError::Internal(format!("failed to apply update: {err}")));
-    }
-
-    chmod_recursively(app_dir, 0o755)?;
-    stage.discard_after_success();
-    Ok(())
 }
 
 fn resolve_update_root(extracted: &Path) -> Result<PathBuf> {
@@ -1007,95 +1021,6 @@ fn ensure_success(output: &CommandOutput, action: &str) -> Result<()> {
     )))
 }
 
-fn remove_dir_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn move_path(src: &Path, dst: &Path) -> Result<()> {
-    if dst.exists() {
-        remove_dir_if_exists(dst)?;
-    }
-    match fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            tracing::warn!(
-                source = %src.display(),
-                target = %dst.display(),
-                error = %rename_err,
-                "rename failed, copying directory"
-            );
-            copy_path(src, dst)?;
-            remove_dir_if_exists(src)
-        }
-    }
-}
-
-fn copy_path(src: &Path, dst: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(src)?;
-    if metadata.file_type().is_symlink() {
-        return Err(AppError::BadRequest(
-            "unsupported symlink in update tree".to_string(),
-        ));
-    } else if metadata.is_dir() {
-        fs::create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_path(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-    } else if metadata.is_file() {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dst)?;
-    } else {
-        return Err(AppError::BadRequest(
-            "unsupported file type in update tree".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn restore_backup(app_dir: &Path, backup_dir: &Path) -> Result<()> {
-    remove_dir_if_exists(app_dir)?;
-    if backup_dir.exists() {
-        move_path(backup_dir, app_dir)?;
-    }
-    Ok(())
-}
-
-fn chmod_recursively(path: &Path, mode: u32) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_symlink() {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    }
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            chmod_recursively(&entry?.path(), mode)?;
-        }
-    }
-    Ok(())
-}
-
-fn restart_nanokvm_after_response(owner: UpdateOwner) {
-    tokio::spawn(async move {
-        time::sleep(Duration::from_secs(1)).await;
-        let result = run_allowed(
-            AllowedCommand::ServiceNanokvmRestart,
-            ["restart"],
-            Duration::from_secs(20),
-        )
-        .await;
-        if !matches!(result, Ok(ref output) if output.status == 0) {
-            owner.record_outcome(false);
-            tracing::error!("failed to restart NanoKVM after update");
-        }
-    });
-}
-
 pub(crate) fn is_preview_enabled() -> bool {
     Path::new(PREVIEW_UPDATES_FLAG).exists()
 }
@@ -1109,6 +1034,24 @@ fn read_trimmed(path: &str) -> Option<String> {
 
 pub(crate) fn current_app_version() -> String {
     read_trimmed(APP_VERSION_FILE).unwrap_or_else(|| DEFAULT_APP_VERSION.to_string())
+}
+
+/// The offline API's handoff for fixture archive bytes: the same verified
+/// candidate preparation and installer submission as `offline_update`.
+#[cfg(test)]
+pub(crate) fn submit_manual_fixture(
+    stage: AppStage,
+    bytes: &[u8],
+    handoff: Handoff,
+) -> Result<[u8; 16]> {
+    let mut download = stage.create_archive()?;
+    download.append(bytes)?;
+    submit_package(
+        download.finish_manual_import()?,
+        stage,
+        InstallAuthority::ManualImport,
+        handoff,
+    )
 }
 
 #[cfg(test)]

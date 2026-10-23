@@ -22,6 +22,8 @@ import type {
 import * as firewallApi from '@/api/system-firewall.ts';
 import type { FirewallStatus } from '@/api/system-firewall.ts';
 
+import { followAppUpdate, pendingAppUpdate } from './job.ts';
+import type { AppUpdateOutcome } from './job.ts';
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
 
@@ -51,9 +53,26 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [firewallStatus, setFirewallStatus] = useState<FirewallStatus | null>(null);
 
   useEffect(() => {
+    const pending = pendingAppUpdate();
+    if (pending) {
+      setIsLocked(true);
+      setStatus('updating');
+      followAppUpdate(pending).then(finishAppUpdate);
+      return;
+    }
     refreshFirewallStatus();
     refreshRawSystemUpdatesEnabled();
   }, []);
+
+  function finishAppUpdate(outcome: AppUpdateOutcome) {
+    setIsLocked(false);
+    if (outcome === 'rolled-back') {
+      setStatus('failed');
+      setErrMsg(t('settings.update.updateFailed'));
+      return;
+    }
+    window.location.reload();
+  }
 
   const onlineUpdatesBlocked = !!firewallStatus?.paranoidActive;
 
@@ -442,12 +461,16 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     api
       .update()
       .then((rsp: any) => {
-        if (rsp.code !== 0) {
+        if (rsp.code !== 0 || !rsp.data?.transactionId) {
           setStatus('failed');
-          setErrMsg(t('settings.update.updateFailed'));
+          setErrMsg(rsp.msg || t('settings.update.updateFailed'));
+          setIsLocked(false);
+          return;
         }
+        return followAppUpdate(rsp.data.transactionId).then(finishAppUpdate);
       })
-      .finally(() => {
+      .catch(() => {
+        // No reply: the device may already be restarting for the update.
         setTimeout(() => {
           setIsLocked(false);
           setErrMsg('');

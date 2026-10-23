@@ -5,6 +5,8 @@ import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/application.ts';
 
+import { followAppUpdate } from './job.ts';
+
 interface UpdateProps {
   status: string;
   setStatus: (status: string) => void;
@@ -59,20 +61,29 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
     api
       .offlineUpdate(formData)
       .then((rsp: Response) => {
-        // Prüfen ob HTTP OK
         if (!rsp.ok) throw new Error(`HTTP error ${rsp.status}`);
-        return rsp.json(); // JSON-Payload parsen
+        return rsp.json();
       })
       .then((rspj: any) => {
-        // Jetzt rspj ist das tatsächliche JSON
-        if (rspj.code !== 0 || !rspj.data) {
+        if (rspj.code !== 0 || !rspj.data?.transactionId) {
           setStatus('failed');
           setErrMsg(rspj.msg || t('settings.update.offline.updateFailed'));
+          setIsLocked(false);
           console.log(rspj);
           return;
         }
+        return followAppUpdate(rspj.data.transactionId).then((outcome) => {
+          setIsLocked(false);
+          if (outcome === 'rolled-back') {
+            setStatus('failed');
+            setErrMsg(t('settings.update.offline.updateFailed'));
+            return;
+          }
+          window.location.reload();
+        });
       })
-      .finally(() => {
+      .catch(() => {
+        // No reply: the device may already be restarting for the update.
         setTimeout(() => {
           setIsLocked(false);
           setErrMsg('');

@@ -767,7 +767,7 @@ async fn invalid_canonical_receipt_rejects_valid_leases_before_any_native_stop()
 #[test]
 fn fixed_root_delivery_child() {
     use crate::{
-        api::application::manual_candidate_fixture,
+        api::application::submit_manual_fixture,
         update::{
             app_stage::AppStage,
             operation::{Kind, UpdateCoordinator},
@@ -804,6 +804,27 @@ fn fixed_root_delivery_child() {
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
     let uid = nix::unistd::geteuid().as_raw();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let submit = || {
+        let coordinator = Arc::new(UpdateCoordinator::default());
+        let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
+        let drain = runtime
+            .block_on(StateWriters::default().drain(Duration::from_secs(1)))
+            .unwrap();
+        let handoff = owner.prepare_install_handoff(drain).unwrap();
+        submit_manual_fixture(
+            AppStage::prepare().unwrap(),
+            &app_slot::issuer_tests::archive(),
+            handoff,
+        )
+    };
+    // With no installer listening the API refuses before any durable record,
+    // which would otherwise block every later update until boot recovery.
+    assert!(matches!(submit(), Err(crate::AppError::Conflict(_))));
+    assert!(!Path::new("/etc/kvm/application-slot/current").exists());
     // Only native enrollment/process execution are fixture supplied. Endpoint
     // connect, Incoming::open, prepared issuer and acceptance use fixed roots.
     let mut server = Server::new(broker(Path::new("/etc/kvm")), uid).unwrap();
@@ -817,28 +838,9 @@ fn fixed_root_delivery_child() {
     std::thread::scope(|scope| {
         let thread = scope.spawn(move || server.run());
         let guard = Cancel(send);
-        let coordinator = Arc::new(UpdateCoordinator::default());
-        let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let drain = runtime
-            .block_on(StateWriters::default().drain(Duration::from_secs(1)))
-            .unwrap();
-        let candidate = manual_candidate_fixture(
-            AppStage::prepare().unwrap(),
-            &app_slot::issuer_tests::archive(),
-        )
-        .unwrap();
-        let prepared =
-            app_slot::prepare(candidate, owner.prepare_install_handoff(drain).unwrap()).unwrap();
-        let id = prepared.transaction();
-        app_install_lease::Sender::connect_broker()
-            .unwrap()
-            .send(prepared.into_handoff())
-            .unwrap();
-        drop(owner);
+        // The offline API's own composition: verified candidate, durable
+        // prepared record, then the handoff to the named installer endpoint.
+        let id = submit().unwrap();
         let mut control = Channel::connect().unwrap();
         observed(&mut control, Mode::Installing);
         // Production 5 s idle applies to this non-lease observer: release it at

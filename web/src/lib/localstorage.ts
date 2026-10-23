@@ -22,6 +22,7 @@ const MENU_DISABLED_ITEMS_KEY = 'nano-kvm-menu-disabled-items';
 const MENU_AUTO_HIDE_KEY = 'nano-kvm-menu-auto-hide';
 const LAYOUT_MODE_KEY = 'nano-kvm-layout-mode';
 const POWER_CONFIRM_KEY = 'nano-kvm-power-confirm';
+const APP_UPDATE_JOB_KEY = 'nano-kvm-app-update-job';
 
 type ItemWithExpiry = {
   value: string;
@@ -293,4 +294,17 @@ export function getPowerConfirm() {
 
 export function setPowerConfirm(enabled: boolean) {
   localStorage.setItem(POWER_CONFIRM_KEY, String(enabled));
+}
+
+// The installer transaction of an app update that this browser submitted.
+export function getAppUpdateJob() {
+  return localStorage.getItem(APP_UPDATE_JOB_KEY);
+}
+
+export function setAppUpdateJob(transactionId: string) {
+  localStorage.setItem(APP_UPDATE_JOB_KEY, transactionId);
+}
+
+export function removeAppUpdateJob() {
+  localStorage.removeItem(APP_UPDATE_JOB_KEY);
 }
