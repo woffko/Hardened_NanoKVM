@@ -19,7 +19,8 @@ if [ "${1:-}" != --inside ]; then
         fi
     done
     TEST_ROOT="$(mktemp -d)"
-    trap 'rm -rf "$TEST_ROOT"' EXIT
+    # The overlay leaves its work directory without permissions.
+    trap 'chmod -R u+rwx "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
     status=0
     unshare --user --map-root-user --net --mount bash "$0" --inside "$TEST_ROOT" || status=$?
     exit "$status"
