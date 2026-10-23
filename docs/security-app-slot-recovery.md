@@ -2,16 +2,13 @@
 
 This describes source/host-tested preparation, independent daemon delivery,
 native-closed publication, rollback and early consumer gates, not a completed
-API installation lifecycle or WP-04/C1 fix. Since 2026-10-23 the online and
-offline app update API hands its verified candidate to this installer instead
-of swapping `/kvmapp` itself; that path is host-tested with the fixed-root daemon
-and is not accepted on a device. The new helper is compile-bound into the linked RV64 backend and
+API installation lifecycle or WP-04/C1 fix. The actual app
+API still uses its legacy slot swap. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
 installation for an app-only bridge. S02 and individual consumer gates now invoke
-it, but device acceptance of the API submission and the broker, the remaining
-producer activation, legacy first-bridge target acceptance and helper migration
-remain open. The full remediation scope is unchanged.
+it, but producer/API/broker activation, legacy first-bridge target acceptance, helper migration and
+device acceptance remain open. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
 
@@ -56,8 +53,8 @@ authority. The factory fingerprints the actual readonly archive descriptor,
 rechecks its size/hash against authenticated online metadata, binds the candidate
 version and records exact metadata/signature byte hashes. Manual import and
 policy-authorized unsigned-lab metadata remain distinct; neither is relabeled
-as signed. The API passes this candidate to the journal issuer and then to the
-installer endpoint, as described under independent daemon delivery. Rootfs
+as signed. The API still uses the old swap after this shared candidate factory:
+it has **not** been connected to the new journal issuer. Rootfs
 protection, issuer provenance and the closed restore policy are mandatory.
 Neither a copied p3 record nor a valid checksum creates installation authority.
 Host tests require the new journal, temporary records and old/new code slots to
@@ -216,23 +213,7 @@ writer exclusions are retained: it acquires writer/update
 admission and performs storage, helper, trust and init-script writes. Do not
 release/reacquire the exclusions to make that startup succeed.
 
-## Independent daemon delivery and API submission
-
-The ordinary online and offline POSTs now end with this delivery. After the
-verified candidate is ready they connect once to the installer endpoint and
-close again, so that an absent installer is refused before any durable record:
-a prepared record that nobody accepts would block every later update until boot
-recovery retires it. Then they prepare the record under the retained
-update/writer handoff, connect again (the daemon drops an offer idle for five
-seconds, and preparation syncs the whole candidate) and send the handoff. The
-reply carries the transaction ID; the broker then stops this backend for the
-frozen trial. A failed send reports that ID and must be inspected through
-`/update/jobs/{id}`, never submitted again. The legacy `/kvmapp` swap, its
-`/root/old` backup and the S95 restart after the reply are gone. The web UI
-polls the job across the drain and trial; the restarted backend has no session,
-so its 401 leads to login, after which the update page reads the stored
-transaction once more. The fixed-root delivery fixture drives this exact API
-composition, including the refusal with no installer listening.
+## Independent daemon delivery (API not activated)
 
 The existing independent native broker is itself the installation owner; an
 additional installer child is not spawned below the backend's subreaper. This
@@ -326,8 +307,7 @@ inactive-payload pruning below uses retained lifetime authority and its own
 protected journal. Bounded receipt expiry/cutoff and full GC acceptance remain
 required. App
 Committed, archived status, mtime/UUID order and PID absence do not authorize
-deleting a known fallback. The ordinary app API submits through the installer
-but is not accepted on a device.
+deleting a known fallback. The ordinary app API is still legacy/unaccepted.
 
 ## Terminal archival and per-transaction observation
 
@@ -357,7 +337,7 @@ Issuing a subsequent app requires the head's exact archived directory/receipt
 and the expected current live identity. An unordered pre-policy history cannot
 be silently enrolled; it stays preserved and needs an explicit migration policy.
 This is development-only state: it is not a requirement imposed on published
-legacy RC12 assets, nor device acceptance of the ordinary app API.
+legacy RC12 assets, nor acceptance of the still-legacy ordinary app API.
 
 Inactive payload expiry and bounded receipt retention now have separate journaled
 development paths below. Full GC acceptance and baseline health/promotion policy
@@ -446,7 +426,7 @@ Default PicoClaw state lives outside the app, but its effective config/home and
 workspace are configurable. Resolve the actual selected paths: a custom workspace
 inside a replaceable app/slot tree needs explicit durable migration before swap
 or GC; default-path coverage is not proof of custom-state preservation.
-The ordinary app API submits through the installer; no device acceptance is claimed.
+The ordinary app API is still legacy/unaccepted; no device acceptance is claimed.
 
 The immutable manifest is bound to both current and victim order receipts.
 Only complete fsynced anonymous files are linked into the protected namespace.
@@ -569,14 +549,11 @@ with a fixed error, never an inferred absence or private path. A fatal server
 abort produces no response and must not be interpreted as installation failure.
 Responses are `no-store`; the shared API security layer also adds `max-age=0`.
 
-This route grants no install authority and does not replace the old in-memory
-`/update/status` snapshot. The ordinary POSTs return the transaction ID and the
-web UI polls this route; reconnect after the trial restart goes through login.
-The mutable-state allowlist (`ap.ssid`, `ap.pass`, `type`, `fps`, `qlty`, `gop`,
-`res`) covers every persistent setting written under `/kvmapp`; `width`,
-`height`, `state`, `now_fps`, `wifi_state` and `wifi_try_connect` are runtime
-status or one-shot requests, and `/kvmapp/picoclaw` is shipped content. Complete
-target acceptance remains required before release.
+This diagnostic route does not activate the new installer or replace the old
+in-memory `/update/status` snapshot. The still-legacy ordinary POSTs do not yet
+issue canonical job responses, and the current UI is not yet wired to this
+contract. Submission/handoff, reconnect/UI behavior, effective mutable-state
+migration and complete target acceptance remain required before release.
 
 ### Explicit live-terminal archival retry
 
@@ -1006,11 +983,11 @@ select this retained-input gate.
 
 If the backend has already launched, a helper-bootstrap failure alone is logged
 without terminating it, preserving authenticated management for diagnosis.
-The app install API no longer swaps slots itself. `check_before_legacy_install`
-(exact app helper, complete native family and critical consumer scripts, no
-app-slot transaction) remains a read-only bootstrap check. The submission path
-instead relies on preparation's refusal of any current transaction and on the
-trial backend's own `check_trial_support` before it serves.
+The target app install API independently rechecks the exact app helper, complete
+native family and critical consumer scripts, and requires no app-slot transaction before its first legacy
+slot/backup mutation, while
+already owning shared update admission. This is an installation prerequisite,
+not a durable receipt or a claim that the remaining legacy swap is crash-safe.
 
 Buildroot installs both copies up front and restores/verifies both after ELF
 fixups. The legacy SD assembler also writes a mode-0755 root-owned independent
@@ -1175,18 +1152,18 @@ daemon tests include frontend death and observer disconnect through trial/commit
 Engine tests cover failed-trial join/rollback, missing receipt and a post-app-commit
 native-journal failure that retains Uncertain without authorization or retry.
 These are not a daemon-to-real-backend/native-runtime acceptance test. The
-ordinary API submits to the daemon; no device deployment is implied.
+ordinary API is not activated, and no device deployment is implied.
 
 ## Remaining activation prerequisites
 
-- The API now hands updates to the independently delivered native-closed
-  installer (source and host tests). Before release it still needs exact
-  metadata/key/policy lifetime review, daemon-to-real-backend/native-runtime
-  health acceptance, physical fresh-boot/terminal-failure acceptance and the
-  bounded history/space policy.
+- Activate the independently delivered native-closed installer in the API only
+  after exact metadata/key/policy lifetime, durable job observability,
+  daemon-to-real-backend/native-runtime health acceptance, physical fresh-boot/
+  terminal-failure acceptance and bounded history/space policy.
   Execution modes, frozen backend startup and daemon-driven broker transitions
   now have host tests; they are not target/runtime acceptance. Host-tested
-  publication/rollback is not a complete lifecycle.
+  publication/rollback is not a complete lifecycle; the app API still uses its
+  old swap.
 - Full pipeline/target acceptance of independent rootfs installation and the
   atomic app-only bootstrap, including actual I/O failure and mount negatives.
 - Complete helper-version lifecycle across subsequent app updates. The pinned

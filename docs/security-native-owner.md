@@ -19,8 +19,8 @@ app-install endpoint and now drives its frozen trial, commit and failure/cancel
 stop-join transitions. Successful live terminal archival now preserves the
 receipt/inactive slot and permits a subsequent transaction; archival failure
 retains the owner and exclusions. Root has an explicit live-terminal archival
-retry, which cannot reset later ownership uncertainty. The ordinary app update
-API now submits to this endpoint (host-tested); nonterminal/owner-loss and fresh-boot completion, bounded retention,
+retry, which cannot reset later ownership uncertainty. The ordinary API remains
+legacy; nonterminal/owner-loss and fresh-boot completion, bounded retention,
 daemon-to-real-backend/runtime and device acceptance remain required.
 
 ## Implemented boundary
@@ -927,8 +927,7 @@ and missing-closure cases also retain/check the real nine-file journal. These
 payloads and child probes are not authenticated release/device acceptance.
 
 Real native/vendor runtime, ext4/vendor-media allocation, legacy first-bridge/
-restart, device acceptance of the ordinary API submission and device migration
-remain incomplete. These
+restart, ordinary API activation and device migration remain incomplete. These
 host fixtures are not physical boot, hardware power-loss or release acceptance.
 
 ## Frozen trial and recovery integration

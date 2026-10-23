@@ -1,6 +1,6 @@
 use super::*;
 use sha2::{Digest, Sha256, Sha512};
-use std::{os::unix::fs::PermissionsExt, process::Command};
+use std::process::Command;
 use tempfile::{TempDir, tempdir};
 
 struct SigningFixture {

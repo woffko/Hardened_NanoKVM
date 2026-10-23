@@ -157,11 +157,6 @@ export function update() {
   });
 }
 
-// observe the installer transaction of an app update
-export function getUpdateJob(transactionId: string) {
-  return http.get(`/api/application/update/jobs/${encodeURIComponent(transactionId)}`);
-}
-
 // offline update application
 export function offlineUpdate(data: FormData) {
   const baseUrl = getBaseUrl('http');
