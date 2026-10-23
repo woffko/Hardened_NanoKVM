@@ -22,8 +22,21 @@ const DEFAULT_OPTIONS: Required<WsClientOptions> = {
   url: `${getBaseUrl('ws')}/api/ws`,
   heartbeatInterval: 10 * 1000,
   reconnectInterval: 3 * 1000,
-  maxReconnectAttempts: 1
+  maxReconnectAttempts: 10
 };
+
+// Reconnect delays grow from reconnectInterval by this factor, up to the cap,
+// so a device that is rebooting is not polled every few seconds for minutes.
+const RECONNECT_BACKOFF = 1.5;
+const MAX_RECONNECT_INTERVAL = 30 * 1000;
+
+export function reconnectDelay(
+  base: number,
+  attempt: number,
+  cap = MAX_RECONNECT_INTERVAL
+): number {
+  return Math.min(cap, Math.round(base * RECONNECT_BACKOFF ** Math.max(0, attempt - 1)));
+}
 
 export class WsClient {
   private readonly options: Required<WsClientOptions>;
@@ -48,12 +61,7 @@ export class WsClient {
   public close(): void {
     this.shouldReconnect = false;
     this.cleanup();
-
-    if (this.instance && this.instance.readyState === W3cWebSocket.OPEN) {
-      this.instance.close();
-    }
-
-    this.instance = null;
+    this.discardInstance();
   }
 
   public on(type: string, handler: MessageHandler): () => void {
@@ -108,14 +116,45 @@ export class WsClient {
 
   private createConnection(): void {
     this.cleanup();
+    this.discardInstance();
 
-    this.instance = new W3cWebSocket(this.options.url);
-    this.instance.binaryType = 'arraybuffer';
+    const socket = new W3cWebSocket(this.options.url);
+    this.instance = socket;
+    socket.binaryType = 'arraybuffer';
 
-    this.instance.onopen = this.handleOpen.bind(this);
-    this.instance.onclose = this.handleClose.bind(this);
-    this.instance.onerror = this.handleError.bind(this);
-    this.instance.onmessage = this.handleMessage.bind(this);
+    // Only the current socket drives this client. One discarded while it was
+    // still connecting must not start a heartbeat or another reconnect when
+    // it finally opens or closes.
+    socket.onopen = () => {
+      if (socket === this.instance) this.handleOpen();
+    };
+    socket.onclose = () => {
+      if (socket === this.instance) this.handleClose();
+    };
+    socket.onerror = (error: Error) => {
+      if (socket === this.instance) this.handleError(error);
+    };
+    socket.onmessage = (message: IMessageEvent) => {
+      if (socket === this.instance) this.handleMessage(message);
+    };
+  }
+
+  // Close whatever socket is current, including one that is still connecting;
+  // the old code closed only open sockets and left the rest to connect on
+  // their own.
+  private discardInstance(): void {
+    const socket = this.instance;
+    if (!socket) {
+      return;
+    }
+    this.instance = null;
+    socket.onopen = () => {};
+    socket.onclose = () => {};
+    socket.onerror = () => {};
+    socket.onmessage = () => {};
+    if (socket.readyState === W3cWebSocket.CONNECTING || socket.readyState === W3cWebSocket.OPEN) {
+      socket.close();
+    }
   }
 
   private handleOpen(): void {
@@ -170,11 +209,15 @@ export class WsClient {
     }
 
     this.reconnectAttempts++;
-    console.log(`[WebSocket] Reconnecting... (attempt ${this.reconnectAttempts})`);
+    const delay = reconnectDelay(this.options.reconnectInterval, this.reconnectAttempts);
+    console.log(
+      `[WebSocket] Reconnecting in ${delay} ms (attempt ${this.reconnectAttempts}/${this.options.maxReconnectAttempts})`
+    );
 
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       this.createConnection();
-    }, this.options.reconnectInterval);
+    }, delay);
   }
 
   private cleanup(): void {

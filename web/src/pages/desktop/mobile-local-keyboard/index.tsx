@@ -1,7 +1,9 @@
 import { ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useRef } from 'react';
+import { message } from 'antd';
 import { useAtom, useSetAtom } from 'jotai';
 
 import { paste } from '@/api/hid.ts';
+import { CompositionGate } from '@/lib/composition.ts';
 import { KeyboardReport } from '@/lib/keyboard.ts';
 import * as storage from '@/lib/localstorage.ts';
 import { client, MessageEvent } from '@/lib/websocket.ts';
@@ -31,6 +33,7 @@ export const MobileLocalKeyboard = () => {
 
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keyboardRef = useRef(new KeyboardReport());
+  const compositionRef = useRef(new CompositionGate());
   const queueRef = useRef(Promise.resolve());
 
   useEffect(() => {
@@ -66,7 +69,12 @@ export const MobileLocalKeyboard = () => {
   function sendText(text: string) {
     if (!text) return;
     enqueue(async () => {
-      await paste(text, getPasteLanguage());
+      // The backend refuses characters the chosen layout cannot type, by
+      // name; a silent queue would make them look typed.
+      const rsp: any = await paste(text, getPasteLanguage());
+      if (rsp?.code !== 0) {
+        message.error(rsp?.msg || 'paste failed');
+      }
     });
   }
 
@@ -95,9 +103,25 @@ export const MobileLocalKeyboard = () => {
     }
   }
 
-  function handleInput() {
-    const value = inputRef.current?.value || '';
-    if (!value) return;
+  function handleInput(event: FormEvent<HTMLTextAreaElement>) {
+    const nativeEvent = event.nativeEvent as InputEvent;
+    const value = compositionRef.current.input(
+      inputRef.current?.value || '',
+      nativeEvent.isComposing
+    );
+    if (value === null) return;
+
+    sendText(value.replace(/\r\n/g, '\n'));
+    resetInputValue();
+  }
+
+  function handleCompositionStart() {
+    compositionRef.current.start();
+  }
+
+  function handleCompositionEnd() {
+    const value = compositionRef.current.end(inputRef.current?.value || '');
+    if (value === null) return;
 
     sendText(value.replace(/\r\n/g, '\n'));
     resetInputValue();
@@ -151,6 +175,8 @@ export const MobileLocalKeyboard = () => {
       spellCheck={false}
       tabIndex={-1}
       onBeforeInput={handleBeforeInput}
+      onCompositionEnd={handleCompositionEnd}
+      onCompositionStart={handleCompositionStart}
       onFocus={handleFocus}
       onInput={handleInput}
       onKeyDown={handleKeyDown}

@@ -4,6 +4,7 @@ import { useAtom, useAtomValue } from 'jotai';
 import { MouseReportAbsolute } from '@/lib/mouse.ts';
 import * as storage from '@/lib/localstorage.ts';
 import { client, MessageEvent } from '@/lib/websocket.ts';
+import { wheelStep } from '@/lib/wheel.ts';
 import { scrollDirectionAtom, scrollIntervalAtom } from '@/jotai/mouse.ts';
 import { resolutionAtom, videoScaleAtom } from '@/jotai/screen.ts';
 import { useIsTouchLayout } from '@/hooks/useResponsiveLayout.ts';
@@ -177,7 +178,8 @@ export const Absolute = () => {
     function handleWheel(e: WheelEvent) {
       disableEvent(e);
 
-      if (Math.floor(e.deltaY) === 0) {
+      const deltaY = wheelStep(e.deltaY, scrollDirection);
+      if (deltaY === 0) {
         return;
       }
 
@@ -186,7 +188,6 @@ export const Absolute = () => {
         return;
       }
 
-      const deltaY = (e.deltaY > 0 ? 1 : -1) * scrollDirection;
       handleMouseEvent({ type: 'wheel', deltaY });
       lastScrollTimeRef.current = currentTime;
     }
