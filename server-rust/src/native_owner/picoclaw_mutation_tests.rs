@@ -16,13 +16,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) fn until(mut condition: impl FnMut() -> bool) {
+pub(crate) fn until(condition: impl FnMut() -> bool) {
+    until_within(Duration::from_secs(30), condition)
+}
+
+/// A fixture child re-executes this whole debug test binary. Under heavy host
+/// IO its start alone has taken over 30 s, so its exit gets a longer bound.
+fn until_child_exits(child: &mut Child) {
+    until_within(Duration::from_secs(120), || {
+        child.0.as_mut().unwrap().try_wait().unwrap().is_some()
+    })
+}
+
+fn until_within(limit: Duration, mut condition: impl FnMut() -> bool) {
     let start = Instant::now();
     while !condition() {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "mutation fixture watchdog"
-        );
+        assert!(start.elapsed() < limit, "mutation fixture watchdog");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -147,7 +156,7 @@ fn run(case: &str) {
     let root = root();
     let _cleanup = FixtureLeaves(root.path());
     let mut child = Child(Some(command(root.path(), case).spawn().unwrap()));
-    until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    until_child_exits(&mut child);
     let output = child.0.take().unwrap().wait_with_output().unwrap();
     assert!(output.status.success(), "{case}: {output:?}");
     assert!(
@@ -393,7 +402,7 @@ fn parent_fixture_cleanup_rejects_foreign_pid_file_and_reaps_only_its_owned_orph
     let mut child = Child(Some(
         command(root.path(), "parent-cleanup").spawn().unwrap(),
     ));
-    until(|| child.0.as_mut().unwrap().try_wait().unwrap().is_some());
+    until_child_exits(&mut child);
     let output = child.0.take().unwrap().wait_with_output().unwrap();
     assert!(!output.status.success());
     assert!(
