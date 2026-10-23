@@ -7,7 +7,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use bytes::Bytes;
 use rtcp::payload_feedbacks::{
     full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
 };
@@ -15,19 +14,16 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     future::Future,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Weak},
     task::{Context, Waker},
     time::Duration,
 };
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, watch},
     task::JoinHandle,
-    time::{self, MissedTickBehavior},
+    time,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use webrtc::{
     api::{
         APIBuilder,
@@ -61,8 +57,8 @@ use crate::{
     AppError, Result,
     api::{
         stream::{
-            CAPTURE_MODE_H264, current_h264_screen, h264_frame_duration, is_h264_capture_active,
-            read_h264_capture_frame, request_h264_keyframe,
+            H264Subscription, H264Viewer, current_h264_screen, h264_frame_duration,
+            request_h264_keyframe, subscribe_h264,
         },
         system_firewall,
         webrtc_policy::{PeerAccess, PeerAdmission, SignalBudget, StopOnDrop},
@@ -77,9 +73,10 @@ use crate::{
 const SIGNAL_BUFFER: usize = 64;
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 
-static H264_WEBRTC_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
-static H264_WEBRTC_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
-static H264_WEBRTC_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+/// How long the idle producer sleeps between looks for an active peer, and
+/// how long a viewer waits for a frame before it looks again.
+const PRODUCER_IDLE_POLL: Duration = Duration::from_millis(100);
+const PRODUCER_FRAME_WAIT: Duration = Duration::from_secs(1);
 
 pub async fn h264_webrtc_stream(
     State(state): State<AppState>,
@@ -534,25 +531,20 @@ impl WebRtcManager {
         debug!("start sending h264 webrtc stream");
     }
 
+    /// The retained media producer. While a peer is connected it is one viewer
+    /// of the single H.264 source (shared with Direct viewers) and writes
+    /// every frame to every active peer; without a peer it holds no
+    /// subscription, so the source can stop, and it looks again shortly.
     async fn send_video_stream(manager: Weak<Self>, mut stopped: watch::Receiver<bool>) -> bool {
-        let mut screen = current_h264_screen();
-        let mut duration = h264_frame_duration(screen.fps);
-        let mut interval = time::interval(duration);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let playout_delay = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
             0, 0,
         ))];
+        let mut subscription: Option<H264Subscription> = None;
 
         loop {
-            tokio::select! {
-                biased;
-                _ = stopped.wait_for(|stopped| *stopped) => return true,
-                _ = interval.tick() => {},
-            }
             let Some(manager) = manager.upgrade() else {
                 return true;
             };
-
             let clients = manager.clients().await;
             if !clients
                 .iter()
@@ -561,42 +553,36 @@ impl WebRtcManager {
             {
                 // Stay owned and idle. Exiting here races a newly connected
                 // peer against producer retirement and can lose its restart.
-                continue;
-            }
-
-            screen = current_h264_screen();
-            if !is_h264_capture_active() {
-                // This retained producer is idle, not a failed read. Do not
-                // overwrite capture status owned by the currently active mode.
-                continue;
-            }
-            if !H264_WEBRTC_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(
-                    width = screen.width,
-                    height = screen.height,
-                    bit_rate = screen.bit_rate,
-                    "reading first h264 webrtc frame"
-                );
-            }
-
-            let Some((data, result)) = read_h264_capture_frame(CAPTURE_MODE_H264, screen).await
-            else {
-                if !H264_WEBRTC_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                    warn!("h264 webrtc frame unavailable");
+                subscription = None;
+                tokio::select! {
+                    biased;
+                    _ = stopped.wait_for(|stopped| *stopped) => return true,
+                    _ = time::sleep(PRODUCER_IDLE_POLL) => continue,
                 }
-                continue;
-            };
-
-            if !H264_WEBRTC_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
-                info!(result, bytes = data.len(), "read first h264 webrtc frame");
             }
+            drop(manager);
+
+            let viewer = subscription.get_or_insert_with(|| subscribe_h264(H264Viewer::WebRtc));
+            let frame = tokio::select! {
+                biased;
+                _ = stopped.wait_for(|stopped| *stopped) => return true,
+                frame = time::timeout(PRODUCER_FRAME_WAIT, viewer.recv()) => match frame {
+                    // Nothing yet: MJPEG is selected or capture is disabled.
+                    // Look at the peers again; the subscription stays.
+                    Err(_) => continue,
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        subscription = None;
+                        continue;
+                    }
+                },
+            };
 
             let sample = Sample {
-                data: Bytes::from(data),
-                duration,
+                data: frame.data,
+                duration: h264_frame_duration(current_h264_screen().fps),
                 ..Default::default()
             };
-
             for client in clients.iter().flatten() {
                 if !client.access.is_active() {
                     continue;
@@ -615,14 +601,6 @@ impl WebRtcManager {
                     );
                     client.access.stop();
                 }
-            }
-
-            let latest = current_h264_screen();
-            if latest.fps != screen.fps {
-                screen = latest;
-                duration = h264_frame_duration(screen.fps);
-                interval = time::interval(duration);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             }
         }
     }

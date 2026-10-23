@@ -15,7 +15,9 @@ use futures_util::SinkExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    future::Future,
+    io,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
@@ -69,8 +71,10 @@ static SCREEN: LazyLock<Mutex<Screen>> = LazyLock::new(|| Mutex::new(Screen::def
 static LATEST_MJPEG_FRAME: LazyLock<Mutex<Option<LatestMjpegFrame>>> =
     LazyLock::new(|| Mutex::new(None));
 static MJPEG_FANOUT: LazyLock<StreamFanout<MjpegFrame>> = LazyLock::new(|| StreamFanout::new(4));
-static H264_DIRECT_FANOUT: LazyLock<StreamFanout<H264DirectFrame>> =
-    LazyLock::new(|| StreamFanout::new(16));
+/// The one H.264 encoder is stateful: every read returns the next frame of
+/// one sequence, so every viewer, Direct or WebRTC, must get every frame.
+static H264_SOURCE: LazyLock<H264Source> =
+    LazyLock::new(|| H264Source::new(8, request_h264_keyframe));
 static MJPEG_FIRST_READ_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static MJPEG_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -130,9 +134,130 @@ struct MjpegFrame {
     data: Bytes,
 }
 
+/// One encoded frame of the single H.264 source. `packet` is the Direct
+/// websocket framing (keyframe flag, timestamp, data); `data` borrows it.
 #[derive(Debug, Clone)]
-struct H264DirectFrame {
+pub(crate) struct H264Frame {
+    pub(crate) data: Bytes,
     packet: Bytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum H264Viewer {
+    Direct,
+    WebRtc,
+}
+
+/// What the source does on its next tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H264SourceStep {
+    Capture(H264Screen),
+    /// Another client selected MJPEG; viewers stay connected for the switch
+    /// back.
+    Wait(u64),
+    Stop,
+}
+
+struct H264Source {
+    fanout: StreamFanout<H264Frame>,
+    direct: AtomicUsize,
+    webrtc: AtomicUsize,
+    /// Asks the encoder for an I-frame; a viewer that joins a running stream
+    /// or lost frames cannot decode anything before one arrives.
+    keyframe: fn(&'static str),
+}
+
+/// A viewer's place in the fan-out. Dropping it leaves the stream; the source
+/// stops after the last viewer.
+pub(crate) struct H264Subscription {
+    source: &'static H264Source,
+    kind: H264Viewer,
+    rx: broadcast::Receiver<H264Frame>,
+}
+
+impl H264Source {
+    fn new(capacity: usize, keyframe: fn(&'static str)) -> Self {
+        Self {
+            fanout: StreamFanout::new(capacity),
+            direct: AtomicUsize::new(0),
+            webrtc: AtomicUsize::new(0),
+            keyframe,
+        }
+    }
+
+    fn counter(&self, kind: H264Viewer) -> &AtomicUsize {
+        match kind {
+            H264Viewer::Direct => &self.direct,
+            H264Viewer::WebRtc => &self.webrtc,
+        }
+    }
+
+    /// Join the stream; `start` runs the producer when none is running.
+    fn subscribe(&'static self, kind: H264Viewer, start: impl FnOnce()) -> H264Subscription {
+        self.fanout.clients.fetch_add(1, Ordering::AcqRel);
+        self.counter(kind).fetch_add(1, Ordering::AcqRel);
+        let rx = self.fanout.subscribe();
+        if self
+            .fanout
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            start();
+        } else {
+            (self.keyframe)("new h264 viewer");
+        }
+        H264Subscription {
+            source: self,
+            kind,
+            rx,
+        }
+    }
+
+    /// The capture status labels to report to: the UI shows one per viewer
+    /// mode, and both kinds may be watching the one source.
+    fn status_modes(&self) -> (&'static str, Option<&'static str>) {
+        let direct = self.direct.load(Ordering::Acquire) > 0;
+        let webrtc = self.webrtc.load(Ordering::Acquire) > 0;
+        match (direct, webrtc) {
+            (true, true) => (CAPTURE_MODE_H264, Some(CAPTURE_MODE_DIRECT)),
+            (false, true) => (CAPTURE_MODE_H264, None),
+            _ => (CAPTURE_MODE_DIRECT, None),
+        }
+    }
+}
+
+impl H264Subscription {
+    /// The next frame, or `None` once the source is gone. Lost frames leave
+    /// the decoder without its references: ask for a keyframe and go on with
+    /// the newest frames rather than stopping.
+    pub(crate) async fn recv(&mut self) -> Option<H264Frame> {
+        loop {
+            match self.rx.recv().await {
+                Ok(frame) => return Some(frame),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    (self.source.keyframe)("h264 viewer lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+impl Drop for H264Subscription {
+    fn drop(&mut self) {
+        self.source
+            .counter(self.kind)
+            .fetch_sub(1, Ordering::AcqRel);
+        self.source.fanout.clients.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Join the H.264 stream as a Direct or WebRTC viewer.
+pub(crate) fn subscribe_h264(kind: H264Viewer) -> H264Subscription {
+    H264_SOURCE.subscribe(kind, || {
+        tokio::spawn(run_h264_source());
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -260,6 +385,20 @@ pub fn update_capture_status(mode: &'static str, result: i32) {
 
     if should_broadcast {
         broadcast_capture_status(&next);
+    }
+}
+
+/// Report the latest status of `from` under `to` as well: one H.264 source
+/// serves both viewer modes.
+fn mirror_capture_status(from: &'static str, to: &'static str) {
+    let result = {
+        let Ok(store) = CAPTURE_STATUS.lock() else {
+            return;
+        };
+        store.latest_by_mode.get(from).map(|status| status.result)
+    };
+    if let Some(result) = result {
+        update_capture_status(to, result);
     }
 }
 
@@ -422,26 +561,22 @@ async fn handle_h264_direct_socket(socket: WebSocket, session: TransportSession)
     if !session.is_active() {
         return;
     }
-    let guard = H264_DIRECT_FANOUT.add_client();
-    let rx = H264_DIRECT_FANOUT.subscribe();
-    start_h264_direct_producer();
-    h264_client(socket, rx, session, guard).await;
+    let subscription = subscribe_h264(H264Viewer::Direct);
+    h264_client(socket, subscription, session).await;
 }
 
 async fn h264_client(
     mut socket: WebSocket,
-    mut rx: broadcast::Receiver<H264DirectFrame>,
+    mut subscription: H264Subscription,
     session: TransportSession,
-    _guard: ClientGuard<'_>,
 ) {
     loop {
         let frame = tokio::select! {
             biased;
             _ = session.ended() => break,
-            frame = rx.recv() => match frame {
-                Ok(frame) => frame,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            frame = subscription.recv() => match frame {
+                Some(frame) => frame,
+                None => break,
             },
         };
         let sent = tokio::select! {
@@ -463,16 +598,6 @@ fn start_mjpeg_producer() {
         .is_ok()
     {
         tokio::spawn(run_mjpeg_producer());
-    }
-}
-
-fn start_h264_direct_producer() {
-    if H264_DIRECT_FANOUT
-        .running
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        tokio::spawn(run_h264_direct_producer());
     }
 }
 
@@ -606,72 +731,103 @@ async fn backoff_after_mjpeg_failure(consecutive_failures: &mut usize, result: i
     time::sleep(delay).await;
 }
 
-async fn run_h264_direct_producer() {
+async fn run_h264_source() {
     struct RunningGuard(&'static AtomicBool);
     impl Drop for RunningGuard {
         fn drop(&mut self) {
             self.0.store(false, Ordering::Release);
         }
     }
-    let _guard = RunningGuard(&H264_DIRECT_FANOUT.running);
+    let _guard = RunningGuard(&H264_SOURCE.fanout.running);
+    pump_h264_frames(&H264_SOURCE, h264_source_step, |screen| async move {
+        let (mode, mirror) = H264_SOURCE.status_modes();
+        let frame = read_h264_capture_frame(mode, screen).await;
+        if let Some(other) = mirror {
+            mirror_capture_status(mode, other);
+        }
+        frame
+    })
+    .await;
+}
 
+fn h264_source_step() -> H264SourceStep {
+    let screen = current_screen();
+    match h264_direct_producer_action(screen.mode, h264_capture_disabled()) {
+        H264DirectProducerAction::StopDisabled => H264SourceStep::Stop,
+        H264DirectProducerAction::WaitForH264Mode => H264SourceStep::Wait(screen.fps),
+        H264DirectProducerAction::Capture => H264SourceStep::Capture(H264Screen {
+            width: screen.width,
+            height: screen.height,
+            fps: screen.fps.max(1),
+            bit_rate: screen.bit_rate,
+        }),
+    }
+}
+
+/// Read frames at the screen's rate while the source has viewers and send
+/// each one to all of them. Returns when the last viewer leaves or H.264
+/// capture is disabled.
+async fn pump_h264_frames<R, F>(
+    source: &H264Source,
+    mut step: impl FnMut() -> H264SourceStep,
+    mut read: R,
+) where
+    R: FnMut(H264Screen) -> F,
+    F: Future<Output = Option<(Vec<u8>, i32)>>,
+{
     let start = Instant::now();
-    let mut fps = current_screen().fps;
-    let mut interval = frame_interval(fps);
+    let mut fps = 0;
+    let mut interval = frame_interval(30);
+    let retune = |wanted: u64, fps: &mut u64, interval: &mut time::Interval| {
+        if wanted != *fps {
+            *fps = wanted;
+            *interval = frame_interval(wanted);
+        }
+    };
 
     loop {
         interval.tick().await;
-        if H264_DIRECT_FANOUT.client_count() == 0 {
+        if source.fanout.client_count() == 0 {
             return;
         }
-
-        let screen = current_screen();
-        if screen.fps != fps {
-            fps = screen.fps;
-            interval = frame_interval(fps);
-        }
-        match h264_direct_producer_action(screen.mode, h264_capture_disabled()) {
-            H264DirectProducerAction::StopDisabled => {
+        let screen = match step() {
+            H264SourceStep::Stop => {
                 update_capture_status(CAPTURE_MODE_DIRECT, -8);
+                update_capture_status(CAPTURE_MODE_H264, -8);
                 return;
             }
-            H264DirectProducerAction::WaitForH264Mode => continue,
-            H264DirectProducerAction::Capture => {}
-        }
+            H264SourceStep::Wait(wanted) => {
+                retune(wanted, &mut fps, &mut interval);
+                continue;
+            }
+            H264SourceStep::Capture(screen) => screen,
+        };
+        retune(screen.fps, &mut fps, &mut interval);
         if !H264_DIRECT_FIRST_READ_LOGGED.swap(true, Ordering::Relaxed) {
             info!(
                 width = screen.width,
                 height = screen.height,
                 bit_rate = screen.bit_rate,
-                "reading first h264 direct frame"
+                "reading first h264 frame"
             );
         }
 
-        let Some((data, result)) = read_h264_capture_frame(
-            CAPTURE_MODE_DIRECT,
-            H264Screen {
-                width: screen.width,
-                height: screen.height,
-                fps: screen.fps.max(1),
-                bit_rate: screen.bit_rate,
-            },
-        )
-        .await
-        else {
+        let Some((data, result)) = read(screen).await else {
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                warn!("h264 direct frame unavailable");
+                warn!("h264 frame unavailable");
             }
             continue;
         };
 
         if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
-            info!(result, bytes = data.len(), "read first h264 direct frame");
+            info!(result, bytes = data.len(), "read first h264 frame");
         }
 
         let timestamp = start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-        let packet = h264_direct_packet(result == 3, timestamp, &data);
-        H264_DIRECT_FANOUT.send(H264DirectFrame {
-            packet: Bytes::from(packet),
+        let packet = Bytes::from(h264_direct_packet(result == 3, timestamp, &data));
+        source.fanout.send(H264Frame {
+            data: packet.slice(H264_DIRECT_HEADER..),
+            packet,
         });
     }
 }
@@ -1070,8 +1226,12 @@ fn validate_fps(fps: i32) -> u64 {
     fps.clamp(10, 60) as u64
 }
 
+/// The Direct websocket framing: a keyframe flag and a timestamp before the
+/// Annex B data.
+const H264_DIRECT_HEADER: usize = 1 + 8;
+
 fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(1 + 8 + data.len());
+    let mut packet = Vec::with_capacity(H264_DIRECT_HEADER + data.len());
     packet.push(u8::from(is_keyframe));
     packet.extend_from_slice(&timestamp_micros.to_le_bytes());
     packet.extend_from_slice(data);
@@ -1221,6 +1381,200 @@ mod tests {
             &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
         );
         assert_eq!(&packet[9..], &[0xaa, 0xbb]);
+    }
+
+    use super::{H264Screen, H264Source, H264SourceStep, H264Viewer, pump_h264_frames};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    static KEYFRAME_REQUESTS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    fn record_keyframe_request(reason: &'static str) {
+        KEYFRAME_REQUESTS.lock().unwrap().push(reason);
+    }
+    fn keyframe_requests() -> Vec<&'static str> {
+        KEYFRAME_REQUESTS.lock().unwrap().clone()
+    }
+
+    const SCREEN: H264Screen = H264Screen {
+        width: 1280,
+        height: 720,
+        fps: 200,
+        bit_rate: 3000,
+    };
+
+    /// A source whose reads deliver numbered frames and count themselves.
+    struct Fake {
+        source: &'static H264Source,
+        reads: Arc<AtomicUsize>,
+    }
+    fn fake(capacity: usize) -> Fake {
+        Fake {
+            source: Box::leak(Box::new(H264Source::new(capacity, record_keyframe_request))),
+            reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    impl Fake {
+        fn run(&self, frames: usize) -> tokio::task::JoinHandle<()> {
+            let source = self.source;
+            let reads = Arc::clone(&self.reads);
+            tokio::spawn(async move {
+                pump_h264_frames(
+                    source,
+                    || H264SourceStep::Capture(SCREEN),
+                    move |_| {
+                        let index = reads.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                            // The reader is finite; afterwards the source idles.
+                            (index < frames)
+                                .then(|| (vec![index as u8], if index == 0 { 3 } else { 4 }))
+                        }
+                    },
+                )
+                .await;
+            })
+        }
+    }
+    async fn collect(subscription: &mut super::H264Subscription, count: usize) -> Vec<u8> {
+        let mut seen = Vec::new();
+        while seen.len() < count {
+            let frame = tokio::time::timeout(Duration::from_secs(5), subscription.recv())
+                .await
+                .expect("a frame in time")
+                .expect("the source is alive");
+            seen.push(frame.data[0]);
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn every_viewer_gets_every_frame_of_the_one_source() {
+        let fake = fake(8);
+        let mut direct = fake.source.subscribe(H264Viewer::Direct, || {});
+        let mut webrtc = fake.source.subscribe(H264Viewer::WebRtc, || {});
+        let pump = fake.run(20);
+        let (a, b) = tokio::join!(collect(&mut direct, 20), collect(&mut webrtc, 20));
+        let expected: Vec<u8> = (0..20).collect();
+        assert_eq!(a, expected, "the Direct viewer missed frames");
+        assert_eq!(b, expected, "the WebRTC viewer missed frames");
+        // One read per frame: the viewers did not split the sequence.
+        assert_eq!(fake.reads.load(Ordering::SeqCst).min(20), 20);
+        assert!(
+            !pump.is_finished(),
+            "the source stopped while it had viewers"
+        );
+        drop(direct);
+        drop(webrtc);
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("the source stops after its last viewer")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_viewer_joining_a_running_source_asks_for_a_keyframe() {
+        let fake = fake(8);
+        let started = Arc::new(AtomicUsize::new(0));
+        let first = {
+            let started = Arc::clone(&started);
+            fake.source.subscribe(H264Viewer::Direct, move || {
+                started.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "the first viewer starts the source"
+        );
+        let before = keyframe_requests().len();
+        let second = fake.source.subscribe(H264Viewer::WebRtc, || {
+            panic!("a second viewer must not start another producer")
+        });
+        let requests = keyframe_requests();
+        assert_eq!(requests.len(), before + 1);
+        assert_eq!(requests[before], "new h264 viewer");
+        assert_eq!(
+            fake.source.status_modes(),
+            (super::CAPTURE_MODE_H264, Some(super::CAPTURE_MODE_DIRECT))
+        );
+        drop(second);
+        assert_eq!(
+            fake.source.status_modes(),
+            (super::CAPTURE_MODE_DIRECT, None)
+        );
+        drop(first);
+        assert_eq!(fake.source.fanout.client_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lagging_viewer_asks_for_a_keyframe_and_goes_on_with_newer_frames() {
+        let fake = fake(2);
+        let mut slow = fake.source.subscribe(H264Viewer::Direct, || {});
+        let pump = fake.run(40);
+        // Let the source overrun the two-frame channel.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let before = keyframe_requests().len();
+        let frame = tokio::time::timeout(Duration::from_secs(5), slow.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            frame.data[0] > 2,
+            "the viewer did not skip to newer frames: {}",
+            frame.data[0]
+        );
+        let requests = keyframe_requests();
+        assert!(
+            requests.len() > before,
+            "no keyframe was requested after the lag"
+        );
+        assert_eq!(requests[before], "h264 viewer lagged");
+        drop(slow);
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_source_stops_when_capture_is_disabled_and_waits_in_mjpeg_mode() {
+        let fake = fake(8);
+        let viewer = fake.source.subscribe(H264Viewer::Direct, || {});
+        let reads = Arc::clone(&fake.reads);
+        let steps = Arc::new(Mutex::new(vec![
+            H264SourceStep::Wait(100),
+            H264SourceStep::Wait(100),
+            H264SourceStep::Capture(SCREEN),
+            H264SourceStep::Stop,
+        ]));
+        let source = fake.source;
+        let pump = tokio::spawn(async move {
+            let steps = Arc::clone(&steps);
+            pump_h264_frames(
+                source,
+                move || {
+                    let mut steps = steps.lock().unwrap();
+                    if steps.len() > 1 {
+                        steps.remove(0)
+                    } else {
+                        steps[0]
+                    }
+                },
+                move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    async { Some((vec![7], 3)) }
+                },
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("a disabled capture stops the source")
+            .unwrap();
+        // Two waits read nothing; one capture read once; then the stop.
+        assert_eq!(fake.reads.load(Ordering::SeqCst), 1);
+        drop(viewer);
     }
 
     #[test]

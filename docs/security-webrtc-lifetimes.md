@@ -16,6 +16,22 @@ map or a newly collected vector.
 The retained producer waits between clients and while H264 capture is disabled;
 that idle state does not repeatedly overwrite another mode's capture status.
 
+There is one H.264 capture source for every viewer (`api/stream.rs`,
+`H264Source`). The encoder is stateful: each read returns the next frame of one
+sequence, so two readers would each see half of it and neither could decode.
+Direct websocket viewers and the WebRTC producer subscribe to the source
+instead of reading the encoder themselves; the source reads at the screen's
+frame rate while it has at least one viewer and sends every frame to all of
+them. The WebRTC producer holds its subscription only while a peer is active,
+so an idle manager keeps no capture running. A viewer that joins a running
+source, and a viewer that lost frames to a full channel, asks for a keyframe
+(subject to the one-per-second limit) rather than waiting for the next GOP or
+stopping. Capture status is reported under the `h264` and `direct` modes
+according to which viewer kinds are present. Host tests drive the source with
+a scripted reader: every viewer receives every frame of one read sequence, a
+late viewer and a lagging viewer each request a keyframe, and the source stops
+after its last viewer or when capture is disabled.
+
 The optional `security` configuration fields have these defaults and valid
 ranges. Older configuration files inherit the defaults. Invalid explicit
 values fail configuration loading, trial startup and authenticated restore;

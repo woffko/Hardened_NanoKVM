@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
-use std::{future::Future, pin::Pin, sync::Arc, task::Poll};
+use std::{future::Future, pin::Pin, task::Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
@@ -109,16 +109,25 @@ async fn mjpeg_valid_successive_frames_continue_until_their_own_session_ends() {
 // Origin policy, which has separate admission checks.
 async fn h264_fixture(
     State(state): State<AppState>,
-    Extension(fanout): Extension<Arc<StreamFanout<H264DirectFrame>>>,
+    Extension(source): Extension<&'static H264Source>,
     current: Option<Extension<CurrentSession>>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse> {
     let session = TransportSession::capture(&state.config, current)?;
-    let rx = fanout.subscribe();
+    // Subscribed before the upgrade completes, so a frame sent right after
+    // the handshake is not missed.
+    let subscription = source.subscribe(H264Viewer::Direct, || {});
     Ok(ws.on_upgrade(move |socket| async move {
-        let guard = fanout.add_client();
-        h264_client(socket, rx, session, guard).await;
+        h264_client(socket, subscription, session).await;
     }))
+}
+
+fn h264_frame(bytes: &'static [u8]) -> H264Frame {
+    let packet = Bytes::from_static(bytes);
+    H264Frame {
+        data: packet.clone(),
+        packet,
+    }
 }
 
 struct ServerTask(Option<tokio::task::JoinHandle<()>>);
@@ -136,12 +145,12 @@ async fn actual_authenticated_h264_loop_stops_on_http_logout_and_keeps_new_login
     let mut config = Config::default();
     config.security.allow_default_admin = false;
     let state = AppState::new(config).await.unwrap();
-    let fanout = Arc::new(StreamFanout::<H264DirectFrame>::new(4));
+    let source: &'static H264Source = Box::leak(Box::new(H264Source::new(4, |_| {})));
     let router = Router::new()
         .route("/h264", get(h264_fixture))
         .route("/logout", post(crate::api::account::logout))
         .route_layer(from_fn_with_state(state.clone(), protected))
-        .layer(Extension(Arc::clone(&fanout)))
+        .layer(Extension(source))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -170,9 +179,7 @@ async fn actual_authenticated_h264_loop_stops_on_http_logout_and_keeps_new_login
         format!("Bearer {}", old.token).parse().unwrap(),
     );
     let (mut old_socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    fanout.send(H264DirectFrame {
-        packet: Bytes::from_static(b"old-valid"),
-    });
+    source.fanout.send(h264_frame(b"old-valid"));
     let first = time::timeout(Duration::from_secs(2), old_socket.next())
         .await
         .unwrap();
@@ -213,9 +220,7 @@ async fn actual_authenticated_h264_loop_stops_on_http_logout_and_keeps_new_login
     assert!(matches!(closed, Some(Ok(ClientMessage::Close(_))) | None));
     drop(old_socket);
 
-    fanout.send(H264DirectFrame {
-        packet: Bytes::from_static(b"new-valid"),
-    });
+    source.fanout.send(h264_frame(b"new-valid"));
     let frame = time::timeout(Duration::from_secs(2), next_socket.next())
         .await
         .unwrap();
@@ -232,7 +237,7 @@ async fn actual_authenticated_h264_loop_stops_on_http_logout_and_keeps_new_login
     drop(next_socket);
 
     time::timeout(Duration::from_secs(2), async {
-        while fanout.client_count() != 0 {
+        while source.fanout.client_count() != 0 {
             tokio::task::yield_now().await;
         }
     })
