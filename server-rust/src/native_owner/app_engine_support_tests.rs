@@ -103,26 +103,28 @@ fn refused(engine: &mut Engine, root: &Path, transaction: [u8; 16], old: u64) {
 }
 
 #[tokio::test]
-async fn executing_epoch_zero_refuses_before_support_namespace_or_app_publication() {
+async fn executing_epoch_zero_refuses_before_support_namespace_and_resumes_the_previous_runtime() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     let mut engine = engine(root);
     engine.fixture_allow_unsupported_support = false;
     let (old, transaction) = accept(&mut engine, root).await;
+    let before = live(root);
     preparing(&mut engine);
     assert_eq!(support_abi::CURRENT.support_transition, 0);
-    refused(&mut engine, root, transaction, old);
-    assert!(!root.join("etc/kvm/application-support").exists());
-    // Explicit cancellation is safe here: no support mutation was admitted.
-    assert_eq!(
-        engine.request(2, Operation::CancelAppInstall).code,
-        Code::Ok
-    );
+    // The refusal is known before anything is staged, so the engine takes the
+    // cancel path by itself: no operator request, and never an uncertain mode
+    // that would keep the device headless until a reboot.
     until(|| {
         engine.tick();
+        assert_ne!(engine.mode, Mode::Uncertain);
         engine.install.is_none() && engine.mode == Mode::Running
     });
+    assert!(!root.join("etc/kvm/application-support").exists());
+    assert_eq!(live(root), before);
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
     assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
+    assert!(!root.join("trial-owner-started").exists());
     shutdown(&mut engine);
 }
 

@@ -144,6 +144,9 @@ closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
 native lifecycle compatibility epoch is now 8; epoch-1 through epoch-7 transitions
 are refused, and `support_transition=0` still refuses even a matching epoch-8 live transition.
+That refusal is known before anything is staged, and the install engine then takes
+the cancel path on its own: the previous runtime resumes and the slot ends RolledBack;
+it is not an uncertain state.
 The separate boot receipt now has a generation-bound v2 format; the native
 Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
 was introduced.
@@ -855,7 +858,8 @@ foreign alternatives refuse. Early NoTransaction and terminal deferral paths
 require a clear support store instead of bypassing pending evidence.
 
 The current transition epoch is still zero, so the production entry refuses
-before creating that store. Stopped/prior-boot recovery now reconciles support
+before creating that store (`SlotError::UnsupportedTransition`, which the install
+engine turns into an automatic rollback). Stopped/prior-boot recovery now reconciles support
 before app slots under the same `FencedAppRecovery`, retained update/store/writer
 exclusions and durable recovery intent. Canonical `Committed` selects successor
 support; other supported app states restore predecessor. Terminal support cleanup
@@ -890,7 +894,10 @@ owner; production panic=abort still requires durable process recovery. Teardown
 joins before releasing admission, so kernel-blocked I/O can delay teardown.
 
 With support-transition epoch0 the production Engine still refuses before
-support or app publication. Durable commit and rollback now use distinct fixed,
+support or app publication; because that refusal precedes any staging, the Engine
+rolls back by itself (native journal resumed, slot RolledBack, broker Running)
+instead of waiting uncertain for an operator or a reboot. Unknown or incompatible
+contracts, and every failure after staging began, still leave it uncertain. Durable commit and rollback now use distinct fixed,
 joined workers; rollback includes both support/app restoration and native-journal
 resume in the same result boundary. The broker retains the same Drain and checks
 closure before submission and after completion; it cannot resume or retire a

@@ -14,6 +14,9 @@ pub(crate) enum Poll {
     Failed {
         session: Session,
         uncertain: bool,
+        /// The executing build declined the transition before any staging;
+        /// native uncertainty, when seen, still outranks it.
+        refused: bool,
     },
     Retained(PreparingInstall),
 }
@@ -98,10 +101,11 @@ impl PreparingInstall {
                 && matches!(self.kind, Kind::TrialCheck),
             install,
         };
-        if status == Status::Failed || self.uncertain {
+        if status != Status::Complete || self.uncertain {
             Poll::Failed {
                 session,
                 uncertain: self.uncertain,
+                refused: status == Status::Refused && !self.uncertain,
             }
         } else {
             Poll::Ready {

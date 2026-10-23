@@ -54,7 +54,8 @@ impl Retirement {
         }
         match self.work.poll(true) {
             Status::Pending => return Poll::Pending(self),
-            Status::Failed => return Poll::Failed(self),
+            // A terminal retirement never refuses; a refusal there is a failure.
+            Status::Failed | Status::Refused => return Poll::Failed(self),
             Status::Complete => {}
         }
         if self.broker.group.ownership_uncertain() {

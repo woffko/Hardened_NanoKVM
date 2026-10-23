@@ -463,7 +463,10 @@ async fn real_drained_session_composes_support_exchange_trial_and_terminal_settl
         until(|| session.poll().unwrap() == DrainStatus::Drained);
         assert_eq!(native_phase(root), 4);
         // Production transition0 still refuses, even under a real closed owner.
-        assert!(matches!(session.prepare_support(), Err(SlotError::Invalid)));
+        assert!(matches!(
+            session.prepare_support(),
+            Err(SlotError::UnsupportedTransition)
+        ));
         assert!(!root.join("etc/kvm/application-support").exists());
         let mut prepared = session.prepare_support_fixture().unwrap();
         prepared.check().unwrap();

@@ -2,6 +2,7 @@
 //! Native supervision and proof construction never run in this worker.
 
 use super::{AcceptedInstall, ClosedRuntime, TerminalBoundary, TrialReady, journal};
+use crate::update::app_slot::SlotError;
 use crate::update::app_slot::support::support_operation;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -32,6 +33,24 @@ enum Payload {
     Install(AcceptedInstall),
     Commit(JournaledInstall),
     Rollback(JournaledInstall),
+}
+
+/// What one fixed operation reported. `Refused` is a transition the executing
+/// build declined before anything was staged; it is not an I/O failure.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Outcome {
+    Complete,
+    Refused,
+    Failed,
+}
+impl From<bool> for Outcome {
+    fn from(succeeded: bool) -> Self {
+        if succeeded {
+            Self::Complete
+        } else {
+            Self::Failed
+        }
+    }
 }
 impl Operation {
     fn worker_copy(&self) -> Self {
@@ -66,7 +85,7 @@ impl Operation {
         }
     }
 
-    fn execute(self, payload: &mut Payload, #[cfg(test)] fault: &Option<Fixture>) -> bool {
+    fn execute(self, payload: &mut Payload, #[cfg(test)] fault: &Option<Fixture>) -> Outcome {
         match (self, payload) {
             (
                 Self::Support {
@@ -84,16 +103,20 @@ impl Operation {
                 };
                 #[cfg(not(test))]
                 let prepared = crate::update::app_slot::support::prepare(install, closed);
-                prepared.and_then(|mut support| support.exchange()).is_ok()
+                match prepared.and_then(|mut support| support.exchange()) {
+                    Ok(_) => Outcome::Complete,
+                    Err(SlotError::UnsupportedTransition) => Outcome::Refused,
+                    Err(_) => Outcome::Failed,
+                }
             }
-            (Self::Publish(closed), Payload::Install(install)) => matches!(
+            (Self::Publish(closed), Payload::Install(install)) => Outcome::from(matches!(
                 install.publish(&closed),
                 Ok(crate::update::app_slot::Status::Transaction(
                     crate::update::app_slot::Phase::Published
                 ))
-            ),
+            )),
             (Self::CheckTrial(closed), Payload::Install(install)) => {
-                install.check_trial(&closed).is_ok()
+                install.check_trial(&closed).is_ok().into()
             }
             (Self::Commit(ready), Payload::Commit(state)) => {
                 if !matches!(
@@ -102,13 +125,13 @@ impl Operation {
                         crate::update::app_slot::Phase::Committed
                     ))
                 ) {
-                    return false;
+                    return Outcome::Failed;
                 }
                 #[cfg(test)]
                 match fault {
                     Some(Fixture::BlockCommitJournal { entered, resume }) => {
                         if entered.send(()).is_err() || resume.recv().is_err() {
-                            return false;
+                            return Outcome::Failed;
                         }
                     }
                     Some(Fixture::PanicAfterCommitRecord) => {
@@ -122,9 +145,10 @@ impl Operation {
                     state.journal.resume_active()
                 )
                 .is_ok()
+                .into()
             }
             (Self::Retire(boundary), Payload::Install(install)) => {
-                install.retire(&boundary).is_ok()
+                install.retire(&boundary).is_ok().into()
             }
             (Self::Rollback(closed), Payload::Rollback(state)) => {
                 if !matches!(
@@ -137,13 +161,13 @@ impl Operation {
                         crate::update::app_slot::Phase::RolledBack
                     ))
                 ) {
-                    return false;
+                    return Outcome::Failed;
                 }
                 #[cfg(test)]
                 match fault {
                     Some(Fixture::BlockRollbackJournal { entered, resume }) => {
                         if entered.send(()).is_err() || resume.recv().is_err() {
-                            return false;
+                            return Outcome::Failed;
                         }
                     }
                     Some(Fixture::PanicAfterRollbackRecord) => {
@@ -157,9 +181,10 @@ impl Operation {
                     state.journal.resume_active()
                 )
                 .is_ok()
+                .into()
             }
             // A mismatched fixed factory cannot shed or reinterpret authority.
-            _ => false,
+            _ => Outcome::Failed,
         }
     }
 }
@@ -168,9 +193,10 @@ enum State {
     Idle,
     Running(Worker),
     Failed,
+    Refused,
     Complete,
 }
-struct Worker(Option<JoinHandle<bool>>);
+struct Worker(Option<JoinHandle<Outcome>>);
 impl Drop for Worker {
     fn drop(&mut self) {
         // Teardown joins, never detaches a borrower of accepted admission.
@@ -184,6 +210,8 @@ impl Drop for Worker {
 pub(super) enum Status {
     Pending,
     Failed,
+    /// Declined before any staging; nothing to recover.
+    Refused,
     Complete,
 }
 
@@ -294,7 +322,7 @@ impl InstallWork {
 
     #[cfg(test)]
     pub(super) fn fixture_settled(&self) -> bool {
-        matches!(self.state, State::Failed | State::Complete)
+        matches!(self.state, State::Failed | State::Refused | State::Complete)
     }
 
     #[cfg(test)]
@@ -304,6 +332,7 @@ impl InstallWork {
             State::Idle => ("idle", None),
             State::Running(worker) => ("running", worker.0.as_ref().map(JoinHandle::is_finished)),
             State::Failed => ("failed", None),
+            State::Refused => ("refused", None),
             State::Complete => ("complete", None),
         };
         let Some(observation) = &mut self.diagnostic else {
@@ -357,24 +386,26 @@ impl InstallWork {
                 }
             }
             State::Failed => return Status::Failed,
+            State::Refused => return Status::Refused,
             State::Complete => return Status::Complete,
         }
         if let State::Running(worker) = &mut self.state {
             // is_finished proves this join does not wait for filesystem work.
             self.state = match worker.0.take().map(JoinHandle::join) {
-                Some(Ok(true)) => State::Complete,
+                Some(Ok(Outcome::Complete)) => State::Complete,
+                Some(Ok(Outcome::Refused)) => State::Refused,
                 _ => State::Failed,
             };
         }
-        if matches!(self.state, State::Complete) {
-            Status::Complete
-        } else {
-            Status::Failed
+        match self.state {
+            State::Complete => Status::Complete,
+            State::Refused => Status::Refused,
+            _ => Status::Failed,
         }
     }
 
     pub(super) fn into_install(mut self) -> Result<AcceptedInstall, Self> {
-        if !matches!(self.state, State::Failed | State::Complete) {
+        if !matches!(self.state, State::Failed | State::Refused | State::Complete) {
             return Err(self);
         }
         // Joined worker + unique Arc: exclusive get_mut cannot block. Never
@@ -463,10 +494,10 @@ impl InstallWork {
             // The original Arc remains with the main owner even on spawn
             // failure/panic. Catch only a borrow of the complete payload.
             let Ok(mut slot) = payload.lock() else {
-                return false;
+                return Outcome::Failed;
             };
             let Some(payload) = slot.as_mut() else {
-                return false;
+                return Outcome::Failed;
             };
             catch_unwind(AssertUnwindSafe(|| {
                 #[cfg(test)]
@@ -475,7 +506,7 @@ impl InstallWork {
                 match &fixture {
                     Some(Fixture::Block { entered, resume }) => {
                         if entered.send(()).is_err() || resume.recv().is_err() {
-                            return false;
+                            return Outcome::Failed;
                         }
                     }
                     Some(Fixture::Panic) => panic!("fixture install worker failure"),
@@ -490,7 +521,7 @@ impl InstallWork {
                     )
                     | None => {}
                 }
-                let succeeded = operation.execute(
+                let outcome = operation.execute(
                     payload,
                     #[cfg(test)]
                     &fixture,
@@ -499,15 +530,15 @@ impl InstallWork {
                 if let Some(Fixture::BlockAfterIo { entered, resume }) = fixture
                     && (entered.send(()).is_err() || resume.recv().is_err())
                 {
-                    return false;
+                    return Outcome::Failed;
                 }
                 #[cfg(test)]
                 if panic_after_io {
                     panic!("fixture install failure after filesystem result");
                 }
-                succeeded
+                outcome
             }))
-            .unwrap_or(false)
+            .unwrap_or(Outcome::Failed)
         }) {
             Ok(handle) => State::Running(Worker(Some(handle))),
             Err(_) => State::Failed,

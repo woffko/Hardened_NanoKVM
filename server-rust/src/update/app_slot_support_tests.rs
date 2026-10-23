@@ -228,7 +228,7 @@ async fn current_unsupported_transition_refuses_before_private_namespace_creatio
     let closed = ClosedRuntime::fixture(install.transaction());
     assert!(matches!(
         prepare(&mut install, closed),
-        Err(SlotError::Invalid)
+        Err(SlotError::UnsupportedTransition)
     ));
     assert!(!support(root.path()).exists());
     super::super::issuer_tests::assert_excluded(root.path());

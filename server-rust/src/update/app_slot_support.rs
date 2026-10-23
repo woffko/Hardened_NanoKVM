@@ -188,8 +188,17 @@ pub(crate) fn prepare(
     closed: ClosedRuntime,
 ) -> Result<Prepared<'_>> {
     let sources = Sources::open(install, &closed)?;
-    support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi)
-        .map_err(|_| SlotError::Invalid)?;
+    // The executing build's own declaration decides before anything is staged.
+    // A transition it does not support is a known refusal with its own name;
+    // an unknown or incompatible contract keeps the conservative verdict.
+    support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi).map_err(|error| {
+        match error {
+            support_abi_catalog::CompatibilityError::UnsupportedTransition => {
+                SlotError::UnsupportedTransition
+            }
+            support_abi_catalog::CompatibilityError::UnknownOrIncompatible => SlotError::Invalid,
+        }
+    })?;
     stage(install, closed, sources)
 }
 

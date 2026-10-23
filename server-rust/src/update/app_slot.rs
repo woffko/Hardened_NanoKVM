@@ -60,6 +60,10 @@ pub enum SlotError {
     Unsafe,
     #[error("application slot journal or layout is invalid; evidence retained")]
     Invalid,
+    #[error(
+        "the executing broker declares no support for this helper transition; nothing was staged"
+    )]
+    UnsupportedTransition,
     #[error("application slot recovery is owned by another operation")]
     Busy,
     #[error("application slot recovery I/O failed; inspect durable state before retry")]

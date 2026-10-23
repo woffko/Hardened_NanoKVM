@@ -924,12 +924,20 @@ impl Engine {
                         };
                         InstallOwner::Draining(session)
                     }
-                    app_install::PreparationPoll::Failed { session, uncertain } => {
+                    app_install::PreparationPoll::Failed {
+                        session,
+                        uncertain,
+                        refused,
+                    } => {
                         if uncertain {
                             self.roles = [6; 2];
                             self.backend_status = Some(Status::Uncertain);
                         }
-                        stage = if cancel_requested && !uncertain {
+                        // A transition the executing broker declined before
+                        // staging changed nothing: take the cancel path, so
+                        // the previous runtime resumes instead of the device
+                        // staying uncertain until an operator or a reboot.
+                        stage = if (cancel_requested || refused) && !uncertain {
                             InstallStage::Rollback
                         } else {
                             InstallStage::Failed
