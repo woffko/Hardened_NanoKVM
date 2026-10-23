@@ -375,8 +375,20 @@ system_update_version_matches() {
     return 0
 }
 
+# The install writes the new version file, so only a later boot shows that
+# an update needing a reboot came up. Older backends recorded no boot ID.
+system_update_booted_since_install() {
+    pending_file="$(pending_update_file)" || return 1
+    grep -q '"requiresReboot"[[:space:]]*:[[:space:]]*false' "$pending_file" && return 0
+    install_boot="$(json_string_value "$pending_file" installBootId)"
+    [ -n "$install_boot" ] || return 0
+    current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+    [ -n "$current_boot" ] && [ "$current_boot" != "$install_boot" ]
+}
+
 system_update_boot_healthy() {
     pending_update_exists || return 1
+    system_update_booted_since_install || return 1
     [ -f /boot/ver ] || return 1
     [ -f /kvmapp/server/web/index.html ] || return 1
     system_update_version_matches || return 1
@@ -400,6 +412,7 @@ confirm_system_update_boot() {
   "target": "$target",
   "health": {
     "backendRunning": true,
+    "rebooted": true,
     "versionMatchesPending": true,
     "bootMarkerPresent": true,
     "webRootPresent": true,

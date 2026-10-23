@@ -735,6 +735,7 @@ fn root_pending_status_keeps_root_record_and_exposes_read_errors() {
         installed_at: 42,
         requires_reboot: true,
         file_count: 1,
+        install_boot_id: None,
     };
     let bytes = serde_json::to_vec(&expected).unwrap();
     fs::write(&pending, &bytes).unwrap();

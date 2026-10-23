@@ -454,14 +454,30 @@ fn packaged_catalog_survives_private_candidate_preflight_without_publishing_boot
             manual_candidate_fixture(AppStage::fixture(root.path()).unwrap(), &bytes).unwrap();
         let app = candidate.fixture_root();
         let catalog = inspect(&File::open(app.join("server/NanoKVM-Server")).unwrap()).unwrap();
-        for (member, role) in catalog.members().iter().zip(ROLES) {
-            let expected =
-                fs::read(project.join("kvmapp/system/init.d").join(role.filename())).unwrap();
-            assert_eq!(member.size(), expected.len() as u64);
-            assert_eq!(
-                *member.sha256(),
-                <[u8; 32]>::from(Sha256::digest(&expected))
-            );
+        // The scripts this retained backend was linked with on 2026-10-19. The
+        // current sources are checked against the current linked backend above.
+        const LINKED: [(u64, &str); 4] = [
+            (
+                430,
+                "55d3da11e753a73989e4aeb68046f0af8d184ff80ed72052ab7795cb21ca3abb",
+            ),
+            (
+                8586,
+                "875de81875aa53bfdbe0c976f1876f1314d1a2e495a8623b08b479508c0b717c",
+            ),
+            (
+                4725,
+                "b73af15f74c830137d507e0e7693b97b6d8e42b9219311dd95d9b70592587092",
+            ),
+            (
+                18189,
+                "a64e20557759bbfc4541da2eb55e140bcd8068e13a7f2a39ede4e3787ba6a0be",
+            ),
+        ];
+        for (member, (size, sha256)) in catalog.members().iter().zip(LINKED) {
+            assert_eq!(member.size(), size);
+            let digest: String = member.sha256().iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(digest, sha256);
         }
         assert_eq!(fs::read(app.join("version")).unwrap(), b"0.0.0\n");
         for name in ["S02apprecover", "S30eth", "S30wifi"] {

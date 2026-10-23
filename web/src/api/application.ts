@@ -78,6 +78,7 @@ export type SystemRollbackInfo = {
 
 export type SystemBootHealth = {
   backendRunning: boolean;
+  rebooted: boolean;
   versionMatchesPending: boolean;
   bootMarkerPresent: boolean;
   webRootPresent: boolean;

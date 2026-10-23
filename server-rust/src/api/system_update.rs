@@ -10,6 +10,7 @@ use crate::{
         archive::extract_tar_gz_reader,
         keys::verify_metadata_signature,
         operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
+        restore_capsule::ticket::BootId,
         staged_archive::{StageDirectory, StagedDownload},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
         staged_snapshot::PublicSnapshot,
@@ -35,6 +36,8 @@ mod bundle;
 
 const SYSTEM_VERSION_FILE: &str = "/etc/kvm/system-version.json";
 const BOOT_VERSION_FILE: &str = "/boot/ver";
+const BOOT_ID_FILE: &str = "/proc/sys/kernel/random/boot_id";
+const PROC_STAT_FILE: &str = "/proc/stat";
 const KERNEL_RELEASE_FILE: &str = "/proc/sys/kernel/osrelease";
 const OS_RELEASE_FILE: &str = "/etc/os-release";
 const DEVICE_MODEL_FILE: &str = "/proc/device-tree/model";
@@ -208,6 +211,10 @@ pub struct SystemPendingUpdate {
     pub installed_at: u64,
     pub requires_reboot: bool,
     pub file_count: usize,
+    /// Kernel boot ID at install. An update that requires a reboot is
+    /// confirmed only in a later boot; older backends recorded none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_boot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +247,8 @@ pub struct SystemRollbackRsp {
 #[serde(rename_all = "camelCase")]
 pub struct SystemBootHealth {
     pub backend_running: bool,
+    #[serde(default)]
+    pub rebooted: bool,
     pub version_matches_pending: bool,
     pub boot_marker_present: bool,
     pub web_root_present: bool,
@@ -334,6 +343,8 @@ struct SystemInstallRecord {
     installed_at: u64,
     requires_reboot: bool,
     files: Vec<SystemBackupFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_boot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -791,7 +802,12 @@ pub async fn confirm(State(state): State<AppState>) -> Result<Json<ApiResponse<S
 
                 if !health.healthy {
                     return Err(AppError::BadRequest(
-                        "system update boot health check failed".to_string(),
+                        if pending.requires_reboot && !health.rebooted {
+                            "reboot the device before confirming the system update"
+                        } else {
+                            "system update boot health check failed"
+                        }
+                        .to_string(),
                     ));
                 }
 
@@ -1538,6 +1554,7 @@ fn install_staged_update(
         return install_raw_image_update(stage_dir, &manifest, &payload_dir, config);
     }
 
+    let install_boot_id = current_boot_id()?;
     let backup_id = format!("{}-{}", manifest.version, now_unix_seconds());
     validate_filename(&backup_id)?;
     let backup_dir = backup_dir_for(stage_dir, &backup_id);
@@ -1551,6 +1568,7 @@ fn install_staged_update(
         installed_at: now_unix_seconds(),
         requires_reboot: manifest.requires_reboot,
         files: Vec::new(),
+        install_boot_id: Some(install_boot_id),
     };
 
     let mut backed_up = BTreeSet::new();
@@ -3083,21 +3101,84 @@ fn evaluate_boot_health(
     pending: &SystemPendingUpdate,
     state: &AppState,
 ) -> SystemBootHealth {
+    boot_health(
+        current,
+        pending,
+        &CurrentBoot::read(),
+        Path::new(BOOT_VERSION_FILE).is_file(),
+        state.config.paths.web_root.join("index.html").is_file(),
+    )
+}
+
+fn boot_health(
+    current: &SystemVersion,
+    pending: &SystemPendingUpdate,
+    boot: &CurrentBoot,
+    boot_marker_present: bool,
+    web_root_present: bool,
+) -> SystemBootHealth {
+    // The install writes the new version file, so the version matches before
+    // the reboot too. Only a later boot shows that the update came up.
     let version_matches_pending =
         current.version == pending.version && current.target == pending.target;
-    let boot_marker_present = Path::new(BOOT_VERSION_FILE).is_file();
-    let web_root_present = state.config.paths.web_root.join("index.html").is_file();
+    let rebooted = booted_since_install(pending, boot);
+    // This runs in the backend that serves the request.
     let backend_running = true;
-    let healthy =
-        backend_running && version_matches_pending && boot_marker_present && web_root_present;
+    let healthy = backend_running
+        && (rebooted || !pending.requires_reboot)
+        && version_matches_pending
+        && boot_marker_present
+        && web_root_present;
 
     SystemBootHealth {
         backend_running,
+        rebooted,
         version_matches_pending,
         boot_marker_present,
         web_root_present,
         healthy,
     }
+}
+
+/// The current boot, as needed to tell whether an install was followed by one.
+struct CurrentBoot {
+    id: Option<String>,
+    started_at: Option<u64>,
+}
+
+impl CurrentBoot {
+    fn read() -> Self {
+        Self {
+            id: current_boot_id().ok(),
+            started_at: boot_started_at(),
+        }
+    }
+}
+
+fn booted_since_install(pending: &SystemPendingUpdate, boot: &CurrentBoot) -> bool {
+    match (&pending.install_boot_id, &boot.id) {
+        (Some(installed), Some(current)) => installed != current,
+        (Some(_), None) => false,
+        // Older backends recorded no boot ID: compare the install time with
+        // the start of this boot instead.
+        (None, _) => boot
+            .started_at
+            .is_some_and(|started| started > pending.installed_at),
+    }
+}
+
+fn current_boot_id() -> Result<String> {
+    let raw = fs::read_to_string(BOOT_ID_FILE)?;
+    let id = raw.strip_suffix('\n').unwrap_or(&raw);
+    BootId::parse(id).map_err(|_| AppError::Internal("invalid kernel boot ID".into()))?;
+    Ok(id.to_ascii_lowercase())
+}
+
+fn boot_started_at() -> Option<u64> {
+    fs::read_to_string(PROC_STAT_FILE)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
 }
 
 fn write_last_backup_record(record: &SystemInstallRecord) -> Result<()> {
@@ -3187,6 +3268,7 @@ fn pending_update(record: &SystemInstallRecord) -> SystemPendingUpdate {
         installed_at: record.installed_at,
         requires_reboot: record.requires_reboot,
         file_count: record.files.len(),
+        install_boot_id: record.install_boot_id.clone(),
     }
 }
 
@@ -3892,6 +3974,7 @@ mod tests {
             installed_at: 123,
             requires_reboot: true,
             file_count: manifest.raw_images.len(),
+            install_boot_id: None,
         };
 
         let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
@@ -3980,6 +4063,7 @@ mod tests {
             installed_at: 123,
             requires_reboot: true,
             file_count: manifest.raw_images.len(),
+            install_boot_id: None,
         };
 
         let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
@@ -4227,6 +4311,7 @@ mod tests {
                     existed: false,
                 },
             ],
+            install_boot_id: None,
         };
 
         let script = rollback_script_for_record(&stage_dir, &record).unwrap();
@@ -4252,8 +4337,150 @@ mod tests {
                 backup: "etc/config".to_string(),
                 existed: true,
             }],
+            install_boot_id: None,
         };
 
         assert!(rollback_script_for_record(temp.path(), &record).is_err());
+    }
+
+    const INSTALL_BOOT: &str = "0f8c6f4e-6b9b-4f0e-9a51-6c1f0d6f7a10";
+    const LATER_BOOT: &str = "6e1b5b9d-1a2c-4c7e-8d3f-2a9b0c4d5e6f";
+
+    fn pending_installed(boot_id: Option<&str>, requires_reboot: bool) -> SystemPendingUpdate {
+        SystemPendingUpdate {
+            version: "0.1.0".into(),
+            target: DEFAULT_SYSTEM_TARGET.into(),
+            backup_id: "0.1.0-100".into(),
+            installed_at: 100,
+            requires_reboot,
+            file_count: 1,
+            install_boot_id: boot_id.map(str::to_string),
+        }
+    }
+
+    fn running(version: &str) -> SystemVersion {
+        SystemVersion {
+            version: version.into(),
+            target: DEFAULT_SYSTEM_TARGET.into(),
+            base_version: String::new(),
+            kernel_version: String::new(),
+            rootfs_version: String::new(),
+            security_patch_level: None,
+            model: String::new(),
+            hardware_version: String::new(),
+            source: "test".into(),
+        }
+    }
+
+    fn boot(id: Option<&str>, started_at: Option<u64>) -> CurrentBoot {
+        CurrentBoot {
+            id: id.map(str::to_string),
+            started_at,
+        }
+    }
+
+    #[test]
+    fn an_update_that_needs_a_reboot_is_healthy_only_in_a_later_boot() {
+        let pending = pending_installed(Some(INSTALL_BOOT), true);
+        let current = running("0.1.0");
+        let same = boot_health(
+            &current,
+            &pending,
+            &boot(Some(INSTALL_BOOT), Some(200)),
+            true,
+            true,
+        );
+        assert!(
+            !same.rebooted && !same.healthy,
+            "confirmed before the reboot"
+        );
+        let later = boot_health(
+            &current,
+            &pending,
+            &boot(Some(LATER_BOOT), Some(200)),
+            true,
+            true,
+        );
+        assert!(later.rebooted && later.healthy);
+        // A later boot does not excuse a failed check.
+        let later_boot = boot(Some(LATER_BOOT), Some(200));
+        assert!(!boot_health(&running("0.0.9"), &pending, &later_boot, true, true).healthy);
+        assert!(!boot_health(&current, &pending, &later_boot, false, true).healthy);
+        assert!(!boot_health(&current, &pending, &later_boot, true, false).healthy);
+        // An unreadable boot ID never counts as a new boot.
+        assert!(!boot_health(&current, &pending, &boot(None, Some(200)), true, true).healthy);
+    }
+
+    #[test]
+    fn an_update_without_a_reboot_is_healthy_in_the_install_boot() {
+        let pending = pending_installed(Some(INSTALL_BOOT), false);
+        let health = boot_health(
+            &running("0.1.0"),
+            &pending,
+            &boot(Some(INSTALL_BOOT), Some(50)),
+            true,
+            true,
+        );
+        assert!(!health.rebooted && health.healthy);
+    }
+
+    #[test]
+    fn records_without_a_boot_id_compare_the_install_time_with_the_boot_start() {
+        let pending = pending_installed(None, true);
+        assert!(!booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(99))
+        ));
+        assert!(!booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(100))
+        ));
+        assert!(booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(101))
+        ));
+        assert!(!booted_since_install(&pending, &boot(None, None)));
+    }
+
+    #[test]
+    fn pending_records_carry_the_install_boot_id_and_old_ones_still_parse() {
+        let old = br#"{"version":"0.1.0","target":"t","backupId":"b","installedAt":1,"requiresReboot":true,"fileCount":1}"#;
+        let parsed: SystemPendingUpdate = serde_json::from_slice(old).unwrap();
+        assert_eq!(parsed.install_boot_id, None);
+        let json = serde_json::to_string(&pending_installed(Some(INSTALL_BOOT), true)).unwrap();
+        assert!(
+            json.contains(&format!("\"installBootId\":\"{INSTALL_BOOT}\"")),
+            "{json}"
+        );
+        let record = SystemInstallRecord {
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            backup_id: "0.1.0-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            files: Vec::new(),
+            install_boot_id: Some(INSTALL_BOOT.to_string()),
+        };
+        assert_eq!(
+            pending_update(&record).install_boot_id.as_deref(),
+            Some(INSTALL_BOOT)
+        );
+        let health: SystemBootHealth = serde_json::from_slice(
+            br#"{"backendRunning":true,"versionMatchesPending":true,"bootMarkerPresent":true,"webRootPresent":true,"healthy":true}"#,
+        )
+        .unwrap();
+        assert!(!health.rebooted);
+    }
+
+    #[test]
+    fn this_hosts_boot_id_and_boot_start_are_read() {
+        let id = current_boot_id().unwrap();
+        assert!(BootId::parse(&id).is_ok());
+        assert_eq!(current_boot_id().unwrap(), id);
+        assert!(boot_started_at().is_some_and(|started| started > 0));
+        assert!(!booted_since_install(
+            &pending_installed(Some(&id), true),
+            &CurrentBoot::read()
+        ));
     }
 }

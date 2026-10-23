@@ -922,7 +922,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   t('settings.update.system.bootHealth'),
                   systemBootHealth.healthy
                     ? t('settings.update.system.healthy')
-                    : t('settings.update.system.unhealthy')
+                    : systemPending?.requiresReboot && !systemBootHealth.rebooted
+                      ? t('settings.update.system.rebootRequired')
+                      : t('settings.update.system.unhealthy')
                 )}
               {systemPending && systemBootHealth?.healthy && (
                 <div className="flex justify-end pt-2">
