@@ -9,7 +9,7 @@ PWD := $(shell pwd)
 # Docker run common parameters
 DOCKER_RUN_BASE := docker run -e UID=$(UID) -e GID=$(GID) -v $(PWD):/home/build/NanoKVM --rm
 RUST_TARGET ?=
-RUST_BUILD_ARGS := --manifest-path server-rust/Cargo.toml --release
+RUST_BUILD_ARGS := --manifest-path server-rust/Cargo.toml --release --locked
 ifneq ($(strip $(RUST_TARGET)),)
 RUST_BUILD_ARGS += --target $(RUST_TARGET)
 endif

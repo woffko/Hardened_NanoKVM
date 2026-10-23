@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="riscv64gc-unknown-linux-musl"
+# Build from Cargo.lock as committed, also when called without arguments.
+case " $* " in
+  *" --locked "* | *" --frozen "*) ;;
+  *) set -- --locked "$@" ;;
+esac
 SYSROOT_LIB="${NANOKVM_SYSROOT_LIB:-$ROOT/sysroot/lib}"
 
 if [[ ! -f "$SYSROOT_LIB/libc.so" ]]; then
