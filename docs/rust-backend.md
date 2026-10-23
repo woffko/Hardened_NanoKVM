@@ -275,4 +275,8 @@ ssh root@nanokvm 'sh /tmp/install-rust-backend.sh /tmp/NanoKVM-Server.rust'
 ```
 
 The manual installer also removes stale backend backups and development helper
-scripts left by older test builds.
+scripts left by older test builds. It bypasses the signed app update, so use it
+only on a test device. It refuses while an app update transaction is recorded
+(`/etc/kvm/application-slot/current`). It replaces each binary by rename, so
+the running backend is never written in place, and S95 then restarts it.
+`scripts/test-install-rust-backend.sh` checks this against a temporary root.
