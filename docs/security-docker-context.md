@@ -36,8 +36,29 @@ to the builder. Use a trusted local builder for the actual SDK build.
 At implementation time Docker/BuildKit was unavailable on the build host.
 Static checks passed; real engine context acceptance and the SDK build remain
 NOT TESTED. This is a source-level M13 improvement, not complete release
-acceptance. Pinning Ubuntu, MaixCDK, Python and toolchain downloads is separate
-unfinished work (L-S13); those inputs were not changed here.
+acceptance.
+
+The image inputs are pinned (L-S13):
+
+- the base image by digest (`ubuntu:24.04@sha256:68ee2200…`, the 24.04 index
+  on 2026-10-23);
+- the toolchain by SHA-256. It is now `host-tools-2025.7.28.tar.xz` from the
+  MaixCDK release, the archive MaixCDK pins in `dl/pkgs_info.json` and the
+  native builds use, instead of the unhashed 2023 vendor archive;
+- MaixCDK by commit (`5b0aa5b1…`, the base of the local SDK checkout);
+- the Python packages by `docker/maixcdk-requirements.lock`, installed with
+  `--require-hashes --no-deps`.
+
+`scripts/lock-maixcdk-requirements.py` writes the lock from `pip freeze` of the
+MaixCDK environment, with the PyPI hashes of the files that fit CPython 3.12 on
+x86_64. A fresh virtual environment installed from it matched that freeze
+exactly. The apt packages still come from the Ubuntu archive at build time and
+are not pinned. The image has not been built with these pins, because no Docker
+engine is available here.
+
+`kvm_system/main/lib/system_ctrl/ap_key.h`, added with the AP key fix (M2),
+was not admitted and would have been missing from a Docker build. It is
+admitted now.
 
 The allowlist does not detect a secret deliberately written into an approved
 source file, authorize untrusted changes, or replace source review and release

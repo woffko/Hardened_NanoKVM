@@ -7,6 +7,7 @@
 docker/**
 !docker/Dockerfile
 !docker/entrypoint
+!docker/maixcdk-requirements.lock
 
 !support
 support/**
@@ -123,6 +124,7 @@ support/sg2002/kvm_system/main/lib/oled_ui/**
 !support/sg2002/kvm_system/main/lib/oled_ui/oled_ui.h
 !support/sg2002/kvm_system/main/lib/system_ctrl
 support/sg2002/kvm_system/main/lib/system_ctrl/**
+!support/sg2002/kvm_system/main/lib/system_ctrl/ap_key.h
 !support/sg2002/kvm_system/main/lib/system_ctrl/system_ctrl.cpp
 !support/sg2002/kvm_system/main/lib/system_ctrl/system_ctrl.h
 !support/sg2002/kvm_system/main/lib/system_init

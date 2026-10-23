@@ -14,7 +14,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = (
-    "docker/Dockerfile", "docker/entrypoint", "support/sg2002/build",
+    "docker/Dockerfile", "docker/entrypoint", "docker/maixcdk-requirements.lock",
+    "support/sg2002/build",
     "support/sg2002/additional/kvm", "support/sg2002/additional/kvm_mmf",
     "support/sg2002/additional/vision",
     "support/sg2002/additional/peripheral/port/maixcam/maix_i2c.cpp",
@@ -151,7 +152,7 @@ class ContextPolicyTests(unittest.TestCase):
     def test_exact_tracked_native_inventory_and_regular_sources(self):
         self.assertEqual(check_policy(self.policy, self.files), self.files)
         check_source_files(self.files)
-        self.assertTrue(set(INPUTS[:3]) <= self.files)
+        self.assertTrue(set(INPUTS[:4]) <= self.files)
 
     def test_old_policy_is_rejected(self):
         self.reject(OLD_POLICY)
