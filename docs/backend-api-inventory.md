@@ -162,7 +162,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | GET      | `/api/download/image/status`         | Implemented.                                                                                                                                                              |
 | POST     | `/api/download/file`                 | Implemented browser ISO upload with size and path validation.                                                                                                             |
 | GET/POST | `/api/download/image/remote/enabled` | Implemented disabled-by-default remote ISO toggle.                                                                                                                        |
-| POST     | `/api/download/image`                | Implemented guarded remote ISO download with protocol, filename, destination, size, redirect, and ISO signature checks.                                                   |
+| POST     | `/api/download/image`                | Implemented guarded remote ISO download with protocol, filename, destination, size, redirect, and ISO signature checks. The backend follows up to five redirects itself: each hop's host is resolved, every address must be outside loopback, `0.0.0.0/8`, link-local (including cloud metadata) and multicast, and curl connects only to the checked address (`--resolve`). LAN servers stay allowed. curl's `--max-filesize` stops a transfer at 8 GiB also without a Content-Length (curl 8.4.0 or later; the rootfs ships 8.21.0). |
 
 ### Network And Tailscale
 
