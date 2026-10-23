@@ -6,6 +6,8 @@ import { useTranslation } from 'react-i18next';
 import * as api from '@/api/application.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
+import { followAppUpdate } from './job.ts';
+
 interface UpdateProps {
   status: string;
   setStatus: (status: string) => void;
@@ -60,20 +62,28 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
     api
       .offlineUpdate(formData)
       .then((rsp: Response) => {
-        // Prüfen ob HTTP OK
         if (!rsp.ok) throw new Error(`HTTP error ${rsp.status}`);
-        return rsp.json(); // JSON-Payload parsen
+        return rsp.json();
       })
-      .then(async (rspj: any) => {
-        if (rspj.code !== 0 || !rspj.data) {
-          // A failed install stays on screen; nothing reloads it away.
+      .then((rspj: any) => {
+        if (rspj.code !== 0 || !rspj.data?.transactionId) {
           setStatus('failed');
           setErrMsg(rspj.msg || t('settings.update.offline.updateFailed'));
           setIsLocked(false);
           return;
         }
-        // The backend restarts into the new application: wait for it to go
-        // and come back instead of reloading after a fixed delay.
+        return followAppUpdate(rspj.data.transactionId).then((outcome) => {
+          setIsLocked(false);
+          if (outcome === 'rolled-back') {
+            setStatus('failed');
+            setErrMsg(t('settings.update.offline.updateFailed'));
+            return;
+          }
+          window.location.reload();
+        });
+      })
+      .catch(async () => {
+        // No reply: the device may already be restarting for the update.
         setStatus('restarting');
         const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
         if (outcome === 'back') {
@@ -82,11 +92,6 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
         }
         setStatus('failed');
         setErrMsg(t('settings.update.unreachable'));
-        setIsLocked(false);
-      })
-      .catch(() => {
-        setStatus('failed');
-        setErrMsg(t('settings.update.offline.updateFailed'));
         setIsLocked(false);
       });
   }

@@ -23,6 +23,8 @@ import * as firewallApi from '@/api/system-firewall.ts';
 import type { FirewallStatus } from '@/api/system-firewall.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
+import { followAppUpdate, pendingAppUpdate } from './job.ts';
+import type { AppUpdateOutcome } from './job.ts';
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
 
@@ -52,9 +54,26 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [firewallStatus, setFirewallStatus] = useState<FirewallStatus | null>(null);
 
   useEffect(() => {
+    const pending = pendingAppUpdate();
+    if (pending) {
+      setIsLocked(true);
+      setStatus('updating');
+      followAppUpdate(pending).then(finishAppUpdate);
+      return;
+    }
     refreshFirewallStatus();
     refreshRawSystemUpdatesEnabled();
   }, []);
+
+  function finishAppUpdate(outcome: AppUpdateOutcome) {
+    setIsLocked(false);
+    if (outcome === 'rolled-back') {
+      setStatus('failed');
+      setErrMsg(t('settings.update.updateFailed'));
+      return;
+    }
+    window.location.reload();
+  }
 
   const onlineUpdatesBlocked = !!firewallStatus?.paranoidActive;
 
@@ -442,16 +461,17 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
     api
       .update()
-      .then(async (rsp: any) => {
-        if (rsp.code !== 0) {
-          // A failed update stays on screen; nothing reloads it away.
+      .then((rsp: any) => {
+        if (rsp.code !== 0 || !rsp.data?.transactionId) {
           setStatus('failed');
-          setErrMsg(t('settings.update.updateFailed'));
+          setErrMsg(rsp.msg || t('settings.update.updateFailed'));
           setIsLocked(false);
           return;
         }
-        // The backend restarts into the new application: wait for it to go
-        // and come back instead of reloading after a fixed delay.
+        return followAppUpdate(rsp.data.transactionId).then(finishAppUpdate);
+      })
+      .catch(async () => {
+        // No reply: the device may already be restarting for the update.
         setStatus('restarting');
         const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
         if (outcome === 'back') {
@@ -460,11 +480,6 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         }
         setStatus('failed');
         setErrMsg(t('settings.update.unreachable'));
-        setIsLocked(false);
-      })
-      .catch(() => {
-        setStatus('failed');
-        setErrMsg(t('settings.update.updateFailed'));
         setIsLocked(false);
       });
   }

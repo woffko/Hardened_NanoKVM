@@ -198,7 +198,7 @@ boundary (30-second deadline), settling the enrolled firewall rollback owner
 before waiting for enrolled activity. Only then does it reread persisted Config
 with `Config::read_frozen` and reauthenticate the exact metadata/signature. The
 same owned `WriterDrain` survives that blocking read, reauthentication, archive
-verification, extraction and the current legacy swap. Offline import acquires
+verification, extraction and the handoff to the installer. Offline import acquires
 the same barrier after upload, without inventing signed metadata authority.
 The barrier moves into the owned install callback, not the HTTP handler; a lost
 reply or discarded blocking waiter cannot reopen enrollment during its work.
@@ -317,8 +317,8 @@ Unknown/unsafe support and nonterminal journals refuse migration; missing suppor
 still requires no transaction. This is not automatic old-backend rollback or
 protocol-upgrade acceptance. The trusted producer and first-restart/rollback
 acceptance remain open. Independent installation has no full target acceptance.
-The app API still uses its
-legacy swap; no interrupted-install acceptance is claimed from this component.
+The app API now hands updates to the independent installer; no
+interrupted-install or device acceptance is claimed from this component.
 
 ## Command lifetime within the update worker
 
@@ -634,7 +634,8 @@ now reads existing state under the retained freeze and gates request serving on
 a private parent Commit. Native settings writers remain stopped until the
 install freeze ends. Independent daemon/Engine protocol tests and separate host
 HTTP/TLS tests are not a daemon-to-real-backend/native-runtime health result.
-The API still uses the legacy swap/restart and is not accepted for deployment.
+The API now submits to the installer instead of swapping and restarting; it is
+not accepted for deployment.
 
 Private staging also has [space admission](security-app-slot-recovery.md#space-admission-not-reservation-or-history-gc):
 available blocks/inodes, a journal margin, one shared no-output archive inspection
