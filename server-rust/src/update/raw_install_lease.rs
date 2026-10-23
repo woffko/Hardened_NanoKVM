@@ -341,13 +341,15 @@ fn receive_packet(socket: &OwnedFd, parent: &File, uid: u32) -> Result<RawAccept
     })
 }
 
-/// An authenticated snapshot: an anonymous regular file of `uid`, opened
-/// read-only, close-on-exec, of exactly the declared size and identity.
+/// An authenticated snapshot: an anonymous regular file of `uid`, writable by
+/// no one else, opened read-only and close-on-exec, of exactly the declared
+/// size and identity. The writer's transport checks the same before it writes.
 fn check_image(file: &File, size: u64, encoded: &[u8; 16], uid: u32) -> Result<(), Error> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.nlink() != 0
         || metadata.uid() != uid
+        || metadata.mode() & 0o7022 != 0
         || metadata.len() != size
         || identity(file)? != *encoded
         || fcntl_getfl(file).map_err(io::Error::from)? & OFlags::ACCMODE != OFlags::RDONLY

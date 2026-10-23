@@ -179,10 +179,20 @@ async fn a_linked_writable_or_mis_sized_image_is_refused() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(BOOT).unwrap();
     writable.files[0] = file;
+    // A snapshot that its group may write.
+    let mut shared = images();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::tempfile().unwrap();
+        (&file).write_all(BOOT).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o620))
+            .unwrap();
+        shared.files[0] = File::open(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap();
+    }
     // A size that differs from the snapshot.
     let mut sized = images();
     sized.sizes[1] += 1;
-    for case in [linked, writable, sized] {
+    for case in [linked, writable, shared, sized] {
         let fixture = fixture();
         assert!(matches!(
             exchange(&fixture, handoff(&fixture, case).await),

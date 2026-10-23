@@ -205,6 +205,12 @@ impl WriterArguments {
         })
     }
 
+    /// The transfer context these arguments bind. The broker sends the images
+    /// under it; the writer receives them only under the same one.
+    pub fn context(&self) -> &TransferContext {
+        &self.context
+    }
+
     /// The arguments after `--raw-writer`, in the order the writer parses them.
     pub fn to_args(&self) -> Vec<OsString> {
         [
@@ -257,7 +263,7 @@ pub fn run_device_writer(arguments: WriterArguments) -> io::Error {
     let mut system = device::DeviceSystem::new();
     match receive_inputs(&arguments) {
         Ok((boot, rootfs, ticket)) => {
-            quiet_stderr();
+            quiet_output();
             let outcome = run_writer(
                 &mut system,
                 &WritePlan {
@@ -312,11 +318,13 @@ fn require_sealed(file: &File) -> io::Result<()> {
     }
 }
 
-/// stderr may be a log file on the root filesystem that is about to be
-/// overwritten.
-fn quiet_stderr() {
+/// stdout and stderr may be a log file on the root filesystem that is about
+/// to be overwritten: the broker's own is `/tmp/nanokvm-native.log`.
+fn quiet_output() {
     if let Ok(null) = OpenOptions::new().write(true).open("/dev/null") {
-        let _ = nix::unistd::dup2(null.as_raw_fd(), 2);
+        for fd in [1, 2] {
+            let _ = nix::unistd::dup2(null.as_raw_fd(), fd);
+        }
     }
 }
 

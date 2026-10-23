@@ -1202,8 +1202,9 @@ host tests apart from its pure parts):
 
 The writer process is the broker binary in `--raw-writer` mode. The backend
 cannot run it: its native scope is a child subreaper that kills everything the
-backend starts when the scope stops. The broker will re-execute its own sealed
-in-memory copy into this mode (not wired yet). The mode takes exactly
+backend starts when the scope stops. The broker re-executes its own sealed
+in-memory copy into this mode (`native_owner/raw_install.rs`; the engine does
+not call it yet). The mode takes exactly
 `--transaction`, `--version`, `--boot-size`, `--rootfs-size`, `--boot-sha256`
 and `--rootfs-sha256` (lowercase hex). It returns, without touching anything,
 unless it runs as root from a memfd that carries the write, shrink, grow and
@@ -1212,9 +1213,21 @@ the system, so it always ends in a reboot. It takes the two images from the
 `raw_transport` socket on stdin (peer: its own PID, the pre-exec creator) and
 loads the prepared ticket from the current boot partition. It requires that
 ticket's transaction and image digests to match its arguments, and closes the
-store before `/boot` is released. It sends stderr to `/dev/null`, runs
-`run_writer` with the device system, logs the outcome to the kernel log, syncs
-and reboots (`reboot(2)`, then sysrq `b`).
+store before `/boot` is released. It sends stdout and stderr to `/dev/null`
+(the broker's are a log file), runs `run_writer` with the device system, logs
+the outcome to the kernel log, syncs and reboots (`reboot(2)`, then sysrq `b`).
+
+`sealed_copy` copies a program into a memfd and adds the write, shrink, grow
+and seal seals once the copied length matches the source. `exec_writer` builds
+the fixed writer arguments and marks every descriptor above stderr
+close-on-exec, so the leases, the journal and every other broker descriptor
+close at the exec boundary. It then makes the images' transport socket stdin
+and calls `fexecve` with an empty environment. It returns only if the exec
+failed, and the broker then stays fail-closed. A host test runs the real broker
+binary this way as root in fresh user, mount and PID namespaces, with the
+kernel log bound to a file. The writer receives both images over stdin and
+stops at the missing ticket store; images sent under another context are
+refused before the ticket. There the writer's reboot ends only the namespace.
 
 The backend hands the raw write to the broker as one sequenced packet
 (`update/raw_install_lease.rs`, `NKRAWL01`): the prepared ticket's transaction,
@@ -1224,9 +1237,9 @@ descriptors, namely the update, writer-admission and writer-activity exclusions
 operation can prepare it, and sending it never reports more than "queued". The
 receiver checks each exclusion as for the app handoff: the exact protected
 directory, read-only, close-on-exec and exclusively locked by the same open
-description. It checks each image as an anonymous regular file of the expected
-owner, opened read-only and close-on-exec, of exactly the declared size and
-identity. The broker keeps the exclusions until the exec boundary, where
+description. It checks each image as the writer's transport does: an anonymous
+regular file of the expected owner, writable by no one else, opened read-only
+and close-on-exec, of exactly the declared size and identity. The broker keeps the exclusions until the exec boundary, where
 close-on-exec releases them. The client side connects only to the fixed
 root-only `raw-install.sock` in the broker's journal directory. The broker does
 not bind that endpoint yet; accepting an offer, re-reading the ticket, stopping

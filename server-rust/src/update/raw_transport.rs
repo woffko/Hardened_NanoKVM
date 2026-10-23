@@ -201,6 +201,12 @@ impl ImageReceiver {
         self.socket.into()
     }
 
+    /// The endpoint for a process that makes it its own stdin before exec,
+    /// as the broker does for the raw writer.
+    pub fn into_socket(self) -> OwnedFd {
+        self.socket
+    }
+
     /// Adopt an owned duplicate of the child's stdin socket. The fresh helper
     /// must redirect/close its original stdin alias separately; this function
     /// never changes process-global stdio or closes unrelated descriptors.
