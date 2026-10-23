@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdarg>
+#include <exception>
 
 #define default_venc_chn        1
 
@@ -72,6 +73,56 @@ static bool vi_detection_thread_started = false;
 static bool watchdog_thread_started = false;
 static bool vi_mutex_initialized = false;
 static std::atomic<bool> stop_threads{false};
+
+/* The vendor camera, encoder and I2C wrappers report failures as C++
+ * exceptions.  None may cross the C interface into the Rust backend or end a
+ * worker thread through std::terminate, and none may leave vi_mutex held. */
+namespace {
+class ViLock {
+public:
+    ViLock() = default;
+    ViLock(const ViLock &) = delete;
+    ViLock &operator=(const ViLock &) = delete;
+    ~ViLock() { unlock(); }
+
+    int lock()
+    {
+        int res = pthread_mutex_lock(&vi_mutex);
+        held = res == 0;
+        return res;
+    }
+
+    int lock_until(const struct timespec *deadline)
+    {
+        int res = pthread_mutex_timedlock(&vi_mutex, deadline);
+        held = res == 0;
+        return res;
+    }
+
+    void unlock()
+    {
+        if (held) {
+            held = false;
+            pthread_mutex_unlock(&vi_mutex);
+        }
+    }
+
+private:
+    bool held = false;
+};
+} // namespace
+
+/* Call only from a catch handler: logs the exception being handled. */
+static void report_exception(const char *where)
+{
+    try {
+        throw;
+    } catch (const std::exception &error) {
+        fprintf(stderr, "[kvmv] %s failed: %s\n", where, error.what());
+    } catch (...) {
+        fprintf(stderr, "[kvmv] %s failed\n", where);
+    }
+}
 static kvmv_lifecycle_state_t lifecycle_state = kvmv_lifecycle_state_t::stopped;
 
 static char NanoKVM_edit[] = {
@@ -156,7 +207,8 @@ static bool restart_camera_from_worker()
         return false;
     }
 
-    int lock_res = pthread_mutex_lock(&vi_mutex);
+    ViLock vi_lock;
+    int lock_res = vi_lock.lock();
     if (lock_res != 0) {
         fprintf(stderr, "[kvmv] failed to lock camera mutex: %s\n", strerror(lock_res));
         return false;
@@ -164,11 +216,15 @@ static bool restart_camera_from_worker()
 
     bool restarted = false;
     if (!stop_threads.load(std::memory_order_acquire)) {
-        cam->restart(default_vpss_width, default_vpss_height, image::FMT_YVU420SP);
-        restarted = true;
+        try {
+            cam->restart(default_vpss_width, default_vpss_height, image::FMT_YVU420SP);
+            restarted = true;
+        } catch (...) {
+            report_exception("camera restart");
+        }
     }
 
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
     return restarted;
 }
 
@@ -1164,7 +1220,7 @@ void lt6911_read_fw(void)
 
 // ==============================================================
 
-void* watchdog_sf_feed(void * arg)
+static void* watchdog_sf_feed_loop(void * arg)
 {
     while(!stop_threads.load(std::memory_order_acquire))
     {
@@ -1228,7 +1284,7 @@ void get_hdmi_version()
     }
 }
 
-void* vi_subsystem_detection(void * arg)
+static void* vi_subsystem_detection_loop(void * arg)
 {
 	uint64_t __attribute__((unused)) int_time;
 
@@ -1478,6 +1534,27 @@ void* vi_subsystem_detection(void * arg)
         }
 
 		time::sleep_ms(10);
+    }
+    return NULL;
+}
+
+/* Worker entry points: an exception ends the worker with a log line. */
+void* vi_subsystem_detection(void * arg)
+{
+    try {
+        return vi_subsystem_detection_loop(arg);
+    } catch (...) {
+        report_exception("HDMI detection worker");
+    }
+    return NULL;
+}
+
+void* watchdog_sf_feed(void * arg)
+{
+    try {
+        return watchdog_sf_feed_loop(arg);
+    } catch (...) {
+        report_exception("watchdog worker");
     }
     return NULL;
 }
@@ -1757,9 +1834,17 @@ void kvmv_init(uint8_t _debug_info_en)
 
     // debug("[kvmv]kvmv_init - 1\r\n");
 
-    pthread_mutex_lock(&vi_mutex);
-    cam->hmirror(1);
-    cam->vflip(1);
+    ViLock vi_lock;
+    vi_lock.lock();
+    try {
+        cam->hmirror(1);
+        cam->vflip(1);
+    } catch (...) {
+        report_exception("camera setup");
+        vi_lock.unlock();
+        pthread_mutex_unlock(&lifecycle_mutex);
+        return;
+    }
     /* The global camera is already open.  Recreating it here immediately
      * tears down a freshly started ISP/VI stack and is unreliable with a
      * cleanly rebuilt vendor MMF library.  Real input-resolution changes are
@@ -1769,7 +1854,7 @@ void kvmv_init(uint8_t _debug_info_en)
         kvmv_data_buffer[i].img_data_size = 0;
     }
     kvmv_data_buffer_index = 0;
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
 
     // debug("[kvmv]kvmv_init - 2\r\n");
 
@@ -1850,7 +1935,7 @@ void set_venc_auto_recyc(uint8_t _enable)
          4: Acquire H264 encoded images(P)
          5: IMG not changed
  **********************************************************************************/
-int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
+static int read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
 {
     static uint8_t frame_undetact_count = 0;
 	// uint64_t __attribute__((unused)) start_time = time::time_ms();
@@ -1859,20 +1944,21 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 1;
     // pthread_mutex_lock(&vi_mutex);         // Add lock
-    int mutex_res = pthread_mutex_timedlock(&vi_mutex, &ts);
+    ViLock vi_lock;
+    int mutex_res = vi_lock.lock_until(&ts);
     if(mutex_res != 0){
         return -5;
     }
     if (kvmv_cfg.hdmi_res_err == ERROR_RES){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -7;
     }
     if (kvmv_cfg.hdmi_res_type == UNSUPPORT_RES){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -6;
     }
     if (kvmv_cfg.vi_detect_state == 1){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -4;
     }
     uint8_t try_num = 0;
@@ -1926,7 +2012,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
                         debug("[kvmv]frame not changed...\n");
                         kvmv_cfg.stream_stop = 1;
                         delete img;
-                        pthread_mutex_unlock(&vi_mutex);
+                        vi_lock.unlock();
                         return 5;
                     } else {
                         kvmv_cfg.stream_stop = 0;
@@ -1975,7 +2061,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				delete img;
 				*_pp_kvm_data = NULL;
 				*_p_kvmv_data_size = 0;
-				pthread_mutex_unlock(&vi_mutex);
+				vi_lock.unlock();
 				return IMG_VENC_ERROR;
 			}
             kvmv_data_t* p_kvmv_data = get_save_buffer();
@@ -1985,7 +2071,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 			    delete img;
                 debug("[kvmv]jpg buffer full\n");
                 *_pp_kvm_data = NULL;
-                pthread_mutex_unlock(&vi_mutex);
+                vi_lock.unlock();
                 return IMG_BUFFER_FULL;
             }
 			if (jpg_dump(p_kvmv_data, jpg) != 0) {
@@ -1993,14 +2079,14 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				delete img;
 				*_pp_kvm_data = NULL;
 				*_p_kvmv_data_size = 0;
-				pthread_mutex_unlock(&vi_mutex);
+				vi_lock.unlock();
 				return IMG_VENC_ERROR;
 			}
             delete jpg;
 			delete img;
             *_pp_kvm_data = p_kvmv_data->p_img_data;
             *_p_kvmv_data_size = p_kvmv_data->img_data_size;
-            pthread_mutex_unlock(&vi_mutex);
+            vi_lock.unlock();
             return IMG_MJPEG_TYPE;
         } else if (kvmv_cfg.venc_type == VENC_H264){
             int ret;
@@ -2009,7 +2095,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
                 // buffer full
 			    delete img;
                 *_pp_kvm_data = NULL;
-                pthread_mutex_unlock(&vi_mutex);
+                vi_lock.unlock();
                 return IMG_BUFFER_FULL;
             }
             // debug("[kvmv]get_save_buffer: %d \r\n", (int)(time::time_ms() - start_time));
@@ -2023,14 +2109,27 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				*_pp_kvm_data = p_kvmv_data->p_img_data;
 				*_p_kvmv_data_size = p_kvmv_data->img_data_size;
 			}
-            pthread_mutex_unlock(&vi_mutex);
+            vi_lock.unlock();
             return ret;
         }
     } while (check_kvmv(try_num++));
     // debug("[kvmv]return: %d \r\n", (int)(time::time_ms() - start_time));
     *_pp_kvm_data = NULL;
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
     return IMG_NOT_EXIST;
+}
+
+int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
+{
+    try {
+        return read_img(_width, _height, _type, _qlty, _pp_kvm_data, _p_kvmv_data_size);
+    } catch (...) {
+        // read_img's lock guard has released vi_mutex by now.
+        report_exception("image read");
+    }
+    *_pp_kvm_data = NULL;
+    *_p_kvmv_data_size = 0;
+    return IMG_VENC_ERROR;
 }
 
 int free_kvmv_data(uint8_t ** _pp_kvm_data)
@@ -2095,15 +2194,24 @@ void kvmv_deinit()
         return;
     }
 
-    pthread_mutex_lock(&vi_mutex);
-    cam->close();
-    /* Camera and the optional JPEG encoder each hold an MMF reference.  A
-     * process-level shutdown must release the complete vendor stack rather
-     * than decrementing only one reference and leaving VB/VENC initialized
-     * for the next backend process. */
-    mmf_try_deinit(true);
+    ViLock vi_lock;
+    vi_lock.lock();
+    try {
+        cam->close();
+        /* Camera and the optional JPEG encoder each hold an MMF reference.  A
+         * process-level shutdown must release the complete vendor stack rather
+         * than decrementing only one reference and leaving VB/VENC initialized
+         * for the next backend process. */
+        mmf_try_deinit(true);
+    } catch (...) {
+        report_exception("camera shutdown");
+        vi_lock.unlock();
+        fprintf(stderr, "[kvmv] camera shutdown incomplete; leaving camera/MMF state intact\n");
+        pthread_mutex_unlock(&lifecycle_mutex);
+        return;
+    }
     free_all_kvmv_data();
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
 
     int mutex_res = pthread_mutex_destroy(&vi_mutex);
     if (mutex_res == 0) {

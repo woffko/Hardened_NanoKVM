@@ -277,6 +277,45 @@ been run on hardware. Flashing a real device is a destructive check that
 needs its own approval and a recovery path. The tool still shares the I2C bus
 with `kvm_system` without a common lock.
 
+### libkvm: no C++ exception past the C interface (2026-10-23)
+
+The vendor camera, encoder and I2C wrappers report failures as C++
+exceptions: `err::check_raise` in the H.264 encoder setup, and
+`cam->restart`, `cam->set_resolution`, `cam->hmirror` and `cam->close`. One
+thrown inside `kvmv_read_img`, `kvmv_init`, `kvmv_deinit` or a worker thread
+reached `std::terminate` and could leave `vi_mutex` held. Now:
+
+- every lock of `vi_mutex` goes through a scoped guard that releases it on any
+  exit, including an exception;
+- `kvmv_read_img` returns `IMG_VENC_ERROR` with no data;
+- a throwing camera setup in `kvmv_init` leaves video stopped and both locks
+  free;
+- a throwing camera close in `kvmv_deinit` is reported as an incomplete
+  shutdown, the same as a worker that does not stop: the camera and MMF
+  state stay as they are, and a later `kvmv_init` refuses;
+- the HDMI detection and watchdog threads end with a log line instead of
+  terminating the backend, and a throwing restart from the detection thread
+  only fails that restart.
+
+`scripts/test-kvm-vision-exceptions.sh` builds the real `kvm_vision.cpp` for
+the host against stand-ins for the vendor API that throw on request (under
+`support/sg2002/additional/kvm/test/`). The stand-ins also replace `system()`,
+so no shell command of the code under test runs on the host. Six cases cover
+both workers, a resolution change, the encoder setup, the camera setup and
+the camera close. The previous source, and each fix taken out alone, end the
+test with `std::terminate` or a held `vi_mutex`.
+
+MaixCDK compiles the copy in `MaixCDK/components/kvm`, which must equal this
+source. Rebuilding the unchanged source reproduced the committed library
+byte for byte (sha256 `4f86642e…`). The new `server-rust/native/dl_lib/libkvm.so`,
+sha256 `1f32d768f6f4dd7e7221d9c191589499b127b2793b65e55be17cb3386f4af105`,
+has the same exported and imported symbols, NEEDED libraries and SONAME, and
+no RPATH. It has not run on hardware. Still open: the global `camera::Camera`
+is constructed when the library loads, outside any boundary; an image already
+read is leaked when a later step throws; the camera state after a vendor
+exception is left to the existing restart path. Device acceptance needs
+MJPEG, H.264, resolution changes, HDMI hotplug and a backend restart.
+
 ## Recommended Repair Order
 
 1. Introduce explicit native lifecycle ownership: retain thread handles, stop
