@@ -9,7 +9,7 @@ use std::{fs::File, io, os::unix::fs::MetadataExt, path::Path};
 const DIRECTORY: &str = "update-operation";
 
 #[derive(Clone, Copy)]
-pub(super) enum Domain {
+pub(crate) enum Domain {
     Update,
     WriterAdmission,
     WriterActivity,
@@ -73,7 +73,7 @@ impl ProcessLock {
         Self::at_parent(parent, uid, Domain::Update, false)
     }
 
-    pub(super) fn at_parent(
+    pub(crate) fn at_parent(
         parent: &File,
         uid: u32,
         domain: Domain,

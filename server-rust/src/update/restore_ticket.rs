@@ -163,6 +163,10 @@ impl RestoreTicket {
     pub fn transaction_id(&self) -> [u8; 16] {
         self.transaction_id
     }
+    /// The signed system version the restore belongs to.
+    pub fn target_version(&self) -> &str {
+        &self.target_version
+    }
     /// BOOT and ROOTFS image digests bound at capture.
     pub fn image_digests(&self) -> [[u8; 32]; 2] {
         [
@@ -307,6 +311,14 @@ impl Store {
             return Err(TicketError::UnsafeStore);
         }
         Self::from_boot(boot, 0, device.rdev())
+    }
+
+    /// A store in a private test directory, owned by the test user.
+    #[cfg(test)]
+    pub(crate) fn open_fixture(root: &Path) -> Result<Self> {
+        let boot = restore_fs::open_root(root, false)?;
+        let device = boot.metadata()?.dev();
+        Self::from_boot(boot, nix::unistd::geteuid().as_raw(), device)
     }
 
     fn from_boot(boot: File, uid: u32, device: u64) -> Result<Self> {

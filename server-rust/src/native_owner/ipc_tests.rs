@@ -17,6 +17,8 @@ mod home;
 mod install_engine;
 #[path = "ipc_picoclaw_tests.rs"]
 mod picoclaw;
+#[path = "raw_engine_tests.rs"]
+mod raw;
 pub(super) fn broker(root: &Path) -> Broker {
     Broker {
         group: Group::default(),

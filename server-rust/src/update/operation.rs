@@ -164,7 +164,7 @@ impl UpdateCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn with_test_parent(parent: std::fs::File) -> Self {
+    pub(crate) fn with_test_parent(parent: std::fs::File) -> Self {
         Self {
             slot: Mutex::default(),
             fixture: Some(TestAdmission::Parent(parent)),

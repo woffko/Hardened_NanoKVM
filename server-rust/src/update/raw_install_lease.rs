@@ -96,6 +96,13 @@ impl RawSender {
     pub fn send(self, handoff: RawHandoff) -> Result<(), Error> {
         send(&self.socket, &handoff)
     }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(socket: OwnedFd, uid: u32) -> Result<Self, Error> {
+        let peer = socket_peercred(&socket).map_err(io::Error::from)?;
+        prepare(&socket, peer.pid.as_raw_nonzero().get() as u32, uid)?;
+        Ok(Self { socket })
+    }
 }
 
 fn send(socket: &OwnedFd, handoff: &RawHandoff) -> Result<(), Error> {
@@ -377,6 +384,27 @@ fn valid_sizes(sizes: [u64; 2]) -> bool {
         && sizes[0]
             .checked_add(sizes[1])
             .is_some_and(|total| total <= MAX_IMAGE_BYTES)
+}
+
+/// One handoff through a private pair, received against the leases under
+/// `parent`, as the broker would.
+#[cfg(test)]
+pub(crate) fn exchange_fixture(handoff: RawHandoff, parent: File) -> Result<RawAccepted, Error> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
+    let (sender, receiver) = socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .map_err(io::Error::from)?;
+    let uid = nix::unistd::geteuid().as_raw();
+    prepare(&sender, std::process::id(), uid)?;
+    send(&sender, &handoff)?;
+    drop(handoff);
+    RawIncoming::at_parent(receiver, parent, uid)?
+        .poll()?
+        .ok_or(Error::Record)
 }
 
 #[cfg(test)]

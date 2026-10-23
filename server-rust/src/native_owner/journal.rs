@@ -147,6 +147,10 @@ impl Store {
         socket::Endpoint::bind_picoclaw_job(&self.directory, self.uid, self.device)
     }
 
+    pub(super) fn raw_install_endpoint(&self) -> io::Result<socket::Endpoint> {
+        socket::Endpoint::bind_raw_install(&self.directory, self.uid, self.device)
+    }
+
     pub(super) fn connect_control() -> io::Result<std::os::unix::net::UnixStream> {
         socket::connect(&Self::control_directory()?, 0)
     }

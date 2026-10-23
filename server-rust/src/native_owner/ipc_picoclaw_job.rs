@@ -408,6 +408,7 @@ impl Engine {
     fn pico_job_idle(&self) -> bool {
         self.mode == Mode::Running
             && self.install.is_none()
+            && self.raw.is_none()
             && self.lease.is_none()
             && !self.abandoned
             && self.backend_restart.is_none()

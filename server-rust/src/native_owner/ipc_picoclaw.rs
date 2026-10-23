@@ -113,6 +113,7 @@ impl Engine {
         }
         if self.mode != Mode::Running
             || self.install.is_some()
+            || self.raw.is_some()
             || self.lease.is_some()
             || self.abandoned
             || self.backend_restart.is_some()

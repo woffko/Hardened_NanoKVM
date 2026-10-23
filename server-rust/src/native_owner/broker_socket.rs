@@ -86,6 +86,10 @@ impl Endpoint {
         Self::bind_kind(parent, uid, device, Kind::PicoJob)
     }
 
+    pub(crate) fn bind_raw_install(parent: &File, uid: u32, device: u64) -> io::Result<Self> {
+        Self::bind_kind(parent, uid, device, Kind::RawInstall)
+    }
+
     fn bind_kind(parent: &File, uid: u32, device: u64, kind: Kind) -> io::Result<Self> {
         let directory = parent.try_clone()?;
         // The journal lease, not PID/socket absence, authorizes stale cleanup.

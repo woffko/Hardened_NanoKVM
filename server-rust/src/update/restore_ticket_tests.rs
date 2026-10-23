@@ -50,9 +50,7 @@ fn observed(boot: &str) -> BootObservation<'static> {
     }
 }
 fn open_fixture(root: &Path) -> Result<Store> {
-    let file = restore_fs::open_root(root, false)?;
-    let metadata = file.metadata()?;
-    Store::from_boot(file, nix::unistd::geteuid().as_raw(), metadata.dev())
+    Store::open_fixture(root)
 }
 fn record_path(root: &Path, name: &str) -> std::path::PathBuf {
     root.join(DIRECTORY).join(name)

@@ -1,10 +1,17 @@
-//! Root-only, fixed-frame native lifecycle transport. No raw-write authority.
+//! Root-only, fixed-frame native lifecycle transport and the fixed install
+//! offer endpoints. A raw write is authorized by the prepared ticket on the
+//! boot partition and the offer's exclusions, never by this transport.
 use super::{
     Broker, Resume, RetainedDrain, RuntimePermit, Shutdown, StartFailure, app_install, journal,
+    raw_install,
 };
 use crate::native_owner::controller::{Completion, DrainStatus, Role, StartError, Status};
 use crate::native_owner::picoclaw_home::Home;
-use crate::update::{app_install_lease, app_slot};
+use crate::update::{
+    app_install_lease, app_slot,
+    raw_install_lease::{RawAccepted, RawExclusions, RawIncoming},
+    raw_writer::WriterArguments,
+};
 use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
@@ -369,10 +376,32 @@ struct Install {
     owner: InstallOwner,
     stage: InstallStage,
 }
+
+/// A raw write owns the broker from its accepted offer to the exec. It never
+/// returns to Running: the writer reboots, and a failure stays here.
+enum RawWrite {
+    Draining {
+        session: raw_install::Session,
+        exclusions: RawExclusions,
+        images: [std::fs::File; 2],
+        arguments: WriterArguments,
+    },
+    /// The drain was uncertain or the exec failed. Nothing resumes.
+    Failed {
+        session: raw_install::Session,
+        _exclusions: RawExclusions,
+    },
+    /// Stopping could not be recorded. The live scopes stay supervised.
+    Refused {
+        broker: Broker,
+        _exclusions: RawExclusions,
+    },
+}
 struct Engine {
     home: [u8; 32],
     owner: Option<Owner>,
     install: Option<Install>,
+    raw: Option<RawWrite>,
     wanted: [bool; 2],
     retry: [Instant; 2],
     lease: Option<u64>,
@@ -423,6 +452,7 @@ impl Engine {
             home: broker.group.home.fingerprint(),
             owner: Some(Owner::Running(broker)),
             install: None,
+            raw: None,
             wanted: [false; 2],
             retry: [Instant::now(); 2],
             lease: None,
@@ -470,6 +500,10 @@ impl Engine {
         role.command(&broker.group.home)
     }
     fn tick(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            self.raw = Some(self.tick_raw(raw));
+            return;
+        }
         if let Some(install) = self.install.take() {
             self.install = self.tick_install(install);
             return;
@@ -1153,6 +1187,142 @@ impl Engine {
         }
     }
 
+    fn accept_raw(&mut self, offer: RawAccepted) -> Code {
+        // As for an app install: retained lifecycle or maintenance work, a Pico
+        // job or another update cannot be replaced by an offer.
+        if self.mode != Mode::Running
+            || self.install.is_some()
+            || self.raw.is_some()
+            || self.lease.is_some()
+            || self.abandoned
+            || self.backend_restart.is_some()
+            || self.picoclaw_stop.is_some()
+            || !matches!(self.owner, Some(Owner::Running(_)))
+        {
+            return Code::Busy;
+        }
+        // The prepared ticket on the boot partition must name exactly this
+        // write before anything stops. The writer checks it again.
+        #[cfg(test)]
+        let ticket = match &self.fixture {
+            Some(root) => raw_install::fixture_ticket(root),
+            None => raw_install::boot_ticket(),
+        };
+        #[cfg(not(test))]
+        let ticket = raw_install::boot_ticket();
+        let Some(arguments) = ticket
+            .ok()
+            .flatten()
+            .and_then(|ticket| raw_install::writer_arguments(&ticket, &offer))
+        else {
+            return Code::Invalid;
+        };
+        let Some(Owner::Running(broker)) = self.owner.take() else {
+            return Code::Uncertain;
+        };
+        let (exclusions, images) = offer.into_parts();
+        self.raw = Some(match broker.begin_raw_write() {
+            raw_install::Start::Draining(session) => RawWrite::Draining {
+                session,
+                exclusions,
+                images,
+                arguments,
+            },
+            raw_install::Start::Retained(broker) => RawWrite::Refused {
+                broker,
+                _exclusions: exclusions,
+            },
+        });
+        self.tick();
+        if self.mode == Mode::Uncertain {
+            Code::Uncertain
+        } else {
+            Code::Ok
+        }
+    }
+
+    fn tick_raw(&mut self, raw: RawWrite) -> RawWrite {
+        self.mode = Mode::Installing;
+        match raw {
+            RawWrite::Draining {
+                mut session,
+                exclusions,
+                images,
+                arguments,
+            } => match session.poll() {
+                Ok(DrainStatus::Drained) => {
+                    self.roles = [4; 2];
+                    self.backend_status = Some(Status::Closed(Completion::Stopped));
+                    // Returns only if the exec failed; every scope stays stopped.
+                    let _ = self.start_writer(&arguments, images);
+                    self.mode = Mode::Uncertain;
+                    RawWrite::Failed {
+                        session,
+                        _exclusions: exclusions,
+                    }
+                }
+                Ok(DrainStatus::Pending) => {
+                    self.roles = [3; 2];
+                    self.backend_status = Some(Status::Stopping);
+                    RawWrite::Draining {
+                        session,
+                        exclusions,
+                        images,
+                        arguments,
+                    }
+                }
+                _ => {
+                    // An uncertain drain may still own a tree: never exec.
+                    self.roles = [6; 2];
+                    self.backend_status = Some(Status::Uncertain);
+                    self.mode = Mode::Uncertain;
+                    RawWrite::Failed {
+                        session,
+                        _exclusions: exclusions,
+                    }
+                }
+            },
+            RawWrite::Failed {
+                mut session,
+                _exclusions,
+            } => {
+                // Keep reaping; a later Drained never starts the writer.
+                (self.roles, self.backend_status) = match session.poll() {
+                    Ok(DrainStatus::Drained) => ([4; 2], Some(Status::Closed(Completion::Stopped))),
+                    Ok(DrainStatus::Pending) => ([3; 2], Some(Status::Stopping)),
+                    _ => ([6; 2], Some(Status::Uncertain)),
+                };
+                self.mode = Mode::Uncertain;
+                RawWrite::Failed {
+                    session,
+                    _exclusions,
+                }
+            }
+            RawWrite::Refused {
+                mut broker,
+                _exclusions,
+            } => {
+                // Journal failure cannot discard live scopes or admission.
+                self.roles = broker.poll().map(role_status);
+                self.backend_status = broker.backend_status();
+                self.mode = Mode::Uncertain;
+                RawWrite::Refused {
+                    broker,
+                    _exclusions,
+                }
+            }
+        }
+    }
+
+    fn start_writer(&self, arguments: &WriterArguments, images: [std::fs::File; 2]) -> io::Error {
+        #[cfg(test)]
+        if let Some(root) = &self.fixture {
+            return raw_install::record_writer_fixture(root, arguments, images);
+        }
+        // A multi-threaded test process without a fixture refuses here too.
+        raw_install::start_writer(std::path::Path::new("/proc/self/exe"), arguments, images)
+    }
+
     fn cancel_install(&mut self) -> Code {
         let Some(install) = self.install.take() else {
             return Code::Busy;
@@ -1280,6 +1450,7 @@ impl Engine {
             Operation::RetryAppRetirement => code = self.retry_app_retirement(),
             Operation::BackendRunning => {
                 if self.install.is_some()
+                    || self.raw.is_some()
                     || self.backend_restart.is_some()
                     || self.backend_status != Some(Status::Running)
                 {
@@ -1421,7 +1592,7 @@ impl Engine {
                 }
             }
         }
-        if self.mode == Mode::Uncertain {
+        if self.mode == Mode::Uncertain && self.raw.is_none() {
             code = Code::Uncertain;
         }
         #[cfg(test)]
@@ -1557,8 +1728,10 @@ struct Server {
     endpoint: journal::socket::Endpoint,
     install_endpoint: journal::socket::Endpoint,
     job_endpoint: journal::socket::Endpoint,
+    raw_endpoint: journal::socket::Endpoint,
     // Close queued rights before dropping accepted engine ownership/admission.
     offers: [Option<(app_install_lease::Incoming, Instant)>; INSTALL_OFFERS],
+    raw_offer: Option<(RawIncoming, Instant)>,
     job_clients: [Option<picoclaw_job::JobClient>; picoclaw_job::JOB_CLIENTS],
     engine: Engine,
     clients: [Option<Client>; CLIENTS],
@@ -1576,7 +1749,9 @@ impl Server {
             endpoint: broker.journal.endpoint()?,
             install_endpoint: broker.journal.install_endpoint()?,
             job_endpoint: broker.journal.picoclaw_job_endpoint()?,
+            raw_endpoint: broker.journal.raw_install_endpoint()?,
             offers: std::array::from_fn(|_| None),
+            raw_offer: None,
             job_clients: std::array::from_fn(|_| None),
             engine: Engine::new(broker),
             clients: std::array::from_fn(|_| None),
@@ -1622,6 +1797,17 @@ impl Server {
                     }
                     Ok(None) if since.elapsed() < self.idle => {}
                     _ => *slot = None,
+                }
+            }
+            if let Some((offer, since)) = self.raw_offer.as_mut() {
+                match offer.poll() {
+                    Ok(Some(accepted)) => {
+                        // As for an app offer: from here this daemon owns it.
+                        self.engine.accept_raw(accepted);
+                        self.raw_offer = None;
+                    }
+                    Ok(None) if since.elapsed() < self.idle => {}
+                    _ => self.raw_offer = None,
                 }
             }
             for slot in &mut self.clients {
@@ -1749,6 +1935,30 @@ impl Server {
                 #[cfg(not(test))]
                 let offer = app_install_lease::Incoming::open(fd);
                 *slot = offer.ok().map(|offer| (offer, Instant::now()));
+            }
+            // One raw offer at a time; a second waits in the listen backlog.
+            if self.raw_offer.is_none() {
+                match rustix::net::accept_with(
+                    &self.raw_endpoint.listener,
+                    rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+                ) {
+                    Ok(fd) => {
+                        if rustix::net::sockopt::socket_peercred(&fd)?.uid.as_raw() == self.uid {
+                            #[cfg(test)]
+                            let offer = match &self.engine.fixture {
+                                Some(root) => {
+                                    RawIncoming::fixture(fd, std::fs::File::open(root)?, self.uid)
+                                }
+                                None => RawIncoming::open(fd),
+                            };
+                            #[cfg(not(test))]
+                            let offer = RawIncoming::open(fd);
+                            self.raw_offer = offer.ok().map(|offer| (offer, Instant::now()));
+                        }
+                    }
+                    Err(e) if e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
             // Every client is nonblocking and gets one bounded read/write tick.
             // Avoid a permanently readable listener spinning when all slots fill.
