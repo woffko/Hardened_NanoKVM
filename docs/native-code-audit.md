@@ -244,6 +244,39 @@ Still required before release: repeated HDMI hotplug and resolution changes,
 physical OLED/button behavior, fault injection for vendor failure paths, and a
 long-running dmesg/syslog soak.
 
+### EDID utility: read and save before erasing (2026-10-23)
+
+`nanokvm_update_edid` used to erase the LT6911 flash before it checked the
+chip, kept no copy of the EDID it replaced, and stopped after a failed write
+with the flash erased. It now:
+
+- reads the current EDID with the chip's own read sequence before anything is
+  erased, and stops unless the result is an erased flash or an EDID header
+  whose base block checksum is valid, which a wrong `hdmi_version` would not
+  return;
+- saves that EDID to a new file `/data/edid-backup-<seconds>.bin` (mode 0600,
+  fsynced) and stops if it cannot;
+- writes the new EDID and reads it back; on any failure it writes the saved
+  EDID again, verifies it, and otherwise names the backup to write before a
+  reboot.
+
+The chip-specific register sequences are unchanged. `scripts/test-nanokvm-update-edid.sh`
+builds the utility for the host against a model of the LT6911UXC registers
+(`tools/nanokvm_update_edid/test-fake-bus.c`) and covers an update, a chip
+without an EDID, an erased chip, a write that fails after the erase, and a
+missing backup directory.
+
+The committed RISC-V binary was the vendor build: neither the current source
+nor the upstream 413cdd9 source reproduces it, and it lacked the earlier input
+and page-offset fixes. It is now built from this source with the MaixCDK
+Xuantie GCC 10.2.0 toolchain (`riscv64-unknown-linux-musl-gcc
+-I<toolchain>/sysroot/usr/include -march=rv64gc`), which gives the same bytes
+from any directory: sha256
+`cfdda07b503d22ce47f56ea926bfedc243a911935c74121522f17ba61597e347`. It has not
+been run on hardware. Flashing a real device is a destructive check that
+needs its own approval and a recovery path. The tool still shares the I2C bus
+with `kvm_system` without a common lock.
+
 ## Recommended Repair Order
 
 1. Introduce explicit native lifecycle ownership: retain thread handles, stop
