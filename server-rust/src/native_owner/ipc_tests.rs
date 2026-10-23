@@ -6,7 +6,9 @@ use std::{
     process::{Command, Stdio},
 };
 const BOOT: &str = "12345678-1234-1234-1234-123456789abc";
-const FIXTURE_WAIT: Duration = Duration::from_secs(6);
+// A hang guard for fixture progress, not a property under test. Fixture steps
+// fsync; under heavy host IO single fsyncs have taken 1.6 s.
+const FIXTURE_WAIT: Duration = Duration::from_secs(30);
 #[path = "app_delivery_tests.rs"]
 mod delivery;
 #[path = "ipc_home_tests.rs"]
