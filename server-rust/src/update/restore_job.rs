@@ -6,6 +6,7 @@
 
 use super::{
     raw_transport::{TransferContext, channel},
+    restore_accounts::{self, SignedAccounts},
     restore_effective::{self, RootContext, RootEffectivePolicy},
     restore_key::{KeyOperation, KeyStage, MAX_PUBLIC, parse_public},
     restore_preflight::PreparedSshRoot,
@@ -216,6 +217,47 @@ impl SshPreflightJob {
         cancelled(cancel)?;
         result
     }
+}
+
+/// Reads the account tables of the authenticated ROOTFS image through the
+/// pinned sandbox, which mounts it read-only in its own namespaces and runs
+/// nothing from it. The tables feed `capture_effective`; this proves neither
+/// the image nor a restore authorization. `image_mountpoint` must be an empty
+/// private directory; the images are lent as read-only aliases.
+pub fn export_signed_accounts(
+    helper: &PinnedSshHelper,
+    images: &[File; 2],
+    transfer: &TransferContext,
+    image_mountpoint: &Path,
+    cancel: &AtomicBool,
+) -> Result<SignedAccounts> {
+    cancelled(cancel)?;
+    let (sender, receiver) = channel().map_err(|_| JobError::Process)?;
+    sender
+        .send(
+            transfer,
+            [
+                images[0].try_clone().map_err(|_| JobError::Process)?,
+                images[1].try_clone().map_err(|_| JobError::Process)?,
+            ],
+        )
+        .map_err(|_| JobError::Process)?;
+    cancelled(cancel)?;
+    let mut command = helper.command()?;
+    command
+        .arg("--export-accounts")
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .arg("--image-root")
+        .arg(image_mountpoint);
+    transfer.append_helper_arguments(&mut command);
+    command.stdin(receiver.into_stdio());
+    collect_accounts(command, cancel)
+}
+
+fn collect_accounts(command: Command, cancel: &AtomicBool) -> Result<SignedAccounts> {
+    let encoded = supervise(command, cancel, DEADLINE, restore_accounts::MAX_ENCODED)?;
+    restore_accounts::decode(&encoded).map_err(|_| JobError::Native)
 }
 
 fn execute(

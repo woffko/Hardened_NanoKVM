@@ -389,3 +389,54 @@ fn successful_exit_without_output_eof_is_not_accepted() {
         Err(nix::errno::Errno::ECHILD)
     );
 }
+
+mod accounts {
+    use super::*;
+    use crate::update::{restore_accounts, restore_native::AccountFiles};
+
+    const TABLES: AccountFiles<'static> = AccountFiles {
+        passwd: b"root:x:0:0:root:/root:/bin/sh\nsshd:x:999:999:sshd:/var/empty:/bin/false\n",
+        group: b"root:x:0:\nsshd:x:999:\n",
+        shadow: b"root:!:::::::\nsshd:!:::::::\n",
+        gshadow: None,
+    };
+
+    fn helper(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    #[test]
+    fn the_parent_decodes_exactly_one_valid_frame_from_a_successful_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let frame = dir.path().join("frame");
+        std::fs::write(&frame, &*restore_accounts::encode(&TABLES).unwrap()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let accounts =
+            collect_accounts(helper(&format!("cat '{}'", frame.display())), &cancel).unwrap();
+        assert_eq!(accounts.as_files().passwd, TABLES.passwd);
+        assert_eq!(accounts.as_files().shadow, TABLES.shadow);
+        assert!(accounts.as_files().gshadow.is_none());
+
+        for script in [
+            format!("cat '{}'; exit 3", frame.display()),
+            format!("cat '{}' '{}'", frame.display(), frame.display()),
+            "printf 'NKACCT01'".to_string(),
+            "head -c 300000 /dev/zero".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    collect_accounts(helper(&script), &cancel),
+                    Err(JobError::Native)
+                ),
+                "{script}"
+            );
+        }
+        cancel.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            collect_accounts(helper(&format!("cat '{}'", frame.display())), &cancel),
+            Err(JobError::Cancelled)
+        ));
+    }
+}

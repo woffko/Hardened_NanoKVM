@@ -1,5 +1,6 @@
 use nanokvm_rust_server::update::{
     raw_transport::{ImageReceiver, TransferContext},
+    restore_accounts,
     restore_effective::RootContext,
     restore_key::KeyOperation,
     restore_rootfs::{RootfsError, RootfsView},
@@ -12,7 +13,8 @@ use std::{
     convert::Infallible,
     ffi::OsString,
     fs::File,
-    os::fd::{AsFd, AsRawFd},
+    io::Write,
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     path::Path,
     process::ExitCode,
 };
@@ -29,6 +31,12 @@ enum Mode<'a> {
         context: TransferContext,
         query: Option<RootContext>,
         key: Option<KeyOperation>,
+    },
+    /// Writes the image's account tables to stdout; runs nothing from it.
+    Accounts {
+        parent: u32,
+        mountpoint: &'a Path,
+        context: TransferContext,
     },
 }
 
@@ -56,15 +64,14 @@ impl RunError {
 }
 
 fn parse(args: &[OsString]) -> Option<Mode<'_>> {
+    if args.len() == 14 && args[1] == "--export-accounts" {
+        return parse_accounts(args);
+    }
     if !matches!(args.len(), 5 | 15 | 17) || args[1] != "--root" || args[3] != "--parent-pid" {
         return None;
     }
     let root = Path::new(&args[2]);
-    let parent = args[4]
-        .to_str()?
-        .parse::<u32>()
-        .ok()
-        .filter(|pid| *pid > 1)?;
+    let parent = parent_pid(&args[4])?;
     if args.len() == 5 {
         return Some(Mode::Prepared { root, parent });
     }
@@ -79,25 +86,7 @@ fn parse(args: &[OsString]) -> Option<Mode<'_>> {
             return None;
         }
     }
-    let encoded = args[8].to_str()?.as_bytes();
-    if encoded.len() != 32 {
-        return None;
-    }
-    let mut transaction = [0; 16];
-    for (out, pair) in transaction.iter_mut().zip(encoded.as_chunks::<2>().0) {
-        let hex = |byte| match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        };
-        *out = hex(pair[0])? * 16 + hex(pair[1])?;
-    }
-    let sizes = [
-        args[12].to_str()?.parse::<u64>().ok()?,
-        args[14].to_str()?.parse::<u64>().ok()?,
-    ];
-    let context = TransferContext::new(transaction, args[10].to_str()?, sizes).ok()?;
+    let context = transfer_context(&args[8], &args[10], &args[12], &args[14])?;
     let (query, key) = if args.len() == 17 {
         if args[15] == "--effective-root" {
             (Some(RootContext::parse(args[16].to_str()?).ok()?), None)
@@ -119,6 +108,59 @@ fn parse(args: &[OsString]) -> Option<Mode<'_>> {
     })
 }
 
+/// `--export-accounts --parent-pid PID --image-root MOUNTPOINT` followed by the
+/// same transfer context as the image modes.
+fn parse_accounts(args: &[OsString]) -> Option<Mode<'_>> {
+    for (index, flag) in [
+        (2, "--parent-pid"),
+        (4, "--image-root"),
+        (6, "--transaction"),
+        (8, "--version"),
+        (10, "--boot-size"),
+        (12, "--rootfs-size"),
+    ] {
+        if args[index] != flag {
+            return None;
+        }
+    }
+    Some(Mode::Accounts {
+        parent: parent_pid(&args[3])?,
+        mountpoint: Path::new(&args[5]),
+        context: transfer_context(&args[7], &args[9], &args[11], &args[13])?,
+    })
+}
+
+fn parent_pid(arg: &OsString) -> Option<u32> {
+    arg.to_str()?.parse::<u32>().ok().filter(|pid| *pid > 1)
+}
+
+fn transfer_context(
+    transaction: &OsString,
+    version: &OsString,
+    boot_size: &OsString,
+    rootfs_size: &OsString,
+) -> Option<TransferContext> {
+    let encoded = transaction.to_str()?.as_bytes();
+    if encoded.len() != 32 {
+        return None;
+    }
+    let mut transaction = [0; 16];
+    for (out, pair) in transaction.iter_mut().zip(encoded.as_chunks::<2>().0) {
+        let hex = |byte| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        *out = hex(pair[0])? * 16 + hex(pair[1])?;
+    }
+    let sizes = [
+        boot_size.to_str()?.parse::<u64>().ok()?,
+        rootfs_size.to_str()?.parse::<u64>().ok()?,
+    ];
+    TransferContext::new(transaction, version.to_str()?, sizes).ok()
+}
+
 fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
     let (root, parent, mountpoint, context, query, key) = match mode {
         Mode::Prepared { root, parent } => {
@@ -131,7 +173,12 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
             context,
             query,
             key,
-        } => (root, parent, mountpoint, context, query, key),
+        } => (Some(root), parent, mountpoint, context, query, key),
+        Mode::Accounts {
+            parent,
+            mountpoint,
+            context,
+        } => (None, parent, mountpoint, context, None, None),
     };
     if nix::unistd::getppid().as_raw() as u32 != parent {
         return Err(RootfsError::Process.into());
@@ -148,7 +195,7 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
         .map_err(|_| RunError::Transfer)?;
     let null = File::open("/dev/null").map_err(|_| RunError::Transfer)?;
     nix::unistd::dup2(null.as_raw_fd(), 0).map_err(|_| RunError::Transfer)?;
-    let output = if query.is_some() || key.is_some() {
+    let output = if root.is_none() || query.is_some() || key.is_some() {
         let output = rustix::io::fcntl_dupfd_cloexec(std::io::stdout().as_fd(), 3)
             .map_err(|_| RunError::Transfer)?;
         nix::unistd::dup2(null.as_raw_fd(), 1).map_err(|_| RunError::Transfer)?;
@@ -161,6 +208,9 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
     let [boot, rootfs] = receiver.receive(&context).map_err(|_| RunError::Transfer)?;
     drop(boot); // Syntax preflight never boots or writes either image.
     let view = RootfsView::mount(rootfs, mountpoint, parent)?;
+    let Some(root) = root else {
+        return export_accounts(view, output.ok_or(RunError::Transfer)?);
+    };
     if let Some(key) = key {
         return exec_host_key_from_image(
             root,
@@ -180,11 +230,25 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
     }
 }
 
+fn export_accounts(view: RootfsView, output: OwnedFd) -> Result<Infallible, RunError> {
+    let accounts = view.accounts()?;
+    let encoded = restore_accounts::encode(&accounts.as_files())
+        .map_err(|_| RunError::Rootfs(RootfsError::Accounts))?;
+    File::from(output)
+        .write_all(&encoded)
+        .map_err(|_| RunError::Transfer)?;
+    // exit skips destructors; zeroize the tables first.
+    drop(encoded);
+    drop(accounts);
+    drop(view);
+    std::process::exit(0)
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().take(18).collect();
     let Some(mode) = parse(&args) else {
         eprintln!(
-            "usage: nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID [--image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION --boot-size BYTES --rootfs-size BYTES [--effective-root FIXED_ROOT_CONNECTION_SPEC | --host-key-proof FIXED_STAGE:ALGORITHM]]"
+            "usage: nanokvm-ssh-sandbox --root PRIVATE_PREPARED_ROOT --parent-pid PID [--image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION --boot-size BYTES --rootfs-size BYTES [--effective-root FIXED_ROOT_CONNECTION_SPEC | --host-key-proof FIXED_STAGE:ALGORITHM]]\n       nanokvm-ssh-sandbox --export-accounts --parent-pid PID --image-root EMPTY_PRIVATE_MOUNTPOINT --transaction HEX32 --version VERSION --boot-size BYTES --rootfs-size BYTES"
         );
         return ExitCode::from(64);
     };
@@ -325,6 +389,63 @@ mod tests {
             let mut image = args();
             image.extend(["--host-key-proof".into(), value.into()]);
             assert!(parse(&image).is_none());
+        }
+    }
+
+    fn account_args() -> Vec<OsString> {
+        [
+            "helper",
+            "--export-accounts",
+            "--parent-pid",
+            "42",
+            "--image-root",
+            "/image",
+            "--transaction",
+            "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+            "--version",
+            "0.3.0-raw.fixture",
+            "--boot-size",
+            "1025",
+            "--rootfs-size",
+            "65537",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect()
+    }
+
+    #[test]
+    fn account_export_takes_only_its_fixed_form() {
+        let all = account_args();
+        let expected = TransferContext::new([42; 16], "0.3.0-raw.fixture", [1025, 65537]).unwrap();
+        assert!(matches!(
+            parse(&all),
+            Some(Mode::Accounts { parent: 42, mountpoint, context })
+                if context == expected && mountpoint == Path::new("/image")
+        ));
+        for length in 0..all.len() {
+            assert!(parse(&all[..length]).is_none(), "prefix {length}");
+        }
+        let mut extra = all;
+        extra.push("extra".into());
+        assert!(parse(&extra).is_none());
+        for index in [1, 2, 4, 6, 8, 10, 12] {
+            let mut invalid = account_args();
+            invalid[index] = "--unknown".into();
+            assert!(parse(&invalid).is_none(), "flag {index}");
+        }
+        for (index, value) in [
+            (3, "1"),
+            (3, "pid"),
+            (7, "00000000000000000000000000000000"),
+            (7, "2a"),
+            (9, "bad version"),
+            (11, "0"),
+            (13, "rootfs"),
+        ] {
+            let mut invalid = account_args();
+            invalid[index] = value.into();
+            assert!(parse(&invalid).is_none(), "{index}={value}");
         }
     }
 }

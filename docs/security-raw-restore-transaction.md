@@ -840,6 +840,25 @@ matrix and actual SSH login remain open. Production raw writing/early apply are
 not integrated; the legacy path is retired with a temporary install barrier:
 **C1 remains OPEN**.
 
+### Signed image account export (component; capture not wired)
+
+`capture_effective` needs the account tables of the exact target ROOTFS image.
+`restore_job::export_signed_accounts` gets them from the same pinned sandbox:
+`--export-accounts --parent-pid PID --image-root EMPTY_PRIVATE_MOUNTPOINT` plus
+the public transfer context. The child receives both read-only image
+descriptors, drops BOOT, mounts ROOTFS through `RootfsView::mount` (private
+mount and network namespaces, read-only loop, `noload`), reads passwd, group,
+shadow and optional gshadow with the existing checks and writes one
+`restore_accounts` frame to its private stdout pipe. It executes nothing from
+the image. The frame is `NKACCT01`, four little-endian lengths (`u32::MAX` only
+for an absent gshadow) and the tables; each table is at most 64 KiB. The parent
+reads it through the same supervisor (15-second deadline, cancellation, output
+cap, exit zero and EOF), then requires the exact total length and
+`restore_native::validate`. The frame proves neither the image nor a restore
+authorization: the caller must already have authenticated both images. Host
+tests cover the framing, the helper's fixed argument form and the parent with
+host shell helpers; mounting a real image needs the target or root.
+
 ### Static helper build/package binding (component; app-slot authority open)
 
 The linked build wrapper builds the helper first, without `linked-libkvm` and
