@@ -159,6 +159,10 @@ impl Store {
         socket::connect_picoclaw_job(&Self::control_directory()?, 0)
     }
 
+    pub(super) fn connect_raw_install() -> io::Result<std::os::fd::OwnedFd> {
+        socket::connect_raw_install(&Self::control_directory()?, 0)
+    }
+
     fn control_directory() -> io::Result<File> {
         if !nix::unistd::geteuid().is_root() {
             return Err(io::ErrorKind::PermissionDenied.into());

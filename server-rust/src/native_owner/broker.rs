@@ -28,6 +28,8 @@ pub use picoclaw_mutation::{
 pub mod app_install;
 #[path = "ipc.rs"]
 pub mod ipc;
+#[path = "raw_install.rs"]
+pub mod raw_install;
 
 #[derive(Debug)]
 pub enum StartFailure {

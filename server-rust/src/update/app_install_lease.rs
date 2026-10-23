@@ -33,25 +33,25 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("app install lease requires the expected root local peer")]
+    #[error("install lease requires the expected root local peer")]
     Channel,
-    #[error("app install lease packet or descriptors are invalid")]
+    #[error("install lease packet or descriptors are invalid")]
     Record,
-    #[error("app install lease does not match fixed protected admission")]
+    #[error("install lease does not match fixed protected admission")]
     Admission,
-    #[error("app install lease transfer failed; outcome must be inspected")]
+    #[error("install lease transfer failed; outcome must be inspected")]
     Io(#[from] io::Error),
 }
 
 // Release activity, admission, and finally update exclusion. These are shared
 // open descriptions: NEVER explicitly flock(UNLOCK) an exported alias.
-struct Files {
-    activity: File,
-    admission: File,
-    update: File,
+pub(super) struct Files {
+    pub(super) activity: File,
+    pub(super) admission: File,
+    pub(super) update: File,
 }
 impl Files {
-    fn wire(&self) -> [&File; 3] {
+    pub(super) fn wire(&self) -> [&File; 3] {
         [&self.update, &self.admission, &self.activity]
     }
 }
@@ -350,31 +350,7 @@ fn receive_packet(
         ])
         .zip(bytes[24..].as_chunks::<16>().0)
     {
-        protected(file, uid, true)?;
-        let named = restore_fs::open_beneath(
-            parent,
-            domain.directory(),
-            OFlags::RDONLY | OFlags::DIRECTORY,
-        )?;
-        protected(&named, uid, true)?;
-        let m = file.metadata()?;
-        let n = named.metadata()?;
-        let mut identity = [0; 16];
-        identity[..8].copy_from_slice(&m.dev().to_be_bytes());
-        identity[8..].copy_from_slice(&m.ino().to_be_bytes());
-        if (m.dev(), m.ino()) != (n.dev(), n.ino())
-            || m.dev() != parent.metadata()?.dev()
-            || identity != *encoded
-            || fcntl_getfl(file).map_err(io::Error::from)? & OFlags::ACCMODE != OFlags::RDONLY
-            || !fcntl_getfd(file)
-                .map_err(io::Error::from)?
-                .contains(FdFlags::CLOEXEC)
-        {
-            return Err(Error::Admission);
-        }
-        // Same OFD as the sender's EX lease: flock is idempotent. A separately
-        // opened or still-contended description cannot bypass existing EX.
-        flock(file, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Admission)?;
+        check_lease(file, domain, encoded, parent, uid)?;
     }
     Ok(Accepted {
         _files: files,
@@ -382,7 +358,43 @@ fn receive_packet(
     })
 }
 
-fn protected(file: &File, uid: u32, private: bool) -> Result<(), Error> {
+/// One received exclusion: the exact protected directory of `domain` under
+/// `parent`, read-only, close-on-exec, and exclusively locked by this OFD.
+pub(super) fn check_lease(
+    file: &File,
+    domain: Domain,
+    encoded: &[u8; 16],
+    parent: &File,
+    uid: u32,
+) -> Result<(), Error> {
+    protected(file, uid, true)?;
+    let named = restore_fs::open_beneath(
+        parent,
+        domain.directory(),
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
+    protected(&named, uid, true)?;
+    let m = file.metadata()?;
+    let n = named.metadata()?;
+    let mut identity = [0; 16];
+    identity[..8].copy_from_slice(&m.dev().to_be_bytes());
+    identity[8..].copy_from_slice(&m.ino().to_be_bytes());
+    if (m.dev(), m.ino()) != (n.dev(), n.ino())
+        || m.dev() != parent.metadata()?.dev()
+        || identity != *encoded
+        || fcntl_getfl(file).map_err(io::Error::from)? & OFlags::ACCMODE != OFlags::RDONLY
+        || !fcntl_getfd(file)
+            .map_err(io::Error::from)?
+            .contains(FdFlags::CLOEXEC)
+    {
+        return Err(Error::Admission);
+    }
+    // Same OFD as the sender's EX lease: flock is idempotent. A separately
+    // opened or still-contended description cannot bypass existing EX.
+    flock(file, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Admission)
+}
+
+pub(super) fn protected(file: &File, uid: u32, private: bool) -> Result<(), Error> {
     let m = file.metadata()?;
     if !m.is_dir()
         || m.uid() != uid
@@ -394,7 +406,7 @@ fn protected(file: &File, uid: u32, private: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn prepare(socket: &OwnedFd, pid: u32, uid: u32) -> Result<(), Error> {
+pub(super) fn prepare(socket: &OwnedFd, pid: u32, uid: u32) -> Result<(), Error> {
     let peer = socket_peercred(socket).map_err(io::Error::from)?;
     if pid == 0
         || peer.pid.as_raw_nonzero().get() as u32 != pid

@@ -30,7 +30,7 @@ const MAGIC: &[u8; 8] = b"NKRAW001";
 const VERSION_BYTES: usize = 64;
 const CONTEXT_BYTES: usize = 8 + 16 + 1 + VERSION_BYTES + 2 * 8;
 const RECORD_BYTES: usize = CONTEXT_BYTES + 2 * 16;
-const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(super) const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]

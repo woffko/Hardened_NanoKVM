@@ -19,6 +19,7 @@ enum Kind {
     Control,
     AppInstall,
     PicoJob,
+    RawInstall,
 }
 impl Kind {
     fn name(self) -> &'static str {
@@ -26,12 +27,13 @@ impl Kind {
             Self::Control => "control.sock",
             Self::AppInstall => "app-install.sock",
             Self::PicoJob => "picoclaw-job.sock",
+            Self::RawInstall => "raw-install.sock",
         }
     }
     fn socket_type(self) -> SocketType {
         match self {
             Self::Control => SocketType::STREAM,
-            Self::AppInstall | Self::PicoJob => SocketType::SEQPACKET,
+            Self::AppInstall | Self::PicoJob | Self::RawInstall => SocketType::SEQPACKET,
         }
     }
 }
@@ -151,6 +153,10 @@ pub(crate) fn connect_install(directory: &File, uid: u32) -> io::Result<OwnedFd>
 
 pub(crate) fn connect_picoclaw_job(directory: &File, uid: u32) -> io::Result<OwnedFd> {
     connect_kind(directory, uid, Kind::PicoJob)
+}
+
+pub(crate) fn connect_raw_install(directory: &File, uid: u32) -> io::Result<OwnedFd> {
+    connect_kind(directory, uid, Kind::RawInstall)
 }
 
 fn connect_kind(directory: &File, uid: u32, kind: Kind) -> io::Result<OwnedFd> {

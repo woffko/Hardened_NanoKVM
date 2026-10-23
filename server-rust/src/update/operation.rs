@@ -256,6 +256,34 @@ impl UpdateOwner {
         )
     }
 
+    /// Prepare only the raw write's admission transfer: the retained update and
+    /// writer exclusions plus the two image snapshots. `transaction` is the
+    /// prepared ticket's; this neither publishes nor authorizes anything.
+    pub fn prepare_raw_handoff(
+        &self,
+        transaction: [u8; 16],
+        images: super::raw_install_lease::RawImages,
+        writers: super::state_writers::WriterDrain,
+    ) -> Result<super::raw_install_lease::RawHandoff> {
+        if self.0.kind != Kind::SystemInstall {
+            return Err(AppError::Conflict(
+                "raw handoff requires a system install operation".into(),
+            ));
+        }
+        let mut lease = self.0.process_lock.lock().map_err(|_| poisoned())?;
+        let lease = lease
+            .as_mut()
+            .ok_or_else(|| AppError::Internal("raw handoff requires process admission".into()))?;
+        let update = lease.transfer_alias().map_err(lock_error)?;
+        super::raw_install_lease::RawHandoff::new(
+            transaction,
+            images,
+            update,
+            writers,
+            UpdateOwner(Arc::clone(&self.0)),
+        )
+    }
+
     /// Runtime-owned work continues after disconnect. No abort handle is
     /// exposed. Schedule follow-up work inside this job, never by returning an
     /// owner through the HTTP reply. Not a restart journal/user cancellation API.

@@ -1216,6 +1216,22 @@ store before `/boot` is released. It sends stderr to `/dev/null`, runs
 `run_writer` with the device system, logs the outcome to the kernel log, syncs
 and reboots (`reboot(2)`, then sysrq `b`).
 
+The backend hands the raw write to the broker as one sequenced packet
+(`update/raw_install_lease.rs`, `NKRAWL01`): the prepared ticket's transaction,
+both image sizes and SHA-256 digests, and the device/inode identities of five
+descriptors, namely the update, writer-admission and writer-activity exclusions
+(as for an app install) and the two image snapshots. Only a system-install
+operation can prepare it, and sending it never reports more than "queued". The
+receiver checks each exclusion as for the app handoff: the exact protected
+directory, read-only, close-on-exec and exclusively locked by the same open
+description. It checks each image as an anonymous regular file of the expected
+owner, opened read-only and close-on-exec, of exactly the declared size and
+identity. The broker keeps the exclusions until the exec boundary, where
+close-on-exec releases them. The client side connects only to the fixed
+root-only `raw-install.sock` in the broker's journal directory. The broker does
+not bind that endpoint yet; accepting an offer, re-reading the ticket, stopping
+the scopes and the exec are the next step.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative
