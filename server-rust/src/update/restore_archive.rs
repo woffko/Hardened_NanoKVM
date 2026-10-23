@@ -118,6 +118,21 @@ fn capture(source_root: &Path, private_staging: &Path) -> Result<CapturedArchive
     capture_canonical(&source, private_staging, &[], &[])
 }
 
+/// A captured archive of synthetic required state, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn fixture_archive(source_root: &Path, private_staging: &Path) -> CapturedArchive {
+    for path in policy::REQUIRED
+        .iter()
+        .copied()
+        .chain(["etc/kvm/session_secret"])
+    {
+        let path = source_root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"synthetic fixture state\n").unwrap();
+    }
+    capture(source_root, private_staging).unwrap()
+}
+
 // Only the effective-state normalizer can supply canonical replacements. A
 // missing optional replacement suppresses stale state at its old default path.
 pub(super) struct CanonicalSetting<'a> {

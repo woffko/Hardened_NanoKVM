@@ -61,6 +61,11 @@ pub struct RestoreSecret {
 }
 
 impl RestoreSecret {
+    /// The capsule header carries it in clear; it names the capsule file.
+    pub fn transaction_id(&self) -> [u8; 16] {
+        self.transaction_id
+    }
+
     fn validate(&self) -> Result<()> {
         validate_context(&self.target_version, self.plaintext_len)?;
         if self.transaction_id == [0; 16] {

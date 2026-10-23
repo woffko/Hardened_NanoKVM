@@ -1107,6 +1107,22 @@ be connected by the writer/early helper; none may be taken from p3 JSON or HTTP
 parameters. Host fixtures do not exercise the production `/boot` entry point or
 prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 
+## Capsule sealing on the data partition (component; capture not wired)
+
+A raw write replaces p1 and p2, so the capsule must live on p3 in a private
+directory outside every media and API path. `raw_capture::seal_capsule`
+encrypts a captured archive there as `<transaction>.capsule`. It writes an
+exclusive 0600 temporary (a random `.capsule-*.tmp` name, `O_EXCL|O_NOFOLLOW`
+relative to the pinned directory), hashes the encrypted bytes while writing,
+fsyncs the file, renames it with `RENAME_NOREPLACE` and fsyncs the directory.
+Any failure returns no secret and removes the temporary; a failed directory
+fsync also removes the renamed capsule, which nothing could open without the
+dropped secret. The SHA-256 it returns is the ticket's capsule digest, and
+`RestoreSecret::transaction_id` (also in the capsule header in clear) names
+the file. Host tests inject faults before the file sync, the rename and the
+directory sync; vendor exFAT rename/fsync behavior and power loss are not
+covered.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative

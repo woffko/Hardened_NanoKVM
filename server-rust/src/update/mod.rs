@@ -19,6 +19,7 @@ pub(crate) mod picoclaw_profile;
 pub(crate) mod picoclaw_runtime;
 pub(crate) mod picoclaw_startup;
 pub(crate) mod picoclaw_token;
+pub mod raw_capture;
 pub mod raw_transport;
 pub mod restore_accounts;
 pub mod restore_archive;
