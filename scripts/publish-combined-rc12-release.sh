@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[ "${HARDENED_LEGACY_RC12:-}" = 1 ] || {
+	echo "this is the published RC12 release helper; new releases use scripts/prepare-release.sh and scripts/publish-release.sh; set HARDENED_LEGACY_RC12=1 to run it" >&2
+	exit 2
+}
+
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO="${GITHUB_REPOSITORY:-woffko/Hardened_NanoKVM}"
 RELEASE_TAG="${RELEASE_TAG:-hardened-system-0.3.0-raw.12}"

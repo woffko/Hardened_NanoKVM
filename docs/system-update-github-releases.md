@@ -37,6 +37,11 @@ https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-sta
 Do not use `https://github.com/woffko/Hardened_NanoKVM/releases/latest/...` for
 system updates while application updates still use that endpoint.
 
+Releases are prepared and published with `scripts/prepare-release.sh` and
+`scripts/publish-release.sh`. The channel metadata changes only after the
+versioned release is published and verified; see
+[release-procedure.md](release-procedure.md).
+
 ## Versioned Release Assets
 
 A versioned system release tag should be named like:

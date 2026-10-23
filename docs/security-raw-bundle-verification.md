@@ -6,6 +6,10 @@ It is not the current remediation-candidate verifier: historical integrity does
 not prove that an image implements the subsequent storage/recovery protocol.
 A new candidate still needs its own manifest-bound verification and full
 build/device acceptance; historical PASS must not substitute for those gates.
+For a new release, `scripts/verify-raw-bundle.sh` runs the same checks against
+the accepted candidate's values, which are all required. It has no unsigned
+mode, and `scripts/prepare-release.sh` runs it before anything is signed (see
+[release-procedure.md](release-procedure.md)).
 
 Signed metadata is required by default:
 
