@@ -51,8 +51,9 @@ echo "ok libkvm polls the chip only under the bus lock"
 
 EDID="$ROOT/tools/nanokvm_update_edid/nanokvm_update_edid.c"
 awk '/^int lt6911_edid_config/,/^}/' "$EDID" > "$T/config"
-lock_line="$(grep -n 'bus_lock(client)' "$T/config" | head -n 1 | cut -d: -f1)"
-read_line="$(grep -n 'edid_read(' "$T/config" | head -n 1 | cut -d: -f1)"
+# A missing line is a finding, not a shell error (set -e, pipefail).
+lock_line="$(grep -n 'bus_lock(client)' "$T/config" | head -n 1 | cut -d: -f1 || true)"
+read_line="$(grep -n 'edid_read(' "$T/config" | head -n 1 | cut -d: -f1 || true)"
 [ -n "$lock_line" ] && [ -n "$read_line" ] && [ "$lock_line" -lt "$read_line" ] ||
     fail "the EDID tool reads the chip before taking the bus lock"
 echo "ok the EDID tool takes the bus lock before its first read"
