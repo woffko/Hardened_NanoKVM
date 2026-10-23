@@ -169,6 +169,9 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
     Outcome::Written
 }
 
+#[path = "raw_writer_device.rs"]
+pub mod device;
+
 #[cfg(test)]
 #[path = "raw_writer_tests.rs"]
 mod tests;

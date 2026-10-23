@@ -1180,6 +1180,26 @@ the old system; also when ROOTFS cannot be opened), `Failed` (a write started:
 manual recovery) or `Written`; the caller reboots after any of them. Host tests
 drive the sequence with a fake system over temporary files.
 
+`raw_writer::device::DeviceSystem` is the device implementation (not run by
+host tests apart from its pure parts):
+
+- stopping: every process in /proc except PID 1, the writer, kernel threads
+  (`PF_KTHREAD`) and zombies, scanned once and tracked by pidfd; TERM, 5 s,
+  KILL, 5 s; a scanned process still alive is an error (`NotStarted`).
+  Processes init respawns afterwards (a console getty) are left alone.
+- freezing: the new boot mountpoint `/dev/.nanokvm-raw-boot` is created on
+  devtmpfs first, `sync`, then `mount -o remount,ro /` up to three times on
+  EBUSY, then `sysrq u` (every filesystem read-only; the images are only read
+  from here on), verified in /proc/mounts.
+- releasing: `/boot` is unmounted, never left read-only, because a second
+  mount of the same device would reuse the stale superblock.
+- partitions: `/dev/mmcblk0p2` and `p1` opened read-write, required to be
+  block devices.
+- the ticket: the new p1 is mounted at the devtmpfs path with `nosuid,nodev,
+  noexec,uid=0,gid=0,fmask=0177,dmask=0077`, `Store::open_mounted` publishes
+  the prepared ticket, `sync`, unmount.
+- logging: `/dev/kmsg` only; stderr may be a file on the overwritten root.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative
