@@ -112,7 +112,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | GET/POST        | `/api/vm/device/virtual`   | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/oled`             | Implemented.                                                                                                       |
 | GET             | `/api/vm/hdmi`             | Implemented.                                                                                                       |
-| POST            | `/api/vm/hdmi/reset`       | Implemented. Off, 1 s, on, in a task of its own: a lost client cannot leave HDMI capture off. libkvm calls run on a blocking thread. |
+| POST            | `/api/vm/hdmi/reset`       | Implemented. Off, 1 s, on, in a task of its own: a lost client cannot leave HDMI capture off. A capture the user disabled is refused by name and stays disabled; a reset persists no setting. libkvm calls run on a blocking thread. |
 | POST            | `/api/vm/hdmi/enable`      | Implemented.                                                                                                       |
 | POST            | `/api/vm/hdmi/disable`     | Implemented.                                                                                                       |
 | GET             | `/api/vm/ssh`              | Implemented.                                                                                                       |
@@ -138,7 +138,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | GET         | `/api/ws`                       | Implemented HID keyboard/mouse WebSocket plus capture-status events.                                                                                                         |
 | GET         | `/api/stream/mjpeg`             | Implemented through `libkvm` with shared fanout.                                                                                                                             |
 | POST        | `/api/stream/mjpeg/detect`      | Implemented.                                                                                                                                                                 |
-| POST        | `/api/stream/mjpeg/detect/stop` | Implemented. Frame detection is paused for the given seconds in a task of its own, so a lost client cannot leave it off; libkvm calls run on a blocking thread.               |
+| POST        | `/api/stream/mjpeg/detect/stop` | Implemented. Frame detection is paused for the given seconds in a task of its own, so a lost client cannot leave it off. The pause ends at the user's setting (`/detect`), not at a constant; a setting changed during a pause takes effect when the last pause ends. libkvm calls run on a blocking thread. |
 | GET         | `/api/stream/h264/direct`       | Implemented NanoKVM-compatible direct H.264 binary frame WebSocket.                                                                                                          |
 | GET         | `/api/stream/h264`              | Implemented H.264 WebRTC signaling and RTP sample streaming for Baseline/Moderate firewall modes; returns forbidden while Restricted or Paranoid firewall mode is effective. |
 | GET         | `/api/hid/shortcuts`            | Implemented.                                                                                                                                                                 |

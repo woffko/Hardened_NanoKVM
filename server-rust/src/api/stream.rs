@@ -39,6 +39,53 @@ use crate::{
 
 const FRAME_DETECT_INTERVAL: u8 = 60;
 
+/// The frame-detect interval the user chose (0 = off) and the stop windows that
+/// hold it off for a while. libkvm starts with detection off and the web
+/// announces the stored choice at page load; a window ends at the configured
+/// value, not at a constant, and a choice made inside a window takes effect
+/// when the last window ends.
+struct FrameDetect {
+    configured: u8,
+    windows: usize,
+}
+
+static FRAME_DETECT: Mutex<FrameDetect> = Mutex::new(FrameDetect {
+    configured: 0,
+    windows: 0,
+});
+
+impl FrameDetect {
+    fn configure(&mut self, frame: u8, apply: impl FnOnce(u8) -> Result<()>) -> Result<()> {
+        if self.windows == 0 {
+            apply(frame)?;
+        }
+        self.configured = frame;
+        Ok(())
+    }
+
+    fn stop_begin(&mut self, apply: impl FnOnce(u8) -> Result<()>) -> Result<()> {
+        if self.windows == 0 {
+            apply(0)?;
+        }
+        self.windows += 1;
+        Ok(())
+    }
+
+    fn stop_end(&mut self, apply: impl FnOnce(u8) -> Result<()>) -> Result<()> {
+        self.windows = self.windows.saturating_sub(1);
+        if self.windows == 0 {
+            apply(self.configured)?;
+        }
+        Ok(())
+    }
+}
+
+fn frame_detect() -> Result<std::sync::MutexGuard<'static, FrameDetect>> {
+    FRAME_DETECT
+        .lock()
+        .map_err(|_| AppError::Internal("frame detect state poisoned".to_string()))
+}
+
 #[cfg(test)]
 #[path = "stream_session_tests.rs"]
 mod session_lifetime_tests;
@@ -874,16 +921,18 @@ pub async fn update_frame_detect(
     } else {
         0
     };
-    libkvm(move || kvm::set_frame_detect(frame)).await?;
+    libkvm(move || frame_detect()?.configure(frame, kvm::set_frame_detect)).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn stop_frame_detect(Json(req): Json<StopFrameDetectReq>) -> Result<impl IntoResponse> {
     let duration = Duration::from_secs(req.duration.unwrap_or(10).max(1));
+    // The window ends at the user's setting, which a page load or another
+    // browser may have changed meanwhile, not at the enabled interval.
     owned_interval(
-        || kvm::set_frame_detect(0),
+        || frame_detect()?.stop_begin(kvm::set_frame_detect),
         duration,
-        || kvm::set_frame_detect(FRAME_DETECT_INTERVAL),
+        || frame_detect()?.stop_end(kvm::set_frame_detect),
     )
     .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -1283,6 +1332,107 @@ fn h264_direct_packet(is_keyframe: bool, timestamp_micros: u64, data: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
+    fn recorder(applied: &RefCell<Vec<u8>>) -> impl Fn(u8) -> super::Result<()> + '_ {
+        move |frame| {
+            applied.borrow_mut().push(frame);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stop_window_ends_at_the_configured_interval() {
+        use super::{FRAME_DETECT_INTERVAL, FrameDetect};
+        let applied = RefCell::new(Vec::new());
+        let record = recorder(&applied);
+        let mut state = FrameDetect {
+            configured: 0,
+            windows: 0,
+        };
+        state.configure(0, &record).unwrap();
+        state.stop_begin(&record).unwrap();
+        state.stop_end(&record).unwrap();
+        assert_eq!(
+            *applied.borrow(),
+            [0, 0, 0],
+            "a disabled choice stays disabled"
+        );
+        state.configure(FRAME_DETECT_INTERVAL, &record).unwrap();
+        state.stop_begin(&record).unwrap();
+        state.stop_end(&record).unwrap();
+        assert_eq!(
+            applied.borrow()[3..],
+            [FRAME_DETECT_INTERVAL, 0, FRAME_DETECT_INTERVAL]
+        );
+    }
+
+    #[test]
+    fn a_choice_made_inside_a_window_waits_for_its_end() {
+        use super::{FRAME_DETECT_INTERVAL, FrameDetect};
+        let applied = RefCell::new(Vec::new());
+        let record = recorder(&applied);
+        let mut state = FrameDetect {
+            configured: 0,
+            windows: 0,
+        };
+        state.stop_begin(&record).unwrap();
+        state.configure(FRAME_DETECT_INTERVAL, &record).unwrap();
+        assert_eq!(*applied.borrow(), [0], "the page's pause is not cut short");
+        assert_eq!(state.configured, FRAME_DETECT_INTERVAL);
+        state.stop_end(&record).unwrap();
+        assert_eq!(*applied.borrow(), [0, FRAME_DETECT_INTERVAL]);
+        state.stop_begin(&record).unwrap();
+        state.configure(0, &record).unwrap();
+        state.stop_end(&record).unwrap();
+        assert_eq!(applied.borrow()[2..], [0, 0]);
+    }
+
+    #[test]
+    fn overlapping_windows_end_together() {
+        use super::{FRAME_DETECT_INTERVAL, FrameDetect};
+        let applied = RefCell::new(Vec::new());
+        let record = recorder(&applied);
+        let mut state = FrameDetect {
+            configured: 0,
+            windows: 0,
+        };
+        state.configure(FRAME_DETECT_INTERVAL, &record).unwrap();
+        state.stop_begin(&record).unwrap();
+        state.stop_begin(&record).unwrap();
+        state.stop_end(&record).unwrap();
+        assert_eq!(
+            *applied.borrow(),
+            [FRAME_DETECT_INTERVAL, 0],
+            "one window still holds"
+        );
+        state.stop_end(&record).unwrap();
+        assert_eq!(
+            *applied.borrow(),
+            [FRAME_DETECT_INTERVAL, 0, FRAME_DETECT_INTERVAL]
+        );
+    }
+
+    #[test]
+    fn a_failed_stop_opens_no_window() {
+        use super::{AppError, FRAME_DETECT_INTERVAL, FrameDetect};
+        let applied = RefCell::new(Vec::new());
+        let record = recorder(&applied);
+        let fail = |_: u8| -> super::Result<()> { Err(AppError::Internal("libkvm".to_string())) };
+        let mut state = FrameDetect {
+            configured: 0,
+            windows: 0,
+        };
+        assert!(state.stop_begin(fail).is_err());
+        assert_eq!(state.windows, 0);
+        state.configure(FRAME_DETECT_INTERVAL, &record).unwrap();
+        assert_eq!(
+            *applied.borrow(),
+            [FRAME_DETECT_INTERVAL],
+            "applied at once: no window is open"
+        );
+    }
+
     #[test]
     fn keyframe_requests_are_spaced_by_their_interval() {
         use super::{H264_KEYFRAME_REQUEST_INTERVAL, keyframe_request_due};

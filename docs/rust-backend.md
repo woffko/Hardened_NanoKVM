@@ -149,7 +149,9 @@ For end-user flashing instructions, see
 - MJPEG stream and frame-detect endpoints through `libkvm`. With frame
   detection on, an unchanged screen (`libkvm` result 5) sends nothing and is
   not a capture failure, so the stream resumes at the next changed frame
-  without the failure backoff.
+  without the failure backoff. libkvm starts with detection off; the web
+  announces the stored choice at page load, and the pause at page load
+  (`detect/stop`) returns to that choice rather than to a constant.
 - H.264 Direct and H.264 WebRTC routes are implemented. Direct streaming is the
   preferred low-CPU mode and has been verified on hardware. WebRTC websocket
   signaling is available only when the effective firewall mode permits it.

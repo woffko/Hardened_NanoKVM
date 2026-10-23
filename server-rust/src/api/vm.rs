@@ -457,17 +457,25 @@ pub async fn disable_hdmi() -> Result<impl IntoResponse> {
 }
 
 pub async fn reset_hdmi() -> Result<impl IntoResponse> {
-    // A lost client must not leave HDMI capture switched off.
+    reset_hdmi_capture(Path::new(HDMI_DISABLE_FILE).exists()).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+/// Off, 1 s, on, for a capture that is on. A capture the user disabled is
+/// refused by name and stays disabled: a reset pulses, it does not persist a
+/// setting. A lost client must not leave HDMI capture switched off.
+async fn reset_hdmi_capture(disabled: bool) -> Result<()> {
+    if disabled {
+        return Err(AppError::BadRequest(
+            "HDMI capture is disabled; enable it before a reset".to_string(),
+        ));
+    }
     stream::owned_interval(
         || kvm::set_hdmi(false).map(drop),
         Duration::from_secs(1),
-        || {
-            kvm::set_hdmi(true)?;
-            persist_hdmi_enabled()
-        },
+        || kvm::set_hdmi(true).map(drop),
     )
-    .await?;
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    .await
 }
 
 pub async fn get_ssh_state() -> Result<impl IntoResponse> {
@@ -1689,6 +1697,18 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reset_keeps_a_disabled_capture_disabled() {
+        // Refused by name before any libkvm call; on this host libkvm cannot be
+        // loaded, so reaching it would be a different error.
+        match reset_hdmi_capture(true).await {
+            Err(AppError::BadRequest(message)) => {
+                assert!(message.contains("disabled"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_stalled_pty_blocks_only_the_terminal_writer_thread() {
