@@ -49,11 +49,11 @@ fi
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-restore-runtime.sh" --locked --offline
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-app-recovery.sh" --locked --offline
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-native-owner.sh"
-NANOKVM_SSH_RUNTIME_BINDING="$(python3 "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
+NANOKVM_SSH_RUNTIME_BINDING="$(python3 -B "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-ssh-sandbox" \
   --directory "$TARGET_DIR/ssh-runtime-bindings")"
 export NANOKVM_SSH_RUNTIME_BINDING
-NANOKVM_APP_RECOVERY_BINDING="$(python3 "$ROOT/../scripts/app-recovery-binding.py" prepare \
+NANOKVM_APP_RECOVERY_BINDING="$(python3 -B "$ROOT/../scripts/app-recovery-binding.py" prepare \
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-app-recovery" \
   --directory "$TARGET_DIR/app-recovery-bindings")"
 export NANOKVM_APP_RECOVERY_BINDING
