@@ -35,7 +35,10 @@ use std::{
     sync::mpsc,
 };
 
-const LIMIT: Duration = Duration::from_secs(5);
+// A hang guard for the fixture's drain, not a property under test: the aborted
+// writer's fsyncs ran past 5 s once under full-suite IO load (G1 on 436d4fa,
+// phase 1 at 1475 s) while the test takes about 1 s alone.
+const LIMIT: Duration = Duration::from_secs(30);
 
 // Transferred descriptions release on the last FD, including short-lived
 // CLOEXEC aliases in parallel fixtures' fork-before-exec windows. Only confirmed
