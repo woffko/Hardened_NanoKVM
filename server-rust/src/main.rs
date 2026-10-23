@@ -1,7 +1,7 @@
 use axum::{
     extract::State,
-    http::{HeaderMap, Uri, header},
-    response::Redirect,
+    http::{HeaderMap, StatusCode, Uri, header},
+    response::{IntoResponse, Redirect, Response},
 };
 use nanokvm_rust_server::{
     config::Config,
@@ -18,6 +18,7 @@ use rand_core::{OsRng, RngCore};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
+    net::Ipv6Addr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process,
@@ -441,52 +442,74 @@ async fn redirect_to_https(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-) -> Redirect {
+) -> Response {
     let https_port = state.config.port.https;
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost");
+    // The redirect names only a host or an address literal from the request:
+    // never a path, user info or anything else a Host header can carry.
+    let Some(host) = redirect_host(host, https_port) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     let target = format!(
-        "https://{}{}",
-        redirect_host(host, https_port),
+        "https://{host}{}",
         uri.path_and_query()
             .map(|value| value.as_str())
             .unwrap_or("/")
     );
-    Redirect::temporary(&target)
+    Redirect::temporary(&target).into_response()
 }
 
-fn redirect_host(request_host: &str, https_port: u16) -> String {
-    let host = host_without_port(request_host);
+fn redirect_host(request_host: &str, https_port: u16) -> Option<String> {
+    let host = host_without_port(request_host)?;
+    if host.contains(':') {
+        host.parse::<Ipv6Addr>().ok()?;
+    } else if host.is_empty()
+        || host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
+    {
+        return None;
+    }
 
-    if https_port == 443 {
-        if host.contains(':') && !host.starts_with('[') {
+    Some(if https_port == 443 {
+        if host.contains(':') {
             format!("[{host}]")
         } else {
             host
         }
-    } else if host.contains(':') && !host.starts_with('[') {
+    } else if host.contains(':') {
         format!("[{host}]:{https_port}")
     } else {
         format!("{host}:{https_port}")
-    }
+    })
 }
 
-fn host_without_port(request_host: &str) -> String {
+/// The host of a Host header with its port removed; `None` when what follows
+/// the host is not a port.
+fn host_without_port(request_host: &str) -> Option<String> {
+    let is_port = |port: &str| port.parse::<u16>().is_ok();
     if let Some(rest) = request_host.strip_prefix('[') {
-        if let Some((host, _)) = rest.split_once(']') {
-            return host.to_string();
-        }
+        let (host, after) = rest.split_once(']')?;
+        host.parse::<Ipv6Addr>().ok()?;
+        return (after.is_empty() || after.strip_prefix(':').is_some_and(is_port))
+            .then(|| host.to_string());
     }
 
-    if let Some((host, port)) = request_host.rsplit_once(':') {
-        if !host.contains(':') && port.chars().all(|ch| ch.is_ascii_digit()) {
-            return host.to_string();
-        }
+    if let Some((host, port)) = request_host.rsplit_once(':')
+        && !host.contains(':')
+    {
+        return is_port(port).then(|| host.to_string());
     }
 
-    request_host.to_string()
+    Some(request_host.to_string())
 }
 
 fn init_tracing() {
@@ -577,13 +600,50 @@ mod tests {
 
     #[test]
     fn redirect_host_replaces_http_port() {
-        assert_eq!(redirect_host("10.0.87.133:80", 443), "10.0.87.133");
-        assert_eq!(redirect_host("10.0.87.133:80", 8443), "10.0.87.133:8443");
+        assert_eq!(
+            redirect_host("10.0.87.133:80", 443).as_deref(),
+            Some("10.0.87.133")
+        );
+        assert_eq!(
+            redirect_host("10.0.87.133:80", 8443).as_deref(),
+            Some("10.0.87.133:8443")
+        );
+        assert_eq!(
+            redirect_host("kvm-1234.local", 443).as_deref(),
+            Some("kvm-1234.local")
+        );
     }
 
     #[test]
     fn redirect_host_handles_ipv6() {
-        assert_eq!(redirect_host("[::1]:80", 443), "[::1]");
-        assert_eq!(redirect_host("[::1]:80", 8443), "[::1]:8443");
+        assert_eq!(redirect_host("[::1]:80", 443).as_deref(), Some("[::1]"));
+        assert_eq!(
+            redirect_host("[::1]:80", 8443).as_deref(),
+            Some("[::1]:8443")
+        );
+        assert_eq!(
+            redirect_host("[fe80::1]", 443).as_deref(),
+            Some("[fe80::1]")
+        );
+    }
+
+    #[test]
+    fn redirect_host_refuses_what_is_not_a_host() {
+        for host in [
+            "",
+            "evil.example/path",
+            "user@evil.example",
+            "evil.example:80@other",
+            "kvm.local:http",
+            "kvm.local:99999",
+            "[::1]evil",
+            "[not-an-address]",
+            "two words",
+            "kvm..local",
+            "kvm.local\\evil",
+            "%65vil.example",
+        ] {
+            assert_eq!(redirect_host(host, 443), None, "{host:?}");
+        }
     }
 }

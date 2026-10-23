@@ -14,7 +14,9 @@ This document maps the current Rust backend surface in `server-rust/`.
 - Default HTTP bind: `host: ""`, port `80`, effectively all interfaces.
 - Optional HTTPS: `proto: https`, `port.https`, and configured cert/key.
 - HTTPS mode keeps a restricted loopback HTTP surface for PicoClaw internal
-  routes and redirects normal HTTP clients to HTTPS.
+  routes and redirects normal HTTP clients to HTTPS. The redirect target is
+  taken from `Host` only when it is a host name, an IPv4 address or a bracketed
+  IPv6 address with an optional numeric port; any other value gets `400`.
 
 ## Response Envelope
 
@@ -36,6 +38,11 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST | `/api/auth/setup`          | Implemented for first-account setup flow; GET reports whether setup is required, POST creates the first account only while `/etc/kvm/pwd` is missing. |
 | POST     | `/api/network/wifi`        | AP-mode no-auth Wi-Fi flow with AP key verification; lockout of 5 failures per source and 20 shared, for 10 minutes.                                  |
 | POST     | `/api/network/wifi/verify` | AP-mode verification under the same AP key lockout.                                                                                                   |
+
+On these routes an I/O, configuration or internal failure is reported as
+`{"code": -500, "msg": "internal error"}`; the text, which may name paths or
+configuration detail, goes only to the backend log. `/api/application/current-version`
+is handled the same way. Authenticated routes keep the detailed message.
 
 ## Authenticated REST Routes
 

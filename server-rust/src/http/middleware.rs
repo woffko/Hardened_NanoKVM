@@ -1,9 +1,9 @@
 use axum::{
-    Extension,
+    Extension, Json,
     body::Body,
     extract::State,
     extract::connect_info::ConnectInfo,
-    http::{HeaderMap, Method, Request, Uri, header},
+    http::{HeaderMap, Method, Request, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -12,6 +12,7 @@ use crate::{
     AppError,
     auth::session::{Session, SessionLifetime},
     config::Config,
+    error::{ApiResponse, InternalErrorDetail},
     http::tls::ClientAddr,
     state::AppState,
 };
@@ -104,6 +105,24 @@ pub async fn picoclaw_internal(req: Request<Body>, next: Next) -> Response {
         return next.run(req).await;
     }
     AppError::Unauthorized.into_response()
+}
+
+/// For routes that unauthenticated callers reach: an internal error is
+/// reported as such, while its text (paths, I/O and configuration detail) goes
+/// only to the log.
+pub async fn conceal_internal_errors(req: Request<Body>, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    let Some(InternalErrorDetail(detail)) = response.extensions().get::<InternalErrorDetail>()
+    else {
+        return response;
+    };
+    tracing::warn!(path, error = ?detail, "internal error on a public route");
+    (
+        StatusCode::OK,
+        Json(ApiResponse::<()>::err(-500, "internal error")),
+    )
+        .into_response()
 }
 
 fn is_state_changing(method: &Method) -> bool {

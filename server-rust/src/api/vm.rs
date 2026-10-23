@@ -871,7 +871,7 @@ pub async fn unlock_terminal(
         let mut limiter = state.login_limiter.write().await;
         let locked = limiter.record_failure(source, &limiter_username);
         if locked {
-            warn!(source_ip, username = %session.username, "terminal unlock lockout threshold reached");
+            warn!(source_ip, username = ?session.username, "terminal unlock lockout threshold reached");
         }
         return Err(AppError::InvalidCredentials);
     }
