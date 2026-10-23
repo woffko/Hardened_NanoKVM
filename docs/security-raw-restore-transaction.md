@@ -62,8 +62,19 @@ This is denial/retry protection, not authorization from a legacy marker.
 
 `S01fs` no longer imports the p3 plaintext preserve tree, privileged configuration,
 accounts, optional executables/init scripts or update trust. Its old permission
-fixups, including weakening `server.yaml` to mode `0644`, are removed. Existing media
-mount/partition-growth logic is unchanged, not accepted as idempotent by this fix.
+fixups, including weakening `server.yaml` to mode `0644`, are removed.
+
+Its partition steps are re-runnable (L-B10). p2 is grown to its fixed end only
+when `/sys/class/block/mmcblk0p2` says it ends before 8192MB, so the partition
+table is rewritten on a freshly written card and never again; `resize2fs` still
+runs every boot, because a raw update writes a smaller filesystem into the same
+partition. The data partition is created only when p3 is absent, and formatted
+only when this script created it: `/etc/kvm.disk0.creating` is written before
+`mkpart` and removed after `mkfs.exfat`, so a boot interrupted between the two
+formats the still-empty p3 on the next boot, and an existing p3 is never
+formatted. `scripts/test-s01fs.sh` runs these functions under sh and BusyBox sh
+with recording stand-ins for `parted` and `mkfs.exfat`. The script has not run
+on a device since this change.
 `S95nanokvm` selects only the rootfs file-update pending record, never the p3 raw
 marker, and does not delete that marker during auto-confirm.
 

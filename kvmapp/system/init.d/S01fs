@@ -1,60 +1,82 @@
 #!/bin/sh
 
-if [ "$1" = "start" ]
-then
-        DATA_DEVICE=/dev/mmcblk0p3
-        DATA_MOUNT=/data
-        DATA_LOG=/tmp/data-mount.log
-        # p3 is media/untrusted legacy data, never boot restore authority.
-        # Do not inspect/import old markers, plaintext preserve trees or code.
-        # Authenticated raw restore requires a separate protected early helper.
+ROOT_DISK=/dev/mmcblk0
+ROOT_PARTITION=/sys/class/block/mmcblk0p2
+# p2 ends at 8192MB (parted MB: 10^6 bytes), sector 16000000 of 512 bytes.
+ROOT_END_SECTOR=16000000
+DATA_DEVICE=/dev/mmcblk0p3
+DATA_MOUNT=/data
+DATA_LOG=/tmp/data-mount.log
+DATA_READY=/etc/kvm.disk0
+# Present from before p3 is created until its filesystem exists. Only a
+# partition this script created, and never mounted, is ever formatted.
+DATA_PENDING=/etc/kvm.disk0.creating
+# p3 is media/untrusted legacy data, never boot restore authority.
+# Do not inspect/import old markers, plaintext preserve trees or code.
+# Authenticated raw restore requires a separate protected early helper.
 
-        mount_data_partition() {
-                [ -e "$DATA_DEVICE" ] || return 0
-                mkdir -p "$DATA_MOUNT"
-                if grep -q " $DATA_MOUNT " /proc/mounts
+# Grow p2 to its fixed end on a freshly written card only; a raw update writes
+# a smaller filesystem into the same partition, so resize2fs runs every boot.
+grow_root_partition() {
+        start=$(cat "$ROOT_PARTITION/start" 2>/dev/null) || return 0
+        size=$(cat "$ROOT_PARTITION/size" 2>/dev/null) || return 0
+        # Within 1 MiB of the end: already grown, leave the table alone.
+        [ $((start + size + 2048)) -lt "$ROOT_END_SECTOR" ] || return 0
+        parted -s "$ROOT_DISK" "resizepart 2 -0"
+        echo "yes
+        8192MB
+        " | parted ---pretend-input-tty "$ROOT_DISK" "resizepart 2 8192MB"
+}
+
+mount_data_partition() {
+        [ -e "$DATA_DEVICE" ] || return 0
+        mkdir -p "$DATA_MOUNT"
+        if grep -q " $DATA_MOUNT " /proc/mounts
+        then
+                # The backend migration verifies effective options.
+                # Vendor exFAT ignores new masks during remount.
+                return 0
+        fi
+
+        i=0
+        while [ "$i" -lt 5 ]
+        do
+                if mount -t exfat -o nosuid,nodev,noexec,uid=0,gid=0,fmask=0177,dmask=0077 "$DATA_DEVICE" "$DATA_MOUNT" >> "$DATA_LOG" 2>&1
                 then
-                        # The backend migration verifies effective options.
-                        # Vendor exFAT ignores new masks during remount.
                         return 0
                 fi
+                i=$((i + 1))
+                sleep 1
+        done
 
-                i=0
-                while [ "$i" -lt 5 ]
-                do
-                        if mount -t exfat -o nosuid,nodev,noexec,uid=0,gid=0,fmask=0177,dmask=0077 "$DATA_DEVICE" "$DATA_MOUNT" >> "$DATA_LOG" 2>&1
-                        then
-                                return 0
-                        fi
-                        i=$((i + 1))
-                        sleep 1
-                done
+        echo "failed to mount $DATA_DEVICE on $DATA_MOUNT" >> "$DATA_LOG"
+        return 1
+}
 
-                echo "failed to mount $DATA_DEVICE on $DATA_MOUNT" >> "$DATA_LOG"
-                return 1
-        }
+wait_for_data_device() {
+        i=0
+        while [ "$i" -lt 5 ]
+        do
+                [ -e "$DATA_DEVICE" ] && return 0
+                i=$((i + 1))
+                sleep 1
+        done
 
-        wait_for_data_device() {
-                i=0
-                while [ "$i" -lt 5 ]
-                do
-                        [ -e "$DATA_DEVICE" ] && return 0
-                        i=$((i + 1))
-                        sleep 1
-                done
+        return 1
+}
 
-                return 1
-        }
+ensure_data_partition() {
+        if [ -e "$DATA_DEVICE" ] && [ ! -e "$DATA_PENDING" ]
+        then
+                touch "$DATA_READY"
+                return 0
+        fi
 
-        ensure_data_partition() {
-                if [ -e "$DATA_DEVICE" ]
-                then
-                        touch /etc/kvm.disk0
-                        return 0
-                fi
-
+        if [ ! -e "$DATA_DEVICE" ]
+        then
+                : > "$DATA_PENDING" && sync || return 1
                 echo "creating $DATA_DEVICE" >> "$DATA_LOG"
-                parted -s /dev/mmcblk0 "mkpart primary 8193MB 100%" >> "$DATA_LOG" 2>&1 || {
+                parted -s "$ROOT_DISK" "mkpart primary 8193MB 100%" >> "$DATA_LOG" 2>&1 || {
                         echo "failed to create $DATA_DEVICE" >> "$DATA_LOG"
                         return 1
                 }
@@ -64,20 +86,19 @@ then
                         echo "$DATA_DEVICE did not appear after partition create" >> "$DATA_LOG"
                         return 1
                 fi
+        else
+                echo "formatting $DATA_DEVICE, created by an interrupted boot" >> "$DATA_LOG"
+        fi
 
-                mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || return 1
-                touch /etc/kvm.disk0
-                return 0
-        }
+        mkfs.exfat "$DATA_DEVICE" >> "$DATA_LOG" 2>&1 || return 1
+        touch "$DATA_READY" && rm -f "$DATA_PENDING" && sync
+}
 
-                # use all sdcard free space for data
-                parted -s /dev/mmcblk0 "resizepart 2 -0"
-                echo "yes
-                8192MB
-                " | parted ---pretend-input-tty /dev/mmcblk0 "resizepart 2 8192MB"
-                # resize data filesystem
-                (resize2fs /dev/mmcblk0p2) &
-
+if [ "$1" = "start" ]
+then
+        grow_root_partition
+        # resize data filesystem
+        (resize2fs /dev/mmcblk0p2) &
 
         . /etc/profile
         printf "mounting filesystem : "
