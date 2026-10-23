@@ -163,6 +163,13 @@ impl RestoreTicket {
     pub fn transaction_id(&self) -> [u8; 16] {
         self.transaction_id
     }
+    /// BOOT and ROOTFS image digests bound at capture.
+    pub fn image_digests(&self) -> [[u8; 32]; 2] {
+        [
+            self.binding.boot_image_sha256,
+            self.binding.rootfs_image_sha256,
+        ]
+    }
 
     /// No plaintext escapes until full AEAD *and* exact encrypted-file hash
     /// validation. Ticket publication/replay state is checked by Store methods.

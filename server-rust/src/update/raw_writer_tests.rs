@@ -296,3 +296,84 @@ mod sequence {
         }
     }
 }
+
+mod mode {
+    use super::*;
+    use rustix::fs::{MemfdFlags, fcntl_add_seals, memfd_create};
+    use std::io::Write;
+
+    fn arguments() -> WriterArguments {
+        WriterArguments::new(
+            [7; 16],
+            "0.3.0-raw.13",
+            [1025, 65537],
+            [[1; 32], [0xab; 32]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn writer_arguments_round_trip_and_nothing_else_parses() {
+        let args = arguments().to_args();
+        assert_eq!(args.len(), 12);
+        let parsed = parse_writer_arguments(&args).unwrap();
+        assert_eq!(parsed.to_args(), args);
+        assert_eq!(parsed.transaction, [7; 16]);
+        assert_eq!(parsed.sizes, [1025, 65537]);
+        assert_eq!(parsed.sha256, [[1; 32], [0xab; 32]]);
+        for length in 0..args.len() {
+            assert!(
+                parse_writer_arguments(&args[..length]).is_none(),
+                "{length}"
+            );
+        }
+        let mut extra = args.clone();
+        extra.push("x".into());
+        assert!(parse_writer_arguments(&extra).is_none());
+        for index in (0..12).step_by(2) {
+            let mut bad = args.clone();
+            bad[index] = "--other".into();
+            assert!(parse_writer_arguments(&bad).is_none(), "flag {index}");
+        }
+        for (index, value) in [
+            (1, "00000000000000000000000000000000".to_string()),
+            (1, "07".repeat(15)),
+            (1, "0G".repeat(16)),
+            (1, "0A".repeat(16)),
+            (3, "bad version".to_string()),
+            (5, "0".to_string()),
+            (7, "size".to_string()),
+            (9, "ab".repeat(31)),
+            (11, "zz".repeat(32)),
+        ] {
+            let mut bad = args.clone();
+            bad[index] = value.clone().into();
+            assert!(parse_writer_arguments(&bad).is_none(), "{index}={value}");
+        }
+    }
+
+    #[test]
+    fn only_a_fully_sealed_memory_image_may_run_the_writer() {
+        let memfd = File::from(
+            memfd_create(
+                "nanokvm-raw-writer-test",
+                MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+            )
+            .unwrap(),
+        );
+        (&memfd).write_all(b"\x7fELF synthetic").unwrap();
+        assert!(require_sealed(&memfd).is_err(), "unsealed");
+        fcntl_add_seals(&memfd, SealFlags::WRITE).unwrap();
+        assert!(require_sealed(&memfd).is_err(), "write seal only");
+        fcntl_add_seals(
+            &memfd,
+            SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL,
+        )
+        .unwrap();
+        require_sealed(&memfd).unwrap();
+        assert!(
+            require_sealed(&tempfile::tempfile().unwrap()).is_err(),
+            "regular file"
+        );
+    }
+}

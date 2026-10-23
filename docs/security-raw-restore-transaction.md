@@ -1200,6 +1200,22 @@ host tests apart from its pure parts):
   the prepared ticket, `sync`, unmount.
 - logging: `/dev/kmsg` only; stderr may be a file on the overwritten root.
 
+The writer process is the broker binary in `--raw-writer` mode. The backend
+cannot run it: its native scope is a child subreaper that kills everything the
+backend starts when the scope stops. The broker will re-execute its own sealed
+in-memory copy into this mode (not wired yet). The mode takes exactly
+`--transaction`, `--version`, `--boot-size`, `--rootfs-size`, `--boot-sha256`
+and `--rootfs-sha256` (lowercase hex). It returns, without touching anything,
+unless it runs as root from a memfd that carries the write, shrink, grow and
+seal seals; from a shell it exits 65. Otherwise the broker has already stopped
+the system, so it always ends in a reboot. It takes the two images from the
+`raw_transport` socket on stdin (peer: its own PID, the pre-exec creator) and
+loads the prepared ticket from the current boot partition. It requires that
+ticket's transaction and image digests to match its arguments, and closes the
+store before `/boot` is released. It sends stderr to `/dev/null`, runs
+`run_writer` with the device system, logs the outcome to the kernel log, syncs
+and reboots (`reboot(2)`, then sysrq `b`).
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative

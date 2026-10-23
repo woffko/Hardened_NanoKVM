@@ -332,6 +332,11 @@ impl ImageReader {
     pub(super) fn into_rootfs_backing(self) -> (File, u64) {
         (self.file, self.size)
     }
+
+    // Crate-internal transfer to the raw writer, which writes the image whole.
+    pub(super) fn into_file(self) -> File {
+        self.file
+    }
 }
 
 impl Read for ImageReader {

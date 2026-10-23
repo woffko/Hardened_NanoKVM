@@ -3,10 +3,19 @@
 //! that every undoable step comes first. The device operations and the reboot
 //! belong to the writer process.
 
-use super::restore_capsule::ticket::{RestoreTicket, TicketError};
-use rustix::fs::{Advice, SeekFrom, fadvise, seek};
+use super::{
+    raw_transport::{ImageReceiver, TransferContext},
+    restore_capsule::ticket::{Phase, RestoreTicket, Store, TicketError},
+};
+use rustix::fs::{Advice, SealFlags, SeekFrom, fadvise, fcntl_get_seals, seek};
 use sha2::{Digest, Sha256};
-use std::{fs::File, io, num::NonZeroU64, os::unix::fs::FileExt};
+use std::{
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
+    io,
+    num::NonZeroU64,
+    os::{fd::AsRawFd, unix::fs::FileExt},
+};
 
 const CHUNK: usize = 1024 * 1024;
 
@@ -167,6 +176,176 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
     }
     system.log("raw write complete");
     Outcome::Written
+}
+
+/// The writer mode's arguments, which the broker passes when it re-executes
+/// its own sealed in-memory copy: the transfer context of the two images and
+/// their authenticated digests.
+pub struct WriterArguments {
+    context: TransferContext,
+    transaction: [u8; 16],
+    version: String,
+    sizes: [u64; 2],
+    sha256: [[u8; 32]; 2],
+}
+
+impl WriterArguments {
+    pub fn new(
+        transaction: [u8; 16],
+        version: &str,
+        sizes: [u64; 2],
+        sha256: [[u8; 32]; 2],
+    ) -> Option<Self> {
+        Some(Self {
+            context: TransferContext::new(transaction, version, sizes).ok()?,
+            transaction,
+            version: version.to_string(),
+            sizes,
+            sha256,
+        })
+    }
+
+    /// The arguments after `--raw-writer`, in the order the writer parses them.
+    pub fn to_args(&self) -> Vec<OsString> {
+        [
+            ("--transaction", hex(&self.transaction)),
+            ("--version", self.version.clone()),
+            ("--boot-size", self.sizes[0].to_string()),
+            ("--rootfs-size", self.sizes[1].to_string()),
+            ("--boot-sha256", hex(&self.sha256[0])),
+            ("--rootfs-sha256", hex(&self.sha256[1])),
+        ]
+        .into_iter()
+        .flat_map(|(flag, value)| [OsString::from(flag), OsString::from(value)])
+        .collect()
+    }
+}
+
+/// Exactly the arguments `WriterArguments::to_args` produces.
+pub fn parse_writer_arguments(args: &[OsString]) -> Option<WriterArguments> {
+    if args.len() != 12 {
+        return None;
+    }
+    let value = |index: usize, flag: &str| {
+        (args[index] == flag)
+            .then(|| args[index + 1].to_str())
+            .flatten()
+    };
+    let size = |index, flag| value(index, flag)?.parse::<u64>().ok();
+    WriterArguments::new(
+        unhex(value(0, "--transaction")?)?,
+        value(2, "--version")?,
+        [size(4, "--boot-size")?, size(6, "--rootfs-size")?],
+        [
+            unhex(value(8, "--boot-sha256")?)?,
+            unhex(value(10, "--rootfs-sha256")?)?,
+        ],
+    )
+}
+
+/// The writer process. It returns only when it refuses before touching
+/// anything: run from a shell (not root, or not the sealed in-memory copy the
+/// broker executes). Once it runs as that copy the broker has already stopped
+/// the system, so every outcome ends in a reboot.
+pub fn run_device_writer(arguments: WriterArguments) -> io::Error {
+    if !nix::unistd::geteuid().is_root() {
+        return io::Error::other("the raw writer must run as root");
+    }
+    if let Err(error) = File::open("/proc/self/exe").and_then(|exe| require_sealed(&exe)) {
+        return error;
+    }
+    let mut system = device::DeviceSystem::new();
+    match receive_inputs(&arguments) {
+        Ok((boot, rootfs, ticket)) => {
+            quiet_stderr();
+            let outcome = run_writer(
+                &mut system,
+                &WritePlan {
+                    images: [&boot, &rootfs],
+                    sizes: arguments.sizes,
+                    sha256: arguments.sha256,
+                    ticket: &ticket,
+                },
+            );
+            system.log(&format!("raw writer finished: {outcome:?}; rebooting"));
+        }
+        Err(error) => system.log(&format!("raw write not started: {error}; rebooting")),
+    }
+    nix::unistd::sync();
+    reboot()
+}
+
+/// The images from the inherited socket on stdin, and the prepared ticket of
+/// this transaction from the current boot partition. The store, and with it
+/// its descriptor on /boot, is closed before the writer releases /boot.
+fn receive_inputs(arguments: &WriterArguments) -> io::Result<(File, File, RestoreTicket)> {
+    let socket = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)?;
+    let null = File::open("/dev/null")?;
+    nix::unistd::dup2(null.as_raw_fd(), 0)?;
+    let receiver = ImageReceiver::adopt(socket, std::process::id()).map_err(io::Error::other)?;
+    let [boot, rootfs] = receiver
+        .receive(&arguments.context)
+        .map_err(io::Error::other)?;
+    let ticket = Store::open_boot()
+        .and_then(|mut store| store.load())
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("the boot partition holds no restore ticket"))?;
+    if ticket.phase() != Phase::Prepared
+        || ticket.transaction_id() != arguments.transaction
+        || ticket.image_digests() != arguments.sha256
+    {
+        return Err(io::Error::other(
+            "the boot partition's ticket is not this transaction's prepared ticket",
+        ));
+    }
+    Ok((boot.into_file(), rootfs.into_file(), ticket))
+}
+
+/// A memfd with every seal that keeps its bytes fixed.
+fn require_sealed(file: &File) -> io::Result<()> {
+    let required = SealFlags::SEAL | SealFlags::SHRINK | SealFlags::GROW | SealFlags::WRITE;
+    match fcntl_get_seals(file) {
+        Ok(seals) if seals.contains(required) => Ok(()),
+        _ => Err(io::Error::other(
+            "the raw writer runs only from the broker's sealed in-memory copy",
+        )),
+    }
+}
+
+/// stderr may be a log file on the root filesystem that is about to be
+/// overwritten.
+fn quiet_stderr() {
+    if let Ok(null) = OpenOptions::new().write(true).open("/dev/null") {
+        let _ = nix::unistd::dup2(null.as_raw_fd(), 2);
+    }
+}
+
+fn reboot() -> ! {
+    // SAFETY: reboot(2) with a command constant reads no caller memory.
+    unsafe { nix::libc::reboot(nix::libc::LINUX_REBOOT_CMD_RESTART) };
+    let _ = fs::write("/proc/sysrq-trigger", b"b");
+    std::process::exit(70)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let digits = text.as_bytes();
+    if digits.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0; N];
+    for (byte, pair) in out.iter_mut().zip(digits.as_chunks::<2>().0) {
+        let nibble = |digit: u8| {
+            (digit as char)
+                .to_digit(16)
+                .filter(|_| !digit.is_ascii_uppercase())
+        };
+        *byte = (nibble(pair[0])? * 16 + nibble(pair[1])?) as u8;
+    }
+    Some(out)
 }
 
 #[path = "raw_writer_device.rs"]
