@@ -19,7 +19,9 @@ One static applet, built from the same source as the rootfs BusyBox:
 - the Buildroot 2026.05.1 security tree's `package/busybox` patches and the
   board patches under
   `buildroot-external/hardened-sg2002/board/sg2002/patches/busybox/1.38.0/`,
-  applied in name order (14 patches at the time of writing),
+  applied in name order (15 patches at the time of writing; the board's 0015
+  makes both DHCP clients refuse a header length shorter than the IP and UDP
+  headers, CVE-2026-88833 and its DHCPv6 twin),
 - the fragment `buildroot-external/hardened-sg2002/board/sg2002/udhcpc6.fragment`
   on top of `allnoconfig`: static, `FEATURE_IPV6`, `UDHCPC6` with the RFC 3646
   DNS options the hook reads (`$dns`, `$search`, `$domain`), the hook path as
