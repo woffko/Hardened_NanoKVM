@@ -7,13 +7,14 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KVM=$ROOT/support/sg2002/additional/kvm
+TEST=$ROOT/support/sg2002/kvm_vision_host_test
 SOURCE=${1:-$KVM/src/kvm_vision.cpp}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 c++ -std=c++17 -O1 -g -pthread -w \
-	-I "$KVM/test/stubs" -I "$KVM/include" \
-	"$SOURCE" "$KVM/test/stubs/vendor_stubs.cpp" \
-	"$KVM/test/exception_boundary_test.cpp" \
+	-I "$TEST/stubs" -I "$KVM/include" \
+	"$SOURCE" "$TEST/stubs/vendor_stubs.cpp" \
+	"$TEST/exception_boundary_test.cpp" \
 	-o "$WORK/exception_boundary_test"
 timeout 60 "$WORK/exception_boundary_test"

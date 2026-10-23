@@ -299,7 +299,8 @@ reached `std::terminate` and could leave `vi_mutex` held. Now:
 
 `scripts/test-kvm-vision-exceptions.sh` builds the real `kvm_vision.cpp` for
 the host against stand-ins for the vendor API that throw on request (under
-`support/sg2002/additional/kvm/test/`). The stand-ins also replace `system()`,
+`support/sg2002/kvm_vision_host_test/`, outside the MaixCDK component, whose
+directory the Docker context admits file by file). The stand-ins also replace `system()`,
 so no shell command of the code under test runs on the host. Six cases cover
 both workers, a resolution change, the encoder setup, the camera setup and
 the camera close. The previous source, and each fix taken out alone, end the
