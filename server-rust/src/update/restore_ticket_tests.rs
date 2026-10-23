@@ -580,19 +580,40 @@ fn boot_mount_must_be_unique_whole_expected_partition_not_a_bind_subtree() {
     let line = format!(
         "21 1 {number} / /boot rw,nosuid,nodev,noexec - vfat /dev/mmcblk0p1 rw,fmask=0177,dmask=0077\n"
     );
-    assert!(boot_mount_is_root(&line, device));
-    assert!(!boot_mount_is_root(&(line.clone() + &line), device));
-    assert!(!boot_mount_is_root(
+    assert!(mount_is_whole_device(
+        &line,
+        "/boot",
+        "/dev/mmcblk0p1",
+        device
+    ));
+    assert!(!mount_is_whole_device(
+        &(line.clone() + &line),
+        "/boot",
+        "/dev/mmcblk0p1",
+        device
+    ));
+    assert!(!mount_is_whole_device(
         &line.replace(" / /boot ", " /alias /boot "),
+        "/boot",
+        "/dev/mmcblk0p1",
         device
     ));
-    assert!(!boot_mount_is_root(
+    assert!(!mount_is_whole_device(
         &line.replace("mmcblk0p1", "mmcblk0p3"),
+        "/boot",
+        "/dev/mmcblk0p1",
         device
     ));
-    assert!(!boot_mount_is_root(&line.replace("vfat", "exfat"), device));
-    assert!(!boot_mount_is_root(
+    assert!(!mount_is_whole_device(
+        &line.replace("vfat", "exfat"),
+        "/boot",
+        "/dev/mmcblk0p1",
+        device
+    ));
+    assert!(!mount_is_whole_device(
         &line.replace(&number, "999:999"),
+        "/boot",
+        "/dev/mmcblk0p1",
         device
     ));
 }
@@ -712,5 +733,35 @@ fn a_missing_empty_or_malformed_unique_id_is_no_device_binding() {
     assert!(matches!(
         device_id_from(dir.path()),
         Err(TicketError::Device)
+    ));
+}
+
+#[test]
+fn a_whole_device_mount_is_checked_at_the_given_path_and_source() {
+    let device = rustix::fs::makedev(179, 1);
+    let line = "41 25 179:1 / /dev/.nanokvm-raw-boot rw,nosuid,nodev,noexec shared:1 - vfat /dev/mmcblk0p1 rw,fmask=0177,dmask=0077\n";
+    assert!(mount_is_whole_device(
+        line,
+        "/dev/.nanokvm-raw-boot",
+        "/dev/mmcblk0p1",
+        device
+    ));
+    assert!(!mount_is_whole_device(
+        line,
+        "/boot",
+        "/dev/mmcblk0p1",
+        device
+    ));
+    assert!(!mount_is_whole_device(
+        line,
+        "/dev/.nanokvm-raw-boot",
+        "/dev/mmcblk0p2",
+        device
+    ));
+    assert!(!mount_is_whole_device(
+        &line.replace(" / /dev/", " /sub /dev/"),
+        "/dev/.nanokvm-raw-boot",
+        "/dev/mmcblk0p1",
+        device
     ));
 }

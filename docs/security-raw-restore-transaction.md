@@ -1149,6 +1149,26 @@ does not empty keeps its unknown entries for inspection and fails the check.
 all jobs. Host tests run the check sequence with a stub job inside a
 mapped-root user namespace; the real jobs need the target.
 
+## Raw writer core (component; writer process not implemented)
+
+`raw_writer::write_image` copies an authenticated image snapshot onto its
+partition: it refuses a partition smaller than the image before writing, copies
+1 MiB chunks from offset 0, `fdatasync`s, drops the cached pages with
+`POSIX_FADV_DONTNEED` so the read-back reaches the medium, reads the range back
+and requires the manifest's SHA-256. The image snapshot is the immutable
+anonymous spool the bundle check created, so it is not hashed again; the
+read-back is the check that matters, and nothing undoes a write. Host tests
+use regular files as partitions, including a change to the "medium" between
+the sync and the read-back, which must fail.
+
+The new boot partition cannot be mounted at `/boot`: that directory lives on
+the root filesystem the writer has just overwritten. `Store::open_mounted`
+applies the `open_boot` checks (root, block device, a single whole-device vfat
+mount with the private options) at a given mountpoint; the writer will use a
+directory on devtmpfs, whose mountpoint dentry stays pinned, so no path walk
+reads the overwritten partition. `open_boot` is `open_mounted("/boot",
+"/dev/mmcblk0p1")`.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative

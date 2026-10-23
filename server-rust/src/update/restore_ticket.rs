@@ -277,23 +277,25 @@ enum PublishStep {
 }
 impl Store {
     pub fn open_boot() -> Result<Self> {
+        Self::open_mounted("/boot", "/dev/mmcblk0p1")
+    }
+
+    /// The raw writer publishes the ticket on the newly written boot partition
+    /// mounted at its own path: `/boot` lives on the root filesystem it has
+    /// just overwritten. The same root, device and mount checks apply.
+    pub fn open_mounted(mountpoint: &str, source: &str) -> Result<Self> {
         if nix::unistd::geteuid().as_raw() != 0 {
             return Err(TicketError::UnsafeStore);
         }
-        let device = fs::symlink_metadata("/dev/mmcblk0p1")?;
+        let device = fs::symlink_metadata(source)?;
         if !device.file_type().is_block_device() {
             return Err(TicketError::UnsafeStore);
         }
-        let boot = restore_fs::open_root(Path::new("/boot"), false)?;
+        let boot = restore_fs::open_root(Path::new(mountpoint), false)?;
         let mounts = bounded_text("/proc/mounts")?;
         let mountinfo = bounded_text("/proc/self/mountinfo")?;
-        if !crate::system::media::has_expected_mount(
-            &mounts,
-            "/boot",
-            "/dev/mmcblk0p1",
-            "vfat",
-            true,
-        ) || !boot_mount_is_root(&mountinfo, device.rdev())
+        if !crate::system::media::has_expected_mount(&mounts, mountpoint, source, "vfat", true)
+            || !mount_is_whole_device(&mountinfo, mountpoint, source, device.rdev())
         {
             return Err(TicketError::UnsafeStore);
         }
@@ -562,11 +564,11 @@ fn bounded_text(path: &str) -> Result<String> {
     }
     Ok(value)
 }
-fn boot_mount_is_root(mountinfo: &str, device: u64) -> bool {
+fn mount_is_whole_device(mountinfo: &str, mountpoint: &str, source: &str, device: u64) -> bool {
     let mut matching = mountinfo
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>())
-        .filter(|fields| fields.get(4) == Some(&"/boot"));
+        .filter(|fields| fields.get(4) == Some(&mountpoint));
     let Some(fields) = matching.next() else {
         return false;
     };
@@ -582,7 +584,7 @@ fn boot_mount_is_root(mountinfo: &str, device: u64) -> bool {
                 rustix::fs::minor(device)
             )
         && fields[separator + 1] == "vfat"
-        && fields[separator + 2] == "/dev/mmcblk0p1"
+        && fields[separator + 2] == source
         && matching.next().is_none()
 }
 fn identifier(value: &str) -> bool {
