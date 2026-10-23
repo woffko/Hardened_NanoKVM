@@ -8,6 +8,13 @@
 [ -x /usr/sbin/sshd ] || exit 1
 
 PIDFILE="/var/run/sshd.pid"
+# Password guessing limits. Command-line options take precedence over
+# sshd_config, which a raw restore keeps as the device had it: three tries
+# per connection, a minute to log in, and after each connection that fails
+# to authenticate its source (an IPv6 /64) is refused for a minute, up to
+# ten minutes.
+SSHD_LIMITS="-o MaxAuthTries=3 -o LoginGraceTime=60 -o PerSourceNetBlockSize=32:64 \
+-o PerSourcePenalties=authfail:60s -o PerSourcePenalties=invaliduser:60s"
 
 umask 077
 
@@ -16,7 +23,13 @@ startssh() {
     [ ! -f /etc/ssh/ssh_host_rsa_key ] && /usr/bin/ssh-keygen -A
 
         printf "Starting sshd: "
-        /usr/sbin/sshd
+        # An sshd that does not know these options still starts, without them.
+        if /usr/sbin/sshd -t $SSHD_LIMITS 2>/dev/null; then
+            /usr/sbin/sshd $SSHD_LIMITS
+        else
+            printf "without password guessing limits, "
+            /usr/sbin/sshd
+        fi
         touch /var/lock/sshd
         echo "OK"
 }

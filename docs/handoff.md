@@ -685,6 +685,19 @@ scripts/validate-nanokvm-rootfs.sh <rootfs>
   images built before it carry the crash. `scripts/test-s49ntp.sh` checks both
   points against host builds of the patched ntpd.
 
+### SSH
+
+- Root password login stays. `S50sshd` starts sshd with password guessing
+  limits on its command line, which take precedence over
+  `/etc/ssh/sshd_config` (a raw restore keeps the device's own):
+  `MaxAuthTries 3`, `LoginGraceTime 60`,
+  `PerSourcePenalties authfail:60s invaliduser:60s` (up to the default
+  10-minute maximum) and `PerSourceNetBlockSize 32:64`, so an IPv6 /64 counts
+  as one source.
+- An sshd that refuses these options (before OpenSSH 9.8) still starts,
+  without them, and the start message says so. `scripts/test-s50sshd.sh`
+  checks both paths with a host build of OpenSSH 10.5p1.
+
 ### Mobile/tablet UI
 
 - Mobile view is a Hardened addition, not present in the original project.
