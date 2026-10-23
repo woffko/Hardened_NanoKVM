@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include "i2c_bus_lock.h"
 
 #define PAGES 2
 
@@ -39,6 +40,24 @@ static void event(const char *what, int page, int offset)
         fprintf(event_log, "%s %d %d\n", what, page, offset);
         fflush(event_log);
     }
+}
+
+static int lock_fd = -1;
+
+// FAKE_LOCK names a file standing in for the bus device's lock; without it
+// the fake bus is never busy.
+int bus_lock(int fd)
+{
+    const char *path = getenv("FAKE_LOCK");
+    (void)fd;
+    if (!path) {
+        return 0;
+    }
+    lock_fd = i2c_bus_lock_open(path);
+    if (lock_fd < 0) {
+        return -1;
+    }
+    return i2c_bus_lock_acquire(lock_fd, 200);
 }
 
 int bus_open(void)
@@ -135,6 +154,10 @@ int bus_close(int fd)
 {
     const char *path = getenv("FAKE_FLASH_OUT");
     (void)fd;
+    if (lock_fd >= 0) {
+        close(lock_fd);
+        lock_fd = -1;
+    }
     if (path) {
         FILE *file = fopen(path, "wb");
         if (!file || fwrite(flash[0], 1, 256, file) != 256 || fclose(file) != 0) {

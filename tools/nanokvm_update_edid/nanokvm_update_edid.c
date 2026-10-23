@@ -16,10 +16,12 @@
 #include <time.h>
 
 #include "nanokvm_update_edid.h"
+#include "i2c_bus_lock.h"
 
 #ifdef EDID_FAKE_BUS
 // Host test build: a model of the chip stands in for /dev/i2c-*.
 int bus_open(void);
+int bus_lock(int fd);
 ssize_t bus_write(int fd, const void *buf, size_t len);
 ssize_t bus_read(int fd, void *buf, size_t len);
 int bus_close(int fd);
@@ -37,6 +39,13 @@ static int bus_open(void)
         return -1;
     }
     return fd;
+}
+// The whole update runs under the shared bus lock (i2c_bus_lock.h); libkvm
+// waits or skips its poll meanwhile. The lock goes with the descriptor, so
+// bus_close releases it.
+static int bus_lock(int fd)
+{
+    return i2c_bus_lock_acquire(fd, 10000);
 }
 #define bus_write write
 #define bus_read read
@@ -778,6 +787,11 @@ int lt6911_edid_config(chip_version_t chip_version, uint8_t *edid_data, uint16_t
 
     // open i2c device and set the lt6911 address
     if ((client = bus_open()) < 0) {
+        return -1;
+    }
+    if (bus_lock(client) != 0) {
+        fprintf(stderr, "The I2C bus is in use (the video backend reads the HDMI chip); nothing was changed. Retry, or stop the backend first\n");
+        bus_close(client);
         return -1;
     }
 

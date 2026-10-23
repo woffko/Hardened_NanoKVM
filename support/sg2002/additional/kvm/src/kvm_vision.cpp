@@ -21,6 +21,8 @@
 #include <cstdarg>
 #include <exception>
 
+#include "i2c_bus_lock.h"
+
 #define default_venc_chn        1
 
 #define VENC_MJPEG              0
@@ -200,6 +202,39 @@ void debug(const char *format, ...)
         va_end(args);
     }
 }
+
+/* The LT6911 shares /dev/i2c-4 with the EDID tool and S15kvmhwd's probes
+ * (see i2c_bus_lock.h). Every chip transaction of the detection thread runs
+ * under that lock. A bus held longer than this wait skips one poll; the next
+ * interrupt or retry comes back to it. Only the detection thread uses it. */
+#define LT6911_BUS_WAIT_MS 1000
+static int lt6911_bus_lock_fd = -1;
+namespace {
+class I2cBusLock {
+public:
+    I2cBusLock() = default;
+    I2cBusLock(const I2cBusLock &) = delete;
+    I2cBusLock &operator=(const I2cBusLock &) = delete;
+    ~I2cBusLock()
+    {
+        if (held) {
+            i2c_bus_lock_release(lt6911_bus_lock_fd);
+        }
+    }
+
+    bool acquire(unsigned wait_ms)
+    {
+        if (lt6911_bus_lock_fd < 0) {
+            lt6911_bus_lock_fd = i2c_bus_lock_open(I2C_BUS_LOCK_PATH);
+        }
+        held = lt6911_bus_lock_fd >= 0 && i2c_bus_lock_acquire(lt6911_bus_lock_fd, wait_ms) == 0;
+        return held;
+    }
+
+private:
+    bool held = false;
+};
+} // namespace
 
 static bool restart_camera_from_worker()
 {
@@ -1031,6 +1066,11 @@ uint8_t lt6911_read_one_reg(uint8_t reg)
 
 void lt6911_write_edid(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint8_t i, j;
 	uint8_t buf[2];
 	lt6911_enable();
@@ -1090,6 +1130,11 @@ void lt6911_write_edid(void)
 
 void lt6911_read_edid(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint8_t i;
 	lt6911_enable();
 
@@ -1153,6 +1198,11 @@ void lt6911_read_edid(void)
 
 void lt6911_read_fw(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint32_t i;
 	uint8_t buf[3];
 	lt6911_enable();
@@ -1284,6 +1334,36 @@ void get_hdmi_version()
     }
 }
 
+/* One chip poll after an interrupt: resolution and cable state, under the
+ * bus lock. The chip stays disabled again afterwards, as before. */
+static void poll_lt6911(const char *chip, uint8_t *auto_change_mode)
+{
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] %s: I2C bus busy, polling later\n", chip);
+        return;
+    }
+    lt6911_enable();
+    if(lt6911_get_hdmi_res()){
+        // hdmi get res
+        debug("[hdmi] %s HDMI cable insertion!\n", chip);
+        kvmv_cfg.hdmi_cable_state = 1;
+        kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
+        if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
+        else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
+            /* Move HDMI resolution modification directly
+                to mode1 to solve deadlock problem */
+            *auto_change_mode = 1;
+            set_hdmi_mode(1);
+        }
+    } else {
+        // HDMI res = 0*0/x*0
+        debug("[hdmi] %s HDMI cable unplugged!\n", chip);
+        kvmv_cfg.hdmi_cable_state = 0;
+    }
+    lt6911_disable();
+}
+
 static void* vi_subsystem_detection_loop(void * arg)
 {
 	uint64_t __attribute__((unused)) int_time;
@@ -1346,75 +1426,21 @@ static void* vi_subsystem_detection_loop(void * arg)
                         if(kvmv_cfg.hdmi_version == 0){
                             // LT6911C
                             if(rising_times != 0){
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] C HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] C HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("C", &auto_change_mode);
                             }
                         } else if (kvmv_cfg.hdmi_version == 1){
                             // LT6911UXC
                                 debug("[hdmi] UXC int\n");
                             if(falling_times != 0){
                                 debug("[hdmi] UXC int && \n");
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] UXC HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] UXC HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("UXC", &auto_change_mode);
                             }
                         } else if (kvmv_cfg.hdmi_version == 3){
                             // LT6911D
                                 debug("[hdmi] D int\n");
                             if(falling_times != 0){
                                 debug("[hdmi] D int && \n");
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] D HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] D HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("D", &auto_change_mode);
                             }
                         } else {
                             debug("[hdmi] Chip not supported for reading \n");

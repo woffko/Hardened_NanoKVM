@@ -18,7 +18,7 @@ fail() {
 printf 'ux\n' > "$TEST_ROOT/hdmi_version"
 printf 'beta\n' > "$TEST_ROOT/hw"
 build() {
-    cc -Wall -Wextra -Werror -DEDID_FAKE_BUS \
+    cc -Wall -Wextra -Werror -DEDID_FAKE_BUS -I "$ROOT_DIR/support/sg2002/additional/kvm/include" \
         -DVERSION_PATH="\"$TEST_ROOT/hdmi_version\"" -DPRODUCT_PATH="\"$TEST_ROOT/hw\"" \
         -DEDID_BACKUP_DIR="\"$2\"" -o "$1" "$TOOL/nanokvm_update_edid.c" "$TOOL/test-fake-bus.c"
 }
@@ -86,5 +86,20 @@ run "$TEST_ROOT/tool-no-backup" no-backup FAKE_FLASH="$OLD"
 [ "$status" != 0 ] || fail "an update without a backup was accepted"
 ! grep -q -e '^erase' -e '^program' "$TEST_ROOT/no-backup.log" || fail "the chip was erased without a backup"
 cmp -s "$TEST_ROOT/no-backup.flash" "$OLD" || fail "the chip changed without a backup"
+
+# 6. A bus held by another process (libkvm polling the chip) stops the tool
+# before it reads or erases anything; once the bus is free, the update runs.
+flock -x "$TEST_ROOT/bus.lock" sleep 2 &
+holder=$!
+sleep 0.2
+run "$TEST_ROOT/tool" busy FAKE_FLASH="$OLD" FAKE_LOCK="$TEST_ROOT/bus.lock"
+[ "$status" != 0 ] || fail "an update on a busy bus was accepted"
+[ ! -s "$TEST_ROOT/busy.log" ] || fail "the busy bus was touched: $(cat "$TEST_ROOT/busy.log")"
+grep -q 'I2C bus is in use' "$TEST_ROOT/busy.out" || fail "no busy message: $(cat "$TEST_ROOT/busy.out")"
+[ "$(backups)" = 0 ] || fail "a backup was saved on a busy bus"
+wait "$holder"
+run "$TEST_ROOT/tool" freed FAKE_FLASH="$OLD" FAKE_LOCK="$TEST_ROOT/bus.lock"
+[ "$status" = 0 ] || fail "the update after the bus was freed failed: $(cat "$TEST_ROOT/freed.out")"
+cmp -s "$TEST_ROOT/freed.flash" "$NEW" || fail "the chip does not hold the new EDID after the bus was freed"
 
 echo "nanokvm_update_edid: PASS"

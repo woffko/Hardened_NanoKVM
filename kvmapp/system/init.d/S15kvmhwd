@@ -189,10 +189,11 @@ kvm_hw_init(){
 
 kvm_hdmi_version_detect()
 {
-    if i2cdetect -ry 4 0x2c 0x2c | grep -qw "2c"; then
+    # Probes take the shared LT6911 bus lock (see i2c_bus_lock.h in libkvm).
+    if flock /dev/i2c-4 i2cdetect -ry 4 0x2c 0x2c | grep -qw "2c"; then
         echo "c" > /etc/kvm/hdmi_version
-    elif i2cdetect -ry 4 0x2b 0x2b | grep -qw "2b"; then
-        if i2cdetect -ry 4 0x44 0x44 | grep -qw "44"; then
+    elif flock /dev/i2c-4 i2cdetect -ry 4 0x2b 0x2b | grep -qw "2b"; then
+        if flock /dev/i2c-4 i2cdetect -ry 4 0x44 0x44 | grep -qw "44"; then
             echo "ux" > /etc/kvm/hdmi_version
         else
             echo "d" > /etc/kvm/hdmi_version

@@ -23,6 +23,7 @@ support/sg2002/additional/kvm/**
 !support/sg2002/additional/kvm/Kconfig
 !support/sg2002/additional/kvm/include
 support/sg2002/additional/kvm/include/**
+!support/sg2002/additional/kvm/include/i2c_bus_lock.h
 !support/sg2002/additional/kvm/include/kvm_vision.h
 !support/sg2002/additional/kvm/src
 support/sg2002/additional/kvm/src/**

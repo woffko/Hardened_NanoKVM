@@ -274,8 +274,8 @@ Xuantie GCC 10.2.0 toolchain (`riscv64-unknown-linux-musl-gcc
 from any directory: sha256
 `cfdda07b503d22ce47f56ea926bfedc243a911935c74121522f17ba61597e347`. It has not
 been run on hardware. Flashing a real device is a destructive check that
-needs its own approval and a recovery path. The tool still shares the I2C bus
-with `kvm_system` without a common lock.
+needs its own approval and a recovery path. The tool takes the shared bus lock
+described below before its first read.
 
 ### libkvm: no C++ exception past the C interface (2026-10-23)
 
@@ -316,6 +316,37 @@ is constructed when the library loads, outside any boundary; an image already
 read is leaked when a later step throws; the camera state after a vendor
 exception is left to the existing restart path. Device acceptance needs
 MJPEG, H.264, resolution changes, HDMI hotplug and a backend restart.
+
+### Shared LT6911 bus lock (2026-10-23)
+
+Three programs talk to the HDMI chip on `/dev/i2c-4` with no coordination:
+libkvm's detection thread after every chip interrupt, `nanokvm_update_edid`
+for a whole erase-and-program sequence, and `S15kvmhwd`'s `i2cdetect` probes
+(run at boot and again by libkvm through `get_hdmi_version`). A poll in the
+middle of an EDID write could read garbage or disturb the write. They now
+share `flock(2)` on the bus device node
+(`support/sg2002/additional/kvm/include/i2c_bus_lock.h`, header-only, so the
+C tool and the C++ library use the same code):
+
+- libkvm's three per-chip polls became one `poll_lt6911` that takes the lock
+  for up to 1 s and skips the poll when the bus stays busy (the next interrupt
+  or retry comes back to it); the unused `lt6911_write_edid`, `_read_edid`
+  and `_read_fw` helpers take it too. The lock descriptor is opened once by
+  the detection thread.
+- the EDID tool locks its own bus descriptor for up to 10 s before the first
+  read and refuses with "The I2C bus is in use" otherwise; the lock ends with
+  the descriptor, so a crash releases it.
+- `S15kvmhwd` wraps each bus-4 `i2cdetect` in `flock /dev/i2c-4` (BusyBox has
+  the applet).
+
+The lock covers these user-space programs only, not the kernel's own sensor
+driver. `scripts/test-i2c-bus-lock.sh` checks the header with two processes
+on a temporary file (a short wait is refused while the lock is held, a longer
+one is admitted when the holder exits without releasing) and checks
+statically that each of the three users takes the lock.
+`scripts/test-nanokvm-update-edid.sh` adds a busy-bus case: the tool stops
+before any read and runs once the bus is free. `libkvm.so` and the RISC-V
+`nanokvm_update_edid` are rebuilt; neither has run on hardware since.
 
 ## Recommended Repair Order
 
