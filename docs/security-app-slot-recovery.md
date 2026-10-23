@@ -9,8 +9,9 @@ and is not accepted on a device. The new helper is compile-bound into the linked
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent
 `/usr/libexec/nanokvm-app-recovery` copy, and the target backend attempts atomic
 installation for an app-only bridge. S02 and individual consumer gates now invoke
-it, but producer/API/broker activation, legacy first-bridge target acceptance, helper migration and
-device acceptance remain open. The full remediation scope is unchanged.
+it, but device acceptance of the API submission and the broker, the remaining
+producer activation, legacy first-bridge target acceptance and helper migration
+remain open. The full remediation scope is unchanged.
 
 ## Authority and fixed storage
 
@@ -232,7 +233,6 @@ polls the job across the drain and trial; the restarted backend has no session,
 so its 401 leads to login, after which the update page reads the stored
 transaction once more. The fixed-root delivery fixture drives this exact API
 composition, including the refusal with no installer listening.
-
 
 The existing independent native broker is itself the installation owner; an
 additional installer child is not spawned below the backend's subreaper. This
