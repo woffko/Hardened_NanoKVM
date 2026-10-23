@@ -352,10 +352,10 @@ Chroot fixtures run a real one-shot fixture under the job. They cover:
 ## Current Install settlement
 
 Installation is split. The backend keeps the network part: it downloads the
-release checksum and archive, verifies the archive's SHA-512 against that
-checksum, and extracts `picoclaw` into its scratch directory
-`/root/.picoclaw-cache`. That checksum proves integrity against the same
-origin, not provenance; package trust remains WP-13. The backend then submits
+v0.2.8 archive over HTTPS only, keeps it only when its SHA-256 equals the pin
+in the backend source, and extracts `picoclaw` into its scratch
+directory `/root/.picoclaw-cache`. No checksum is fetched from the CDN; see
+[optional package pins](security-optional-packages.md). The backend then submits
 an Install job carrying the extracted file's SHA-512 and never writes the
 rootfs runtime itself.
 

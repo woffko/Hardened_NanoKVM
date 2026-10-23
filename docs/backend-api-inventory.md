@@ -176,7 +176,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | GET        | `/api/network/wifi`            | Implemented.                                                                  |
 | POST       | `/api/network/wifi/connect`    | Implemented.                                                                  |
 | POST       | `/api/network/wifi/disconnect` | Implemented.                                                                  |
-| GET/POST   | `/api/extensions/tailscale/*`  | Implemented lifecycle/status/login/install flow with safer command execution. |
+| GET/POST   | `/api/extensions/tailscale/*`  | Implemented lifecycle/status/login/install flow with safer command execution. Install fetches only the pinned Tailscale 1.104.2 static riscv64 archive over HTTPS and keeps it only when its SHA-256 matches the pin ([optional package pins](security-optional-packages.md)). |
 
 ### PicoClaw
 
@@ -186,7 +186,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | POST            | `/api/picoclaw/agent/profile` | Implemented compatibility route.                                                 |
 | GET             | `/api/picoclaw/sessions`      | Implemented session list compatibility; full real-history validation remains.    |
 | GET/DELETE      | `/api/picoclaw/sessions/{id}` | Implemented compatibility shape; real session history behavior needs validation. |
-| GET/POST/DELETE | `/api/picoclaw/runtime/*`     | Implemented runtime status/session/install/uninstall/start/stop flows.           |
+| GET/POST/DELETE | `/api/picoclaw/runtime/*`     | Implemented runtime status/session/install/uninstall/start/stop flows. Install fetches only the pinned v0.2.8 archive over HTTPS (size and SHA-256 in source). |
 | GET             | `/api/picoclaw/gateway/ws`    | Implemented gateway WebSocket relay.                                             |
 | GET             | `/api/picoclaw/screenshot`    | Implemented loopback-only internal route.                                        |
 | POST            | `/api/picoclaw/actions`       | Implemented loopback-only HID action route.                                      |

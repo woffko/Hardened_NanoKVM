@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha512};
 use std::{
-    ffi::OsString,
     fs, io,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
@@ -40,7 +39,10 @@ use crate::{
     error::ApiResponse,
     http::middleware::{CurrentSession, TransportSession},
     state::AppState,
-    system::command::{self, AllowedCommand},
+    system::{
+        command::{self, AllowedCommand},
+        package_download::{self, Pinned},
+    },
     update::picoclaw_startup as startup,
     ws::hid as hid_ws,
 };
@@ -56,10 +58,14 @@ pub(crate) mod worker;
 
 const PICOCLAW_BINARY_PATH: &str = "/usr/bin/picoclaw";
 const PICOCLAW_CACHE_DIR: &str = "/root/.picoclaw-cache";
-const PICOCLAW_DOWNLOAD_URL: &str =
-    "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz";
-const PICOCLAW_CHECKSUM_URL: &str =
-    "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/sha512.txt";
+// picoclaw v0.2.8 for riscv64. Sipeed's CDN copy and the GitHub release asset
+// (sipeed/picoclaw v0.2.8, its digest and picoclaw_0.2.8_checksums.txt) are
+// these same bytes.
+pub(crate) const PACKAGE: Pinned = Pinned {
+    url: "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz",
+    size: 20_825_810,
+    sha256: "acfa68d48a573e3805762fecbae99c9f495de19707e58ba43933657db55707ae",
+};
 const DEFAULT_GATEWAY_HOST: &str = startup::GATEWAY_HOST;
 const DEFAULT_GATEWAY_PORT: u16 = startup::GATEWAY_PORT;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
@@ -474,7 +480,7 @@ pub async fn install_runtime() -> Result<Response> {
         return Ok(Json(ApiResponse::ok(RuntimeInstallResult {
             installed: false,
             binary: PICOCLAW_BINARY_PATH.to_string(),
-            download: PICOCLAW_DOWNLOAD_URL.to_string(),
+            download: PACKAGE.url.to_string(),
             output: "picoclaw installation is already in progress".to_string(),
             status: current,
         }))
@@ -487,7 +493,7 @@ pub async fn install_runtime() -> Result<Response> {
         return Ok(Json(ApiResponse::ok(RuntimeInstallResult {
             installed: true,
             binary: PICOCLAW_BINARY_PATH.to_string(),
-            download: PICOCLAW_DOWNLOAD_URL.to_string(),
+            download: PACKAGE.url.to_string(),
             output: "picoclaw is already installed".to_string(),
             status: runtime_status(),
         }))
@@ -535,7 +541,7 @@ pub async fn install_runtime() -> Result<Response> {
     Ok(Json(ApiResponse::ok(RuntimeInstallResult {
         installed: false,
         binary: PICOCLAW_BINARY_PATH.to_string(),
-        download: PICOCLAW_DOWNLOAD_URL.to_string(),
+        download: PACKAGE.url.to_string(),
         output: "picoclaw installation started".to_string(),
         status: runtime_status(),
     }))
@@ -581,7 +587,7 @@ pub async fn uninstall_runtime() -> Result<Response> {
     Ok(Json(ApiResponse::ok(RuntimeInstallResult {
         installed: false,
         binary: PICOCLAW_BINARY_PATH.to_string(),
-        download: PICOCLAW_DOWNLOAD_URL.to_string(),
+        download: PACKAGE.url.to_string(),
         output: "picoclaw executable and configuration removed".to_string(),
         status: runtime_status(),
     }))
@@ -2595,23 +2601,9 @@ async fn run_install_runtime() -> Result<()> {
     let _ = fs::remove_dir_all(cache);
     fs::create_dir_all(cache)?;
 
-    set_install_progress("downloading", 5, None);
-    let checksum_path = cache.join("sha512.txt");
-    download_to(PICOCLAW_CHECKSUM_URL, &checksum_path).await?;
-    let expected_digest = parse_sha512_digest(
-        &fs::read_to_string(&checksum_path)?,
-        Path::new(PICOCLAW_DOWNLOAD_URL)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(""),
-    )?;
-
     set_install_progress("downloading", 10, None);
     let archive_path = cache.join("picoclaw.tar.gz");
-    download_to(PICOCLAW_DOWNLOAD_URL, &archive_path).await?;
-
-    set_install_progress("verifying", 82, None);
-    verify_sha512(&archive_path, &expected_digest)?;
+    package_download::fetch(&PACKAGE, &archive_path, PICOCLAW_DOWNLOAD_TIMEOUT).await?;
 
     set_install_progress("extracting", 85, None);
     let extracted = {
@@ -2671,79 +2663,6 @@ fn set_install_progress(stage: &str, progress: i32, last_error: Option<String>) 
         checked_at: Some(now_string()),
         current_session: None,
     });
-}
-
-async fn download_to(url: &str, target: &Path) -> Result<()> {
-    let args = vec![
-        OsString::from("-f"),
-        OsString::from("-L"),
-        OsString::from("-sS"),
-        OsString::from("--connect-timeout"),
-        OsString::from("20"),
-        OsString::from("--max-time"),
-        OsString::from("600"),
-        OsString::from("--output"),
-        target.as_os_str().to_os_string(),
-        OsString::from(url),
-    ];
-    let curl = command::run_allowed(AllowedCommand::Curl, args, PICOCLAW_DOWNLOAD_TIMEOUT).await;
-    if let Ok(output) = curl {
-        if output.status == 0 {
-            return Ok(());
-        }
-    }
-
-    let args = vec![
-        OsString::from("-q"),
-        OsString::from("-O"),
-        target.as_os_str().to_os_string(),
-        OsString::from(url),
-    ];
-    let output =
-        command::run_allowed(AllowedCommand::Wget, args, PICOCLAW_DOWNLOAD_TIMEOUT).await?;
-    if output.status == 0 {
-        Ok(())
-    } else {
-        Err(AppError::Internal(command_error(
-            "download picoclaw",
-            output,
-        )))
-    }
-}
-
-fn parse_sha512_digest(raw: &str, expected_name: &str) -> Result<String> {
-    let mut fallback = None;
-    for line in raw.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.is_empty() || !is_sha512_digest(fields[0]) {
-            continue;
-        }
-        if fields.len() == 1 {
-            fallback.get_or_insert_with(|| fields[0].to_ascii_lowercase());
-            continue;
-        }
-        let name = fields[fields.len() - 1].trim_start_matches('*');
-        if expected_name.is_empty() || name == expected_name {
-            return Ok(fields[0].to_ascii_lowercase());
-        }
-    }
-    fallback.ok_or_else(|| AppError::Internal("failed to parse sha512 digest".to_string()))
-}
-
-fn is_sha512_digest(value: &str) -> bool {
-    value.len() == 128 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn verify_sha512(path: &Path, expected: &str) -> Result<()> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha512::new();
-    io::copy(&mut file, &mut hasher)?;
-    let actual = format!("{:x}", hasher.finalize());
-    if actual == expected.to_ascii_lowercase() {
-        Ok(())
-    } else {
-        Err(AppError::Internal(format!("sha512 mismatch: got {actual}")))
-    }
 }
 
 fn extract_picoclaw_binary(archive_path: &Path, destination: &Path) -> Result<PathBuf> {
@@ -3347,28 +3266,9 @@ fn command_output_text(output: &crate::system::command::CommandOutput) -> String
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn command_error(message: &str, output: crate::system::command::CommandOutput) -> String {
-    let detail = command_output_text(&output);
-    if detail.is_empty() {
-        message.to_string()
-    } else {
-        format!("{message}: {detail}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_sha512_for_named_archive() {
-        let digest = "a".repeat(128);
-        let raw = format!("{digest}  picoclaw_Linux_riscv64.tar.gz\n");
-        assert_eq!(
-            parse_sha512_digest(&raw, "picoclaw_Linux_riscv64.tar.gz").unwrap(),
-            digest
-        );
-    }
 
     #[test]
     fn extracts_model_name_from_provider_path() {
