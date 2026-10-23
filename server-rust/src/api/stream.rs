@@ -1197,6 +1197,24 @@ pub fn latest_mjpeg_frame(max_age: Duration) -> Option<LatestMjpegFrame> {
     (frame.captured_at.elapsed() <= max_age).then_some(frame)
 }
 
+impl LatestMjpegFrame {
+    /// A frame read just now, outside the MJPEG producer.
+    pub(crate) fn captured_now(data: Vec<u8>, width: u16, height: u16) -> Self {
+        Self {
+            data,
+            width,
+            height,
+            captured_at: Instant::now(),
+        }
+    }
+}
+
+/// The MJPEG encoder is the one in use. A direct MJPEG read is safe then; in
+/// H.264 mode it would recreate the encoder under a running stream.
+pub fn is_mjpeg_mode() -> bool {
+    current_screen().mode == StreamMode::Mjpeg
+}
+
 pub fn h264_frame_duration(fps: u64) -> Duration {
     Duration::from_millis((1000 / fps.max(1)).max(1))
 }

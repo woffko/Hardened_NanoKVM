@@ -153,3 +153,30 @@ M10 is fixed: the gateway WebSocket validates its Origin before any effect.
 For H2, the first release enforces the
 [local tool policy](security-picoclaw-local-tools.md). The unprivileged runtime
 and the remaining WP-06 gateway, token and URL boundaries are separate work.
+
+### Screenshot source and installation start (2026-10-23)
+
+A screenshot used to be the frame the MJPEG stream cached in the last two
+seconds, so it failed whenever no browser was watching MJPEG, and the
+requested size and quality were read and ignored. It now takes that cached
+frame when there is one; otherwise, while the capture is in MJPEG mode, it
+reads one frame directly at the capture's current size and quality (a still
+screen under frame detection returns the last cached frame); in H.264 mode it
+refuses with a message naming the cause, because an MJPEG read there would
+recreate the encoder under the running stream. The capture pipeline has one
+resolution, so the requested size stays advisory and the reply carries the
+real dimensions. The host test covers the source decision; the direct read
+itself needs a device.
+
+`POST /api/picoclaw/install` used to read "not installing" and then mark the
+start as two steps, so two requests arriving together both began a download.
+The check and the mark are one step under the status lock now; the second
+request gets the running installation's status. The broker already ran the
+install job itself one at a time.
+
+The bridge script scanned every argument for `session:`/`pico:` hints and the
+global options, including the values of `--text`, `--keys` and `--url`: typed
+text that looked like a hint replaced the session, and `--base-url` inside it
+moved the request. Option values are payload now; only a bare argument can be
+a hint. The boundary test types such a text and checks the session header,
+the body and the request URL.

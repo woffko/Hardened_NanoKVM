@@ -12,6 +12,7 @@ WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
 NATIVE_CTL=/usr/libexec/nanokvm-native-ctl
 NATIVE_BROKER=/usr/libexec/nanokvm-native-broker
 NATIVE_LOG=/tmp/nanokvm-native.log
+NATIVE_LOG_LIMIT=1048576
 HWMON_SOURCE=/kvmapp/hwmon/nanokvm-hwmon
 HWMON_START_DELAY_SECS=20
 RUST_HWMON_FLAG=/etc/kvm/rust_hwmon_enabled
@@ -136,6 +137,17 @@ kvm_system_is_running() {
     "$NATIVE_CTL" kvm-running >/dev/null 2>&1
 }
 
+# The broker, the native owners and the Pico gateway all append to the native
+# log on tmpfs. Keep it root-only, and keep one previous generation instead of
+# letting it grow without bound.
+prepare_native_log() {
+    if [ -f "$NATIVE_LOG" ] && [ "$(wc -c < "$NATIVE_LOG")" -gt "$NATIVE_LOG_LIMIT" ]; then
+        mv -f "$NATIVE_LOG" "$NATIVE_LOG.1"
+    fi
+    ( umask 077; : >> "$NATIVE_LOG" )
+    chmod 0600 "$NATIVE_LOG" 2>/dev/null || true
+}
+
 start_native_broker() {
     "$NATIVE_CTL" boot-ready >/dev/null 2>&1 || {
         runtime_log "native runtime requires a fresh enrolled boot; refusing legacy process adoption"
@@ -147,6 +159,7 @@ start_native_broker() {
     fi
     # The daemon's protected singleton/journal decides admission. No PID-file,
     # socket deletion, legacy scan, or kill/relaunch fallback grants ownership.
+    prepare_native_log
     nohup "$NATIVE_BROKER" --serve >>"$NATIVE_LOG" 2>&1 </dev/null &
     for _ in 1 2 3 4 5; do
         "$NATIVE_CTL" running >/dev/null 2>&1 && return 0

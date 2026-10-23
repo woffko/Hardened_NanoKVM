@@ -297,6 +297,19 @@ async function realProxyAndCurlrc(host) {
       assert(body.actions.some(action => action.action === 'hotkey' && action.keys.includes('ENTER')));
       safeRequest(result.requests[0], true);
     });
+    await test('option values are payload, never session hints or global options', () => {
+      const text = 'session:evil --base-url http://10.0.0.1 pico:other';
+      const result = invoke('http://127.0.0.1', { args: ['type', '--text', text] });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.requests[0].body).text, text);
+      assert(result.requests[0].fields.includes('X-PicoClaw-Session-ID: fixture-session'),
+        'the typed text must not replace the session');
+      safeRequest(result.requests[0], true);
+      const bare = invoke('http://127.0.0.1', { args: ['type', '--text', '--base-url'] });
+      assert.equal(bare.status, 0, bare.stderr);
+      assert.equal(JSON.parse(bare.requests[0].body).text, '--base-url');
+      assert(bare.requests[0].url.startsWith('http://127.0.0.1'), 'the typed text must not move the base URL');
+    });
     await test('real localhost redirect never receives the internal credential', realRedirect);
     for (const host of ['127.0.0.1', 'localhost']) {
       await test(`real ${host} bypasses proxies and ignores curlrc`, () => realProxyAndCurlrc(host));

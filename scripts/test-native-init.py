@@ -42,7 +42,7 @@ exit 0
             prefix = '\n'.join([
                 'NATIVE_CTL=' + shlex.quote(str(ctl)), 'NATIVE_BROKER=' + shlex.quote(str(broker)),
                 'NATIVE_LOG=' + shlex.quote(str(root / "native.log")),
-                'runtime_log() { :; }', 'sleep() { :; }',
+                'runtime_log() { :; }', 'sleep() { :; }', 'prepare_native_log() { :; }',
                 'stop_system_update_watchdog() { echo stop-update-watchdog >> "$CALLS"; }',
                 'stop_watchdog() { echo stop-watchdog >> "$CALLS"; }',
                 'rm() { echo cleanup >> "$CALLS"; }',

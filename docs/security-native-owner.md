@@ -975,3 +975,13 @@ C1, complete service closure, canonical multi-file settings capture, retained
 raw writer/ticket/early restore and production capture remain open. See
 [state writers](security-state-writers.md) and
 [update ownership](security-update-ownership.md).
+
+### Native log on tmpfs (2026-10-23)
+
+`/tmp/nanokvm-native.log` receives the output of the broker, every native
+owner and the Pico gateway (`S95nanokvm` appends them there). S95 used to
+create it with the default umask and let it grow for the whole uptime. Before
+it starts the broker it now keeps the file root-only (mode 0600) and, when the
+file is over 1 MiB, moves it to `.1` and starts a new one, so at most two
+generations exist. `scripts/test-s95-native-log.sh` runs the function under
+sh and BusyBox sh with a small limit.

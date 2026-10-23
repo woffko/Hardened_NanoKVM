@@ -475,8 +475,9 @@ pub async fn stop_runtime() -> Result<Response> {
 }
 
 pub async fn install_runtime() -> Result<Response> {
-    let current = runtime_status();
-    if current.installing {
+    // One check-and-mark under the status lock: two requests arriving
+    // together used to both read "not installing" and both start.
+    if let Some(current) = begin_install() {
         return Ok(Json(ApiResponse::ok(RuntimeInstallResult {
             installed: false,
             binary: PICOCLAW_BINARY_PATH.to_string(),
@@ -499,23 +500,6 @@ pub async fn install_runtime() -> Result<Response> {
         }))
         .into_response());
     }
-
-    set_runtime_status(RuntimeStatus {
-        ready: false,
-        installed: false,
-        installing: true,
-        install_progress: Some(0),
-        install_stage: Some("preparing".to_string()),
-        install_path: Some(PICOCLAW_BINARY_PATH.to_string()),
-        agent_profile: Some(detect_agent_profile()),
-        model_configured: false,
-        model_name: None,
-        status: "installing".to_string(),
-        config_error: None,
-        last_error: None,
-        checked_at: Some(now_string()),
-        current_session: None,
-    });
 
     tokio::spawn(async {
         if let Err(err) = run_install_runtime().await {
@@ -1409,16 +1393,71 @@ fn update_runtime_gateway_state(
     current.checked_at = Some(now_string());
 }
 
+/// Where a screenshot comes from: a frame the running MJPEG stream cached
+/// moments ago, one frame read directly while the capture is in MJPEG mode,
+/// or nothing in H.264 mode, where an MJPEG read would recreate the encoder
+/// under a running stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenshotSource {
+    Cached,
+    Capture,
+    Unavailable,
+}
+
+fn screenshot_source(cached: bool, mjpeg_mode: bool) -> ScreenshotSource {
+    if cached {
+        ScreenshotSource::Cached
+    } else if mjpeg_mode {
+        ScreenshotSource::Capture
+    } else {
+        ScreenshotSource::Unavailable
+    }
+}
+
+/// One frame from the capture at its current size and quality. The capture
+/// pipeline has one resolution, so a requested size is advisory and the reply
+/// carries the real one. A still screen under frame detection returns no
+/// bytes; the last cached frame is still that screen.
+fn capture_mjpeg_frame_blocking() -> std::result::Result<stream::LatestMjpegFrame, PicoclawErrorData>
+{
+    let screen = stream::current_mjpeg_screen();
+    let (data, result) = crate::ffi::kvm::read_mjpeg(screen.width, screen.height, screen.quality)
+        .map_err(|err| {
+        PicoclawErrorData::new(
+            CODE_SCREENSHOT_FAILED,
+            format!("mjpeg capture failed: {err}"),
+        )
+    })?;
+    if result >= 0 && !data.is_empty() {
+        return Ok(stream::LatestMjpegFrame::captured_now(
+            data,
+            screen.width,
+            screen.height,
+        ));
+    }
+    stream::latest_mjpeg_frame(Duration::MAX).ok_or_else(|| {
+        PicoclawErrorData::new(
+            CODE_SCREENSHOT_FAILED,
+            format!("no frame from the capture (result {result}) and none cached"),
+        )
+    })
+}
+
 fn capture_screenshot_blocking(
     query: ScreenshotQuery,
 ) -> std::result::Result<(Vec<u8>, ScreenshotMeta), PicoclawErrorData> {
     let (_width, _height, _quality, source_width, source_height) =
         resolve_screenshot_request(&query);
-    let Some(frame) = stream::latest_mjpeg_frame(CACHED_FRAME_MAX_AGE) else {
-        return Err(PicoclawErrorData::new(
-            CODE_SCREENSHOT_FAILED,
-            "no cached MJPEG frame available",
-        ));
+    let cached = stream::latest_mjpeg_frame(CACHED_FRAME_MAX_AGE);
+    let frame = match screenshot_source(cached.is_some(), stream::is_mjpeg_mode()) {
+        ScreenshotSource::Cached => cached.expect("checked above"),
+        ScreenshotSource::Capture => capture_mjpeg_frame_blocking()?,
+        ScreenshotSource::Unavailable => {
+            return Err(PicoclawErrorData::new(
+                CODE_SCREENSHOT_FAILED,
+                "no frame available: the capture is in H.264 mode and no MJPEG viewer cached a frame",
+            ));
+        }
     };
 
     Ok((
@@ -2373,6 +2412,38 @@ fn runtime_status() -> RuntimeStatus {
         .unwrap_or_else(|_| RuntimeStatus::checking())
 }
 
+/// Mark an installation as running unless one is, in which case the running
+/// one's status comes back for the caller to report. The check and the mark
+/// happen under the same lock.
+fn begin_install() -> Option<RuntimeStatus> {
+    // Prepared outside the lock: the profile detector reads the workspace.
+    let preparing = RuntimeStatus {
+        ready: false,
+        installed: false,
+        installing: true,
+        install_progress: Some(0),
+        install_stage: Some("preparing".to_string()),
+        install_path: Some(PICOCLAW_BINARY_PATH.to_string()),
+        agent_profile: Some(detect_agent_profile()),
+        model_configured: false,
+        model_name: None,
+        status: "installing".to_string(),
+        config_error: None,
+        last_error: None,
+        checked_at: Some(now_string()),
+        current_session: None,
+    }
+    .with_checked_at();
+    let Ok(mut current) = RUNTIME_STATUS.write() else {
+        return Some(RuntimeStatus::checking());
+    };
+    if current.installing {
+        return Some(current.clone());
+    }
+    *current = preparing;
+    None
+}
+
 fn set_runtime_status(status: RuntimeStatus) {
     if let Ok(mut current) = RUNTIME_STATUS.write() {
         *current = status.with_checked_at();
@@ -3268,6 +3339,57 @@ fn command_output_text(output: &crate::system::command::CommandOutput) -> String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_one_installation_begins_at_a_time() {
+        use super::{RuntimeStatus, begin_install, runtime_status, set_runtime_status};
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let before = runtime_status();
+        set_runtime_status(RuntimeStatus {
+            installing: false,
+            ..before.clone()
+        });
+        assert!(begin_install().is_none());
+        let running = begin_install().expect("a second start while one runs");
+        assert!(running.installing);
+        assert_eq!(running.status, "installing");
+        // Requests arriving together: exactly one of them starts, every time.
+        for _ in 0..50 {
+            set_runtime_status(RuntimeStatus {
+                installing: false,
+                ..before.clone()
+            });
+            let barrier = Barrier::new(8);
+            let started = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        if begin_install().is_none() {
+                            started.fetch_add(1, Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+        }
+        set_runtime_status(before);
+    }
+
+    #[test]
+    fn a_screenshot_comes_from_the_cache_then_the_mjpeg_capture_never_from_h264() {
+        use super::{ScreenshotSource, screenshot_source};
+        assert_eq!(screenshot_source(true, true), ScreenshotSource::Cached);
+        assert_eq!(screenshot_source(true, false), ScreenshotSource::Cached);
+        assert_eq!(screenshot_source(false, true), ScreenshotSource::Capture);
+        assert_eq!(
+            screenshot_source(false, false),
+            ScreenshotSource::Unavailable
+        );
+    }
+
     use super::*;
 
     #[test]

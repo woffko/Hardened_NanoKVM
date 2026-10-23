@@ -270,6 +270,9 @@ scan_session_hints() {
   return 1
 }
 
+# Every command option takes a value. That value is payload (text to type, a
+# key list, a URL), never a session hint or a global option, whatever it looks
+# like; only a bare argument can be a hint.
 scan_global_options() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -277,6 +280,13 @@ scan_global_options() {
         [ "$#" -ge 2 ] || die "INVALID_ARGUMENT" "missing value for $1"
         consume_global_option "$1" "$2"
         shift 2
+        ;;
+      --*)
+        if [ "$#" -ge 2 ]; then
+          shift 2
+        else
+          shift
+        fi
         ;;
       *)
         if consume_session_hint "$1"; then
