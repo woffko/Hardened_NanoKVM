@@ -178,9 +178,14 @@ def main():
           and "output.status == 0" in native and "run_allowed_owned(" in native
           and "AllowedCommand::AppSlotGate" not in stop and 'run_script("stop"' not in stop
           and "killall" not in api)
-    check("picoclaw onboard API requires exact current support and fresh boot, no legacy script selection",
-          "native_control_ready().await?" in onboard and
-          "run_native_control(PicoControl::Onboard, support).await?" in onboard and
+    # Since 617203f onboarding is a broker-owned job: the broker holds the
+    # admission and the boot proof, so the handler runs no native control and
+    # selects no script itself.
+    check("picoclaw onboard API is a broker job, no legacy script selection",
+          "run_config_job(ONBOARD_JOB_KIND" in onboard and
+          "broker::ipc::run_onboard_job(" in onboard and
+          "run_native_control(" not in onboard and "run_script(" not in onboard and
+          "AllowedCommand::" not in onboard and
           "native_bootstrap::check_installed()" in preflight and "boot::require_ready()" in preflight and
           "async fn run_script(" not in api)
     if not args.baseline_ref:
