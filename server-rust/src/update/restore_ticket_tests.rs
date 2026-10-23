@@ -674,3 +674,43 @@ fn actual_process_kill_releases_lock_and_recovers_before_and_after_rename() {
         assert!(!record_path(root.path(), NEXT).exists());
     }
 }
+
+#[test]
+fn the_device_binding_is_a_domain_separated_hash_of_the_exact_unique_id() {
+    let dir = tempdir().unwrap();
+    let uid = dir.path().join("base_uid");
+    fs::write(&uid, b"base_uid: 0x12345678_0x9abcdef0\n").unwrap();
+    let id = device_id_from(&uid).unwrap();
+    assert_eq!(device_id_from(&uid).unwrap(), id);
+    let mut plain = [0; 32];
+    plain.copy_from_slice(&Sha256::digest(b"base_uid: 0x12345678_0x9abcdef0\n"));
+    assert_ne!(id, plain, "no domain separation");
+    assert_ne!(id, [0; 32]);
+    fs::write(&uid, b"base_uid: 0x12345678_0x9abcdef1\n").unwrap();
+    assert_ne!(device_id_from(&uid).unwrap(), id);
+}
+
+#[test]
+fn a_missing_empty_or_malformed_unique_id_is_no_device_binding() {
+    let dir = tempdir().unwrap();
+    let uid = dir.path().join("base_uid");
+    assert!(matches!(device_id_from(&uid), Err(TicketError::Device)));
+    for bytes in [
+        b"".to_vec(),
+        b" \n\t".to_vec(),
+        b"base_uid: 0x1\0x2\n".to_vec(),
+        vec![b'a'; MAX_DEVICE_UID_BYTES as usize + 1],
+    ] {
+        fs::write(&uid, &bytes).unwrap();
+        assert!(
+            matches!(device_id_from(&uid), Err(TicketError::Device)),
+            "{bytes:?}"
+        );
+    }
+    fs::write(&uid, vec![b'a'; MAX_DEVICE_UID_BYTES as usize]).unwrap();
+    assert!(device_id_from(&uid).is_ok());
+    assert!(matches!(
+        device_id_from(dir.path()),
+        Err(TicketError::Device)
+    ));
+}

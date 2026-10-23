@@ -23,6 +23,9 @@ const DIRECTORY: &str = ".nanokvm-restore";
 const STATE: &str = "state";
 const NEXT: &str = ".state.next";
 const MAX_MOUNT_BYTES: u64 = 256 * 1024;
+const DEVICE_UID: &str = "/sys/class/cvi-base/base_uid";
+const DEVICE_DOMAIN: &[u8] = b"nanokvm-restore-device-v1\0";
+const MAX_DEVICE_UID_BYTES: u64 = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TicketError {
@@ -36,6 +39,8 @@ pub enum TicketError {
     WrongBoot,
     #[error("restore transaction was already committed")]
     Replay,
+    #[error("this device has no readable unique ID to bind a restore to")]
+    Device,
     #[error("boot restore publication was interrupted; reopen and inspect durable state")]
     Ambiguous,
     #[error("boot restore I/O failed: {0}")]
@@ -44,6 +49,31 @@ pub enum TicketError {
     Capsule(#[from] CapsuleError),
 }
 type Result<T> = std::result::Result<T, TicketError>;
+
+/// The device binding of a ticket: SHA-256 over a fixed domain and the exact
+/// SoC unique-ID attribute that S95 also derives `/device_key` from. Capture
+/// and the early restore both read it. A kernel that prints the attribute
+/// differently makes the restore refuse; it never guesses.
+pub fn device_id() -> Result<[u8; 32]> {
+    device_id_from(Path::new(DEVICE_UID))
+}
+
+fn device_id_from(path: &Path) -> Result<[u8; 32]> {
+    let mut uid = Vec::new();
+    File::open(path)
+        .and_then(|file| file.take(MAX_DEVICE_UID_BYTES + 1).read_to_end(&mut uid))
+        .map_err(|_| TicketError::Device)?;
+    if uid.len() as u64 > MAX_DEVICE_UID_BYTES
+        || uid.contains(&0)
+        || uid.iter().all(u8::is_ascii_whitespace)
+    {
+        return Err(TicketError::Device);
+    }
+    let mut hash = Sha256::new();
+    hash.update(DEVICE_DOMAIN);
+    hash.update(&uid);
+    Ok(hash.finalize().into())
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct BootId([u8; 16]);

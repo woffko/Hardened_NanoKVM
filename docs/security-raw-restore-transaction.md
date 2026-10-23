@@ -1046,7 +1046,12 @@ device identity digest, exact encrypted capsule/boot image/rootfs image digests,
 system/app versions, target, phase and active key. Reserved bytes/string padding
 must be zero. The final SHA-256 detects corruption; it is **not** authentication.
 Authorization comes from the private expected p1 store and verified caller
-context. Device identity must come from stable hardware, not a cloned machine-id.
+context. Device identity must come from stable hardware, not a cloned machine-id:
+`ticket::device_id()` is SHA-256 over the fixed domain `nanokvm-restore-device-v1`
+and the exact bytes of `/sys/class/cvi-base/base_uid`, the SoC unique-ID
+attribute S95 also derives `/device_key` from. A missing, empty, oversized or
+NUL-containing attribute is no binding. A kernel that prints it differently
+makes the restore refuse; it never normalizes or guesses.
 
 Publication creates the fixed `.state.next` with CREATE|EXCL, writes and fsyncs
 the complete record, renames it to `state`, then fsyncs the directory. All I/O is
