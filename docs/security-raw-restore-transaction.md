@@ -1169,6 +1169,17 @@ directory on devtmpfs, whose mountpoint dentry stays pinned, so no path walk
 reads the overwritten partition. `open_boot` is `open_mounted("/boot",
 "/dev/mmcblk0p1")`.
 
+`raw_writer::run_writer` orders the whole write over a `WriterSystem` (the
+device implementation belongs to the writer process). Steps that a reboot can
+still undo come first and run one at a time: stop every other process, flush
+and remount the root read-only, release the old boot partition. ROOTFS is then
+written and verified, then BOOT, and the prepared ticket is published on the
+new boot partition last, so a failure never leaves a ticket beside a partly
+written system. The outcome is `NotStarted` (nothing written; a reboot restores
+the old system; also when ROOTFS cannot be opened), `Failed` (a write started:
+manual recovery) or `Written`; the caller reboots after any of them. Host tests
+drive the sequence with a fake system over temporary files.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative

@@ -79,3 +79,220 @@ fn the_read_back_comes_from_the_partition_not_from_the_image() {
     AFTER_SYNC.with(|hook| *hook.borrow_mut() = None);
     assert!(matches!(result, Err(WriteError::Mismatch)));
 }
+
+mod sequence {
+    use super::*;
+    use crate::update::restore_capsule::{
+        prepare_capsule,
+        ticket::{Binding, BootId},
+    };
+    use std::io::Cursor;
+
+    fn ticket() -> RestoreTicket {
+        let mut encrypted = Vec::new();
+        let plaintext = b"synthetic restore archive";
+        let secret = prepare_capsule(
+            "0.3.0-raw.13",
+            plaintext.len() as u64,
+            &mut Cursor::new(&plaintext[..]),
+            &mut encrypted,
+        )
+        .unwrap();
+        RestoreTicket::prepared(
+            secret,
+            Binding {
+                source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                device_id: [1; 32],
+                capsule_sha256: Sha256::digest(&encrypted).into(),
+                boot_image_sha256: [2; 32],
+                rootfs_image_sha256: [3; 32],
+                target_app_version: "2.0.43".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        calls: Vec<String>,
+        fail: Option<&'static str>,
+        partitions: Vec<(Partition, File)>,
+        log: Vec<String>,
+    }
+    impl Fake {
+        fn step(&mut self, name: &'static str) -> io::Result<()> {
+            self.calls.push(name.into());
+            if self.fail == Some(name) {
+                return Err(io::Error::other("injected"));
+            }
+            Ok(())
+        }
+        fn partition(&self, partition: Partition) -> Vec<u8> {
+            let file = &self
+                .partitions
+                .iter()
+                .find(|(p, _)| *p == partition)
+                .unwrap()
+                .1;
+            let mut bytes = vec![0; 4096];
+            file.read_exact_at(&mut bytes, 0).unwrap();
+            bytes
+        }
+    }
+    impl WriterSystem for Fake {
+        fn stop_others(&mut self) -> io::Result<()> {
+            self.step("stop")
+        }
+        fn freeze_root(&mut self) -> io::Result<()> {
+            self.step("freeze")
+        }
+        fn release_boot(&mut self) -> io::Result<()> {
+            self.step("release")
+        }
+        fn open_partition(&mut self, partition: Partition) -> io::Result<File> {
+            self.step(match partition {
+                Partition::Boot => "open-boot",
+                Partition::Rootfs => "open-rootfs",
+            })?;
+            let device = self
+                .partitions
+                .iter()
+                .find(|(p, _)| *p == partition)
+                .unwrap()
+                .1
+                .try_clone()?;
+            Ok(device)
+        }
+        fn publish_ticket(&mut self, _: &RestoreTicket) -> std::result::Result<(), TicketError> {
+            self.step("publish").map_err(TicketError::Io)
+        }
+        fn log(&mut self, line: &str) {
+            self.log.push(line.into());
+        }
+    }
+
+    fn device(fill: u8) -> File {
+        let file = tempfile::tempfile().unwrap();
+        file.write_all_at(&[fill; 4096], 0).unwrap();
+        file
+    }
+
+    struct Images {
+        files: [File; 2],
+        sha256: [[u8; 32]; 2],
+    }
+    fn images() -> Images {
+        let boot = device(0xb0);
+        let rootfs = device(0x5f);
+        Images {
+            files: [boot, rootfs],
+            sha256: [
+                Sha256::digest([0xb0; 4096]).into(),
+                Sha256::digest([0x5f; 4096]).into(),
+            ],
+        }
+    }
+
+    fn run(fake: &mut Fake, images: &Images, ticket: &RestoreTicket) -> Outcome {
+        fake.partitions = vec![(Partition::Boot, device(0)), (Partition::Rootfs, device(0))];
+        run_writer(
+            fake,
+            &WritePlan {
+                images: [&images.files[0], &images.files[1]],
+                sizes: [4096, 4096],
+                sha256: images.sha256,
+                ticket,
+            },
+        )
+    }
+
+    #[test]
+    fn a_complete_write_stops_freezes_and_writes_rootfs_then_boot_then_the_ticket() {
+        let (images, ticket) = (images(), ticket());
+        let mut fake = Fake::default();
+        assert_eq!(run(&mut fake, &images, &ticket), Outcome::Written);
+        assert_eq!(
+            fake.calls,
+            [
+                "stop",
+                "freeze",
+                "release",
+                "open-rootfs",
+                "open-boot",
+                "publish"
+            ]
+        );
+        assert_eq!(fake.partition(Partition::Rootfs), [0x5f; 4096]);
+        assert_eq!(fake.partition(Partition::Boot), [0xb0; 4096]);
+    }
+
+    #[test]
+    fn a_failure_before_the_first_partition_write_writes_nothing_and_runs_no_later_step() {
+        let (images, ticket) = (images(), ticket());
+        for (fail, calls) in [
+            ("stop", &["stop"][..]),
+            ("freeze", &["stop", "freeze"][..]),
+            ("release", &["stop", "freeze", "release"][..]),
+            (
+                "open-rootfs",
+                &["stop", "freeze", "release", "open-rootfs"][..],
+            ),
+        ] {
+            let mut fake = Fake {
+                fail: Some(fail),
+                ..Fake::default()
+            };
+            assert_eq!(
+                run(&mut fake, &images, &ticket),
+                Outcome::NotStarted,
+                "{fail}"
+            );
+            assert_eq!(fake.calls, calls, "{fail}");
+            assert_eq!(fake.partition(Partition::Rootfs), [0; 4096], "{fail}");
+            assert_eq!(fake.partition(Partition::Boot), [0; 4096], "{fail}");
+            assert!(fake.log.iter().any(|line| line.contains("not started")));
+        }
+    }
+
+    #[test]
+    fn a_failure_after_the_first_write_is_manual_recovery_and_never_publishes_the_ticket() {
+        let (mut images, ticket) = (images(), ticket());
+        // ROOTFS reads back wrong: BOOT is never opened, no ticket.
+        images.sha256[1][0] ^= 1;
+        let mut fake = Fake::default();
+        assert_eq!(run(&mut fake, &images, &ticket), Outcome::Failed);
+        assert_eq!(fake.calls, ["stop", "freeze", "release", "open-rootfs"]);
+        assert_eq!(fake.partition(Partition::Boot), [0; 4096]);
+        images.sha256[1][0] ^= 1;
+        for (fail, calls) in [
+            (
+                "open-boot",
+                &["stop", "freeze", "release", "open-rootfs", "open-boot"][..],
+            ),
+            (
+                "publish",
+                &[
+                    "stop",
+                    "freeze",
+                    "release",
+                    "open-rootfs",
+                    "open-boot",
+                    "publish",
+                ][..],
+            ),
+        ] {
+            let mut fake = Fake {
+                fail: Some(fail),
+                ..Fake::default()
+            };
+            assert_eq!(run(&mut fake, &images, &ticket), Outcome::Failed, "{fail}");
+            assert_eq!(fake.calls, calls, "{fail}");
+            assert!(
+                fake.log
+                    .iter()
+                    .any(|line| line.contains("raw write failed"))
+            );
+        }
+    }
+}
