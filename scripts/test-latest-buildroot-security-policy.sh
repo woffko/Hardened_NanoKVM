@@ -11,6 +11,7 @@ PACKAGE_SCRIPT="$ROOT/scripts/package-rust-kvmapp.sh"
 AVAHI_CONFIG="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/avahi/avahi-daemon.conf"
 POST_BUILD="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/post-build.sh"
 KVM_CMAKE="$ROOT/support/sg2002/additional/kvm/CMakeLists.txt"
+SSHD_CONFIG="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/ssh/sshd_config"
 
 # Source coverage only, not proof that services/writers are quiescent.
 python3 "$ROOT/scripts/validate-state-writer-inventory.py" --root "$ROOT"
@@ -56,6 +57,9 @@ require_line 'BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit -U 23df1b1c-cbf0-5e
 reject_text 'BR2_PACKAGE_DNSMASQ=' "$DEFCONFIG"
 reject_text 'clients-max=' "$AVAHI_CONFIG"
 require_line 'rlimit-nofile=256' "$AVAHI_CONFIG"
+require_line 'Compression no' "$SSHD_CONFIG"
+require_line 'PermitEmptyPasswords no' "$SSHD_CONFIG"
+require_line 'UsePAM no' "$SSHD_CONFIG"
 
 test ! -e "$ROOT/kvmapp/system/init.d/S80dnsmasq"
 test -x "$POST_BUILD"
