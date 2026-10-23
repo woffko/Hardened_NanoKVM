@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Superseded by the RC12 release scripts. Kept so that RC11 assets can still
+# be rebuilt or republished for recovery, which must be asked for explicitly.
+[ "${HARDENED_LEGACY_RC11:-}" = 1 ] || {
+	echo "this is the superseded RC11 release helper; set HARDENED_LEGACY_RC11=1 to run it" >&2
+	exit 2
+}
+
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 REPO="${GITHUB_REPOSITORY:-woffko/Hardened_NanoKVM}"
 RELEASE_TAG="${RELEASE_TAG:-hardened-system-0.3.0-raw.10}"
