@@ -128,6 +128,9 @@ struct TerminalPty {
     child: Pid,
 }
 
+/// Queued terminal input messages before the websocket loop waits.
+const TERMINAL_INPUT_QUEUE: usize = 16;
+
 #[derive(Debug, Deserialize)]
 pub struct SetHostnameReq {
     pub hostname: String,
@@ -751,7 +754,15 @@ async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime
             return;
         }
     };
-    let mut pty_writer = master;
+    let pty_winsize = match master.try_clone() {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(error = ?err, "failed to clone terminal pty");
+            cleanup_terminal_process_blocking(child);
+            return;
+        }
+    };
+    let (pty_writer, writer_task) = spawn_pty_writer(master);
     let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(16);
     let reader_task = task::spawn_blocking(move || {
         let mut buffer = [0_u8; TERMINAL_MAX_MESSAGE_SIZE];
@@ -776,14 +787,9 @@ async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime
     loop {
         tokio::select! {
             end = &mut session_end => {
-                let reason = match end {
-                    SessionEnd::Revoked => "terminal session revoked",
-                    SessionEnd::Expired => "terminal session expired",
-                    SessionEnd::Uncertain => "terminal session ended",
-                };
                 let _ = ws_tx.send(Message::Close(Some(CloseFrame {
                     code: 1008,
-                    reason: reason.into(),
+                    reason: terminal_session_end_reason(end).into(),
                 }))).await;
                 break;
             }
@@ -807,13 +813,29 @@ async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime
 
                 match message {
                     Message::Text(text) => {
-                        if pty_writer.write_all(text.as_bytes()).is_err() {
-                            break;
+                        // A shell that stopped reading fills the queue and then
+                        // holds this loop, never a runtime worker; the session
+                        // end still wins over the wait.
+                        let delivered = tokio::select! {
+                            biased;
+                            end = &mut session_end => Err(end),
+                            sent = pty_writer.send(text.as_bytes().to_vec()) => Ok(sent.is_ok()),
+                        };
+                        match delivered {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(end) => {
+                                let _ = ws_tx.send(Message::Close(Some(CloseFrame {
+                                    code: 1008,
+                                    reason: terminal_session_end_reason(end).into(),
+                                }))).await;
+                                break;
+                            }
                         }
                     }
                     Message::Binary(data) => {
                         if let Some(size) = parse_terminal_winsize(&data) {
-                            set_terminal_winsize(&pty_writer, &size);
+                            set_terminal_winsize(&pty_winsize, &size);
                         }
                     }
                     Message::Ping(data) => {
@@ -829,8 +851,10 @@ async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime
     }
 
     drop(pty_writer);
+    drop(pty_winsize);
     let _ = task::spawn_blocking(move || cleanup_terminal_process_blocking(child)).await;
     let _ = reader_task.await;
+    let _ = writer_task.await;
     debug!("terminal websocket disconnected");
 }
 
@@ -971,6 +995,29 @@ pub async fn set_session_lock(
             ))
         })
         .await
+}
+
+fn terminal_session_end_reason(end: SessionEnd) -> &'static str {
+    match end {
+        SessionEnd::Revoked => "terminal session revoked",
+        SessionEnd::Expired => "terminal session expired",
+        SessionEnd::Uncertain => "terminal session ended",
+    }
+}
+
+/// PTY input goes through a thread of its own. A shell that stopped reading
+/// (flow control, a stuck foreground job) blocks the write, and that must
+/// stall this terminal only, not a runtime worker and every request on it.
+fn spawn_pty_writer(mut pty: File) -> (mpsc::Sender<Vec<u8>>, task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(TERMINAL_INPUT_QUEUE);
+    let task = task::spawn_blocking(move || {
+        while let Some(data) = rx.blocking_recv() {
+            if pty.write_all(&data).is_err() {
+                break;
+            }
+        }
+    });
+    (tx, task)
 }
 
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
@@ -1642,6 +1689,35 @@ fn remove_file_if_exists(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_pty_blocks_only_the_terminal_writer_thread() {
+        let (read_end, write_end) = nix::unistd::pipe().unwrap();
+        let (writer, task) = spawn_pty_writer(File::from(write_end));
+        // More than the pipe buffer, with a reader that never reads: the
+        // writer thread blocks in write_all.
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut queued = 0;
+        while writer.try_send(chunk.clone()).is_ok() {
+            queued += 1;
+        }
+        assert!(queued >= 2, "{queued}");
+        // This is the only runtime thread: a timer firing shows no write ran
+        // on it.
+        time::timeout(
+            Duration::from_millis(300),
+            time::sleep(Duration::from_millis(50)),
+        )
+        .await
+        .expect("the runtime kept running while the pty writer was stuck");
+        assert!(!task.is_finished());
+        drop(writer);
+        drop(read_end);
+        time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the writer ends once its reader is gone")
+            .unwrap();
+    }
 
     #[test]
     fn a_new_hostname_replaces_only_whole_host_names() {

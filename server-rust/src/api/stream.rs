@@ -26,7 +26,7 @@ use tokio::{
     sync::{broadcast, oneshot},
     time::{self, MissedTickBehavior},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
@@ -61,6 +61,10 @@ const MJPEG_FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 const MJPEG_FRAME_UNCHANGED: i32 = 5;
 const H264_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const H264_FAILURE_LIMIT: usize = 3;
+/// After a failed read the source waits before the next one, and longer once
+/// the failure limit is reached: a lost HDMI input is not polled at frame rate.
+const H264_FAILURE_BACKOFF: Duration = Duration::from_millis(500);
+const H264_FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 const H264_KEYFRAME_REQUEST_HOLD: Duration = Duration::from_millis(250);
 /// At most one keyframe request per interval: a peer flooding RTCP PLI/FIR
 /// would otherwise reconfigure the encoder for every viewer several times a
@@ -83,6 +87,8 @@ static H264_DIRECT_FIRST_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_DIRECT_FIRST_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_CAPTURE_DISABLED: AtomicBool = AtomicBool::new(false);
 static H264_CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+/// Set by the first failure of an outage, cleared by the next good frame.
+static H264_OUTAGE_LOGGED: AtomicBool = AtomicBool::new(false);
 static H264_KEYFRAME_REQUEST_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static H264_LAST_KEYFRAME_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 static CAPTURE_STATUS: LazyLock<Mutex<CaptureStatusStore>> =
@@ -750,6 +756,14 @@ async fn run_h264_source() {
     .await;
 }
 
+fn h264_failure_backoff(failures: usize) -> Duration {
+    if failures >= H264_FAILURE_LIMIT {
+        H264_FAILURE_COOLDOWN
+    } else {
+        H264_FAILURE_BACKOFF
+    }
+}
+
 fn h264_source_step() -> H264SourceStep {
     let screen = current_screen();
     match h264_direct_producer_action(screen.mode, h264_capture_disabled()) {
@@ -777,6 +791,7 @@ async fn pump_h264_frames<R, F>(
 {
     let start = Instant::now();
     let mut fps = 0;
+    let mut failures = 0usize;
     let mut interval = frame_interval(30);
     let retune = |wanted: u64, fps: &mut u64, interval: &mut time::Interval| {
         if wanted != *fps {
@@ -816,8 +831,11 @@ async fn pump_h264_frames<R, F>(
             if !H264_DIRECT_FIRST_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
                 warn!("h264 frame unavailable");
             }
+            failures += 1;
+            time::sleep(h264_failure_backoff(failures)).await;
             continue;
         };
+        failures = 0;
 
         if !H264_DIRECT_FIRST_SUCCESS_LOGGED.swap(true, Ordering::Relaxed) {
             info!(result, bytes = data.len(), "read first h264 frame");
@@ -1104,6 +1122,7 @@ pub async fn read_h264_capture_frame(
     }
 
     H264_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+    H264_OUTAGE_LOGGED.store(false, Ordering::Release);
     Some((data, result))
 }
 
@@ -1124,7 +1143,13 @@ fn record_h264_failure(
 ) {
     update_capture_status(mode, -1);
     let failures = H264_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::AcqRel) + 1;
-    warn!(mode, failures, detail = ?detail, reason, "h264 capture failure");
+    // One line per outage, the rest at debug: a lost HDMI input must not write
+    // a line per frame to the tmpfs log.
+    if !H264_OUTAGE_LOGGED.swap(true, Ordering::AcqRel) {
+        warn!(mode, failures, detail = ?detail, reason, "h264 capture failure");
+    } else {
+        debug!(mode, failures, detail = ?detail, reason, "h264 capture failure");
+    }
 
     if failures >= H264_FAILURE_LIMIT {
         match recovery {
@@ -1415,7 +1440,7 @@ mod tests {
         }
     }
     impl Fake {
-        fn run(&self, frames: usize) -> tokio::task::JoinHandle<()> {
+        fn run(&self) -> tokio::task::JoinHandle<()> {
             let source = self.source;
             let reads = Arc::clone(&self.reads);
             tokio::spawn(async move {
@@ -1426,9 +1451,7 @@ mod tests {
                         let index = reads.fetch_add(1, Ordering::SeqCst);
                         async move {
                             tokio::time::sleep(Duration::from_millis(2)).await;
-                            // The reader is finite; afterwards the source idles.
-                            (index < frames)
-                                .then(|| (vec![index as u8], if index == 0 { 3 } else { 4 }))
+                            Some((vec![index as u8], if index == 0 { 3 } else { 4 }))
                         }
                     },
                 )
@@ -1453,7 +1476,7 @@ mod tests {
         let fake = fake(8);
         let mut direct = fake.source.subscribe(H264Viewer::Direct, || {});
         let mut webrtc = fake.source.subscribe(H264Viewer::WebRtc, || {});
-        let pump = fake.run(20);
+        let pump = fake.run();
         let (a, b) = tokio::join!(collect(&mut direct, 20), collect(&mut webrtc, 20));
         let expected: Vec<u8> = (0..20).collect();
         assert_eq!(a, expected, "the Direct viewer missed frames");
@@ -1511,7 +1534,7 @@ mod tests {
     async fn a_lagging_viewer_asks_for_a_keyframe_and_goes_on_with_newer_frames() {
         let fake = fake(2);
         let mut slow = fake.source.subscribe(H264Viewer::Direct, || {});
-        let pump = fake.run(40);
+        let pump = fake.run();
         // Let the source overrun the two-frame channel.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let before = keyframe_requests().len();
@@ -1532,6 +1555,36 @@ mod tests {
         assert_eq!(requests[before], "h264 viewer lagged");
         drop(slow);
         tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_read_backs_off_instead_of_retrying_every_frame() {
+        let fake = fake(8);
+        let viewer = fake.source.subscribe(H264Viewer::Direct, || {});
+        let reads = Arc::clone(&fake.reads);
+        let source = fake.source;
+        let pump = tokio::spawn(async move {
+            pump_h264_frames(
+                source,
+                || H264SourceStep::Capture(SCREEN),
+                move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    async { None::<(Vec<u8>, i32)> }
+                },
+            )
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        // At 200 fps that would be about 280 reads. With the backoff: one at
+        // once, two more 500 ms apart, then the 5 s cooldown.
+        assert_eq!(fake.reads.load(Ordering::SeqCst), 3);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(fake.reads.load(Ordering::SeqCst), 4);
+        drop(viewer);
+        tokio::time::timeout(Duration::from_secs(10), pump)
             .await
             .unwrap()
             .unwrap();

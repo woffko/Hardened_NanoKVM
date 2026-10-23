@@ -32,6 +32,14 @@ a scripted reader: every viewer receives every frame of one read sequence, a
 late viewer and a lagging viewer each request a keyframe, and the source stops
 after its last viewer or when capture is disabled.
 
+A failed read does not retry at frame rate: the source waits 500 ms after a
+failure and 5 s once three failures are in a row, and `kvm::read_img` refuses
+after `kvm::shutdown`, so no producer reaches the deinitialized capture stack.
+The failure is logged once per outage at warn level and at debug level after
+that; a lost HDMI input used to write a line per frame to the tmpfs log. A
+host test with a reader that always fails sees one read at once, two more
+500 ms apart and the next after the 5 s cooldown.
+
 The optional `security` configuration fields have these defaults and valid
 ranges. Older configuration files inherit the defaults. Invalid explicit
 values fail configuration loading, trial startup and authenticated restore;

@@ -74,6 +74,8 @@ webrtc = "0.17.1"
 zeroize = "=1.9.0"
 
 [dev-dependencies]
+# Paused time for the H.264 source backoff test; test builds only.
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 
 [build-dependencies]

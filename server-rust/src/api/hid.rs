@@ -279,15 +279,59 @@ fn validate_paste_request(req: &PasteReq) -> Result<()> {
             msg: "content too long".to_string(),
         });
     }
+    // Refuse before the first key goes out: a paste that silently dropped
+    // characters typed something other than what was shown.
+    let unsupported = unsupported_paste_chars(&req.content, &req.langue);
+    if !unsupported.is_empty() {
+        return Err(AppError::BadRequest(unsupported_paste_message(
+            &unsupported,
+        )));
+    }
     Ok(())
+}
+
+/// The characters `language` has no key for, each once, in order of first
+/// appearance. A carriage return is line-ending noise and is dropped, not
+/// refused.
+fn unsupported_paste_chars(content: &str, language: &str) -> Vec<char> {
+    let mut unsupported = Vec::new();
+    for ch in content.chars() {
+        if ch != '\r' && paste_key(ch, language).is_none() && !unsupported.contains(&ch) {
+            unsupported.push(ch);
+        }
+    }
+    unsupported
+}
+
+fn unsupported_paste_message(unsupported: &[char]) -> String {
+    const SHOWN: usize = 8;
+    let shown: Vec<String> = unsupported
+        .iter()
+        .take(SHOWN)
+        .map(|ch| {
+            if ch.is_control() || ch.is_whitespace() {
+                format!("U+{:04X}", *ch as u32)
+            } else {
+                format!("'{ch}' (U+{:04X})", *ch as u32)
+            }
+        })
+        .collect();
+    let message = format!(
+        "unsupported characters for this keyboard layout: {}",
+        shown.join(", ")
+    );
+    match unsupported.len().saturating_sub(SHOWN) {
+        0 => message,
+        more => format!("{message} and {more} more"),
+    }
 }
 
 fn paste_blocking(content: &str, language: &str) -> Result<()> {
     let owner = hid_ws::begin_input()?;
     let result = (|| -> Result<()> {
         for ch in content.chars() {
+            // validate_paste_request refused anything but '\r' already.
             let Some(key) = paste_key(ch, language) else {
-                tracing::debug!(char = %ch, codepoint = ch as u32, "unknown HID paste character");
                 continue;
             };
 
@@ -421,6 +465,8 @@ fn de_paste_key(ch: char) -> Option<PasteKey> {
         '`' => Some(key(2, 46)),
         '"' => Some(key(2, 31)),
         '?' => Some(key(2, 45)),
+        // Shift+0 on the German layout; the US key 46 is the acute accent there.
+        '=' => Some(key(2, 39)),
         '{' => Some(key(0x40, 36)),
         '[' => Some(key(0x40, 37)),
         ']' => Some(key(0x40, 38)),
@@ -491,6 +537,9 @@ fn fr_paste_key(ch: char) -> Option<PasteKey> {
         '/' => Some(key(2, 55)),
         '!' => Some(key(0, 56)),
         '\u{00a7}' => Some(key(2, 56)),
+        // The 102nd key left of W; the US Shift+comma types a period here.
+        '<' => Some(key(0, 100)),
+        '>' => Some(key(2, 100)),
         '~' => Some(key(0x40, 31)),
         '#' => Some(key(0x40, 32)),
         '{' => Some(key(0x40, 33)),
@@ -822,6 +871,39 @@ mod tests {
         assert_eq!(paste_key('a', "fr").unwrap(), key(0, 20));
         assert_eq!(paste_key('1', "fr").unwrap(), key(2, 30));
         assert_eq!(paste_key('@', "fr").unwrap(), key(0x40, 39));
+    }
+
+    #[test]
+    fn german_equals_and_french_angle_brackets_use_their_own_keys() {
+        assert_eq!(paste_key('=', "de").unwrap(), key(2, 39));
+        assert_eq!(paste_key('<', "fr").unwrap(), key(0, 100));
+        assert_eq!(paste_key('>', "fr").unwrap(), key(2, 100));
+        // The US layout keeps its keys.
+        assert_eq!(paste_key('=', "").unwrap(), key(0, 46));
+        assert_eq!(paste_key('<', "").unwrap(), key(2, 54));
+        assert_eq!(paste_key('>', "").unwrap(), key(2, 55));
+    }
+
+    #[test]
+    fn a_paste_with_unsupported_characters_is_refused_naming_them() {
+        assert!(unsupported_paste_chars("abc\r\n", "").is_empty());
+        assert_eq!(
+            unsupported_paste_chars("a\u{20ac}b\u{20ac}\u{fc}", ""),
+            vec!['\u{20ac}', '\u{fc}']
+        );
+        assert!(unsupported_paste_chars("\u{20ac}\u{fc}", "de").is_empty());
+        let err = validate_paste_request(&PasteReq {
+            content: "x\u{20ac}y".to_string(),
+            langue: String::new(),
+        })
+        .unwrap_err();
+        let AppError::BadRequest(msg) = err else {
+            panic!("{err:?}");
+        };
+        assert!(msg.contains("U+20AC"), "{msg}");
+        let many: String = ('\u{0400}'..'\u{0410}').collect();
+        let msg = unsupported_paste_message(&unsupported_paste_chars(&many, ""));
+        assert!(msg.ends_with("and 8 more"), "{msg}");
     }
 
     #[test]

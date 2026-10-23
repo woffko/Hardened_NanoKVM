@@ -146,7 +146,7 @@ is handled the same way. Authenticated routes keep the detailed message.
 | GET/POST    | `/api/hid/shortcut/leader-key`  | Implemented.                                                                                                                                                                 |
 | GET/POST    | `/api/hid/mode`                 | Implemented.                                                                                                                                                                 |
 | POST        | `/api/hid/reset`                | Implemented.                                                                                                                                                                 |
-| POST        | `/api/hid/paste`                | Implemented.                                                                                                                                                                 |
+| POST        | `/api/hid/paste`                | Implemented. The text is checked against the chosen layout before any key is sent; characters the layout has no key for are refused by name (a carriage return is dropped). German `=` and French `<`/`>` use their own keys. |
 
 ### Storage And Image Download
 

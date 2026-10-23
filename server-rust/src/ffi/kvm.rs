@@ -200,6 +200,11 @@ impl KvmVision {
         kind: u8,
         quality_or_rate: u16,
     ) -> Result<(Vec<u8>, i32)> {
+        // A producer that outlives shutdown must not reach the deinitialized
+        // capture stack.
+        if self.deinitialized {
+            return Err(AppError::Internal("libkvm is shut down".to_string()));
+        }
         let mut ptr: *mut u8 = std::ptr::null_mut();
         let mut len: u32 = 0;
 
@@ -340,6 +345,11 @@ impl KvmVision {
         kind: u8,
         quality_or_rate: u16,
     ) -> Result<(Vec<u8>, i32)> {
+        // A producer that outlives shutdown must not reach the deinitialized
+        // capture stack.
+        if self.deinitialized {
+            return Err(AppError::Internal("libkvm is shut down".to_string()));
+        }
         let mut ptr: *mut u8 = std::ptr::null_mut();
         let mut len: u32 = 0;
 
