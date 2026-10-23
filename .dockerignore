@@ -118,6 +118,7 @@ support/sg2002/kvm_system/main/lib/libqr/**
 !support/sg2002/kvm_system/main/lib/oled_ctrl
 support/sg2002/kvm_system/main/lib/oled_ctrl/**
 !support/sg2002/kvm_system/main/lib/oled_ctrl/oled_ctrl.cpp
+!support/sg2002/kvm_system/main/lib/oled_ctrl/hw_version.h
 !support/sg2002/kvm_system/main/lib/oled_ctrl/oled_ctrl.h
 !support/sg2002/kvm_system/main/lib/oled_ui
 support/sg2002/kvm_system/main/lib/oled_ui/**

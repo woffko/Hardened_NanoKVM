@@ -1,4 +1,5 @@
 #include "oled_ctrl.h"
+#include "hw_version.h"
 
 using namespace maix;
 using namespace maix::sys;
@@ -44,14 +45,7 @@ int oled_exist(void)
     // system("devmem 0x030010D0 32 0x2");
     // system("devmem 0x030010DC 32 0x2");
 
-	if(access("/etc/kvm/hw", F_OK) == 0){
-		uint8_t RW_Data[2];
-		FILE *fp = fopen("/etc/kvm/hw", "r");
-		fread(RW_Data, sizeof(char), 2, fp);
-		fclose(fp);
-		if(RW_Data[0] == 'b') kvm_hw_ver = 1;
-		else if(RW_Data[0] == 'p') kvm_hw_ver = 2;
-	}
+	kvm_hw_ver = hw_version_read("/etc/kvm/hw");
 
 	uint8_t buf[2];
 

@@ -348,6 +348,35 @@ statically that each of the three users takes the lock.
 before any read and runs once the bus is free. `libkvm.so` and the RISC-V
 `nanokvm_update_edid` are rebuilt; neither has run on hardware since.
 
+### Three small native faults (L-B12, 2026-10-23)
+
+- `mmf_enc_jpg_init` returned early after a failed pool creation, pool
+  attach or `CVI_VENC_StartRecvFrame` with the VENC channel, the VPSS binding
+  or the first pool still allocated, and `enc_jpg_is_init` clear. Every later
+  init then failed at `CVI_VENC_CreateChn` on the existing channel, so MJPEG
+  never came back. It now records what it created and, on any failure after
+  the channel exists, undoes it in the order `mmf_enc_jpg_deinit` uses
+  (unbind, VPSS deinit, pools, channel). `mmf_enc_jpg_deinit` reset the output
+  pool id twice and never the input one; fixed. `libkvm_mmf.so` is rebuilt
+  (`9ade400e…`, same exports, imports and no RPATH). This is a vendor-SDK
+  sequence with no host harness: the change is reviewed and compiled, not
+  host-tested. Device gate: MJPEG after a forced encoder failure.
+- `S15kvmhwd get_hdmi_version` wrote `ue` (unknown) after one silent probe,
+  and libkvm asks for it at every start, while the video pipeline may still
+  hold the chip in reset. The probe now repeats up to five times 200 ms apart,
+  and a silent chip never replaces a version detected earlier; `ue` is written
+  only when nothing was ever detected, and a later answer replaces it.
+  `scripts/test-s15-hdmi-version.sh` runs the functions under sh and BusyBox
+  sh with a scripted probe.
+- `oled_exist` in `kvm_system` read `/etc/kvm/hw` with unchecked `fopen` and
+  `fread`: an unreadable file dereferenced NULL, an empty one left the buffer
+  uninitialized. The read is now `hw_version_read` (header-only
+  `lib/oled_ctrl/hw_version.h`): any failure or unknown letter means alpha, as
+  before. `scripts/test-kvm-system-hw-version.sh` builds it as C and C++ and
+  runs it against a missing, empty, unreadable and each known file.
+  `kvm_system` is rebuilt; the previous binary stays beside it as
+  `kvm_system.pre-lb12-20261023` in the (ignored) build directory.
+
 ## Recommended Repair Order
 
 1. Introduce explicit native lifecycle ownership: retain thread handles, stop

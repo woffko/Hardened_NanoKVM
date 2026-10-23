@@ -187,20 +187,43 @@ kvm_hw_init(){
     fi
 }
 
-kvm_hdmi_version_detect()
+# One probe of the HDMI chip: c, ux, d, or ue when nothing answers. The
+# probes take the shared LT6911 bus lock (see i2c_bus_lock.h in libkvm).
+kvm_hdmi_version_probe()
 {
-    # Probes take the shared LT6911 bus lock (see i2c_bus_lock.h in libkvm).
     if flock /dev/i2c-4 i2cdetect -ry 4 0x2c 0x2c | grep -qw "2c"; then
-        echo "c" > /etc/kvm/hdmi_version
+        echo c
     elif flock /dev/i2c-4 i2cdetect -ry 4 0x2b 0x2b | grep -qw "2b"; then
         if flock /dev/i2c-4 i2cdetect -ry 4 0x44 0x44 | grep -qw "44"; then
-            echo "ux" > /etc/kvm/hdmi_version
+            echo ux
         else
-            echo "d" > /etc/kvm/hdmi_version
+            echo d
         fi
     else
-        echo "ue" > /etc/kvm/hdmi_version
+        echo ue
     fi
+}
+
+# The chip can be in reset while the video pipeline starts, and libkvm asks
+# for this at every start. A silent chip is probed again a few times, and a
+# version detected earlier is never replaced by "ue".
+kvm_hdmi_version_detect()
+{
+    HDMI_VERSION_FILE="${HDMI_VERSION_FILE:-/etc/kvm/hdmi_version}"
+    tries=0
+    version=ue
+    while [ "$tries" -lt 5 ]; do
+        version=$(kvm_hdmi_version_probe)
+        [ "$version" = ue ] || break
+        tries=$((tries + 1))
+        sleep 0.2
+    done
+    if [ "$version" = ue ] && [ -s "$HDMI_VERSION_FILE" ]; then
+        case "$(head -c 2 "$HDMI_VERSION_FILE")" in
+            c|ux|d) return 0 ;;
+        esac
+    fi
+    echo "$version" > "$HDMI_VERSION_FILE"
 }
 
 case "$1" in

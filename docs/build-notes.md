@@ -218,7 +218,10 @@ Before packaging, the init scripts have host checks that need no device:
 `scripts/test-init-shell-portability.sh` (every script parses under sh and
 BusyBox sh and uses no bash-only `&>`), `scripts/test-s01fs.sh` (partition
 steps are re-runnable), `scripts/test-s30eth-static-dns.sh`,
-`scripts/test-s95-boot-health.sh` and `python3 -B scripts/test-app-boot-gates.py`.
+`scripts/test-s95-boot-health.sh`, `scripts/test-s15-hdmi-version.sh`,
+`scripts/test-i2c-bus-lock.sh` and `python3 -B scripts/test-app-boot-gates.py`.
+For the native pieces: `scripts/test-kvm-vision-exceptions.sh`,
+`scripts/test-kvm-system-hw-version.sh` and `scripts/test-nanokvm-update-edid.sh`.
 
 ## H.264 Hang Guard
 
