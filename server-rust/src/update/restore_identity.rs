@@ -468,4 +468,4 @@ fn read_member(
 
 #[cfg(test)]
 #[path = "restore_identity_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -510,13 +510,13 @@ fn private_ssh_root_cleans_partial_native_inputs_after_actual_kernel_write_failu
     // SIGXFSZ stays blocked only in this disposable exact-test child.
 }
 
-const CONFIG_PATH: &str = "/etc/kvm/server.yaml";
-const CWD: &str = "/etc/kvm";
+pub(crate) const CONFIG_PATH: &str = "/etc/kvm/server.yaml";
+pub(crate) const CWD: &str = "/etc/kvm";
 const NATIVE_PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n";
 const NATIVE_GROUP: &[u8] = b"root:x:0:\n";
 const NATIVE_SHADOW: &[u8] = b"root:!:::::::\n";
 
-fn signed_accounts() -> AccountFiles<'static> {
+pub(crate) fn signed_accounts() -> AccountFiles<'static> {
     AccountFiles {
         passwd: NATIVE_PASSWD,
         group: NATIVE_GROUP,
@@ -537,7 +537,7 @@ fn write_config(root: &Path, path: &str, config: &Config) {
         serde_yaml::to_string(config).unwrap().as_bytes(),
     );
 }
-fn fixture() -> (TempDir, Config) {
+pub(crate) fn fixture() -> (TempDir, Config) {
     let root = tempdir().unwrap();
     for path in restore_policy::REQUIRED {
         put(root.path(), path, b"synthetic OS identity\n");

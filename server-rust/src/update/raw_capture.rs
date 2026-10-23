@@ -3,15 +3,25 @@
 //! authorizes a partition write; the writer and the early restore check again.
 
 use super::{
-    restore_archive::CapturedArchive,
-    restore_capsule::{CapsuleError, RestoreSecret, prepare_capsule},
+    restore_accounts::SignedAccounts,
+    restore_archive::{self, CapturedArchive, RestoreArchiveError},
+    restore_capsule::{
+        CapsuleError, RestoreSecret, open_capsule, prepare_capsule,
+        ticket::{Binding, BootId, RestoreTicket, TicketError},
+    },
+    restore_identity::{self, IdentityCheckedRestore, RestoreIdentityError},
+    restore_job::JobError,
+    restore_native::AccountFiles,
 };
+use crate::config::Config;
 use rand_core::{OsRng, RngCore};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, fsync, openat, renameat_with, unlinkat};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{self, Seek, Write},
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 const TEMPORARY_PREFIX: &str = ".capsule-";
@@ -25,6 +35,18 @@ pub enum CaptureError {
     Io(#[from] io::Error),
     #[error("secure entropy is unavailable")]
     Entropy,
+    #[error(transparent)]
+    Archive(#[from] RestoreArchiveError),
+    #[error(transparent)]
+    Identity(#[from] RestoreIdentityError),
+    #[error(transparent)]
+    Ticket(#[from] TicketError),
+    #[error(transparent)]
+    Image(#[from] JobError),
+    #[error("the sealed restore capsule changed before it was checked")]
+    Changed,
+    #[error("raw update capture was cancelled")]
+    Cancelled,
 }
 type Result<T> = std::result::Result<T, CaptureError>;
 
@@ -45,6 +67,153 @@ impl SealedCapsule {
     }
     pub fn into_secret(self) -> RestoreSecret {
         self.secret
+    }
+}
+
+/// What capture needs from the authenticated target image. Production reads
+/// both through the pinned sandbox; host tests stub them.
+pub trait TargetImage {
+    /// The image's account tables, merged into the captured accounts.
+    fn signed_accounts(&mut self, cancel: &AtomicBool) -> Result<SignedAccounts>;
+    /// Checks the restored SSH identity against the image's sshd.
+    fn check_ssh(
+        &mut self,
+        restore: &mut IdentityCheckedRestore,
+        cancel: &AtomicBool,
+    ) -> Result<()>;
+}
+
+/// Inputs from the authenticated metadata and the live system. The caller holds
+/// the update owner and the writer drain, has refused a pending credential or
+/// Pico pair journal, and pins `capsule_directory` on the data partition.
+pub struct CaptureRequest<'a> {
+    pub source_root: &'a Path,
+    pub private_staging: &'a Path,
+    pub capsule_directory: &'a File,
+    pub config: &'a Config,
+    pub working_dir: &'a Path,
+    pub config_path: &'a Path,
+    pub target_version: &'a str,
+    pub target_app_version: &'a str,
+    pub target: &'a str,
+    pub boot_image_sha256: [u8; 32],
+    pub rootfs_image_sha256: [u8; 32],
+    pub source_boot: BootId,
+    pub device_id: [u8; 32],
+}
+
+/// A prepared ticket and the capsule it opens. Publishing the ticket and
+/// writing the images stay with the caller.
+pub struct Captured {
+    ticket: RestoreTicket,
+    capsule_name: String,
+}
+
+impl Captured {
+    pub fn capsule_name(&self) -> &str {
+        &self.capsule_name
+    }
+    pub fn into_ticket(self) -> RestoreTicket {
+        self.ticket
+    }
+}
+
+/// Captures the live state, seals it, reopens the sealed capsule as the early
+/// restore will and checks it against the image, then binds a prepared ticket
+/// to the capsule, both images, this boot and this device. Any failure after
+/// sealing removes the capsule; no partition is touched here.
+pub fn capture(
+    request: &CaptureRequest<'_>,
+    image: &mut impl TargetImage,
+    cancel: &AtomicBool,
+) -> Result<Captured> {
+    cancelled(cancel)?;
+    let signed = image.signed_accounts(cancel)?;
+    cancelled(cancel)?;
+    let mut archive = restore_identity::capture_effective(
+        request.source_root,
+        request.private_staging,
+        request.config,
+        request.working_dir,
+        request.config_path,
+        &signed.as_files(),
+    )?;
+    let sealed = seal_capsule(
+        &mut archive,
+        request.target_version,
+        request.capsule_directory,
+    )?;
+    drop(archive);
+    let checked = verify_sealed(
+        &sealed,
+        request.capsule_directory,
+        request.private_staging,
+        &signed.as_files(),
+    )
+    .and_then(|mut restore| {
+        cancelled(cancel)?;
+        image.check_ssh(&mut restore, cancel)
+    })
+    .and_then(|()| cancelled(cancel));
+    let capsule_name = sealed.name().to_string();
+    let prepared = checked.and_then(|()| {
+        let binding = Binding {
+            source_boot: request.source_boot,
+            device_id: request.device_id,
+            capsule_sha256: *sealed.sha256(),
+            boot_image_sha256: request.boot_image_sha256,
+            rootfs_image_sha256: request.rootfs_image_sha256,
+            target_app_version: request.target_app_version.to_string(),
+            target: request.target.to_string(),
+        };
+        Ok(RestoreTicket::prepared(sealed.into_secret(), binding)?)
+    });
+    match prepared {
+        Ok(ticket) => Ok(Captured {
+            ticket,
+            capsule_name,
+        }),
+        Err(error) => {
+            let _ = unlinkat(request.capsule_directory, &capsule_name, AtFlags::empty())
+                .and_then(|()| fsync(request.capsule_directory));
+            Err(error)
+        }
+    }
+}
+
+/// Reopens the published capsule, requires the digest the ticket will carry,
+/// decrypts it and validates the archive and its accounts, as restore will.
+fn verify_sealed(
+    sealed: &SealedCapsule,
+    directory: &File,
+    private_staging: &Path,
+    signed: &AccountFiles<'_>,
+) -> Result<IdentityCheckedRestore> {
+    let mut file = File::from(
+        openat(
+            directory,
+            sealed.name(),
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    );
+    let mut hash = Sha256::new();
+    io::copy(&mut file, &mut hash)?;
+    if <[u8; 32]>::from(hash.finalize()) != sealed.sha256 {
+        return Err(CaptureError::Changed);
+    }
+    file.rewind()?;
+    let payload = open_capsule(&sealed.secret, &mut file, private_staging)?;
+    let validated = restore_archive::validate(payload)?;
+    Ok(restore_identity::check_identity(validated, signed)?)
+}
+
+fn cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::SeqCst) {
+        Err(CaptureError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 

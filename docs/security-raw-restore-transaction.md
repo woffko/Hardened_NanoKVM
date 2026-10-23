@@ -1123,6 +1123,19 @@ the file. Host tests inject faults before the file sync, the rename and the
 directory sync; vendor exFAT rename/fsync behavior and power loss are not
 covered.
 
+`raw_capture::capture` composes the capture. It takes the signed accounts from
+a `TargetImage` (production: the sandbox export above), runs `capture_effective`
+over the live root, seals the capsule, reopens it by name, requires the digest
+the ticket will carry, decrypts it, validates the archive and checks its
+accounts against the image as the early restore will, and then has the image
+check the restored SSH identity. Only then does it bind a prepared ticket to
+the capsule digest, both image digests from the authenticated manifest, the
+source boot, the device ID, the target app version and the target. Any failure
+or cancellation after sealing removes the capsule. The caller holds the update
+owner and the writer drain, refuses a pending credential or Pico pair journal,
+publishes the ticket and starts the writer; none of that is wired yet. Host
+tests stub the image (accounts and SSH result) and run the rest for real.
+
 ## Required writer/boot integration (not implemented yet)
 
 App/system front-end work now shares a runtime job owner and cooperative
