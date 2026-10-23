@@ -675,6 +675,15 @@ scripts/validate-nanokvm-rootfs.sh <rootfs>
   test received `no server suitable for synchronization found`. That was a
   server-side NTP suitability/configuration issue, not failure to consume the
   GUI setting.
+- `ntpd` is a client only. `restrict default ... noserve` gives no time
+  service, queries or peering to any address. In ntpd 4.2.8p18 `noserve` also
+  drops server replies, so `restrict source` gives each configured server its
+  own entry without it.
+- ntpd 4.2.8p18 dies with SIGSEGV when it cannot bind a local address, such as
+  a tentative IPv6 address while a network interface comes up.
+  `board/sg2002/patches/ntp/4.2.8p18/0001-...` fixes that in the next rootfs;
+  images built before it carry the crash. `scripts/test-s49ntp.sh` checks both
+  points against host builds of the patched ntpd.
 
 ### Mobile/tablet UI
 

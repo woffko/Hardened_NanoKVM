@@ -99,7 +99,8 @@ async fn lost_time_set_reply_keeps_full_publication_and_service_followup_owned()
     assert_eq!(config.servers, ["192.0.2.123"]);
     let ntp = fs::read_to_string(dir.path().join("etc/ntp.conf")).unwrap();
     assert!(ntp.contains("server 192.0.2.123 iburst\n"));
-    assert!(ntp.contains("restrict default kod nomodify notrap nopeer noquery"));
+    assert!(ntp.contains("restrict default nomodify notrap nopeer noquery noserve\n"));
+    assert!(ntp.contains("restrict source nomodify notrap noquery\n"));
     assert_eq!(
         fs::read_to_string(dir.path().join("etc/default/ntpd")).unwrap(),
         "NTPD_ARGS=\" -g\"\n"

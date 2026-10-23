@@ -89,7 +89,11 @@ write_ntp_conf() {
             [ -n "$server" ] && printf 'server %s iburst\n' "$server"
         done
         echo
-        echo "restrict default kod nomodify notrap nopeer noquery"
+        # A client only: no time service, queries or peering for anyone.
+        # noserve also drops server replies, so each configured server gets
+        # its own entry from "restrict source", which leaves it out.
+        echo "restrict default nomodify notrap nopeer noquery noserve"
+        echo "restrict source nomodify notrap noquery"
         echo "restrict 127.0.0.1"
         echo "restrict ::1"
     } > "$tmp" && mv "$tmp" "$NTP_CONF"
