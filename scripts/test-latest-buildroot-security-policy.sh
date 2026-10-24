@@ -100,7 +100,10 @@ done
 test -f "$PATCH_ROOT/busybox/1.38.0/0012-CVE-2026-38753-fix-awk-sub-use-after-free.patch"
 test -f "$PATCH_ROOT/busybox/1.38.0/0013-CVE-2026-38755-limit-ash-function-recursion.patch"
 test -f "$PATCH_ROOT/busybox/1.38.0/0014-CVE-2026-38754-clear-stale-ifs-regions.patch"
-test -f "$PATCH_ROOT/ntp/4.2.8p18/0001-ntpd-do-not-dereference-a-NULL-interface-after-a-bind-failure.patch"
+# The ntpd bind-failure crash is fixed by Buildroot's own package patch
+# 0004-Fix-crash-when-binding-IPv6-address.patch; a board copy of the same
+# change made the ntp patch step fail ("Reversed (or previously applied)").
+test ! -e "$PATCH_ROOT/ntp"
 
 for patch in "$ROOT"/buildroot-external/hardened-sg2002/buildroot-patches/2026.05.1/*.patch; do
 	verify_prepare_hash "$patch"
