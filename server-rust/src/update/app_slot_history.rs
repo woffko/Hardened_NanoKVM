@@ -191,7 +191,13 @@ fn load(parent: &File, name: &str, device: u64, uid: u32) -> Result<Option<Store
         || m.mode() & 0o7777 != 0o600
         || m.len() != BYTES as u64
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "history load {name} pinned: file={} nlink={} mode={:o} len={}",
+            m.is_file(),
+            m.nlink(),
+            m.mode() & 0o7777,
+            m.len()
+        ));
     }
     let mut file = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
     let actual = file.metadata()?;
@@ -205,7 +211,15 @@ fn load(parent: &File, name: &str, device: u64, uid: u32) -> Result<Option<Store
             actual.nlink(),
         )
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "history load {name} reopened changed: ino {}->{} nlink {}->{} len {}->{}",
+            m.ino(),
+            actual.ino(),
+            m.nlink(),
+            actual.nlink(),
+            m.len(),
+            actual.len()
+        ));
     }
     let mut bytes = [0; BYTES];
     file.read_exact(&mut bytes)?;

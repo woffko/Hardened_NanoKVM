@@ -29,6 +29,18 @@ const RECORD_BYTES: usize = 512;
 const HASH_OFFSET: usize = 480;
 const HASH_DOMAIN: &[u8] = b"NanoKVM app slot journal v1\0";
 
+/// Declares an object unsafe and, in test builds only, prints which check did
+/// so: a lock-free status read that fails under load can then be located from
+/// the test log (G1 on 72cdc9e and c331c4d each failed one delivery test with
+/// an `Unsafe` whose origin a backtrace cannot show, since it is a value).
+macro_rules! unsafe_at {
+    ($($arg:tt)*) => {{
+        #[cfg(test)]
+        eprintln!("slot-unsafe: {}", format_args!($($arg)*));
+        SlotError::Unsafe
+    }};
+}
+
 #[path = "app_slot_history.rs"]
 mod history;
 #[path = "app_slot_recovery_intent.rs"]
@@ -1160,7 +1172,9 @@ fn read_live_record_at(directory: &File, device: u64, uid: u32) -> Result<Record
             return Ok(record);
         }
     }
-    Err(SlotError::Unsafe)
+    Err(unsafe_at!(
+        "read_live_record_at: state replaced during each of {LIVE_RECORD_READS} reads"
+    ))
 }
 
 const LIVE_RECORD_READS: usize = 8;
@@ -1196,7 +1210,15 @@ fn read_record_once(directory: &File, device: u64, uid: u32) -> Result<Option<Re
         || metadata.mode() & 0o7777 != 0o600
         || metadata.len() != RECORD_BYTES as u64
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "read_record_once pinned state: file={} nlink={} mode={:o} len={} uid={} dev={}",
+            metadata.is_file(),
+            metadata.nlink(),
+            metadata.mode() & 0o7777,
+            metadata.len(),
+            metadata.uid(),
+            metadata.dev()
+        ));
     }
     #[cfg(test)]
     AFTER_RECORD_PIN.with(|hook| {
@@ -1221,7 +1243,15 @@ fn read_record_once(directory: &File, device: u64, uid: u32) -> Result<Option<Re
         metadata.nlink(),
         metadata.len(),
     ) {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "read_record_once reopened state changed: nlink {}->{} mode {:o}->{:o} len {}->{}",
+            metadata.nlink(),
+            reopened.nlink(),
+            metadata.mode() & 0o7777,
+            reopened.mode() & 0o7777,
+            metadata.len(),
+            reopened.len()
+        ));
     }
     let mut bytes = [0; RECORD_BYTES];
     file.read_exact(&mut bytes)?;
@@ -1245,7 +1275,12 @@ fn protected_directory(directory: &File, device: u64, uid: u32, private: bool) -
         || metadata.mode() & 0o7022 != 0
         || (private && metadata.mode() & 0o7777 != 0o700)
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "protected_directory private={private} mode={:o} uid={} dev={}",
+            metadata.mode() & 0o7777,
+            metadata.uid(),
+            metadata.dev()
+        ));
     }
     Ok(())
 }

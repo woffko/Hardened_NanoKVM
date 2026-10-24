@@ -55,14 +55,28 @@ fn open_file(
         || m.nlink() != 1
         || !(minimum..=maximum).contains(&m.len())
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "open_file {name} pinned: file={} nlink={} mode={:o} len={} within {minimum}..={maximum}",
+            m.is_file(),
+            m.nlink(),
+            m.mode() & 0o7777,
+            m.len()
+        ));
     }
     let file = restore_fs::open_beneath(parent, name, OFlags::RDONLY | OFlags::NONBLOCK)?;
     let n = file.metadata()?;
     if (m.dev(), m.ino(), m.uid(), m.mode(), m.nlink(), m.len())
         != (n.dev(), n.ino(), n.uid(), n.mode(), n.nlink(), n.len())
     {
-        return Err(SlotError::Unsafe);
+        return Err(unsafe_at!(
+            "open_file {name} reopened changed: ino {}->{} nlink {}->{} len {}->{}",
+            m.ino(),
+            n.ino(),
+            m.nlink(),
+            n.nlink(),
+            m.len(),
+            n.len()
+        ));
     }
     Ok(Some(file))
 }
