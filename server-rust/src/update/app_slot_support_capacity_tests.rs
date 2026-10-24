@@ -274,7 +274,7 @@ fn capacity_child() {
     let new = case.contains("new");
     if terminal {
         let closed = ClosedRuntime::fixture(install.transaction());
-        let mut prepared = super::prepare_retained_fixture(&mut install, closed).unwrap();
+        let mut prepared = super::prepare(&mut install, closed).unwrap();
         terminal_fixture(&mut prepared, new);
     }
     let before_live = live(&root);
@@ -296,7 +296,7 @@ fn capacity_child() {
         settlement::run(&install._store)
     } else if case == "ample" {
         let closed = ClosedRuntime::fixture(install.transaction());
-        let mut prepared = super::prepare_retained_fixture(&mut install, closed).unwrap();
+        let mut prepared = super::prepare(&mut install, closed).unwrap();
         prepared.check().unwrap();
         prepared.exchange().unwrap();
         prepared.check_exchanged().unwrap();
@@ -305,7 +305,7 @@ fn capacity_child() {
         Ok(())
     } else {
         let closed = ClosedRuntime::fixture(install.transaction());
-        super::prepare_retained_fixture(&mut install, closed).map(drop)
+        super::prepare(&mut install, closed).map(drop)
     };
     if case == "ample" {
         result.unwrap();
@@ -333,7 +333,7 @@ fn capacity_child() {
             assert!(evidence(&root).is_empty());
         } else {
             let closed = ClosedRuntime::fixture(install.transaction());
-            let mut prepared = super::prepare_retained_fixture(&mut install, closed).unwrap();
+            let mut prepared = super::prepare(&mut install, closed).unwrap();
             prepared.check().unwrap();
             prepared.exchange().unwrap();
             prepared.check_exchanged().unwrap();

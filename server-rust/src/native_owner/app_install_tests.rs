@@ -349,16 +349,24 @@ fn trial_scope_probe() {
     }
 }
 
+fn stage_support(session: &mut Session) {
+    let mut prepared = session.prepare_support().unwrap();
+    prepared.check().unwrap();
+    prepared.exchange().unwrap();
+}
+
 async fn published(root: &Path, running: bool) -> Session {
     let mut broker = broker(root);
     if running {
         start_roles(&mut broker, root, false);
     }
     let install = accepted_fixture(root).await;
+    crate::update::app_slot::support::populate_retained_fixture(&install);
     let Start::Draining(mut session) = broker.begin_app_install(install) else {
         panic!("drain refused")
     };
     until(|| matches!(session.poll(), Ok(DrainStatus::Drained)));
+    stage_support(&mut session);
     // Trial is impossible in Prepared, despite the exact accepted lease.
     let BeginTrial::Retained(retained) = session.start_trial_command(trial_command(root, "valid"))
     else {
@@ -452,23 +460,13 @@ async fn real_drained_session_composes_support_exchange_trial_and_terminal_settl
         };
         until(|| root.join("backend-stopping").exists());
         assert!(matches!(session.prepare_support(), Err(SlotError::Busy)));
-        assert!(matches!(
-            session.prepare_support_fixture(),
-            Err(SlotError::Busy)
-        ));
         assert!(!root.join("etc/kvm/application-support").exists());
         assert_eq!(support_live(root), old);
         excluded(root);
         fs::remove_file(root.join("hold-backend")).unwrap();
         until(|| session.poll().unwrap() == DrainStatus::Drained);
         assert_eq!(native_phase(root), 4);
-        // Production transition0 still refuses, even under a real closed owner.
-        assert!(matches!(
-            session.prepare_support(),
-            Err(SlotError::UnsupportedTransition)
-        ));
-        assert!(!root.join("etc/kvm/application-support").exists());
-        let mut prepared = session.prepare_support_fixture().unwrap();
+        let mut prepared = session.prepare_support().unwrap();
         prepared.check().unwrap();
         assert_eq!(support_live(root), old);
         assert_eq!(support_evidence(root).len(), 10);
@@ -939,6 +937,7 @@ async fn all_three_scopes_must_join_before_publication_and_rollback_releases_no_
     let mut broker = broker(root.path());
     start_roles(&mut broker, root.path(), false);
     let install = accepted_fixture(root.path()).await;
+    crate::update::app_slot::support::populate_retained_fixture(&install);
     let id = install.transaction();
     fs::create_dir(root.path().join("kvmapp/kvm")).unwrap();
     for (name, value) in [
@@ -973,6 +972,7 @@ async fn all_three_scopes_must_join_before_publication_and_rollback_releases_no_
         4,
         "drained is not Closed during app work"
     );
+    stage_support(&mut session);
     assert_eq!(
         session.publish().unwrap(),
         Status::Transaction(Phase::Published)

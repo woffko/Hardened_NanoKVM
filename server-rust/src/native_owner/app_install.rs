@@ -288,24 +288,14 @@ impl Session {
     }
 
     /// Retain this whole drained session while preparing independent support.
-    /// Epoch zero currently refuses before namespace mutation. This does not
-    /// publish the app, resume native work or establish trial health.
+    /// The current epoch stages before publication; this does not publish the
+    /// app, resume native work or establish trial health.
     #[cfg(test)]
     pub fn prepare_support(
         &mut self,
     ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
         let closed = self.closed()?;
         crate::update::app_slot::support::prepare(&mut self.install, closed)
-    }
-
-    #[cfg(test)]
-    pub(super) fn prepare_support_fixture(
-        &mut self,
-    ) -> Result<crate::update::app_slot::support::Prepared<'_>, SlotError> {
-        // Keep the SAME whole-Session borrow and real drain proof. The private
-        // fixture bypasses only epoch0, never the native ownership boundary.
-        let closed = self.closed()?;
-        crate::update::app_slot::support::prepare_retained_fixture(&mut self.install, closed)
     }
 
     pub(super) fn start_support(mut self) -> BeginPreparation {
@@ -319,22 +309,6 @@ impl Session {
             self.journal,
             self.enrollment,
             #[cfg(test)]
-            self.update_parent,
-            work,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_support_fixture(mut self) -> BeginPreparation {
-        let Ok(closed) = self.closed() else {
-            return BeginPreparation::Retained(self);
-        };
-        let work = work::InstallWork::support_fixture(self.install, closed);
-        BeginPreparation::Started(PreparingInstall::new(
-            PreparationKind::Support,
-            self.group,
-            self.journal,
-            self.enrollment,
             self.update_parent,
             work,
         ))

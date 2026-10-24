@@ -18,10 +18,7 @@ fn prior_lifecycle_epochs_cannot_authorize_the_picoclaw_service_transition() {
             Err(CompatibilityError::UnknownOrIncompatible)
         );
     }
-    assert_eq!(
-        check_transition(&current, &current),
-        Err(CompatibilityError::UnsupportedTransition)
-    );
+    assert_eq!(check_transition(&current, &current), Ok(()));
 }
 use crate::update::{app_bootstrap::BOOT_SCRIPT_FRAMES, restore_binding};
 use sha2::{Digest, Sha256};
@@ -90,7 +87,7 @@ fn rehash(frame: &mut [u8]) {
 }
 
 #[test]
-fn complete_catalog_has_six_scoped_roles_and_never_enables_matching_zero() {
+fn complete_catalog_has_six_scoped_roles_and_enables_matching_epoch_one() {
     let catalog = catalog_fixture();
     for (member, role) in catalog.members().iter().zip(abi::ROLES) {
         assert_eq!(
@@ -101,12 +98,9 @@ fn complete_catalog_has_six_scoped_roles_and_never_enables_matching_zero() {
             }
         );
     }
-    assert_eq!(
-        check_transition(&catalog, &catalog),
-        Err(CompatibilityError::UnsupportedTransition)
-    );
+    assert_eq!(check_transition(&catalog, &catalog), Ok(()));
     let mut fake_live = abi::CURRENT;
-    fake_live.support_transition = 1;
+    fake_live.support_transition = 0;
     assert_eq!(
         check_with_live(&catalog, &catalog, fake_live),
         Err(CompatibilityError::UnknownOrIncompatible)
@@ -460,10 +454,7 @@ fn linked_six_scoped_declarations_match_independent_actual_helper_images() {
             .unwrap();
         assert_eq!(embedded, image);
     }
-    assert_eq!(
-        check_transition(&catalog, &catalog),
-        Err(CompatibilityError::UnsupportedTransition)
-    );
+    assert_eq!(check_transition(&catalog, &catalog), Ok(()));
 }
 
 #[test]

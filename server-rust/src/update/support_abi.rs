@@ -53,7 +53,8 @@ pub struct Epochs {
     pub native_lifecycle: u32,
     pub helper_framing: u32,
     pub boot_script_framing: u32,
-    /// Zero until stage/swap/rollback/settlement AND early recovery exist.
+    /// One: stage, exchange, rollback, settlement and both early recovery
+    /// entrypoints are implemented by this source.
     pub support_transition: u32,
 }
 
@@ -64,7 +65,7 @@ pub const CURRENT: Epochs = Epochs {
     native_lifecycle: 8,
     helper_framing: 1,
     boot_script_framing: 1,
-    support_transition: 0,
+    support_transition: 1,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

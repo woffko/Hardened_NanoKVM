@@ -1,11 +1,10 @@
 //! Retained-owner support preparation and exact-pair exchange.
 //!
-//! Current transition epoch zero refuses preparation before namespace mutation.
+//! Transition epoch one stages the nine support members before publication.
 //! The private staging core allocates all nine anonymous successors before a
 //! durable plan, then links only those recorded inodes. No Drop-based cleanup,
 //! generic orphan adoption, process launch or implicit app publication exists.
 //! Recovery composes this journal under the retained native/update/writer fence.
-//! Epoch0 stays until the complete protocol and acceptance gates are implemented.
 
 use super::{AcceptedInstall, Identity, Phase as AppPhase, Record, Result, SlotError, Store};
 use crate::{
@@ -1339,9 +1338,7 @@ fn point(name: &str) -> Result<()> {
 #[path = "app_slot_support_tests.rs"]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{
-    fixture as accepted_fixture, populate_retained_fixture, prepare_retained_fixture,
-};
+pub(crate) use tests::{fixture as accepted_fixture, populate_retained_fixture};
 
 #[cfg(test)]
 #[path = "app_slot_support_exchange_tests.rs"]

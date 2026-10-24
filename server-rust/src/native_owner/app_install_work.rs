@@ -11,11 +11,7 @@ use std::{
 };
 
 enum Operation {
-    Support {
-        closed: ClosedRuntime,
-        #[cfg(test)]
-        fixture: bool,
-    },
+    Support { closed: ClosedRuntime },
     Publish(ClosedRuntime),
     CheckTrial(ClosedRuntime),
     Commit(TrialReady),
@@ -55,16 +51,10 @@ impl From<bool> for Outcome {
 impl Operation {
     fn worker_copy(&self) -> Self {
         match self {
-            Self::Support {
-                closed,
-                #[cfg(test)]
-                fixture,
-            } => Self::Support {
+            Self::Support { closed } => Self::Support {
                 closed: ClosedRuntime {
                     transaction: closed.transaction(),
                 },
-                #[cfg(test)]
-                fixture: *fixture,
             },
             Self::Publish(closed) => Self::Publish(ClosedRuntime {
                 transaction: closed.transaction(),
@@ -87,21 +77,7 @@ impl Operation {
 
     fn execute(self, payload: &mut Payload, #[cfg(test)] fault: &Option<Fixture>) -> Outcome {
         match (self, payload) {
-            (
-                Self::Support {
-                    closed,
-                    #[cfg(test)]
-                    fixture,
-                },
-                Payload::Install(install),
-            ) => {
-                #[cfg(test)]
-                let prepared = if fixture {
-                    crate::update::app_slot::support::prepare_retained_fixture(install, closed)
-                } else {
-                    crate::update::app_slot::support::prepare(install, closed)
-                };
-                #[cfg(not(test))]
+            (Self::Support { closed }, Payload::Install(install)) => {
                 let prepared = crate::update::app_slot::support::prepare(install, closed);
                 match prepared.and_then(|mut support| support.exchange()) {
                     Ok(_) => Outcome::Complete,
@@ -261,25 +237,7 @@ pub(crate) enum Fixture {
 
 impl InstallWork {
     pub(super) fn support(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
-        Self::new(
-            Payload::Install(install),
-            Operation::Support {
-                closed,
-                #[cfg(test)]
-                fixture: false,
-            },
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn support_fixture(install: AcceptedInstall, closed: ClosedRuntime) -> Self {
-        Self::new(
-            Payload::Install(install),
-            Operation::Support {
-                closed,
-                fixture: true,
-            },
-        )
+        Self::new(Payload::Install(install), Operation::Support { closed })
     }
 
     pub(super) fn retire(install: AcceptedInstall, boundary: TerminalBoundary) -> Self {

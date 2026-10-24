@@ -28,18 +28,18 @@ fn independent_wire_vectors_fix_group_order_endian_and_hash_domain() {
             },
         }
     );
-    frame[16..36].copy_from_slice(&[1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    frame[16..36].copy_from_slice(&[1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
     frame[96..].copy_from_slice(&[
-        0x0d, 0x8e, 0x65, 0x81, 0x4d, 0x24, 0xdf, 0x0a, 0x74, 0xed, 0x68, 0xce, 0xda, 0xe3, 0xf2,
-        0xf2, 0x6c, 0x26, 0x6c, 0x8c, 0xb4, 0x09, 0x70, 0x3d, 0x7e, 0x14, 0xfb, 0x99, 0x8c, 0x03,
-        0x43, 0xe2,
+        0x8b, 0xd6, 0xcf, 0x03, 0xa0, 0x99, 0x53, 0x20, 0x5b, 0x31, 0x6f, 0x1e, 0x9b, 0x29, 0xcd,
+        0xf6, 0xff, 0x6e, 0xb4, 0x81, 0xf6, 0x16, 0x6a, 0xd4, 0xc4, 0xcb, 0xe9, 0x2f, 0xb5, 0x67,
+        0xa3, 0x7b,
     ]);
     assert_eq!(encode(Role::NativeBroker), frame);
 }
 
 #[test]
-fn current_build_declares_each_exact_role_and_no_transition_support() {
-    assert_eq!(CURRENT.support_transition, 0);
+fn current_build_declares_each_exact_role_and_epoch_one_support() {
+    assert_eq!(CURRENT.support_transition, 1);
     for (index, role) in ROLES.into_iter().enumerate() {
         assert_eq!(role as usize, index + 1);
         let frame = encode(role);
@@ -95,7 +95,7 @@ fn checksummed_unknown_format_length_role_and_reserved_data_are_not_literals() {
 
 #[test]
 fn unknown_group_epochs_remain_explicit_diagnostics_not_compatibility() {
-    for (index, unknown) in [0, u32::MAX - 1, u32::MAX].into_iter().enumerate() {
+    for unknown in [0, u32::MAX - 1, u32::MAX] {
         for group in 0..5 {
             let mut frame = encode(Role::NativeBroker);
             let offset = 16 + group * 4;
@@ -105,12 +105,7 @@ fn unknown_group_epochs_remain_explicit_diagnostics_not_compatibility() {
             let declaration = decode(&frame).unwrap();
             assert_eq!(declaration.role, Role::NativeBroker);
             assert_eq!(encode(Role::NativeBroker)[12], declaration.role as u8);
-            if !(group == 4 && index == 0) {
-                assert_ne!(declaration.epochs, CURRENT);
-            } else {
-                assert_eq!(declaration.epochs, CURRENT);
-                assert_eq!(declaration.epochs.support_transition, 0);
-            }
+            assert_ne!(declaration.epochs, CURRENT);
         }
     }
 }

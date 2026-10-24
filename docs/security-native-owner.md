@@ -911,9 +911,9 @@ require acceptance; no whole-install hard latency or target acceptance is claime
 Host tests compose real retained `Session` drain and terminal owners with
 synthetic protected payloads and child protocol probes. They cover successful
 commit, failed-trial rollback, preparation abort, lost commit acknowledgement,
-missing closure receipt and unknown support evidence. The private test seam
-uses the real session's closure token and bypasses only transition0; it is absent
-from production. Separate fixed-root fixtures cover process kills and injected
+missing closure receipt and unknown support evidence. The engine tests run the
+production epoch-one transition path; no transition bypass seam remains.
+Separate fixed-root fixtures cover process kills and injected
 I/O failures through reconciliation, cleanup and archival. Their synthetic
 prior-epoch record is not a physical reboot or same-boot closure permission.
 

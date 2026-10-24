@@ -400,7 +400,6 @@ struct Engine {
     #[cfg(test)]
     fixture_trace_starts: bool,
     #[cfg(test)]
-    fixture_allow_unsupported_support: bool,
     #[cfg(test)]
     fixture_retirement: Option<app_install::InstallIoFixture>,
     #[cfg(test)]
@@ -449,7 +448,6 @@ impl Engine {
             #[cfg(test)]
             fixture_trace_starts: false,
             #[cfg(test)]
-            fixture_allow_unsupported_support: false,
             #[cfg(test)]
             fixture_retirement: None,
             #[cfg(test)]
@@ -721,15 +719,7 @@ impl Engine {
                                 stage = InstallStage::PreparingSupport;
                             }
                             InstallStage::PreparingSupport => {
-                                #[cfg(test)]
-                                let started = if self.fixture_allow_unsupported_support {
-                                    session.start_support_fixture()
-                                } else {
-                                    session.start_support()
-                                };
-                                #[cfg(not(test))]
-                                let started = session.start_support();
-                                return Some(match started {
+                                return Some(match session.start_support() {
                                     app_install::BeginPreparation::Started(owner) => {
                                         #[cfg(test)]
                                         let owner = {

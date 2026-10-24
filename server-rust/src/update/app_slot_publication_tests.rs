@@ -16,6 +16,13 @@ fn current(root: &Path) -> PathBuf {
     root.join(DIRECTORY).join(CURRENT)
 }
 
+fn prepare_support(install: &mut AcceptedInstall) {
+    support::populate_retained_fixture(install);
+    let closed = ClosedRuntime::fixture(install.transaction());
+    let mut prepared = support::prepare(install, closed).unwrap();
+    prepared.exchange().unwrap();
+}
+
 #[tokio::test]
 async fn another_transactions_native_closure_never_authorizes_publication_or_rollback() {
     let root = tempfile::tempdir().unwrap();
@@ -85,6 +92,7 @@ async fn unsafe_old_mutable_state_never_changes_the_live_slot_or_canonical_phase
 async fn absence_is_preserved_without_importing_arbitrary_old_code_or_defaults() {
     let root = tempfile::tempdir().unwrap();
     let mut install = issuer_tests::accepted_fixture(root.path()).await;
+    prepare_support(&mut install);
     fs::create_dir(root.path().join("kvmapp/kvm")).unwrap();
     fs::write(
         root.path().join("kvmapp/kvm/untrusted-script"),
@@ -146,6 +154,7 @@ fn publication_crash_child() {
         .unwrap();
     eprintln!("publication-child: fixture-start");
     let mut install = runtime.block_on(issuer_tests::accepted_fixture(&root));
+    prepare_support(&mut install);
     eprintln!("publication-child: fixture-ready");
     fs::create_dir(root.join("kvmapp/kvm")).unwrap();
     for name in APP_STATE {

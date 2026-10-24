@@ -1,5 +1,5 @@
 //! Filesystem component fixtures, NOT authenticated app/device acceptance.
-//! Only this private test child bypasses transition0 to exercise staging I/O.
+//! The private fixtures exercise the production staging I/O without a device.
 use super::*;
 use crate::update::{app_bootstrap::BOOT_SCRIPTS, support_abi};
 use std::{
@@ -172,24 +172,6 @@ pub(crate) fn populate_retained_fixture(install: &AcceptedInstall) {
     }
 }
 
-/// Exercise the private filesystem protocol with the caller's real drained
-/// Session token. Only the unsupported transition-epoch check is bypassed;
-/// source/context, ownership and all staging checks remain unchanged.
-pub(crate) fn prepare_retained_fixture(
-    install: &mut AcceptedInstall,
-    closed: ClosedRuntime,
-) -> Result<Prepared<'_>> {
-    let _elapsed = diagnostics::Elapsed::start("fixture.prepare-total", None);
-    let sources = Sources::open(install, &closed)?;
-    match support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi) {
-        Ok(()) | Err(support_abi_catalog::CompatibilityError::UnsupportedTransition) => {}
-        Err(support_abi_catalog::CompatibilityError::UnknownOrIncompatible) => {
-            return Err(SlotError::Invalid);
-        }
-    }
-    stage(install, closed, sources)
-}
-
 #[test]
 fn diagnostic_observation_evaluates_the_operation_once_and_preserves_its_error() {
     let mut calls = 0;
@@ -222,15 +204,14 @@ pub(super) fn assert_old(root: &Path, plan: &Plan) {
 }
 
 #[tokio::test]
-async fn current_unsupported_transition_refuses_before_private_namespace_creation() {
+async fn current_epoch_one_prepares_the_private_namespace_without_publishing() {
     let root = tempfile::tempdir().unwrap();
     let mut install = fixture(root.path()).await;
     let closed = ClosedRuntime::fixture(install.transaction());
-    assert!(matches!(
-        prepare(&mut install, closed),
-        Err(SlotError::UnsupportedTransition)
-    ));
-    assert!(!support(root.path()).exists());
+    let prepared = prepare(&mut install, closed).unwrap();
+    prepared.check().unwrap();
+    assert!(support(root.path()).exists());
+    assert_eq!(install._store.record().unwrap().phase, AppPhase::Prepared);
     super::super::issuer_tests::assert_excluded(root.path());
 }
 

@@ -103,28 +103,37 @@ fn refused(engine: &mut Engine, root: &Path, transaction: [u8; 16], old: u64) {
 }
 
 #[tokio::test]
-async fn executing_epoch_zero_refuses_before_support_namespace_and_resumes_the_previous_runtime() {
+async fn executing_epoch_one_stages_the_support_family_and_can_roll_back() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     let mut engine = engine(root);
-    engine.fixture_allow_unsupported_support = false;
     let (old, transaction) = accept(&mut engine, root).await;
     let before = live(root);
     preparing(&mut engine);
-    assert_eq!(support_abi::CURRENT.support_transition, 0);
-    // The refusal is known before anything is staged, so the engine takes the
-    // cancel path by itself: no operator request, and never an uncertain mode
-    // that would keep the device headless until a reboot.
+    assert_eq!(support_abi::CURRENT.support_transition, 1);
     until(|| {
         engine.tick();
-        assert_ne!(engine.mode, Mode::Uncertain);
+        engine
+            .install
+            .as_ref()
+            .is_some_and(|install| install.stage == InstallStage::SupportReady)
+    });
+    assert_ne!(engine.mode, Mode::Uncertain);
+    assert_eq!(evidence(root).len(), 10);
+    assert_ne!(live(root), before);
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert!(!root.join("trial-owner-started").exists());
+    assert_eq!(
+        engine.request(1, Operation::CancelAppInstall).code,
+        Code::Ok
+    );
+    until(|| {
+        engine.tick();
         engine.install.is_none() && engine.mode == Mode::Running
     });
-    assert!(!root.join("etc/kvm/application-support").exists());
+    assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
     assert_eq!(live(root), before);
     assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
-    assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
-    assert!(!root.join("trial-owner-started").exists());
     shutdown(&mut engine);
 }
 

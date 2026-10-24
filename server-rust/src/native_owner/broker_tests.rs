@@ -56,17 +56,17 @@ fn collision(root: &Path) {
 }
 
 #[test]
-fn running_broker_uses_own_compiled_support_epochs_and_refuses_transition_zero() {
+fn running_broker_uses_own_compiled_support_epochs_and_accepts_equal_epoch_one() {
     use crate::update::{support_abi, support_abi_catalog};
     let root = tempfile::tempdir().unwrap();
     let broker = acquire(root.path()).unwrap();
     let predecessor = support_abi_catalog::catalog_fixture();
     let successor = support_abi_catalog::catalog_fixture();
     assert_eq!(broker.support_epochs(), support_abi::CURRENT);
-    assert_eq!(broker.support_epochs().support_transition, 0);
+    assert_eq!(broker.support_epochs().support_transition, 1);
     assert_eq!(
         broker.check_support_transition(&predecessor, &successor),
-        Err(support_abi_catalog::CompatibilityError::UnsupportedTransition)
+        Ok(())
     );
     assert!(!root.path().join("native-runtime-owner/state").exists());
 }

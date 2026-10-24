@@ -40,7 +40,6 @@ fn broker_child() {
     let mut server = Server::new(broker(root), nix::unistd::geteuid().as_raw()).unwrap();
     server.diagnostic_origin = test_diagnostics::Origin::DeliveryDaemon;
     server.engine.fixture = Some(root.to_path_buf());
-    server.engine.fixture_allow_unsupported_support = true;
     fs::write(root.join("broker-ready"), b"ready").unwrap();
     server.run().unwrap();
 }
@@ -390,7 +389,6 @@ fn stalled_or_malformed_install_offer_does_not_block_lifecycle_or_stop_backend()
     let uid = nix::unistd::geteuid().as_raw();
     let mut server = Server::new(broker(root.path()), uid).unwrap();
     server.engine.fixture = Some(root.path().to_path_buf());
-    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
     let mut pending = Vec::new();
@@ -495,7 +493,6 @@ fn actual_idle_control_eof_during_held_support_io_retains_install_for_fresh_clie
     let uid = nix::unistd::geteuid().as_raw();
     let mut server = Server::new(broker(path), uid).unwrap();
     server.engine.fixture = Some(path.to_path_buf());
-    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     let (entered, entering) = std::sync::mpsc::channel();
     let (resume, resumed) = std::sync::mpsc::channel();
@@ -569,7 +566,6 @@ fn actual_idle_eof_after_publication_retains_the_same_job_for_fresh_client_cance
     let uid = nix::unistd::geteuid().as_raw();
     let mut server = Server::new(broker(path), uid).unwrap();
     server.engine.fixture = Some(path.to_path_buf());
-    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     let (entered, entering) = std::sync::mpsc::channel();
     let (resume, resumed) = std::sync::mpsc::channel();
@@ -650,7 +646,6 @@ fn actual_idle_eof_during_commit_keeps_both_leases_and_never_authorizes_early_ac
     let uid = nix::unistd::geteuid().as_raw();
     let mut server = Server::new(broker(path), uid).unwrap();
     server.engine.fixture = Some(path.to_path_buf());
-    server.engine.fixture_allow_unsupported_support = true;
     server.idle = Duration::from_millis(200);
     let (entered, entering) = std::sync::mpsc::channel();
     let (resume, resumed) = std::sync::mpsc::channel();
@@ -811,7 +806,6 @@ fn fixed_root_delivery_child() {
     // This fixture proves production fixed-root delivery/issuer composition,
     // not execution of a native trial inside its deliberately minimal chroot.
     server.engine.fixture_hold_published = true;
-    server.engine.fixture_allow_unsupported_support = true;
     let (send, recv) = std::sync::mpsc::channel();
     server.cancel = Some(recv);
     std::thread::scope(|scope| {
