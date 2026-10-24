@@ -21,6 +21,7 @@ import type {
 } from '@/api/application.ts';
 import * as firewallApi from '@/api/system-firewall.ts';
 import type { FirewallStatus } from '@/api/system-firewall.ts';
+import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
@@ -441,19 +442,30 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
     api
       .update()
-      .then((rsp: any) => {
+      .then(async (rsp: any) => {
         if (rsp.code !== 0) {
+          // A failed update stays on screen; nothing reloads it away.
           setStatus('failed');
           setErrMsg(t('settings.update.updateFailed'));
-        }
-      })
-      .finally(() => {
-        setTimeout(() => {
           setIsLocked(false);
-          setErrMsg('');
-
+          return;
+        }
+        // The backend restarts into the new application: wait for it to go
+        // and come back instead of reloading after a fixed delay.
+        setStatus('restarting');
+        const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
+        if (outcome === 'back') {
           window.location.reload();
-        }, 12000);
+          return;
+        }
+        setStatus('failed');
+        setErrMsg(t('settings.update.unreachable'));
+        setIsLocked(false);
+      })
+      .catch(() => {
+        setStatus('failed');
+        setErrMsg(t('settings.update.updateFailed'));
+        setIsLocked(false);
       });
   }
 
@@ -535,6 +547,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
           <div className="flex flex-col items-center justify-center space-y-10 pb-10 pt-24">
             <Spin size="large" />
             <span className="text-neutral-500">{t('settings.update.updating')}</span>
+          </div>
+        )}
+
+        {status === 'restarting' && (
+          <div className="flex flex-col items-center justify-center space-y-10 pb-10 pt-24">
+            <Spin size="large" />
+            <span className="text-neutral-500">{t('settings.update.restarting')}</span>
           </div>
         )}
 

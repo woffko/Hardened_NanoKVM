@@ -7231,6 +7231,22 @@ function setDeep(target: Record<string, unknown>, path: string, value: string) {
   current[leaf] = value;
 }
 
+const updateRestartFallbackExtras: TranslationMap = {
+  'settings.update.restarting':
+    'Installed. Waiting for the device to come back (up to two minutes); keep it powered.',
+  'settings.update.unreachable':
+    'The device did not answer within two minutes. Reload this page by hand; if its address or certificate changed, open it again from the address bar.'
+};
+
+const updateRestartLocalizedExtras: Record<string, TranslationMap> = {
+  ru: {
+    'settings.update.restarting':
+      'Установлено. Ждём, пока устройство снова ответит (до двух минут); не выключайте питание.',
+    'settings.update.unreachable':
+      'Устройство не ответило за две минуты. Перезагрузите страницу вручную; если изменились адрес или сертификат, откройте устройство заново из адресной строки.'
+  }
+};
+
 export function applyLocaleExtras(language: string, resource: ResourceLanguage) {
   const key = languageAliases[language] || language;
   const firewallModerateExtras = key === 'en' || key === 'ru' ? {} : firewallModerateFallbackExtras;
@@ -7259,6 +7275,7 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
   const firewallNoWebrtcModeDescriptionExtras =
     firewallNoWebrtcModeDescriptionLocalizedExtras[key] ||
     firewallNoWebrtcModeDescriptionFallbackExtras;
+  const updateRestartExtras = updateRestartLocalizedExtras[key] || updateRestartFallbackExtras;
   const extras = {
     ...(downloadExtras[key] || {}),
     ...(downloadOkExtras[key] || {}),
@@ -7280,7 +7297,8 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(firewallModerateLocalizedExtras[key] || {}),
     ...(timeLogExtras[key] || {}),
     ...firewallNoWebrtcExtras,
-    ...firewallNoWebrtcModeDescriptionExtras
+    ...firewallNoWebrtcModeDescriptionExtras,
+    ...updateRestartExtras
   };
   if (!Object.keys(extras).length) return;
 

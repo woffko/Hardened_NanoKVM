@@ -4,6 +4,7 @@ import { ExternalLinkIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/application.ts';
+import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
 interface UpdateProps {
   status: string;
@@ -45,7 +46,7 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
       return;
     }
 
-    if (status === 'loading' || status === 'updating') {
+    if (status === 'loading' || status === 'updating' || status === 'restarting') {
       return;
     }
 
@@ -63,22 +64,30 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
         if (!rsp.ok) throw new Error(`HTTP error ${rsp.status}`);
         return rsp.json(); // JSON-Payload parsen
       })
-      .then((rspj: any) => {
-        // Jetzt rspj ist das tatsächliche JSON
+      .then(async (rspj: any) => {
         if (rspj.code !== 0 || !rspj.data) {
+          // A failed install stays on screen; nothing reloads it away.
           setStatus('failed');
           setErrMsg(rspj.msg || t('settings.update.offline.updateFailed'));
-          console.log(rspj);
+          setIsLocked(false);
           return;
         }
-      })
-      .finally(() => {
-        setTimeout(() => {
-          setIsLocked(false);
-          setErrMsg('');
-
+        // The backend restarts into the new application: wait for it to go
+        // and come back instead of reloading after a fixed delay.
+        setStatus('restarting');
+        const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
+        if (outcome === 'back') {
           window.location.reload();
-        }, 12000);
+          return;
+        }
+        setStatus('failed');
+        setErrMsg(t('settings.update.unreachable'));
+        setIsLocked(false);
+      })
+      .catch(() => {
+        setStatus('failed');
+        setErrMsg(t('settings.update.offline.updateFailed'));
+        setIsLocked(false);
       });
   }
 
