@@ -28,6 +28,11 @@ build; they read those files as data, never execute them, and rebuild the
 host test library with the bound-test feature, which takes a few minutes.
 Without the linked build they are `NOT TESTED`.
 
+The web tree's typecheck (`tsc`), lint (`eslint`) and production build
+(`vite build`) run with the toolchain pinned in `web/node_modules`; without
+it they are `NOT TESTED`. The one pre-existing `react-hooks/exhaustive-deps`
+warning in the update page is a warning, not a failure.
+
 `test-ssh-runtime-build-script.py` needs the compiled Cargo build script and
 the static RV64 helpers of the last linked build; the runner finds both under
 `server-rust/target` after `server-rust/scripts/build-linked-libkvm.sh` and

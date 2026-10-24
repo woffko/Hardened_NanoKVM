@@ -17,6 +17,9 @@
 #   HOST_TEST_TIMEOUT            seconds per test (default 1200)
 #   HOST_TEST_OUTPUT_DIR         keep every test's full output there (default: a temporary directory, removed at exit)
 #
+# The web typecheck, lint and production build run with web/node_modules;
+# without it they are NOT TESTED.
+#
 # The four server-rust/scripts/test-*.sh bound-image tests need the linked RV64
 # backend and the static helpers of the same build (server-rust/scripts/
 # build-linked-libkvm.sh); they read the RV64 files as data, never execute them,
@@ -128,6 +131,16 @@ for f in server-rust/scripts/test-*.sh; do
 	fi
 	run "server-rust-$n" bash "$f"
 done
+
+# The web tree: typecheck, lint and production build, with the toolchain the
+# tree itself pins (web/node_modules); NOT TESTED when it is not installed.
+if [ -x web/node_modules/.bin/tsc ] && [ -x web/node_modules/.bin/eslint ] && [ -x web/node_modules/.bin/vite ]; then
+	run web-typecheck bash -c 'cd web && ./node_modules/.bin/tsc'
+	run web-lint bash -c 'cd web && ./node_modules/.bin/eslint . --report-unused-disable-directives'
+	run web-build bash -c 'cd web && ./node_modules/.bin/vite build'
+else
+	for n in web-typecheck web-lint web-build; do skip "$n" "web/node_modules is not installed (pnpm install in web/)"; done
+fi
 
 echo "host tests: pass=$pass fail=$fail not_tested=$not_tested${failed:+ failed:$failed}"
 [ "$fail" -eq 0 ]
