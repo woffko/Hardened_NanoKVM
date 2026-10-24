@@ -38,3 +38,22 @@ because nothing ran them together: the build-security fixture still carried
 the pre-refresh OpenSSH 10.5 recipe, and the Picoclaw routing checks still
 expected the pre-broker-job onboarding and removal. Run the runner before a
 candidate build and keep its log with the release evidence.
+
+## The Rust half of G1
+
+`scripts/run-rust-tests.sh` runs every test of `server-rust` exactly once,
+split by IO load: phase 1 runs all targets at 16 threads and skips the
+fsync-heavy `native_owner::broker::ipc` module; phase 2 runs that module alone
+at 4 threads with backtraces on; then the doctests. The build happens first
+and is flushed, because the writeback of a fresh debug build starved fixture
+fsyncs in the first minute of a run. The script sets `umask 077` itself (about
+93 tests fail under `022`) and prints each phase's exit status and duration;
+`RUST_TESTS_PRESSURE_LOG` records an IO-pressure sample every 30 s next to the
+log. A run takes 20–30 minutes; one G1 record is one log.
+
+`scripts/check-clippy-baseline.sh` runs Clippy on the same targets and
+compares the warning set (keyed by lint, message, file and the primary span's
+text, so line numbers do not matter) with `scripts/clippy-baseline.tsv`, the
+25 pre-existing warnings. A warning outside the baseline fails the check;
+entries that disappeared are listed, and `--update` rewrites the baseline
+after they are fixed.

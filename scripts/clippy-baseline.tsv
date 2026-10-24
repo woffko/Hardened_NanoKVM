@@ -1,0 +1,25 @@
+clippy::chunks_exact_to_as_chunks	using `chunks_exact` with a constant chunk size	src/api/download.rs	&& sector[446..510].chunks_exact(16).any(|entry| {
+clippy::cmp_owned	this creates an owned instance just for comparison	src/config.rs	if self.paths.update_cache_dir == PathBuf::from("/root/.kvmcache") {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/autostart.rs	if let Ok(metadata) = fs::symlink_metadata(&path) {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/download.rs	if let Ok(metadata) = fs::symlink_metadata(&target) {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if current_dns_mode(paths) == DNS_MODE_DHCP {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Err(err) = dhcp_result {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Err(err) = tmp_result {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Ok(config) = &dhcp_result {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Ok(config) = &tmp_result {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Ok(config) = effective_result {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Some(index) = fields.iter().position(|field| *field == "via") {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/picoclaw.rs	if let Ok(doc) = load_config_document() {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/script.rs	if let Ok(metadata) = fs::symlink_metadata(&path) {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/storage.rs	if let Some(name) = entry.file_name().to_str() {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/stream.rs	if let Some(value) = read_i32(SCREEN_GOP_FILE).and_then(|value| u8::try_from(value).ok()) {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/system_log.rs	if truncated {
+clippy::collapsible_if	this `if` statement can be collapsed	src/api/system_time.rs	if let Ok(canonical) = paths.localtime.parent()?.join(target).canonicalize() {
+clippy::collapsible_if	this `if` statement can be collapsed	src/http/middleware.rs	if let Some(auth) = headers
+clippy::collapsible_if	this `if` statement can be collapsed	src/ws/hid.rs	if let Ok(mut state) = MOUSE_JIGGLER.lock() {
+clippy::derivable_impls	this `impl` can be derived	src/api/picoclaw.rs	impl Default for GatewayQuery {
+clippy::derivable_impls	this `impl` can be derived	src/api/picoclaw.rs	impl Default for LoadImageRequest {
+clippy::derivable_impls	this `impl` can be derived	src/api/picoclaw.rs	impl Default for ScreenshotQuery {
+clippy::derivable_impls	this `impl` can be derived	src/config.rs	impl Default for Turn {
+clippy::filter_next	called `filter(..).next_back()` on an `DoubleEndedIterator`	src/api/download.rs	.and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+clippy::result_large_err	the `Err`-variant returned from this function is very large	src/api/picoclaw.rs	async fn ensure_runtime_ready() -> std::result::Result<RuntimeStatus, RuntimeStatus> {
