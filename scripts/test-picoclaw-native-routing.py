@@ -156,15 +156,25 @@ def main():
           "AllowedCommand::NativePicoclawControl" in control and "run_allowed_owned(" in control and
           "support," in control and "output.status == 0" in control)
     onboard = api.split("async fn onboard_runtime_config()", 1)[-1].split("fn resolve_config_path()", 1)[0]
-    check("API onboarding uses native completion without holding Config or selecting a shell",
-          "native_control_ready().await?" in onboard and
-          "run_native_control(PicoControl::Onboard, support).await?" in onboard and
-          "load_config_document()" in onboard and ".configuration()" not in onboard and
+    # Since 617203f onboarding is a broker-owned job: the handler submits it,
+    # validates the imported configuration afterwards, holds no Config permit
+    # and no admission of its own, and selects no shell. The job's own stop
+    # and stage retirement are covered by the engine's Rust tests.
+    check("API onboarding runs the broker Onboard job, then validates the config, without holding Config or selecting a shell",
+          "run_config_job(ONBOARD_JOB_KIND" in onboard and "run_onboard_job(" in onboard and
+          "load_config_document()" in onboard and
+          onboard.index("run_config_job(ONBOARD_JOB_KIND") < onboard.index("load_config_document()") and
+          ".configuration()" not in onboard and "native_control_ready" not in onboard and
           "async fn run_script(" not in api)
     uninstall = api.split("pub async fn uninstall_runtime()", 1)[-1].split("pub async fn get_runtime_session()", 1)[0]
-    check("uninstall does not delete after an unverified Stop",
-          "if let Err(err) = stop_runtime_inner().await" in uninstall and
-          uninstall.index("if let Err(err) = stop_runtime_inner().await") < uninstall.index("fs::remove_dir_all"))
+    # Removal is the broker Remove job (quiesce, then exactly the managed
+    # files): the handler deletes nothing itself, runs the job before any
+    # status change and returns its failure instead of ignoring it.
+    check("uninstall removes nothing itself: the broker Remove job runs first and its failure is returned",
+          "if let Err(err) = run_config_job(REMOVE_JOB_KIND" in uninstall and
+          uninstall.index("run_config_job(REMOVE_JOB_KIND") < uninstall.index("set_runtime_status(") and
+          "remove_file" not in uninstall and "remove_dir_all" not in uninstall and
+          "stop_runtime_inner" not in uninstall and "killall" not in uninstall)
     print(f"{checks} checks; {failures} failures")
     return int(bool(failures))
 

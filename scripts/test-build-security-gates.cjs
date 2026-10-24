@@ -115,17 +115,26 @@ try {
   });
 
   // Cached preparation must verify the recipes, not just its historical receipt.
+  // The recipes and receipt markers mirror the refreshed pins of
+  // prepare-buildroot-2026.05.1-security-source.sh (backport patches 0004-0008).
   const prepared = path.join(work, 'prepared');
-  for (const pkg of ['openssh', 'hostapd']) {
+  const recipes = {
+    openssh: 'OPENSSH_VERSION_MAJOR = 10.6\n',
+    libopenssl: 'LIBOPENSSL_VERSION = 3.6.5\n',
+    expat: 'EXPAT_VERSION = 2.9.0\n',
+    libcurl: 'LIBCURL_VERSION = 8.23.0\n',
+    wpa_supplicant: 'WPA_SUPPLICANT_VERSION = 2.12\n',
+    hostapd: 'HOSTAPD_VERSION = 2.12\n',
+  };
+  for (const [pkg, recipe] of Object.entries(recipes)) {
     fs.mkdirSync(path.join(prepared, 'package', pkg), { recursive: true });
+    fs.writeFileSync(path.join(prepared, 'package', pkg, `${pkg}.mk`), recipe);
   }
   const hostapd = path.join(prepared, 'package/hostapd/hostapd.mk');
-  fs.writeFileSync(path.join(prepared, 'package/openssh/openssh.mk'),
-    'OPENSSH_VERSION_MAJOR = 10.5\n');
-  fs.writeFileSync(hostapd, 'HOSTAPD_VERSION = 2.12\n');
   const patchDir = path.join(fixture,
     'buildroot-external/hardened-sg2002/buildroot-patches/2026.05.1');
-  const receipt = ['buildroot=2026.05.1', 'openssh=10.5p1', 'hostapd=2.12-no-11be'];
+  const receipt = ['buildroot=2026.05.1', 'openssh=10.6p1', 'libopenssl=3.6.5', 'expat=2.9.0',
+    'libcurl=8.23.0', 'wpa_supplicant=2.12', 'hostapd=2.12-no-11be'];
   for (const name of fs.readdirSync(patchDir).filter(name => name.endsWith('.patch')).sort()) {
     const file = path.join(patchDir, name);
     receipt.push(`${crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')}  ${file}`);
