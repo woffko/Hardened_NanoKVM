@@ -223,6 +223,10 @@ if [ "$EXPECTED_BACKEND" != "any" ] && [ "$backend" != "$EXPECTED_BACKEND" ]; th
   die "unexpected /etc/kvm/backend: $backend, expected $EXPECTED_BACKEND"
 fi
 
+if debugfs_output "stat /etc/kvm/raw-restore-required" >/dev/null 2>&1; then
+  die "full-SD rootfs contains the raw restore discriminator"
+fi
+
 echo "validated Hardened NanoKVM rootfs: $IMAGE"
 echo "kvmapp version: $version"
 echo "backend: $backend"

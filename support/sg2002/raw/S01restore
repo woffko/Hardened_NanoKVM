@@ -1,0 +1,12 @@
+#!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "S01restore: raw restore is blocked" >&2
+    exit 1
+fi
+if [ ! -x /usr/libexec/nanokvm-early-restore ]; then
+    printf 'raw early restore helper is missing\n' > /run/nanokvm-restore-blocked
+    chmod 0600 /run/nanokvm-restore-blocked
+    echo "S01restore: raw restore helper is missing" >&2
+    exit 1
+fi
+/usr/libexec/nanokvm-early-restore

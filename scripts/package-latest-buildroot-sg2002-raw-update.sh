@@ -19,6 +19,18 @@ SIGNING_KEY="${SYSTEM_UPDATE_SIGNING_KEY:-}"
 PUBLIC_KEY="${SYSTEM_UPDATE_PUBLIC_KEY:-$ROOT/kvmapp/system/keys/system-update-signing.pub.pem}"
 KVMAPP_DIR="${NANOKVM_KVMAPP_SOURCE_DIR:-$ROOT/build/kvmapp-rust/kvmapp}"
 ALLOW_UNSIGNED="${ALLOW_UNSIGNED_SYSTEM_UPDATE:-0}"
+EARLY_RESTORE_BIN="${NANOKVM_EARLY_RESTORE_BIN:-$ROOT/server-rust/target/restore-runtime/riscv64gc-unknown-linux-musl/release/nanokvm-early-restore}"
+EARLY_RESTORE_SCRIPT="${NANOKVM_EARLY_RESTORE_SCRIPT:-$ROOT/support/sg2002/raw/S01restore}"
+
+[ -f "$EARLY_RESTORE_BIN" ] || {
+	echo "missing early restore helper: $EARLY_RESTORE_BIN" >&2
+	echo "run server-rust/scripts/build-early-restore.sh" >&2
+	exit 1
+}
+[ -f "$EARLY_RESTORE_SCRIPT" ] || {
+	echo "missing S01restore source: $EARLY_RESTORE_SCRIPT" >&2
+	exit 1
+}
 
 [ -f "$SD_IMAGE" ] || {
 	echo "missing SG2002 SD image: $SD_IMAGE" >&2
@@ -65,6 +77,8 @@ SECURITY_PATCH_LEVEL="$SECURITY_PATCH_LEVEL" \
 RAW_IMAGE_COMPRESSION=gzip \
 SYSTEM_UPDATE_FORMAT=2 \
 SYSTEM_UPDATE_REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-2.0.41}" \
+NANOKVM_EARLY_RESTORE_BIN="$EARLY_RESTORE_BIN" \
+NANOKVM_EARLY_RESTORE_SCRIPT="$EARLY_RESTORE_SCRIPT" \
 	"$ROOT/scripts/create-raw-system-update-bundle.sh" \
 	"$SYSTEM_VERSION" "$SYSTEM_TARGET" \
 	"$RAW_IMAGES_DIR/boot.vfat" "$RAW_IMAGES_DIR/rootfs.sd" "$OUTPUT_DIR"

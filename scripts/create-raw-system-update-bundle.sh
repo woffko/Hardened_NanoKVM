@@ -127,6 +127,34 @@ patch_rootfs_image() {
   debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1
 }
 
+mark_raw_restore_required() {
+  rootfs="$1"
+  early_bin="${NANOKVM_EARLY_RESTORE_BIN:-}"
+  early_script="${NANOKVM_EARLY_RESTORE_SCRIPT:-$ROOT_DIR/support/sg2002/raw/S01restore}"
+  [ -n "$early_bin" ] || die "NANOKVM_EARLY_RESTORE_BIN is required for a raw image"
+  [ -f "$early_bin" ] || die "early restore binary does not exist: $early_bin"
+  [ -f "$early_script" ] || die "early restore script does not exist: $early_script"
+  marker="$STAGE_DIR/raw-restore-required"
+  printf 'nanokvm-raw-restore-required-v1\n' > "$marker"
+  debugfs_cmds="$STAGE_DIR/raw-restore.debugfs"
+  {
+    printf 'write %s /etc/kvm/raw-restore-required\n' "$marker"
+    printf 'sif /etc/kvm/raw-restore-required mode 0100644\n'
+    printf 'sif /etc/kvm/raw-restore-required uid 0\n'
+    printf 'sif /etc/kvm/raw-restore-required gid 0\n'
+    printf 'write %s /usr/libexec/nanokvm-early-restore\n' "$early_bin"
+    printf 'sif /usr/libexec/nanokvm-early-restore mode 0100755\n'
+    printf 'sif /usr/libexec/nanokvm-early-restore uid 0\n'
+    printf 'sif /usr/libexec/nanokvm-early-restore gid 0\n'
+    printf 'write %s /etc/init.d/S01restore\n' "$early_script"
+    printf 'sif /etc/init.d/S01restore mode 0100755\n'
+    printf 'sif /etc/init.d/S01restore uid 0\n'
+    printf 'sif /etc/init.d/S01restore gid 0\n'
+  } > "$debugfs_cmds"
+  debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1 || \
+    die "failed to install the raw restore discriminator, helper or S01restore"
+}
+
 if [ "$#" -ne 5 ]; then
   usage
 fi
@@ -195,6 +223,7 @@ cp -f "$BOOT_IMAGE" "$STAGE_DIR/raw/boot.vfat"
 cp -f "$ROOTFS_IMAGE" "$STAGE_DIR/raw/rootfs.sd"
 patch_rootfs_image "$STAGE_DIR/raw/rootfs.sd"
 "$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$STAGE_DIR/raw/rootfs.sd" >/dev/null
+mark_raw_restore_required "$STAGE_DIR/raw/rootfs.sd"
 
 if [ "$RAW_IMAGE_COMPRESSION" = "gzip" ]; then
   gzip -n -c "$STAGE_DIR/raw/boot.vfat" > "$STAGE_DIR/payload/images/boot.vfat.gz"

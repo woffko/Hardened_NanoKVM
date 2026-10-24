@@ -1,4 +1,8 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 
 RESERVE_INET="192.168.90.1/22"
 ETH_MAC_FILE="/boot/eth.mac"

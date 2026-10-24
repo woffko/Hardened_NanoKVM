@@ -48,6 +48,7 @@ if [[ "$RESTORE_TARGET_DIR" == "$TARGET_DIR" ]]; then
 fi
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-restore-runtime.sh" --locked --offline
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-app-recovery.sh" --locked --offline
+CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-early-restore.sh" --locked --offline
 CARGO_TARGET_DIR="$RESTORE_TARGET_DIR" "$ROOT/scripts/build-native-owner.sh"
 NANOKVM_SSH_RUNTIME_BINDING="$(python3 -B "$ROOT/../scripts/ssh-runtime-binding.py" prepare \
   --helper "$RESTORE_TARGET_DIR/$TARGET/release/nanokvm-ssh-sandbox" \
