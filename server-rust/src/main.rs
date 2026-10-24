@@ -59,6 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // suffixes. Future catalog inspection is read-only, not install authority.
     let _ = std::hint::black_box(nanokvm_rust_server::update::app_bootstrap::BOOT_SCRIPT_FRAMES);
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == std::ffi::OsStr::new("--script-supervisor"))
+    {
+        std::process::exit(nanokvm_rust_server::system::script_supervisor::run(
+            &args[1..],
+        ));
+    }
     let startup = match args.as_slice() {
         [] => None,
         [mode] if mode == "--app-trial" => Some(Startup::adopt_stdin()?),

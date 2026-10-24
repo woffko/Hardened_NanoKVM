@@ -189,7 +189,8 @@ pub async fn run_script(
     let path = checked_script_path(&req.name)?;
     match req.kind.as_str() {
         "foreground" => {
-            let log = run_script_foreground(script_command(&path)?, RUN_LIMITS).await?;
+            let command = supervised_command(script_command(&path)?, RUN_LIMITS)?;
+            let log = run_script_foreground(command, RUN_LIMITS).await?;
             Ok(Json(ApiResponse::ok(RunScriptRsp { log })))
         }
         "background" => {
@@ -273,6 +274,22 @@ async fn run_script_foreground(command: Command, limits: RunLimits) -> Result<St
         .map_err(|_| AppError::Internal("script run ended without a result".to_string()))?
 }
 
+fn supervised_command(command: Command, limits: RunLimits) -> Result<Command> {
+    let executable = std::env::current_exe()?;
+    let standard = command.as_std();
+    let program = standard.get_program().to_os_string();
+    let arguments: Vec<_> = standard.get_args().map(|arg| arg.to_os_string()).collect();
+    let mut supervised = Command::new(executable);
+    supervised
+        .arg("--script-supervisor")
+        .arg(limits.timeout.as_secs().to_string())
+        .arg(limits.grace.as_millis().to_string())
+        .arg("--")
+        .arg(program)
+        .args(arguments);
+    Ok(supervised)
+}
+
 async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<String> {
     // Its own process group, so a timeout ends every process the script
     // started that stayed in it; `setsid` escapes this, as in a shell.
@@ -285,7 +302,8 @@ async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<Strin
         .spawn()?;
     let mut stdout = Captured::drain(child.stdout.take());
     let mut stderr = Captured::drain(child.stderr.take());
-    let status = match time::timeout(limits.timeout, child.wait()).await {
+    let wait_limit = limits.timeout + limits.grace + Duration::from_secs(2);
+    let status = match time::timeout(wait_limit, child.wait()).await {
         Ok(status) => Some(status?),
         Err(_) => {
             stop_group(&mut child, limits.grace).await?;
@@ -301,6 +319,11 @@ async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<Strin
             "script timed out; its process group was stopped".to_string(),
         ));
     };
+    if status.code() == Some(124) {
+        return Err(AppError::Internal(
+            "script timed out; its process tree was stopped".to_string(),
+        ));
+    }
     if !status.success() {
         return Err(AppError::Internal("run script failed".to_string()));
     }

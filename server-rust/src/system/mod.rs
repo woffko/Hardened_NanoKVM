@@ -4,5 +4,6 @@ pub mod files;
 pub mod media;
 pub mod package_download;
 pub mod process;
+pub mod script_supervisor;
 pub mod service;
 pub mod usb;
