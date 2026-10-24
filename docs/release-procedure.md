@@ -7,6 +7,24 @@ publishes it. Publication needs its own explicit approval. The RC11 and RC12
 helpers refuse to run unless `HARDENED_LEGACY_RC11=1` or
 `HARDENED_LEGACY_RC12=1` asks for them.
 
+## Building the candidate
+
+`scripts/build-kernel-5.10.265-candidate-run.sh` runs the whole system
+pipeline (kernel, modules, runtime, rootfs, `boot.itb`, recovery SD) for a
+candidate, in the style of the RC12 wrapper. It pins what the remediation
+fixed: the accepted RC12 kernel fragment by hash, kernel release
+`5.10.265-tag-`, the production update key, and the refreshed Buildroot
+security source (OpenSSL 3.6.5, OpenSSH 10.6p1, expat 2.9.0, curl 8.23.0,
+wpa_supplicant 2.12). It takes from the environment, and refuses to start
+without, what the owner decides: `EXPECTED_SYSTEM_VERSION` and
+`EXPECTED_KVMAPP_VERSION` (an already published version is refused),
+`EXPECTED_KVMAPP_SERVER_SHA256` of the accepted application stage,
+`NANOKVM_KVMAPP_SOURCE_DIR` (the stage; its version file must match) and a
+new `KERNEL_5_10_265_REPRO_ROOT`. Run it twice with independent run roots
+for the G5 comparison. The underlying `build-kernel-5.10.265-repro-run.sh`
+also refuses a dirty worktree and an existing run root. The wrapper signs
+and publishes nothing.
+
 ## Preparing
 
 The inputs are the files that passed candidate acceptance, each with its
