@@ -15,15 +15,30 @@
 #   NANOKVM_HOST_HELPER_DIR      static RV64 helpers of the linked build; default:
 #                                server-rust/target/restore-runtime/riscv64gc-unknown-linux-musl/release
 #   HOST_TEST_TIMEOUT            seconds per test (default 1200)
+#   HOST_TEST_OUTPUT_DIR         keep every test's full output there (default: a temporary directory, removed at exit)
+#
+# The four server-rust/scripts/test-*.sh bound-image tests need the linked RV64
+# backend and the static helpers of the same build (server-rust/scripts/
+# build-linked-libkvm.sh); they read the RV64 files as data, never execute them,
+# and rebuild the host test library with the bound-test feature (a few minutes).
+# Without those files they are NOT TESTED.
 #
 # Exit status 1 when any test FAILED. NOT TESTED does not fail the run; the
 # summary counts it so a release record cannot mistake it for PASS.
 set -u
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT" || exit 2
+# The fixtures create private files and check their modes; the Rust suite
+# needs the same (measured 2026-10-24: embedded-restore-runtime fails under
+# umask 022 at PinnedSshHelper::embedded, and ~93 Rust tests fail under 022).
+umask 077
 TIMEOUT="${HOST_TEST_TIMEOUT:-1200}"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+if [ -n "${HOST_TEST_OUTPUT_DIR:-}" ]; then
+	WORK="$HOST_TEST_OUTPUT_DIR"; mkdir -p "$WORK" || exit 2
+else
+	WORK="$(mktemp -d)"
+	trap 'rm -rf "$WORK"' EXIT
+fi
 pass=0; fail=0; not_tested=0; failed=""
 
 device_reason() {
@@ -44,7 +59,9 @@ report() {
 	else
 		fail=$((fail + 1)); failed="$failed $name"
 		printf 'FAIL       %s exit=%s (%ss)\n' "$name" "$code" "$secs"
-		tail -n 5 "$WORK/$name.out" | sed 's/^/           | /'
+		# the assertion, then the end of the output: enough to name the cause
+		grep -n "panicked at\|Traceback\|AssertionError\|^FAIL" "$WORK/$name.out" | head -n 5 | sed 's/^/           ! /'
+		tail -n 25 "$WORK/$name.out" | sed 's/^/           | /'
 	fi
 }
 
@@ -99,6 +116,17 @@ for f in scripts/test-*.cjs; do
 	reason=$(device_reason "$n")
 	if [ -n "$reason" ]; then skip "$n" "$reason"; continue; fi
 	run "$n" node "$f"
+done
+
+BACKEND=server-rust/target/riscv64gc-unknown-linux-musl/release/nanokvm-rust-server
+HELPERS=${NANOKVM_HOST_HELPER_DIR:-server-rust/target/restore-runtime/riscv64gc-unknown-linux-musl/release}
+for f in server-rust/scripts/test-*.sh; do
+	# reported as server-rust-<name>: the name is also the output file name
+	n=$(basename "$f" .sh)
+	if [ ! -f "$BACKEND" ] || [ ! -f "$HELPERS/nanokvm-app-recovery" ] || [ ! -f "$HELPERS/nanokvm-ssh-sandbox" ]; then
+		skip "server-rust-$n" "needs the linked RV64 backend and static helpers (server-rust/scripts/build-linked-libkvm.sh)"; continue
+	fi
+	run "server-rust-$n" bash "$f"
 done
 
 echo "host tests: pass=$pass fail=$fail not_tested=$not_tested${failed:+ failed:$failed}"
