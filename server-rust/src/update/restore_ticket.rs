@@ -111,6 +111,8 @@ pub enum Phase {
     Applying = 2,
     Restored = 3,
     Committed = 4,
+    /// Key-free terminal record for an attempt that never started the writer.
+    Abandoned = 5,
 }
 
 /// Values must come from trusted live identity and exact verified signed image
@@ -223,9 +225,10 @@ impl RestoreTicket {
             .contains(&[0; 32])
             || !identifier(&self.binding.target_app_version)
             || !identifier(&self.binding.target)
-            || (self.phase == Phase::Prepared) != self.last_boot.is_none()
+            || (matches!(self.phase, Phase::Prepared | Phase::Abandoned))
+                != self.last_boot.is_none()
             || self.last_boot == Some(self.binding.source_boot)
-            || (self.phase == Phase::Committed) != self.secret.is_none()
+            || matches!(self.phase, Phase::Committed | Phase::Abandoned) != self.secret.is_none()
         {
             return Err(TicketError::Invalid);
         }
@@ -383,11 +386,23 @@ impl Store {
             if current.transaction_id == ticket.transaction_id {
                 return Err(TicketError::Replay);
             }
-            if current.phase != Phase::Committed {
+            if !matches!(current.phase, Phase::Committed | Phase::Abandoned) {
                 return Err(TicketError::Busy);
             }
         }
         self.publish(&*encode(ticket, ticket.phase, ticket.last_boot)?)
+    }
+
+    /// Retire a prepared attempt that never reached the writer. The record
+    /// keeps the exact transaction and binding as a key-free terminal receipt;
+    /// a new prepared ticket may replace it.
+    pub fn abandon_prepared(&mut self, ticket: &RestoreTicket) -> Result<()> {
+        self.ready()?;
+        ticket.validate()?;
+        if ticket.phase != Phase::Prepared {
+            return Err(TicketError::Invalid);
+        }
+        self.publish(&*encode(ticket, Phase::Abandoned, None)?)
     }
 
     pub fn decrypt<R: Read>(
@@ -444,7 +459,7 @@ impl Store {
         self.publish(&*encode(ticket, phase, Some(boot))?)?;
         ticket.phase = phase;
         ticket.last_boot = Some(boot);
-        if phase == Phase::Committed {
+        if matches!(phase, Phase::Committed | Phase::Abandoned) {
             ticket.secret = None;
         }
         Ok(())
@@ -641,7 +656,7 @@ fn encode(
     bytes[16..32].copy_from_slice(&ticket.transaction_id);
     bytes[32..40].copy_from_slice(&ticket.plaintext_len.to_be_bytes());
     put_string(&mut bytes[40..105], &ticket.target_version);
-    if phase != Phase::Committed {
+    if !matches!(phase, Phase::Committed | Phase::Abandoned) {
         bytes[105..137].copy_from_slice(&*ticket.secret.as_ref().ok_or(TicketError::Invalid)?.key);
     }
     bytes[137..153].copy_from_slice(&ticket.binding.source_boot.0);
@@ -670,6 +685,7 @@ fn decode(bytes: &[u8; RECORD_BYTES]) -> Result<RestoreTicket> {
         2 => Phase::Applying,
         3 => Phase::Restored,
         4 => Phase::Committed,
+        5 => Phase::Abandoned,
         _ => return Err(TicketError::Invalid),
     };
     let mut id = [0; 16];
@@ -679,10 +695,10 @@ fn decode(bytes: &[u8; RECORD_BYTES]) -> Result<RestoreTicket> {
     let version = get_string(&bytes[40..105])?;
     let mut key = Zeroizing::new([0; 32]);
     key.copy_from_slice(&bytes[105..137]);
-    if phase == Phase::Committed && *key != [0; 32] {
+    if matches!(phase, Phase::Committed | Phase::Abandoned) && *key != [0; 32] {
         return Err(TicketError::Invalid);
     }
-    let secret = if phase == Phase::Committed {
+    let secret = if matches!(phase, Phase::Committed | Phase::Abandoned) {
         None
     } else {
         Some(RestoreSecret {

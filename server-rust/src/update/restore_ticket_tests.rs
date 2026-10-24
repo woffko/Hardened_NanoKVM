@@ -72,6 +72,30 @@ fn applying(root: &Path) -> (Store, RestoreTicket, Vec<u8>, Vec<u8>) {
 }
 
 #[test]
+fn an_abandoned_prepared_receipt_is_key_free_and_allows_a_new_prepared_ticket() {
+    let root = tempdir().unwrap();
+    let mut store = open_fixture(root.path()).unwrap();
+    let (ticket, _, _) = fixture();
+    store.publish_prepared(&ticket).unwrap();
+    store.abandon_prepared(&ticket).unwrap();
+    let abandoned = store.load().unwrap().unwrap();
+    assert_eq!(abandoned.phase(), Phase::Abandoned);
+    assert_eq!(abandoned.transaction_id(), ticket.transaction_id());
+    assert_eq!(abandoned.target_version(), VERSION);
+    let mut abandoned = abandoned;
+    assert!(matches!(
+        store.begin_apply(&mut abandoned, &observed(BOOT)),
+        Err(TicketError::Invalid)
+    ));
+    let (replacement, _, _) = fixture();
+    store.publish_prepared(&replacement).unwrap();
+    assert_eq!(
+        store.load().unwrap().unwrap().transaction_id(),
+        replacement.transaction_id()
+    );
+}
+
+#[test]
 fn boot_ids_are_bounded_canonical_values_not_arbitrary_marker_strings() {
     assert!(BootId::parse(SOURCE).unwrap() == BootId::parse(&SOURCE.to_uppercase()).unwrap());
     for invalid in [

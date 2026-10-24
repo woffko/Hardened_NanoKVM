@@ -210,6 +210,13 @@ impl Drop for Ownership {
 
 // Not publicly Clone: only the driver/blocking helper issue work ownership.
 pub struct UpdateOwner(Arc<Ownership>);
+impl UpdateOwner {
+    /// Crate-private clone for a blocking worker that must prepare a handoff
+    /// under the same retained operation while the caller still owns work.
+    pub(crate) fn clone_for_work(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
 struct BlockingOwnership {
     owner: UpdateOwner,
     success: bool,

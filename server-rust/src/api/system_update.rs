@@ -10,7 +10,11 @@ use crate::{
         archive::extract_tar_gz_reader,
         keys::verify_metadata_signature,
         operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
-        restore_capsule::ticket::BootId,
+        raw_capture::{self, CaptureRequest, TargetImage},
+        raw_install_lease::{RawImages, RawSender},
+        raw_transport::TransferContext,
+        restore_capsule::ticket::{BootId, Phase, RestoreTicket, Store},
+        restore_job::PinnedSshHelper,
         staged_archive::{StageDirectory, StagedDownload},
         staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
         staged_snapshot::PublicSnapshot,
@@ -18,6 +22,7 @@ use crate::{
 };
 use axum::{Json, extract::State, response::IntoResponse};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
@@ -25,9 +30,10 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Read, Seek},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::AtomicBool,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -80,6 +86,9 @@ const SYSTEM_RAW_INSTALL_LOG: &str = "/data/hardened-system-raw-update.log";
 const SYSTEM_RAW_RUNTIME_LOADER: &str = "ld-musl-system-update.so.1";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
+const RAW_PRIVATE_STAGING: &str = "/etc/kvm/.raw-capture";
+const RAW_CAPSULE_DIR: &str = "/data/.nanokvm-restore";
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -645,7 +654,7 @@ async fn download_owned(
             )?;
             downloaded.publish(&verified.latest.name)?;
 
-            let manifest = extract_and_verify_system_bundle(
+            let (manifest, _raw_images) = extract_and_verify_system_bundle(
                 &mut snapshot,
                 &stage_dir_for_verify,
                 &verified.latest,
@@ -725,10 +734,20 @@ async fn install_owned(
         ),
     )?;
     let install_error_version = staged_version.clone();
+    let staged = read_stage_record(&stage_dir)?
+        .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
+    let raw = if staged.manifest.raw_images.is_empty() {
+        None
+    } else {
+        Some((
+            owner.clone_for_work(),
+            state.drain_writers(WRITER_DRAIN_TIMEOUT).await?,
+        ))
+    };
     let installed = match owner
         .blocking(
             "install staged system update",
-            move || match install_staged_update(&stage_dir, &config, verified) {
+            move || match install_staged_update(&stage_dir, &config, verified, raw) {
                 Ok(installed) => Ok(installed),
                 Err(err) => {
                     let _ = write_update_progress(
@@ -1481,16 +1500,13 @@ fn extract_and_verify_system_bundle(
     archive: &mut PublicSnapshot,
     stage_dir: &Path,
     latest: &SystemLatest,
-) -> Result<SystemManifest> {
+) -> Result<(SystemManifest, Option<[PublicSnapshot; 2]>)> {
     let bundle::BundlePreflight {
         manifest,
         raw_images,
     } = bundle::capture(archive, &StageDirectory::open(stage_dir)?, latest)?;
-    // Transitional preflight only: these checked image FDs are not yet passed
-    // to the future isolated writer. Raw install is explicitly blocked until
-    // descriptor/ticket/early-restore integration; C1 remains open. Avoid
-    // retaining expanded image snapshots alongside transitional extraction.
-    drop(raw_images);
+    // Raw images stay as the authenticated anonymous descriptors the writer
+    // consumes. File updates do not retain the unused snapshots.
     archive.rewind()?;
     let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
     remove_dir_if_exists(&extract_dir)?;
@@ -1504,13 +1520,14 @@ fn extract_and_verify_system_bundle(
     let payload_dir = extract_dir.join("payload");
     validate_system_manifest(&manifest, latest, &payload_dir)?;
 
-    Ok(manifest)
+    Ok((manifest, raw_images))
 }
 
 fn install_staged_update(
     stage_dir: &Path,
     config: &Config,
     verified: VerifiedSystemMetadata,
+    raw: Option<(UpdateOwner, crate::update::state_writers::WriterDrain)>,
 ) -> Result<SystemPendingUpdate> {
     let record = read_stage_record(stage_dir)?
         .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
@@ -1542,7 +1559,8 @@ fn install_staged_update(
             Some("extracting staged system update payload".to_string()),
         ),
     )?;
-    let manifest = extract_and_verify_system_bundle(&mut archive, stage_dir, &latest)?;
+    let (manifest, raw_images) =
+        extract_and_verify_system_bundle(&mut archive, stage_dir, &latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
 
     write_update_progress(
@@ -1551,7 +1569,21 @@ fn install_staged_update(
     )?;
 
     if !manifest.raw_images.is_empty() {
-        return install_raw_image_update(stage_dir, &manifest, &payload_dir, config);
+        let images = raw_images.ok_or_else(|| {
+            AppError::Internal("authenticated raw images were not retained".into())
+        })?;
+        let (owner, writers) = raw.ok_or_else(|| {
+            AppError::Internal("raw install requires retained owner and writer drain".into())
+        })?;
+        return install_raw_image_update(
+            stage_dir,
+            &manifest,
+            &payload_dir,
+            config,
+            images,
+            owner,
+            writers,
+        );
     }
 
     let install_boot_id = current_boot_id()?;
@@ -1629,7 +1661,112 @@ fn install_raw_image_update(
     manifest: &SystemManifest,
     _payload_dir: &Path,
     config: &Config,
+    images: [PublicSnapshot; 2],
+    owner: UpdateOwner,
+    writers: crate::update::state_writers::WriterDrain,
 ) -> Result<SystemPendingUpdate> {
+    validate_raw_install(config, manifest)?;
+    retire_stale_prepared_ticket()?;
+
+    let staging = Path::new(RAW_PRIVATE_STAGING);
+    let mountpoint = staging.join("mount");
+    let ssh_roots = staging.join("ssh");
+    ensure_private_directory(staging, true)?;
+    ensure_private_directory(&mountpoint, true)?;
+    ensure_private_directory(&ssh_roots, true)?;
+    if fs::read_dir(&mountpoint)?.next().is_some() || fs::read_dir(&ssh_roots)?.next().is_some() {
+        return Err(AppError::Conflict(
+            "raw capture staging is not empty; recovery evidence was retained".into(),
+        ));
+    }
+    let capsules = ensure_private_directory(Path::new(RAW_CAPSULE_DIR), false)?;
+
+    let boot = raw_image(manifest, "BOOT")?;
+    let rootfs = raw_image(manifest, "ROOTFS")?;
+    let sizes = [boot.size, rootfs.size];
+    let sha256 = [decode_sha256(&boot.sha256)?, decode_sha256(&rootfs.sha256)?];
+    let image_files = [images[0].file().try_clone()?, images[1].file().try_clone()?];
+    let raw_images = RawImages {
+        files: [images[0].file().try_clone()?, images[1].file().try_clone()?],
+        sizes,
+        sha256,
+    };
+
+    let helper = PinnedSshHelper::embedded(staging)
+        .map_err(|error| AppError::Internal(format!("pinned SSH helper unavailable: {error}")))?;
+    let mut seed = [0_u8; 16];
+    OsRng.fill_bytes(&mut seed);
+    if seed == [0; 16] {
+        seed[0] = 1;
+    }
+    let transfer = TransferContext::new(seed, &manifest.version, sizes)
+        .map_err(|error| AppError::Internal(format!("raw transfer context invalid: {error}")))?;
+    let hostname = fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "nanokvm".to_string());
+    let mut image = raw_capture::SandboxImage {
+        helper: &helper,
+        images: &image_files,
+        transfer: &transfer,
+        mountpoint: &mountpoint,
+        ssh_roots: &ssh_roots,
+        hostname: &hostname,
+    };
+    let target_app = manifest
+        .required_app_version
+        .clone()
+        .unwrap_or_else(current_app_version);
+    let request = CaptureRequest {
+        source_root: Path::new("/"),
+        private_staging: staging,
+        capsule_directory: &capsules,
+        config,
+        working_dir: Path::new("/etc/kvm"),
+        config_path: Path::new("/etc/kvm/server.yaml"),
+        target_version: &manifest.version,
+        target_app_version: &target_app,
+        target: &manifest.target,
+        boot_image_sha256: sha256[0],
+        rootfs_image_sha256: sha256[1],
+        source_boot: BootId::parse(&current_boot_id()?)
+            .map_err(|_| AppError::Internal("invalid kernel boot ID".into()))?,
+        device_id: crate::update::restore_capsule::ticket::device_id()
+            .map_err(|error| AppError::Internal(format!("device identity unavailable: {error}")))?,
+    };
+    let publish = |ticket: &RestoreTicket| -> Result<()> {
+        Store::open_boot()
+            .and_then(|mut store| store.publish_prepared(ticket))
+            .map_err(|error| {
+                AppError::Internal(format!("prepared ticket was not published: {error}"))
+            })
+    };
+    let send = move |transaction: [u8; 16], images: RawImages| -> Result<()> {
+        let handoff = owner.prepare_raw_handoff(transaction, images, writers)?;
+        RawSender::connect_broker()
+            .map_err(|error| AppError::Conflict(format!("raw installer is not available: {error}")))?
+            .send(handoff)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "the raw installer did not take update {:032x} ({error}); check its state, do not resubmit",
+                    u128::from_be_bytes(transaction)
+                ))
+            })
+    };
+    let ticket = submit_raw_capture(&request, &mut image, raw_images, publish, send)?;
+    Ok(SystemPendingUpdate {
+        version: ticket.target_version().to_string(),
+        target: manifest.target.clone(),
+        backup_id: format!("raw-{:032x}", u128::from_be_bytes(ticket.transaction_id())),
+        installed_at: now_unix_seconds(),
+        requires_reboot: true,
+        file_count: 0,
+        install_boot_id: Some(current_boot_id()?),
+    })
+}
+
+fn validate_raw_install(config: &Config, manifest: &SystemManifest) -> Result<()> {
     if !config.security.allow_raw_system_updates {
         return Err(AppError::Forbidden(
             "raw partition system updates are disabled".to_string(),
@@ -1640,15 +1777,80 @@ fn install_raw_image_update(
             "raw partition system updates cannot mix file installs".to_string(),
         ));
     }
+    Ok(())
+}
 
-    // Temporary development barrier, NOT the final raw-update implementation.
-    // S01 no longer imports plaintext p3 preserve state. The old detached shell
-    // writer cannot retain authenticated descriptors/ticket/restore authority,
-    // so never publish its marker or start partition writes. Re-enable raw only
-    // through the composed authenticated writer/early-restore lifecycle.
-    Err(AppError::Conflict(
-        "raw installation is unavailable in this development build: authenticated writer/restore integration is incomplete; no partition write started".into(),
-    ))
+fn retire_stale_prepared_ticket() -> Result<()> {
+    let mut store = Store::open_boot()
+        .map_err(|error| AppError::Internal(format!("raw ticket store unavailable: {error}")))?;
+    retire_prepared_ticket(&mut store, Path::new(RAW_CAPSULE_DIR))
+}
+
+fn retire_prepared_ticket(store: &mut Store, capsule_directory: &Path) -> Result<()> {
+    let Some(ticket) = store
+        .load()
+        .map_err(|error| AppError::Internal(format!("raw ticket state is unreadable: {error}")))?
+    else {
+        return Ok(());
+    };
+    if ticket.phase() != Phase::Prepared {
+        return Ok(());
+    }
+    store.abandon_prepared(&ticket).map_err(|error| {
+        AppError::Internal(format!("stale raw ticket was not retired: {error}"))
+    })?;
+    let capsule = capsule_directory.join(format!(
+        "{:032x}.capsule",
+        u128::from_be_bytes(ticket.transaction_id())
+    ));
+    match fs::remove_file(&capsule) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path = %capsule.display(), %error, "stale raw capsule was not removed");
+        }
+    }
+    Ok(())
+}
+
+fn submit_raw_capture(
+    request: &CaptureRequest<'_>,
+    image: &mut impl TargetImage,
+    raw_images: RawImages,
+    publish: impl FnOnce(&RestoreTicket) -> Result<()>,
+    send: impl FnOnce([u8; 16], RawImages) -> Result<()>,
+) -> Result<RestoreTicket> {
+    let cancel = AtomicBool::new(false);
+    let captured = raw_capture::capture(request, image, &cancel)
+        .map_err(|error| AppError::Internal(format!("raw capture failed: {error}")))?;
+    let ticket = captured.into_ticket();
+    publish(&ticket)?;
+    send(ticket.transaction_id(), raw_images)?;
+    Ok(ticket)
+}
+
+fn raw_image<'a>(manifest: &'a SystemManifest, label: &str) -> Result<&'a SystemManifestRawImage> {
+    manifest
+        .raw_images
+        .iter()
+        .find(|image| image.label == label)
+        .ok_or_else(|| AppError::BadRequest("raw manifest is missing an image label".into()))
+}
+
+fn ensure_private_directory(path: &Path, on_root: bool) -> Result<fs::File> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o777 != 0o700
+        || (on_root && metadata.dev() != fs::metadata("/")?.dev())
+    {
+        return Err(AppError::Internal(
+            "raw capture directory is not private protected storage".into(),
+        ));
+    }
+    Ok(fs::File::open(path)?)
 }
 
 #[cfg(test)]
@@ -2778,6 +2980,18 @@ fn validate_sha256_hex(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn decode_sha256(value: &str) -> Result<[u8; 32]> {
+    validate_sha256_hex(value)?;
+    let mut result = [0_u8; 32];
+    for (byte, pair) in result.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+    }
+    Ok(result)
+}
+
 fn validate_text_field(name: &str, value: &str, max_len: usize) -> Result<()> {
     if value.is_empty()
         || value.len() > max_len
@@ -3903,38 +4117,11 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_authenticated_raw_install_refuses_before_any_path_access_or_launch() {
-        let temp = tempfile::tempdir().unwrap();
-        let stage = temp.path().join("staging-must-not-be-created");
-        let payload = temp.path().join("payload-must-not-be-read");
-        let retained = temp.path().join("old-recovery");
-        fs::write(&retained, b"retain existing recovery evidence").unwrap();
-        let mut config = Config::default();
-        config.security.allow_raw_system_updates = true;
-        let result = install_raw_image_update(&stage, &valid_raw_manifest(), &payload, &config);
-        assert!(matches!(result, Err(AppError::Conflict(message))
-            if message.contains("authenticated writer/restore integration is incomplete")
-                && message.contains("no partition write started")));
-        assert!(!stage.exists());
-        assert!(!payload.exists());
-        assert_eq!(
-            fs::read(retained).unwrap(),
-            b"retain existing recovery evidence"
-        );
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
-    }
-
-    #[test]
     fn raw_install_barrier_keeps_existing_configuration_permission_gate() {
         let mut config = Config::default();
         config.security.allow_raw_system_updates = false;
         assert!(matches!(
-            install_raw_image_update(
-                Path::new("/not-opened"),
-                &valid_raw_manifest(),
-                Path::new("/not-opened"),
-                &config
-            ),
+            validate_raw_install(&config, &valid_raw_manifest()),
             Err(AppError::Forbidden(_))
         ));
     }
@@ -3951,14 +4138,157 @@ mod tests {
             sha256: "a".repeat(64),
         });
         assert!(matches!(
-            install_raw_image_update(
-                Path::new("/not-opened"),
-                &manifest,
-                Path::new("/not-opened"),
-                &config
-            ),
+            validate_raw_install(&config, &manifest),
             Err(AppError::BadRequest(_))
         ));
+    }
+    #[test]
+    fn a_stale_prepared_ticket_is_abandoned_and_its_exact_capsule_removed() {
+        use crate::update::restore_capsule::{
+            prepare_capsule,
+            ticket::{Binding, BootId, Phase, RestoreTicket, Store},
+        };
+        use std::io::Cursor;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let capsules = tempfile::tempdir().unwrap();
+        let mut store = Store::open_fixture(root.path()).unwrap();
+        let plaintext = b"fixture".repeat(128);
+        let mut encrypted = Vec::new();
+        let secret = prepare_capsule(
+            "0.3.0-raw.13",
+            plaintext.len() as u64,
+            &mut Cursor::new(&plaintext),
+            &mut encrypted,
+        )
+        .unwrap();
+        let ticket = RestoreTicket::prepared(
+            secret,
+            Binding {
+                source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                device_id: [1; 32],
+                capsule_sha256: Sha256::digest(&encrypted).into(),
+                boot_image_sha256: [2; 32],
+                rootfs_image_sha256: [3; 32],
+                target_app_version: "2.0.43".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        )
+        .unwrap();
+        store.publish_prepared(&ticket).unwrap();
+        let capsule = capsules.path().join(format!(
+            "{:032x}.capsule",
+            u128::from_be_bytes(ticket.transaction_id())
+        ));
+        std::fs::write(&capsule, b"stale ciphertext").unwrap();
+        retire_prepared_ticket(&mut store, capsules.path()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Abandoned);
+        assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn raw_capture_publishes_one_prepared_ticket_then_sends_the_same_transaction_and_images() {
+        use crate::update::{
+            raw_capture::{self, CaptureRequest, TargetImage},
+            raw_install_lease::RawImages,
+            restore_accounts,
+            restore_capsule::ticket::{BootId, Phase},
+            restore_identity::{
+                IdentityCheckedRestore,
+                tests::{CONFIG_PATH, CWD, fixture, signed_accounts},
+            },
+        };
+        use std::{
+            cell::RefCell, fs::File, io::Write, os::unix::fs::PermissionsExt, path::Path,
+            sync::atomic::AtomicBool,
+        };
+
+        #[derive(Default)]
+        struct Image;
+        impl TargetImage for Image {
+            fn signed_accounts(
+                &mut self,
+                _: &AtomicBool,
+            ) -> std::result::Result<restore_accounts::SignedAccounts, raw_capture::CaptureError>
+            {
+                let encoded = restore_accounts::encode(&signed_accounts()).unwrap();
+                Ok(restore_accounts::decode(&encoded).unwrap())
+            }
+            fn check_ssh(
+                &mut self,
+                _: &mut IdentityCheckedRestore,
+                _: &AtomicBool,
+            ) -> std::result::Result<(), raw_capture::CaptureError> {
+                Ok(())
+            }
+        }
+
+        let (source, config) = fixture();
+        let private = tempfile::tempdir().unwrap();
+        let capsules = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(capsules.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = File::open(capsules.path()).unwrap();
+        let mut first = tempfile::tempfile().unwrap();
+        first.write_all(b"boot image").unwrap();
+        let mut second = tempfile::tempfile().unwrap();
+        second.write_all(b"rootfs image").unwrap();
+        let raw_images = RawImages {
+            files: [first, second],
+            sizes: [10, 12],
+            sha256: [[1; 32], [2; 32]],
+        };
+        let published = RefCell::new(None);
+        let sent = RefCell::new(None);
+        let target_app = "2.0.43";
+        let request = CaptureRequest {
+            source_root: source.path(),
+            private_staging: private.path(),
+            capsule_directory: &directory,
+            config: &config,
+            working_dir: Path::new(CWD),
+            config_path: Path::new(CONFIG_PATH),
+            target_version: "0.3.0-raw.13",
+            target_app_version: target_app,
+            target: "sg2002-licheervnano-sd",
+            boot_image_sha256: [2; 32],
+            rootfs_image_sha256: [3; 32],
+            source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            device_id: [1; 32],
+        };
+        let ticket = submit_raw_capture(
+            &request,
+            &mut Image,
+            raw_images,
+            |ticket| {
+                *published.borrow_mut() = Some((
+                    ticket.transaction_id(),
+                    ticket.target_version().to_string(),
+                    ticket.phase(),
+                ));
+                Ok(())
+            },
+            |transaction, images| {
+                *sent.borrow_mut() = Some((transaction, images.sizes, images.sha256));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let (transaction, version, phase) = published.borrow().clone().unwrap();
+        assert_eq!(transaction, ticket.transaction_id());
+        assert_eq!(version, "0.3.0-raw.13");
+        assert_eq!(phase, Phase::Prepared);
+        let (sent_transaction, sizes, sha256) = sent.borrow().clone().unwrap();
+        assert_eq!(sent_transaction, transaction);
+        assert_eq!(sizes, [10, 12]);
+        assert_eq!(sha256, [[1; 32], [2; 32]]);
+        assert_eq!(
+            std::fs::read_dir(capsules.path()).unwrap().count(),
+            1,
+            "the sealed capsule stays on the data partition"
+        );
+        assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
     }
 
     #[test]

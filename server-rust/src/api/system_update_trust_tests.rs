@@ -248,7 +248,7 @@ async fn forged_stage_cannot_replace_authenticated_latest_before_payload_access(
     };
     write_stage_record(stage.path(), &record).unwrap();
     let before = fs::read(stage.path().join(SYSTEM_STAGE_RECORD)).unwrap();
-    let error = install_staged_update(stage.path(), &fixture.config, verified).unwrap_err();
+    let error = install_staged_update(stage.path(), &fixture.config, verified, None).unwrap_err();
     assert!(
         matches!(error, AppError::BadRequest(ref message) if message.starts_with("staged system update differs from authenticated metadata"))
     );
@@ -512,6 +512,8 @@ fn cache_reuse_requires_archive_digest_not_just_same_size_and_valid_extraction()
     downloaded.publish(&latest.name).unwrap();
     let mut snapshot = freeze_system_archive(downloaded.file_mut(), &stage_path, &latest).unwrap();
     let extracted = extract_and_verify_system_bundle(&mut snapshot, &stage_path, &latest).unwrap();
+    let (extracted, raw_images) = extracted;
+    assert!(raw_images.is_none());
     assert_eq!(extracted, manifest);
     write_stage_record(
         &stage_path,
@@ -557,6 +559,8 @@ fn system_extraction_uses_frozen_archive_despite_source_inode_and_name_tampering
     fs::rename(&source_path, stage_path.join("old-source")).unwrap();
     fs::write(&source_path, &tamper).unwrap();
     let actual = extract_and_verify_system_bundle(&mut snapshot, &stage_path, &latest).unwrap();
+    let (actual, raw_images) = actual;
+    assert!(raw_images.is_none());
     assert_eq!(actual, manifest);
     assert!(freeze_system_archive(&mut source, &stage_path, &latest).is_err());
     assert_eq!(fs::read(stage_path.join("old-source")).unwrap(), tamper);

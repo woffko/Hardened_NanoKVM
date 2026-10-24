@@ -72,6 +72,12 @@ impl PublicSnapshot {
         )
     }
 
+    /// The checked anonymous O_RDONLY image. Descriptor ownership stays here;
+    /// callers may duplicate it but never receive a writable alias.
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
+
     fn capture_hashed(
         directory: &StageDirectory,
         source: &mut impl Read,
