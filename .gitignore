@@ -33,3 +33,5 @@ support/sg2002/kvm_vision_test/CMakeLists.txt
 support/sg2002/additional/original
 kvmapp/server/dl_lib
 kvmapp/kvm_system/kvm_system
+# Python bytecode caches of the host scripts
+__pycache__/

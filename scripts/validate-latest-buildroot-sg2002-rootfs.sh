@@ -277,7 +277,7 @@ readelf -rW "$KVM_SYSTEM" >/dev/null 2>&1 || \
 readelf -A "$KVM_SYSTEM" 2>/dev/null | grep -Fq 'v0p7' || \
 	die "kvm_system is not the expected RISC-V v0p7 binary"
 
-python3 "$ROOT/scripts/verify-app-recovery-rootfs.py" "$IMAGE" || \
+python3 -B "$ROOT/scripts/verify-app-recovery-rootfs.py" "$IMAGE" || \
 	die "independent app recovery does not match its protected rootfs/backend binding"
 python3 -B "$ROOT/scripts/verify-native-runtime-rootfs.py" "$IMAGE" || \
 	die "independent native runtimes do not match their protected rootfs/backend bindings"
@@ -290,12 +290,16 @@ debugfs -R "dump /etc/init.d/S95nanokvm $ETC_S95" "$IMAGE" >/dev/null 2>&1 || \
 	die "could not extract installed S95nanokvm"
 cmp -s "$KVMAPP_S95" "$ETC_S95" || \
 	die "packaged and installed S95nanokvm differ"
-grep -Fq 'KVM_SYSTEM_PID_FILE=/tmp/kvm-system.pid' "$KVMAPP_S95" || \
-	die "S95nanokvm does not track the kvm_system PID"
-grep -Fq 'find_kvm_system_pids()' "$KVMAPP_S95" || \
-	die "S95nanokvm lacks exact kvm_system process discovery"
-grep -Fq 'adopt_single_kvm_system_process()' "$KVMAPP_S95" || \
-	die "S95nanokvm lacks orphan kvm_system adoption"
+# kvm_system is owned by the native broker: S95 asks it whether kvm_system
+# runs and starts it through it. No PID file, process scan or orphan adoption.
+grep -Fq '"$NATIVE_CTL" kvm-running' "$KVMAPP_S95" || \
+	die "S95nanokvm does not ask the native broker whether kvm_system runs"
+grep -Fq '"$NATIVE_CTL" ensure-kvm' "$KVMAPP_S95" || \
+	die "S95nanokvm does not start kvm_system through the native broker"
+for legacy in KVM_SYSTEM_PID_FILE find_kvm_system_pids adopt_single_kvm_system_process; do
+	grep -Fq "$legacy" "$KVMAPP_S95" && \
+		die "S95nanokvm still tracks or adopts kvm_system by PID ($legacy)"
+done
 grep -Fq 'kvm_system_is_running || return 1' "$KVMAPP_S95" || \
 	die "system-update boot health does not require kvm_system"
 
