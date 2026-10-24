@@ -36,6 +36,21 @@ verify_sha256 "$PATCH_DIR/0002-hostapd-2.12-minimal.patch" \
 verify_sha256 "$PATCH_DIR/0003-hostapd-disable-11be.patch" \
 	52caa5ffca51d8406c2896857c519667f1a7acec587b53f332298cef57be2ade \
 	"hostapd 11be removal patch"
+verify_sha256 "$PATCH_DIR/0004-libopenssl-3.6.5.patch" \
+	a30546a333bf87cc2db943d98606b655d4c711b57b3df380b2ae05bddcd70b0b \
+	"libopenssl 3.6.5 patch"
+verify_sha256 "$PATCH_DIR/0005-openssh-10.6p1.patch" \
+	c624624b1ab42fbddc0d8e4dd2782507dac8be7c0a93637674e07742aa020e00 \
+	"OpenSSH 10.6p1 patch"
+verify_sha256 "$PATCH_DIR/0006-expat-2.9.0.patch" \
+	87a0870bc8dc7453d6ca894d2e3556e9577d140a2cfa8cc7b658702376047d9d \
+	"expat 2.9.0 patch"
+verify_sha256 "$PATCH_DIR/0007-libcurl-8.23.0.patch" \
+	6a21eb4ca59c9374545b5fdded76149fa4ada7574792a4e81320c500a80810c4 \
+	"libcurl 8.23.0 patch"
+verify_sha256 "$PATCH_DIR/0008-wpa_supplicant-2.12.patch" \
+	f0c224214e34a3018de7a36fd32bbc97b5efefff3d39e1c3980fb6143f47ff4e \
+	"wpa_supplicant 2.12 patch"
 
 if [ -e "$OUTPUT_DIR" ]; then
 	[ -f "$OUTPUT_DIR/.hardened-security-backports" ] || {
@@ -43,7 +58,11 @@ if [ -e "$OUTPUT_DIR" ]; then
 		exit 1
 	}
 	grep -qx 'buildroot=2026.05.1' "$OUTPUT_DIR/.hardened-security-backports"
-	grep -qx 'openssh=10.5p1' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'openssh=10.6p1' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'libopenssl=3.6.5' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'expat=2.9.0' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'libcurl=8.23.0' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'wpa_supplicant=2.12' "$OUTPUT_DIR/.hardened-security-backports"
 	grep -qx 'hostapd=2.12-no-11be' "$OUTPUT_DIR/.hardened-security-backports"
 	for patch_file in "$PATCH_DIR"/*.patch; do
 		grep -Fqx "$(sha256sum "$patch_file")" "$OUTPUT_DIR/.hardened-security-backports" || {
@@ -80,13 +99,21 @@ verify_sha256 "$SOURCE/package/hostapd/0001-RADIUS-Drop-pending-request-only-whe
 verify_sha256 "$SOURCE/package/hostapd/0002-RADIUS-Fix-pending-request-dropping.patch" \
 	77c86463807cda922ed4da9762391f14fc3648454d01d358f743158e0687b1dc \
 	"obsolete hostapd patch 2"
+verify_sha256 "$SOURCE/package/wpa_supplicant/0001-Revert-Mark-authorization-completed-on-driver-indica.patch" \
+	632328b5c1ac39c2e5cfaa6deac9c4afb2c21c25e21f0ba9d7e8a5d8fb0612d0 \
+	"obsolete wpa_supplicant patch 1"
+verify_sha256 "$SOURCE/package/wpa_supplicant/0002-macsec_linux-Hardware-offload-requires-Linux-headers.patch" \
+	869e463a82d20a0cab51d6c2c04a62fd11f1c77941941eb8d96061c2e0f2aa3f \
+	"obsolete wpa_supplicant patch 2"
 
 for patch_file in "$PATCH_DIR"/*.patch; do
 	patch -d "$SOURCE" -p1 --forward --batch -F 0 -i "$patch_file"
 done
 rm -f \
 	"$SOURCE/package/hostapd/0001-RADIUS-Drop-pending-request-only-when-accepting-the-response.patch" \
-	"$SOURCE/package/hostapd/0002-RADIUS-Fix-pending-request-dropping.patch"
+	"$SOURCE/package/hostapd/0002-RADIUS-Fix-pending-request-dropping.patch" \
+	"$SOURCE/package/wpa_supplicant/0001-Revert-Mark-authorization-completed-on-driver-indica.patch" \
+	"$SOURCE/package/wpa_supplicant/0002-macsec_linux-Hardware-offload-requires-Linux-headers.patch"
 
 build_verify_security_recipes "$SOURCE" || exit 1
 
@@ -103,7 +130,11 @@ ln -s "$SHARED_DL_DIR" "$SOURCE/dl"
 {
 	printf 'buildroot=2026.05.1\n'
 	printf 'archive_sha256=%s\n' "$EXPECTED_ARCHIVE_SHA256"
-	printf 'openssh=10.5p1\n'
+	printf 'openssh=10.6p1\n'
+	printf 'libopenssl=3.6.5\n'
+	printf 'expat=2.9.0\n'
+	printf 'libcurl=8.23.0\n'
+	printf 'wpa_supplicant=2.12\n'
 	printf 'hostapd=2.12-no-11be\n'
 	sha256sum "$PATCH_DIR"/*.patch
 } > "$SOURCE/.hardened-security-backports"

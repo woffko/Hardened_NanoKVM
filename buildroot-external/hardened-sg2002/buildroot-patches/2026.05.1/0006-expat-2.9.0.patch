@@ -1,0 +1,32 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/expat: update to 2.9.0
+
+expat 2.8.4 (2026-08-31) fixes CVE-2026-66046/76641 (quadratic attribute
+lookups), CVE-2026-76957 (encoding callback re-entry) and CVE-2026-76956
+(inverted getentropy() return); 2.9.0 (2026-10-05) adds CVE-2026-102633
+(32-bit realloc overflow). 2.9.0 is taken because two independent pins exist
+for it (Buildroot master SHA-256, Alpine SHA-512), none for 2.8.4. On this
+image only avahi links expat, for its root-owned service files.
+
+diff --git a/package/expat/expat.hash b/package/expat/expat.hash
+--- a/package/expat/expat.hash
++++ b/package/expat/expat.hash
+@@ -1,4 +1,4 @@
+-# From https://github.com/libexpat/libexpat/releases/tag/R_2_8_2
+-sha256  3ad89b8588e6644bd4e49981480d48b21289eebbcd4f0a1a4afb1c29f99b6ab4  expat-2.8.2.tar.xz
++# From https://github.com/libexpat/libexpat/releases/tag/R_2_9_0
++sha256  1e6371862cc31999b368c3b89b49994f0677e1bab5f1b2b85ae3741f5d803051  expat-2.9.0.tar.xz
+ # Locally calculated
+ sha256  31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87  COPYING
+diff --git a/package/expat/expat.mk b/package/expat/expat.mk
+--- a/package/expat/expat.mk
++++ b/package/expat/expat.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-EXPAT_VERSION = 2.8.2
++EXPAT_VERSION = 2.9.0
+ EXPAT_SITE = https://github.com/libexpat/libexpat/releases/download/R_$(subst .,_,$(EXPAT_VERSION))
+ EXPAT_SOURCE = expat-$(EXPAT_VERSION).tar.xz
+ EXPAT_INSTALL_STAGING = YES

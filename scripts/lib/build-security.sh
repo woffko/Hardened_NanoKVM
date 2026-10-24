@@ -127,8 +127,24 @@ build_assert_no_private_keys() {
 
 build_verify_security_recipes() {
 	security_source=$1
-	grep -qx 'OPENSSH_VERSION_MAJOR = 10.5' "$security_source/package/openssh/openssh.mk" || {
+	grep -qx 'OPENSSH_VERSION_MAJOR = 10.6' "$security_source/package/openssh/openssh.mk" || {
 		echo "security source has an unexpected OpenSSH version" >&2
+		return 1
+	}
+	grep -qx 'LIBOPENSSL_VERSION = 3.6.5' "$security_source/package/libopenssl/libopenssl.mk" || {
+		echo "security source has an unexpected libopenssl version" >&2
+		return 1
+	}
+	grep -qx 'EXPAT_VERSION = 2.9.0' "$security_source/package/expat/expat.mk" || {
+		echo "security source has an unexpected expat version" >&2
+		return 1
+	}
+	grep -qx 'LIBCURL_VERSION = 8.23.0' "$security_source/package/libcurl/libcurl.mk" || {
+		echo "security source has an unexpected libcurl version" >&2
+		return 1
+	}
+	grep -qx 'WPA_SUPPLICANT_VERSION = 2.12' "$security_source/package/wpa_supplicant/wpa_supplicant.mk" || {
+		echo "security source has an unexpected wpa_supplicant version" >&2
 		return 1
 	}
 	grep -qx 'HOSTAPD_VERSION = 2.12' "$security_source/package/hostapd/hostapd.mk" || {

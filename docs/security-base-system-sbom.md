@@ -30,3 +30,26 @@ and Buildroot applies them after its own (`BR2_GLOBAL_PATCH_DIR`).
 Not in the base image: Tailscale (installed on demand; `scripts/verify-tailscale-package-signature.py` pins a package by Tailscale's own signature chain), dnsmasq, dropbear, chrony, Python.
 
 Sources read on 2026-10-23: openssh.org release notes (10.5, 10.6); openssl-library.org vulnerabilities; w1.fi/security 2026-1…2026-5; the Debian security tracker for busybox (CVE-2026-29004, -26157, -26158, -38752, -88833); curl.se vuln-8.21.0; kernel.org releases; Buildroot 2026.05.1 `package/*/` patch lists; the distribution trackers for avahi, expat and musl where the upstream page gave no version range. Where only secondary sources were found (expat 2.8.4, the avahi patch-to-CVE mapping, the Debian status of CVE-2026-29004 against 1.38.0), the table says so.
+
+## 2026-10-24 refresh of the Buildroot security source
+
+Version bumps as Buildroot backport patches 0004–0008 in
+`buildroot-external/hardened-sg2002/buildroot-patches/2026.05.1/`, pinned by
+`scripts/prepare-buildroot-2026.05.1-security-source.sh` and required by
+`scripts/test-latest-buildroot-security-policy.sh`:
+
+| Package | From | To | Source hash confirmed by |
+| --- | --- | --- | --- |
+| libopenssl | 3.6.3 + board OCSP patch | 3.6.5 | upstream `openssl-3.6.5.tar.gz.sha256`; Buildroot master |
+| openssh | 10.5p1 | 10.6p1 | release-10.6 notes (base64 SHA256 → hex); Buildroot master; Fedora |
+| expat | 2.8.2 | 2.9.0 (2.8.4's fixes plus CVE-2026-102633, 32-bit only) | Buildroot master (SHA-256); Alpine (SHA-512) |
+| libcurl | 8.21.0 | 8.23.0 | PGP signature, key 27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2; Buildroot master; Fedora |
+| wpa_supplicant | 2.11 + board PMKSA patch | 2.12 | PGP signature, key EC4AA0A991A5F2464582D52D2B6EF432EFC895FA; Buildroot master; Gentoo |
+
+The board patches `libopenssl/3.6.3/0001-CVE-2026-54876…` and
+`wpa_supplicant/2.11/0001-…PMKSA…` are removed: both fixes are in the new
+versions. Buildroot's own libopenssl patches apply to 3.6.5 unchanged; its two
+wpa_supplicant 2.11 patches are obsolete in 2.12 and the preparation script
+removes them, as upstream master did. The refreshed source tree is prepared
+as `build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2`; the device
+runs the 2026-10-23 set until a rootfs is built from it and accepted.

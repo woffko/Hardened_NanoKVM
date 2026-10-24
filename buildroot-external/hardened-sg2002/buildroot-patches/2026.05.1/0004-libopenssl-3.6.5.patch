@@ -1,0 +1,34 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/libopenssl: update to 3.6.5
+
+Backport the OpenSSL version and source hash from upstream Buildroot master
+(2026-10). 3.6.4 (2026-08-25) and 3.6.5 (2026-09-29) fix the advisories listed
+in docs/security-base-system-sbom.md, among them CVE-2026-54876 (the OCSP
+response leak the board patch libopenssl/3.6.3/0001 carried until now) and
+CVE-2026-54872 (generic EC scalar-multiplication timing). The hash equals the
+upstream openssl-3.6.5.tar.gz.sha256 asset and the tarball downloaded on
+2026-10-24. Buildroot's three package patches still apply to 3.6.5.
+
+diff --git a/package/libopenssl/libopenssl.hash b/package/libopenssl/libopenssl.hash
+--- a/package/libopenssl/libopenssl.hash
++++ b/package/libopenssl/libopenssl.hash
+@@ -1,5 +1,5 @@
+-# From https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz.sha256
+-sha256  243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1  openssl-3.6.3.tar.gz
++# From https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz.sha256
++sha256  a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98  openssl-3.6.5.tar.gz
+ 
+ # License files
+ sha256  7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a  LICENSE.txt
+diff --git a/package/libopenssl/libopenssl.mk b/package/libopenssl/libopenssl.mk
+--- a/package/libopenssl/libopenssl.mk
++++ b/package/libopenssl/libopenssl.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-LIBOPENSSL_VERSION = 3.6.3
++LIBOPENSSL_VERSION = 3.6.5
+ LIBOPENSSL_SITE = https://github.com/openssl/openssl/releases/download/openssl-$(LIBOPENSSL_VERSION)
+ LIBOPENSSL_SOURCE = openssl-$(LIBOPENSSL_VERSION).tar.gz
+ LIBOPENSSL_LICENSE = Apache-2.0
