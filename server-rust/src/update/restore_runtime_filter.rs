@@ -77,6 +77,14 @@ pub(super) fn compile() -> Result<BpfProgram, SandboxError> {
         libc::SYS_dup3,
         (0..=2).map(|fd| equals(1, fd)).collect::<Result<_, _>>()?,
     );
+    // OpenSSH raises its /dev/null descriptor to REEXEC_MIN_FREE_FD (5) with
+    // dup() before the syntax check. Restrict the source descriptor to the
+    // standard streams and that reserved range; no arbitrary inherited fd can
+    // be duplicated.
+    rules.insert(
+        libc::SYS_dup,
+        (0..=5).map(|fd| equals(0, fd)).collect::<Result<_, _>>()?,
+    );
     #[cfg(target_arch = "x86_64")]
     rules.insert(
         libc::SYS_dup2,
