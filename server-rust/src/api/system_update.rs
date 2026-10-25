@@ -712,7 +712,11 @@ async fn install_owned(
         .ok()
         .flatten()
         .map(|staged| staged.version);
-    let config = Config::read()?;
+    // Use the running identity, not a fresh YAML read: Config::read() does not
+    // materialize a session secret from session_secret_file. Raw capture
+    // compares the running secret with the on-disk identity and otherwise
+    // refuses an update on a valid installation whose YAML secret is empty.
+    let config = state.config.clone();
     let receipt = {
         let store =
             MetadataStore::open().map_err(|error| AppError::BadRequest(error.to_string()))?;
