@@ -382,7 +382,7 @@ fn supervise(
 ) -> Result<Zeroizing<Vec<u8>>> {
     let started = Instant::now();
     cancelled(cancel)?;
-    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    command.stdout(Stdio::piped()).stderr(Stdio::inherit());
     let child = OwnedChild(command.spawn().map_err(|_| JobError::Process)?);
     // Crucial: Command can own stdin/other aliases even after successful spawn.
     drop(command);
