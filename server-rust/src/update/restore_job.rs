@@ -382,7 +382,7 @@ fn supervise(
 ) -> Result<Zeroizing<Vec<u8>>> {
     let started = Instant::now();
     cancelled(cancel)?;
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
     let child = OwnedChild(command.spawn().map_err(|_| JobError::Process)?);
     // Crucial: Command can own stdin/other aliases even after successful spawn.
     drop(command);
@@ -397,7 +397,6 @@ fn collect(
     output_limit: usize,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let mut stdout = child.0.stdout.take().ok_or(JobError::Process)?;
-    let mut stderr = child.0.stderr.take();
     let flags = fcntl_getfl(&stdout).map_err(|_| JobError::Process)?;
     fcntl_setfl(&stdout, flags | OFlags::NONBLOCK).map_err(|_| JobError::Process)?;
     let mut output = Zeroizing::new(Vec::with_capacity(output_limit));
@@ -435,11 +434,6 @@ fn collect(
         }
         if let Some(status) = status {
             if !status.success() {
-                let mut detail = String::new();
-                if let Some(mut err) = stderr.take() {
-                    let _ = err.read_to_string(&mut detail);
-                }
-                tracing::warn!(status = status.code(), stderr = %detail, "SSH helper failed");
                 return Err(JobError::Native);
             }
             if eof {
