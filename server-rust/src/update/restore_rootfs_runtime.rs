@@ -24,11 +24,13 @@ const DIRECTORIES: [(&str, bool, bool); 7] = [
 const LOADER_CONFIGS: [&str; 2] = ["etc/ld-musl-riscv64.path", "etc/ld-musl-riscv64xthead.path"];
 
 pub(super) fn bind_runtime(source: &File, prepared: &File) -> Result<(), RootfsError> {
+    eprintln!("bind_runtime: source-root");
     let root = source.metadata()?;
     if !root.is_dir() || root.uid() != 0 || root.mode() & 0o7022 != 0 {
         return Err(RootfsError::Layout);
     }
     for (path, required, executable) in DIRECTORIES {
+        eprintln!("bind_runtime: directory={path}");
         let image = open_source(source, path, true)?;
         match image {
             Some(image) => bind_one(prepared, path, image, true, executable)?,
@@ -54,6 +56,7 @@ pub(super) fn bind_runtime(source: &File, prepared: &File) -> Result<(), RootfsE
             }
         }
     }
+    eprintln!("bind_runtime: sshd");
     // Fixed command must resolve to a safe executable in this exact image.
     let executable = open_source(source, "usr/sbin/sshd", false)?
         .ok_or(RootfsError::Layout)?

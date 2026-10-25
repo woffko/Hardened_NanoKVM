@@ -176,15 +176,18 @@ impl RootfsView {
     pub(super) fn bind_ssh_runtime(&self, prepared: &File) -> Result<(), RootfsError> {
         // Private restore tables must already include the signed service users;
         // this validates, never silently normalizes or installs factory passwords.
+        eprintln!("bind_ssh_runtime: accounts");
         let restored = read_accounts(prepared)?;
         let signed = self.accounts()?;
         restore_native::check_for_image(&restored.as_files(), &signed.as_files())
             .map_err(|_| RootfsError::Accounts)?;
+        eprintln!("bind_ssh_runtime: root-login-paths");
         self.check_root_login_paths(&restored.as_files())?;
         // The sandbox created a new mount namespace. Reopen the inherited image
         // mount there, rather than using an old-namespace proc-fd as bind source.
         // The path selects no new authority: exact pinned inode/dev + readonly
         // source flags + retained loop owner must match before any import.
+        eprintln!("bind_ssh_runtime: mount-identity");
         let source =
             restore_fs::open_root(&self.mountpoint, false).map_err(|_| RootfsError::Mount)?;
         let old = self.root.metadata()?;
@@ -203,6 +206,7 @@ impl RootfsView {
         {
             return Err(RootfsError::Mount);
         }
+        eprintln!("bind_ssh_runtime: bind-runtime");
         runtime::bind_runtime(&source, prepared)
     }
 }
