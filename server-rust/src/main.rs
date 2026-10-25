@@ -44,7 +44,6 @@ const BOOT_INIT_SCRIPTS: &[&str] = &[
     "S49ntp",
     "S50avahi-daemon",
     "S50sshd",
-    "S80dnsmasq",
     "S95nanokvm",
 ];
 const KVM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
