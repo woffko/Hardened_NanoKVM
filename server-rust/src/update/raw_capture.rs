@@ -165,6 +165,10 @@ fn run_ssh_checks(
         let result = prepare_sshd_root(restore, &root)
             .map_err(CaptureError::from)
             .and_then(|identity| run(identity, check));
+        if let Err(error) = &result {
+            let stage = ["syntax", "effective", "hostkeys"][index];
+            tracing::warn!(stage, error = %error, "SSH preflight check failed");
+        }
         let removed = fs::remove_dir(&root);
         result?;
         removed?;
