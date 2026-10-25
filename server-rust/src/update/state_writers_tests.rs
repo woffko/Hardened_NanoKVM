@@ -367,6 +367,7 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
             username: "fixture".into(),
             password: "short".into(),
             current_password: None,
+            claim: None,
         })
     };
     assert!(

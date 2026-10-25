@@ -107,6 +107,14 @@ async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>>
     media::secure_device_mounts().await?;
     let config = Config::load()?;
     config.log_runtime_warnings();
+    nanokvm_rust_server::auth::claim::ensure(&config.paths.account_file)?;
+    if config.proto == "https" {
+        tls::ensure_server_cert(
+            &config.cert.crt,
+            &config.cert.key,
+            nanokvm_rust_server::api::vm::tls_names(),
+        )?;
+    }
     #[cfg(all(target_arch = "riscv64", feature = "linked-libkvm"))]
     let boot_support = match nanokvm_rust_server::update::native_bootstrap::prepare_boot_support() {
         Ok(support) => Some(support),

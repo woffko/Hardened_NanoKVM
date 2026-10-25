@@ -1231,7 +1231,7 @@ pub async fn set_tls(
 
 /// Names for a new self-signed certificate: loopback, and the device's host
 /// name with its mDNS name when the name is a valid host label.
-fn tls_names() -> Vec<String> {
+pub fn tls_names() -> Vec<String> {
     let mut names = vec![
         "localhost".to_string(),
         "127.0.0.1".to_string(),

@@ -147,6 +147,16 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// A new full-SD/factory installation starts on HTTPS; an existing config
+    /// keeps its explicit protocol choice.
+    pub fn new_install() -> Self {
+        let mut config = Self::default();
+        config.proto = "https".to_string();
+        config
+    }
+}
+
 impl Default for Port {
     fn default() -> Self {
         Self {
@@ -297,7 +307,7 @@ impl Config {
                 AppError::Config(format!("failed to parse {}: {err}", path.display()))
             })?
         } else {
-            Config::default()
+            Config::new_install()
         };
         config.normalize_legacy_fields();
         config.validate_media_directory()?;
@@ -610,6 +620,18 @@ mod tests {
     #[test]
     fn default_disables_legacy_admin_bootstrap() {
         assert!(!Config::default().security.allow_default_admin);
+    }
+
+    #[test]
+    fn new_install_defaults_to_https_but_an_explicit_http_choice_is_kept() {
+        assert_eq!(Config::new_install().proto, "https");
+        assert_eq!(Config::default().proto, "http");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        fs::write(&path, "proto: http\n").unwrap();
+        assert_eq!(Config::read_path(&path).unwrap().proto, "http");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(Config::read_path(&path).unwrap().proto, "https");
     }
 
     #[test]

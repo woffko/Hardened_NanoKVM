@@ -17,6 +17,7 @@ const LIMIT: Duration = Duration::from_secs(5);
 async fn fixture() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
+    config.proto = "http".to_string();
     config.paths.account_file = dir.path().join("pwd");
     config.paths.session_secret_file = dir.path().join("session_secret");
     let mut state = AppState::new(config.clone()).await.unwrap();

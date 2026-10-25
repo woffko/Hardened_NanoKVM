@@ -75,6 +75,8 @@ pub struct ChangePasswordReq {
     /// first setup has none.
     #[serde(rename = "currentPassword", default)]
     pub current_password: Option<String>,
+    #[serde(default)]
+    pub claim: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,8 +183,13 @@ pub async fn setup_first_account(
     let ChangePasswordReq {
         username,
         password: encoded,
+        claim,
         ..
     } = req;
+    let claim = Zeroizing::new(
+        claim.ok_or_else(|| AppError::Forbidden("first-boot claim token required".to_string()))?,
+    );
+    crate::auth::claim::check(&state.config.paths.account_file, claim.as_str())?;
     let encoded = Zeroizing::new(encoded);
     let password = Zeroizing::new(decode_frontend_password(&encoded)?);
     validate_account_credentials(&username, &password)?;
@@ -194,7 +201,10 @@ pub async fn setup_first_account(
             if state.accounts.exists() {
                 return Err(AppError::Conflict("account already initialized".into()));
             }
-            replace_credentials(&state.accounts, &writer, Change::Setup, username, password).await
+            crate::auth::claim::check(&state.config.paths.account_file, claim.as_str())?;
+            replace_credentials(&state.accounts, &writer, Change::Setup, username, password)
+                .await?;
+            crate::auth::claim::consume(&state.config.paths.account_file)
         })
         .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -259,6 +269,7 @@ pub async fn change_password(
         username,
         password: encoded,
         current_password,
+        claim: _,
     } = req;
     let current = Zeroizing::new(current_password.unwrap_or_default());
     reauthenticate(&state, addr.0.ip(), &username, &current).await?;
@@ -471,6 +482,7 @@ mod tests {
             username: "operator".into(),
             password: NEW_PASSWORD.into(),
             current_password: current.map(str::to_string),
+            claim: None,
         })
     }
 
