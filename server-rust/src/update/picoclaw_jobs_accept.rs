@@ -274,7 +274,22 @@ pub(super) fn decode_source(bytes: &[u8]) -> Result<SourceView<'_>> {
 }
 
 const PLAN_MAGIC: &[u8; 8] = b"NKPPLN01";
+const PLAN_MAGIC_V2: &[u8; 8] = b"NKPPLN02";
 const PLAN_HEADER: usize = 96;
+const PLAN_ASSETS: [&str; 3] = [
+    "AGENT.md",
+    "skills/kvm-control/SKILL.md",
+    "skills/kvm-control/scripts/nanokvm-bridge.sh",
+];
+
+/// One managed workspace asset. `before` binds the exact prior digest (or
+/// absence) chosen during settlement; `desired` is installed atomically.
+pub(super) struct Asset {
+    pub(super) path: String,
+    pub(super) before: Option<[u8; 32]>,
+    pub(super) desired: Zeroizing<Vec<u8>>,
+    pub(super) executable: bool,
+}
 
 /// Credential-bearing desired pair and internal value, chosen once before any
 /// stop or publication so a retry or crash replays the same change. Never
@@ -284,6 +299,16 @@ pub(super) struct Plan {
     pub(super) security: Zeroizing<Vec<u8>>,
     pub(super) internal: Zeroizing<String>,
     pub(super) internal_new: bool,
+    pub(super) pair_write: bool,
+    pub(super) assets: Vec<Asset>,
+}
+
+fn asset_path(path: &str) -> bool {
+    PLAN_ASSETS.contains(&path)
+}
+
+fn asset_executable(path: &str) -> bool {
+    path == "skills/kvm-control/scripts/nanokvm-bridge.sh"
 }
 
 pub(super) fn encode_plan(record: &Record, plan: &Plan) -> Result<Zeroizing<Vec<u8>>> {
@@ -291,17 +316,37 @@ pub(super) fn encode_plan(record: &Record, plan: &Plan) -> Result<Zeroizing<Vec<
     if plan.config.len() > super::super::super::MAX_FILE_BYTES
         || plan.security.len() > super::super::super::MAX_FILE_BYTES
         || !crate::update::picoclaw_token::valid_token(plan.internal.as_str())
+        || plan.assets.len() > PLAN_ASSETS.len()
     {
         return Err(invalid());
     }
-    let size = PLAN_HEADER + plan.config.len() + plan.security.len() + internal.len() + 32;
+    let mut size = PLAN_HEADER
+        .checked_add(plan.config.len())
+        .and_then(|n| n.checked_add(plan.security.len()))
+        .and_then(|n| n.checked_add(internal.len()))
+        .ok_or_else(invalid)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for asset in &plan.assets {
+        if !asset_path(&asset.path)
+            || asset.executable != asset_executable(&asset.path)
+            || asset.desired.len() > crate::update::picoclaw_profile::MAX_PROFILE_BYTES
+            || !seen.insert(asset.path.clone())
+        {
+            return Err(invalid());
+        }
+        size = size
+            .checked_add(2 + asset.path.len() + 1 + 32 + 4 + asset.desired.len())
+            .ok_or_else(invalid)?;
+    }
     let mut bytes = Zeroizing::new(vec![0; PLAN_HEADER]);
     bytes.reserve(size - PLAN_HEADER);
-    bytes[..8].copy_from_slice(PLAN_MAGIC);
+    bytes[..8].copy_from_slice(PLAN_MAGIC_V2);
     bytes[8..16].copy_from_slice(&record.sequence.to_le_bytes());
     bytes[16..32].copy_from_slice(&record.nonce);
     bytes[32..64].copy_from_slice(&record.source);
     bytes[64] = u8::from(plan.internal_new);
+    bytes[65] = plan.assets.len() as u8;
+    bytes[66] = u8::from(plan.pair_write);
     for (offset, length) in [
         (68, plan.config.len()),
         (72, plan.security.len()),
@@ -312,23 +357,44 @@ pub(super) fn encode_plan(record: &Record, plan: &Plan) -> Result<Zeroizing<Vec<
     bytes.extend_from_slice(&plan.config);
     bytes.extend_from_slice(&plan.security);
     bytes.extend_from_slice(internal);
-    let hash = private_digest(b"NanoKVM Pico startup plan v1\0", &bytes);
+    for asset in &plan.assets {
+        let before = asset.before.unwrap_or([0; 32]);
+        bytes.extend_from_slice(&(asset.path.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(asset.path.as_bytes());
+        bytes.push(u8::from(asset.before.is_some()) | (u8::from(asset.executable) << 1));
+        bytes.extend_from_slice(&before);
+        bytes.extend_from_slice(&(asset.desired.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&asset.desired);
+    }
+    let hash = private_digest(b"NanoKVM Pico startup plan v2\0", &bytes);
     bytes.extend_from_slice(&hash);
     Ok(bytes)
 }
 
 pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
-    if bytes.len() < PLAN_HEADER + 32 || &bytes[..8] != PLAN_MAGIC {
+    if bytes.len() < PLAN_HEADER + 32 {
+        return Err(invalid());
+    }
+    let v2 = &bytes[..8] == PLAN_MAGIC_V2;
+    if !v2 && &bytes[..8] != PLAN_MAGIC {
         return Err(invalid());
     }
     let (body, hash) = bytes.split_at(bytes.len() - 32);
-    if private_digest(b"NanoKVM Pico startup plan v1\0", body) != hash
+    let domain = if v2 {
+        b"NanoKVM Pico startup plan v2\0".as_slice()
+    } else {
+        b"NanoKVM Pico startup plan v1\0".as_slice()
+    };
+    if private_digest(domain, body) != hash
         || bytes[8..16] != record.sequence.to_le_bytes()
         || bytes[16..32] != record.nonce
         || bytes[32..64] != record.source
         || bytes[64] > 1
-        || bytes[65..68].iter().any(|byte| *byte != 0)
+        || bytes[66] > 1
+        || bytes[67] != 0
         || bytes[80..PLAN_HEADER].iter().any(|byte| *byte != 0)
+        || (!v2 && bytes[65..68].iter().any(|byte| *byte != 0))
+        || (v2 && bytes[65] > PLAN_ASSETS.len() as u8)
     {
         return Err(invalid());
     }
@@ -340,18 +406,75 @@ pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
         ) as usize)
     };
     let (config, security, internal) = (length(68)?, length(72)?, length(76)?);
-    if PLAN_HEADER
+    let body_length = PLAN_HEADER
         .checked_add(config)
         .and_then(|n| n.checked_add(security))
         .and_then(|n| n.checked_add(internal))
-        != Some(body.len())
-    {
+        .ok_or_else(invalid)?;
+    if body_length > body.len() {
         return Err(invalid());
     }
     let config_end = PLAN_HEADER + config;
     let security_end = config_end + security;
-    let internal = std::str::from_utf8(&body[security_end..]).map_err(|_| invalid())?;
+    let internal_end = security_end + internal;
+    let internal = std::str::from_utf8(&body[security_end..internal_end]).map_err(|_| invalid())?;
     if !crate::update::picoclaw_token::valid_token(internal) {
+        return Err(invalid());
+    }
+    let mut assets = Vec::new();
+    if v2 {
+        let mut offset = internal_end;
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..bytes[65] {
+            if offset + 2 > body.len() {
+                return Err(invalid());
+            }
+            let path_len =
+                u16::from_le_bytes(body[offset..offset + 2].try_into().map_err(|_| invalid())?)
+                    as usize;
+            offset += 2;
+            if offset + path_len + 1 + 32 + 4 > body.len() {
+                return Err(invalid());
+            }
+            let path = std::str::from_utf8(&body[offset..offset + path_len])
+                .map_err(|_| invalid())?
+                .to_string();
+            offset += path_len;
+            let flags = body[offset];
+            offset += 1;
+            if !asset_path(&path)
+                || flags & !0b11 != 0
+                || !seen.insert(path.clone())
+                || (flags & 0b10 != 0) != asset_executable(&path)
+            {
+                return Err(invalid());
+            }
+            let before_present = flags & 0b1 != 0;
+            let mut before = [0; 32];
+            before.copy_from_slice(&body[offset..offset + 32]);
+            offset += 32;
+            let desired_len =
+                u32::from_le_bytes(body[offset..offset + 4].try_into().map_err(|_| invalid())?)
+                    as usize;
+            offset += 4;
+            if desired_len > crate::update::picoclaw_profile::MAX_PROFILE_BYTES
+                || offset + desired_len > body.len()
+            {
+                return Err(invalid());
+            }
+            let desired = Zeroizing::new(body[offset..offset + desired_len].to_vec());
+            offset += desired_len;
+            assets.push(Asset {
+                path,
+                before: before_present.then_some(before),
+                desired,
+                executable: flags & 0b10 != 0,
+            });
+        }
+        if offset != body.len() {
+            return Err(invalid());
+        }
+    } else if internal_end != body.len() {
         return Err(invalid());
     }
     Ok(Plan {
@@ -359,6 +482,8 @@ pub(super) fn decode_plan(record: &Record, bytes: &[u8]) -> Result<Plan> {
         security: Zeroizing::new(body[config_end..security_end].to_vec()),
         internal: Zeroizing::new(internal.to_string()),
         internal_new: bytes[64] == 1,
+        pair_write: if v2 { bytes[66] == 1 } else { true },
+        assets,
     })
 }
 
@@ -662,6 +787,131 @@ fn read_workspace_agent(workspace: &Path) -> Result<Option<Vec<u8>>> {
     Ok(directory
         .read_document(AGENT, MAX_PROFILE_BYTES)?
         .map(|bytes| bytes.to_vec()))
+}
+
+fn read_workspace_asset(workspace: &Path, path: &str) -> Result<Option<Vec<u8>>> {
+    let path = Path::new(path);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let directory = match Directory::open(&workspace.join(parent), false) {
+        Ok(directory) => directory,
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(directory
+        .read_document(name, crate::update::picoclaw_profile::MAX_PROFILE_BYTES)?
+        .map(|bytes| bytes.to_vec()))
+}
+
+fn asset_digest(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+fn managed_assets(config: &serde_json::Value, home: &Path) -> Result<Vec<Asset>> {
+    use crate::update::picoclaw_profile::{self, MAX_PROFILE_BYTES};
+    let workspace = picoclaw_profile::workspace(config, home).ok_or_else(invalid)?;
+    let shipped = [
+        picoclaw_profile::SHIPPED_AGENT,
+        picoclaw_profile::SHIPPED_AGENT_KVM,
+    ];
+    let mut assets = Vec::new();
+    for (path, desired, executable) in super::super::super::onboard::GENERATED {
+        let current = read_workspace_asset(&workspace, path)?;
+        if current.as_deref() == Some(desired) {
+            continue;
+        }
+        if path == picoclaw_profile::AGENT {
+            let decision = picoclaw_profile::classify(current.as_deref(), desired, shipped);
+            let replace = match decision {
+                picoclaw_profile::Decision::Replace => true,
+                picoclaw_profile::Decision::Noop => false,
+                picoclaw_profile::Decision::Custom => current
+                    .as_deref()
+                    .is_some_and(picoclaw_profile::is_prior_shipped),
+            };
+            if !replace {
+                continue;
+            }
+        }
+        if desired.len() > MAX_PROFILE_BYTES {
+            return Err(invalid());
+        }
+        assets.push(Asset {
+            path: path.to_string(),
+            before: current.as_deref().map(asset_digest),
+            desired: Zeroizing::new(desired.to_vec()),
+            executable,
+        });
+    }
+    Ok(assets)
+}
+
+fn apply_assets(plan: &Plan, source: &Source) -> Result<()> {
+    if plan.assets.is_empty() {
+        return Ok(());
+    }
+    use crate::update::picoclaw_profile::workspace;
+    use std::os::unix::ffi::OsStrExt as _;
+    let view = decode_source(source.bytes.as_slice())?;
+    let config: serde_json::Value = serde_json::from_slice(&plan.config).map_err(|_| invalid())?;
+    let home = Path::new(std::ffi::OsStr::from_bytes(view.home));
+    let workspace = workspace(&config, home).ok_or_else(invalid)?;
+    install_assets(&workspace, &plan.assets)
+}
+
+fn install_assets(workspace: &Path, assets: &[Asset]) -> Result<()> {
+    use crate::update::picoclaw_profile::MAX_PROFILE_BYTES;
+    Directory::open(workspace, true)?;
+    for asset in assets {
+        let Some((_, expected, executable)) = super::super::super::onboard::GENERATED
+            .iter()
+            .find(|(name, _, _)| *name == asset.path)
+        else {
+            return Err(invalid());
+        };
+        if asset.desired.as_slice() != *expected || asset.executable != *executable {
+            return Err(invalid());
+        }
+        let path = Path::new(&asset.path);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(invalid)?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let directory = Directory::open(&workspace.join(parent), true)?;
+        let before = directory.inspect_document(name, MAX_PROFILE_BYTES)?;
+        let current = directory.read_document(name, MAX_PROFILE_BYTES)?;
+        if current.as_deref().map(Vec::as_slice) == Some(asset.desired.as_slice()) {
+            continue;
+        }
+        if current.as_deref().map(|bytes| asset_digest(bytes)) != asset.before {
+            return Err(invalid());
+        }
+        let mut temporary = directory.temporary(MAX_PROFILE_BYTES)?;
+        temporary.file.write_all(&asset.desired)?;
+        temporary.file.sync_all()?;
+        temporary.publish_document(name, before)?;
+        if asset.executable {
+            fchmod(&temporary.file, Mode::from_raw_mode(0o755)).map_err(std::io::Error::from)?;
+            temporary.file.sync_all()?;
+        }
+        directory.file.sync_all()?;
+        if directory
+            .read_document(name, MAX_PROFILE_BYTES)?
+            .as_deref()
+            .map(Vec::as_slice)
+            != Some(asset.desired.as_slice())
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 // Install the planned document exactly once: the workspace AGENT.md is the
@@ -1440,7 +1690,13 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
         Ok(decision) => decision,
         Err(_) => return refuse(store, record, &mut payload.touched),
     };
-    if decision != crate::update::picoclaw_startup::Decision::Noop {
+    let assets = if record.kind == Kind::Startup {
+        managed_assets(&target.config, home)
+            .map_err(|_| AppError::Config("managed asset settlement refused".into()))?
+    } else {
+        Vec::new()
+    };
+    if decision != crate::update::picoclaw_startup::Decision::Noop || !assets.is_empty() {
         // Select missing tokens exactly once and make the whole change durable
         // before any stop: a retry or crash replays this plan, never new entropy.
         let gateway = crate::update::picoclaw_startup::existing_gateway_token(
@@ -1460,6 +1716,8 @@ pub(super) fn settle(payload: &mut Payload) -> Result<TransitionStatus> {
             security: Zeroizing::new(desired.security.as_bytes().to_vec()),
             internal,
             internal_new,
+            pair_write: decision != crate::update::picoclaw_startup::Decision::Noop,
+            assets,
         };
         store.write_plan(
             encode_plan(&record, &plan)?.as_slice(),
@@ -1547,15 +1805,19 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
     }
     #[cfg(test)]
     checkpoint("internal", "installed")?;
-    super::super::super::pair::publish(&source.directory, &plan.config, Some(&plan.security))?;
-    #[cfg(test)]
-    checkpoint("pair", "published")?;
+    if plan.pair_write {
+        super::super::super::pair::publish(&source.directory, &plan.config, Some(&plan.security))?;
+        #[cfg(test)]
+        checkpoint("pair", "published")?;
+    }
     let installed = super::super::super::pair::read_installed(&source.directory)?;
-    if installed.config.as_slice() != plan.config.as_slice()
-        || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice())
+    if plan.pair_write
+        && (installed.config.as_slice() != plan.config.as_slice()
+            || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice()))
     {
         return Err(invalid());
     }
+    apply_assets(plan, source)?;
     record.phase = Phase::Committed;
     store.publish(record, &mut payload.touched, Publication::Committed)?;
     Ok(TransitionStatus::Committed(
@@ -2097,8 +2359,11 @@ fn complete_startup_apply(
         current[0].as_deref().map(Vec::as_slice) == config
             && current[1].as_deref().map(Vec::as_slice) == security
     };
-    let applied = equals(Some(&plan.config), Some(&plan.security));
-    if !applied && !equals(view.config, view.security) {
+    let pair_applied = equals(Some(&plan.config), Some(&plan.security));
+    let source_unchanged = equals(view.config, view.security);
+    if (plan.pair_write && !pair_applied && !source_unchanged)
+        || (!plan.pair_write && !source_unchanged)
+    {
         return Ok(false);
     }
     if plan.internal_new {
@@ -2110,15 +2375,17 @@ fn complete_startup_apply(
     {
         return Ok(false);
     }
-    if !applied {
+    if !pair_applied && plan.pair_write {
         super::super::super::pair::publish(&source.directory, &plan.config, Some(&plan.security))?;
     }
     let installed = super::super::super::pair::read_installed(&source.directory)?;
-    if installed.config.as_slice() != plan.config.as_slice()
-        || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice())
+    if plan.pair_write
+        && (installed.config.as_slice() != plan.config.as_slice()
+            || installed.security.as_deref().map(Vec::as_slice) != Some(plan.security.as_slice()))
     {
         return Err(invalid());
     }
+    apply_assets(plan, &source)?;
     Ok(true)
 }
 
@@ -2318,3 +2585,7 @@ fn checkpoint(member: &str, phase: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "picoclaw_assets_tests.rs"]
+mod assets_tests;

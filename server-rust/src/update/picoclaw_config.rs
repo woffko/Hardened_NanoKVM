@@ -23,6 +23,8 @@ const SECURITY: &str = ".security.yml";
 mod onboard;
 #[path = "picoclaw_config_pair.rs"]
 mod pair;
+#[cfg(test)]
+pub(crate) use onboard::GENERATED;
 pub(crate) use onboard::Onboarding;
 
 #[path = "picoclaw_jobs.rs"]

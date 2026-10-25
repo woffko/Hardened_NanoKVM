@@ -715,9 +715,11 @@ fn startup_plan_codec_round_trips_and_rejects_foreign_or_damaged_plans() {
         security: Zeroizing::new(b"synthetic: yes\n".to_vec()),
         internal: Zeroizing::new("synthetic-internal-value".into()),
         internal_new: true,
+        pair_write: true,
+        assets: Vec::new(),
     };
     let bytes = accept::encode_plan(&record, &plan).unwrap();
-    assert_eq!(&bytes[..8], b"NKPPLN01");
+    assert_eq!(&bytes[..8], b"NKPPLN02");
     let decoded = accept::decode_plan(&record, &bytes).unwrap();
     assert!(decoded.config == plan.config);
     assert!(decoded.security == plan.security);

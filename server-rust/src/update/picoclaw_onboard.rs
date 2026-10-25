@@ -10,7 +10,7 @@ const MAX_MARKER: usize = 256;
 const MAX_ENTRIES: usize = 256;
 const MAX_TOTAL: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 12;
-const GENERATED: [(&str, &[u8], bool); 3] = [
+pub(crate) const GENERATED: [(&str, &[u8], bool); 3] = [
     (
         "AGENT.md",
         include_bytes!("../../../kvmapp/picoclaw/AGENT_KVM.md"),

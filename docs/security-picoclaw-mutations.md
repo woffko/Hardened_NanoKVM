@@ -410,6 +410,16 @@ The current document decides what happens:
 - **Anything else.** It is the user's own: it is kept and the request refused
   (Failed, runtime Unchanged). An older shipped version counts as customized.
 
+The ordinary Startup settlement applies the same managed-asset rule to the
+three generated workspace files (AGENT.md, skills/kvm-control/SKILL.md and the
+bridge). A missing or changed skill is replaced; an absent or previously
+shipped AGENT.md is replaced; a customized AGENT.md is kept. The generated
+bytes are embedded in the build and are rechecked when the plan is applied.
+The startup plan v2 carries the prior digest (or absence), the desired bytes,
+the executable flag and an asset count. An asset-only change does not rewrite
+the credential-bearing pair; it is durable, atomic and replayed on the next
+boot. The plan still binds the exact job, source and internal value.
+
 A replacement records the prior document's digest and the exact shipped bytes
 in a protected profile plan, bound to the job, before anything is stopped. The
 SAME owned runtime is quiesced with resume kept. Under the job's exclusive
