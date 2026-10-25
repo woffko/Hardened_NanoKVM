@@ -395,7 +395,7 @@ fn exec_sshd(
     // or failure text is diagnostics. Pipe owner must enforce bounded reading.
     let (arguments, context) = match check {
         Check::Syntax => {
-            for fd in 0..=1 {
+            for fd in 0..=2 {
                 dup2(null.as_raw_fd(), fd).map_err(|_| SandboxError::Exec)?;
             }
             (
