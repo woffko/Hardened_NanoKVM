@@ -25,6 +25,16 @@ for the G5 comparison. The underlying `build-kernel-5.10.265-repro-run.sh`
 also refuses a dirty worktree and an existing run root. The wrapper signs
 and publishes nothing.
 
+`scripts/build-kernel-5.10.272-candidate-run.sh` is the 5.10.272 variant. It
+pins the clean merged source tree
+`build/latestbuildroot/kernel-5.10.272-v1/repo`, the merge commit
+`ddef97c3d978b67f7852dca05f0b3505f798c0b2`, its signed stable parent
+`aca95a35f1bcc0626c4fa4d1252bf2d4c990a1a2`, kernel release `5.10.272-tag-`,
+the same accepted RC12 fragment hash, refreshed r2 source and production key.
+It takes the same owner inputs but requires a new
+`KERNEL_5_10_272_REPRO_ROOT`; run it twice with independent roots for G5. The
+5.10.265 wrapper remains for reproducing the RC12 baseline.
+
 ## Preparing
 
 The inputs are the files that passed candidate acceptance, each with its

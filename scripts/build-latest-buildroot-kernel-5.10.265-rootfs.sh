@@ -109,7 +109,7 @@ sha256sum "$ROOTFS_IMAGE" "$OUTPUT_DIR/images/rootfs.tar" \
 	> "$REPORT_DIR/rootfs-sha256.txt"
 
 cat > "$REPORT_DIR/summary.md" <<EOF
-# Buildroot 2026.05.1 rootfs with Linux 5.10.265 modules
+# Buildroot 2026.05.1 rootfs with Linux $EXPECTED_KERNEL_RELEASE modules
 
 - userspace system version: **$EXPECTED_SYSTEM_VERSION**
 - application version: **$EXPECTED_KVMAPP_VERSION**

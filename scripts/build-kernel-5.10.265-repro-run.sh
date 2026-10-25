@@ -85,7 +85,7 @@ EXPECTED_SECURITY_PATCH_LEVEL="$EXPECTED_SECURITY_PATCH_LEVEL" \
 	"$ROOT_DIR/scripts/assemble-kernel-5.10.265-recovery-sd-image.sh"
 
 cat > "$RUN_ROOT/_reports/summary.md" <<EOF
-# Complete Linux 5.10.265 clean candidate run
+# Complete Linux $EXPECTED_KERNEL_RELEASE clean candidate run
 
 - outer project commit: \`$outer_commit\`
 - kernel release: **$EXPECTED_KERNEL_RELEASE**

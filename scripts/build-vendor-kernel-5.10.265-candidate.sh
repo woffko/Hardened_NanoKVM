@@ -262,7 +262,7 @@ find "$OUTPUT_DIR" -type f -name '*.ko' -printf '%P\n' | LC_ALL=C sort \
 	> "$REPORT_DIR/built-in-tree-modules.txt"
 cmp -s "$REPORT_DIR/expected-in-tree-modules.txt" \
 	"$REPORT_DIR/built-in-tree-modules.txt" || {
-	echo "5.10.265 in-tree module inventory differs from accepted baseline" >&2
+	echo "kernel in-tree module inventory differs from the accepted baseline" >&2
 	diff -u "$REPORT_DIR/expected-in-tree-modules.txt" \
 		"$REPORT_DIR/built-in-tree-modules.txt" >&2 || true
 	exit 1
@@ -272,7 +272,7 @@ cp "$EXPECTED_DTB_MANIFEST" "$REPORT_DIR/expected-dtbs.txt"
 find "$OUTPUT_DIR/arch/riscv/boot/dts/cvitek" -maxdepth 1 -type f \
 	-name '*.dtb' -printf '%f\n' | LC_ALL=C sort > "$REPORT_DIR/built-dtbs.txt"
 cmp -s "$REPORT_DIR/expected-dtbs.txt" "$REPORT_DIR/built-dtbs.txt" || {
-	echo "5.10.265 CVITEK DTB inventory differs from accepted baseline" >&2
+	echo "CVITEK DTB inventory differs from the accepted baseline" >&2
 	diff -u "$REPORT_DIR/expected-dtbs.txt" "$REPORT_DIR/built-dtbs.txt" >&2 || true
 	exit 1
 }
@@ -296,7 +296,7 @@ if [ -n "$(git -C "$KERNEL_SOURCE" status --short)" ]; then
 fi
 
 cat > "$REPORT_DIR/summary.md" <<EOF
-# SG2002 Linux 5.10.265 recovery candidate build
+# SG2002 Linux $kernel_release recovery candidate build
 
 - source commit: \`$source_commit\`
 - source tree: \`$source_tree\`

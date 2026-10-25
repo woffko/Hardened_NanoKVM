@@ -171,6 +171,8 @@ external_modules=30
 media_modules=3
 redistribution=disabled-pending-license-grant
 EOF
+cp "$OUTPUT_DIR/system/ko/hardened-kernel-5.10.265-provenance.txt" \
+	"$OUTPUT_DIR/system/ko/hardened-kernel-provenance.txt"
 
 cat > "$OUTPUT_DIR/system/ko/hardened-source-media-provenance.txt" <<EOF
 kernel_release=$kernel_release
@@ -189,7 +191,7 @@ sha256sum "$MANIFEST" "$REPLACED_LIST" "$REPORT_DIR/depmod.stderr" \
 	> "$REPORT_DIR/SHA256SUMS"
 
 cat > "$REPORT_DIR/summary.md" <<EOF
-# SG2002 vendor runtime with Linux 5.10.265 modules
+# SG2002 vendor runtime with Linux $kernel_release modules
 
 - kernel release: **$kernel_release**
 - retained runtime module inventory: **57/57**

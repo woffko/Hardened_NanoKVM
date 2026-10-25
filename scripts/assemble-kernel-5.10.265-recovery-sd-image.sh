@@ -89,7 +89,7 @@ cmp -s "$OUTPUT_DIR/extracted-boot-files/fip.bin" "$FIP_IMAGE" || {
 	exit 1
 }
 cmp -s "$OUTPUT_DIR/extracted-boot-files/boot.sd" "$BOOT_SD" || {
-	echo "recovery SD boot.sd differs from 5.10.265 candidate FIT" >&2
+	echo "recovery SD boot.sd differs from the candidate FIT" >&2
 	exit 1
 }
 
@@ -104,7 +104,7 @@ sha256sum \
 	> "$REPORT_DIR/SHA256SUMS"
 
 cat > "$REPORT_DIR/summary.md" <<EOF
-# Linux 5.10.265 recovery-SD candidate
+# Linux $EXPECTED_KERNEL_RELEASE recovery-SD candidate
 
 - kernel release contract: **$EXPECTED_KERNEL_RELEASE**
 - userspace system: **$EXPECTED_SYSTEM_VERSION**
