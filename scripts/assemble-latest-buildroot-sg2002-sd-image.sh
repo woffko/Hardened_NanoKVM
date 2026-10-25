@@ -38,13 +38,45 @@ require_file "$LOGO_IMAGE"
 require_file "$EXTERNAL_DIR/board/sg2002/genimage.cfg"
 require_file "$ROOT/scripts/mcopy-preserve-time.sh"
 
-for tool in mkdosfs mcopy; do
+for tool in mkdosfs mcopy debugfs; do
 	PATH="$CLEAN_PATH" command -v "$tool" >/dev/null 2>&1 || {
 		echo "missing required host tool in BUILDROOT_PORT_CLEAN_PATH: $tool" >&2
 		exit 1
 	}
 done
 MCOPY_REAL="$(PATH="$CLEAN_PATH" command -v mcopy)"
+
+# Buildroot's package/busybox/busybox.mk device table hardcodes /bin/busybox
+# to 4755 even though the staged target tree is 0755. The authenticated raw
+# restore preflight rejects a setuid shell; normalize the exact image inode
+# before validation and assembly so the candidate and every derived raw image
+# carry a non-setuid BusyBox.
+normalize_busybox_mode() {
+	local image="$1" mode
+	mode="$(debugfs -R 'stat /usr/bin/busybox' "$image" 2>/dev/null | sed -n 's/.*Mode:  *\([0-7]*\).*/\1/p' | head -n 1)"
+	[ -n "$mode" ] || {
+		echo "busybox is missing from the rootfs image" >&2
+		exit 1
+	}
+	case "$mode" in
+		0755|0100755) ;;
+		*)
+			debugfs -w -R 'sif /usr/bin/busybox mode 0100755' "$image" >/dev/null 2>&1 || {
+				echo "could not clear the busybox setuid bit in $image" >&2
+				exit 1
+			}
+			;;
+	esac
+	mode="$(debugfs -R 'stat /usr/bin/busybox' "$image" 2>/dev/null | sed -n 's/.*Mode:  *\([0-7]*\).*/\1/p' | head -n 1)"
+	case "$mode" in
+		0755|0100755) ;;
+		*)
+			echo "busybox remains setuid after normalization: mode=$mode" >&2
+			exit 1
+			;;
+	esac
+}
+normalize_busybox_mode "$ROOTFS_IMAGE"
 
 EXPECTED_BUILDROOT_VERSION="$BUILDROOT_VERSION" \
 EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-2.0.41}" \
