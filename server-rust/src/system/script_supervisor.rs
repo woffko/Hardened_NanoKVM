@@ -6,14 +6,19 @@ use nix::{
     },
     unistd::Pid,
 };
+use rustix::process::{Pid as ChildPid, Signal as ChildSignal};
 use std::{
     ffi::OsString,
-    fs,
+    io,
     os::unix::process::CommandExt,
+    path::Path,
     process::{Command, Stdio},
     thread::sleep,
     time::{Duration, Instant},
 };
+
+#[path = "proc_tree.rs"]
+mod proc_tree;
 
 const CHILD_DRAIN: Duration = Duration::from_secs(1);
 
@@ -96,13 +101,22 @@ fn parse(args: &[OsString]) -> Option<(Duration, Duration, &OsString, &[OsString
 fn kill_remaining_children() {
     let deadline = Instant::now() + CHILD_DRAIN;
     loop {
-        let children = children();
+        let children = match children() {
+            Ok(children) => children,
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
         if children.is_empty() {
             reap();
             return;
         }
         for pid in children {
-            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            let _ = proc_tree::signal_child(pid, ChildSignal::KILL);
         }
         reap();
         if Instant::now() >= deadline {
@@ -112,14 +126,12 @@ fn kill_remaining_children() {
     }
 }
 
-fn children() -> Vec<i32> {
-    let path = format!("/proc/self/task/{}/children", std::process::id());
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.split_whitespace()
-        .filter_map(|value| value.parse::<i32>().ok())
-        .collect()
+fn children() -> io::Result<Vec<ChildPid>> {
+    let raw = i32::try_from(std::process::id())
+        .map_err(|_| io::Error::other("script supervisor PID does not fit in i32"))?;
+    let parent = ChildPid::from_raw(raw)
+        .ok_or_else(|| io::Error::other("script supervisor has an invalid PID"))?;
+    proc_tree::direct_children(Path::new("/proc"), parent)
 }
 
 fn reap() {

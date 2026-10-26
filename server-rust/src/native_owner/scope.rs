@@ -6,11 +6,11 @@ use rustix::{
     io::{Errno, FdFlags, fcntl_setfd},
     process::{
         Pid, PidfdFlags, Signal, WaitId, WaitIdOptions, WaitOptions, child_subreaper, getpid,
-        pidfd_open, pidfd_send_signal, wait, waitid,
+        pidfd_open, wait, waitid,
     },
 };
 use std::{
-    fs::{self, File},
+    fs,
     io::{Read, Write},
     os::fd::{AsFd, AsRawFd},
     os::unix::net::UnixStream,
@@ -18,13 +18,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../system/proc_tree.rs"]
+mod proc_tree;
 #[path = "scope_trial.rs"]
 mod trial;
 pub use crate::app_trial_wire as trial_wire;
 
 const STEP: Duration = Duration::from_millis(20);
 const GRACE: Duration = Duration::from_secs(2);
-const CHILDREN_BYTES: usize = 64 * 1024;
 const CHILD_BATCH: usize = 4096;
 // Linux __WALL includes clone children whose exit signal is not SIGCHLD.
 const REAP: WaitOptions =
@@ -152,20 +153,7 @@ fn control_event(control: &mut UnixStream) -> Result<Control, Error> {
 // PID numbers from proc only nominate candidates. The kernel must confirm the
 // pidfd names OUR unreaped child before any signal. No PID-file or integer kill.
 pub(super) fn signal_child(pid: Pid, signal: Signal) -> Result<(), Error> {
-    let fd = match pidfd_open(pid, PidfdFlags::empty()) {
-        Ok(fd) => fd,
-        Err(Errno::SRCH) => return Ok(()),
-        Err(_) => return Err(Error::Runtime),
-    };
-    match waitid(WaitId::PidFd(fd.as_fd()), PEEK) {
-        Ok(None) => {}
-        Ok(Some(_)) | Err(Errno::CHILD) => return Ok(()),
-        Err(_) => return Err(Error::Runtime),
-    }
-    match pidfd_send_signal(&fd, signal) {
-        Ok(()) | Err(Errno::SRCH) => Ok(()),
-        Err(_) => Err(Error::Runtime),
-    }
+    proc_tree::signal_child(pid, signal).map_err(|_| Error::Runtime)
 }
 
 pub(super) fn run(command: Command, control: UnixStream) -> Result<Outcome, Error> {
@@ -226,8 +214,6 @@ fn run_owned<G>(
     } else {
         command.stdin(std::process::Stdio::null());
     }
-    let children_path = format!("/proc/self/task/{}/children", getpid().as_raw_nonzero());
-    let mut buffer = vec![0_u8; CHILDREN_BYTES];
     let mut term_seen = Vec::with_capacity(CHILD_BATCH);
     let leader = command.spawn().map_err(|_| Error::Spawn)?;
     // Command retains configured Stdio FDs after spawn. Drop its child-side
@@ -331,27 +317,9 @@ fn run_owned<G>(
         }
         if let Some(started) = stopping {
             let kill = started.elapsed() >= GRACE;
-            let children = File::open(&children_path);
-            match children.and_then(|mut file| file.read(&mut buffer)) {
-                Ok(size) => {
-                    if size == buffer.len() {
-                        failed = true;
-                    }
-                    for token in buffer[..size]
-                        .split(|b| b.is_ascii_whitespace())
-                        .take(CHILD_BATCH)
-                    {
-                        if token.is_empty() {
-                            continue;
-                        }
-                        let pid = std::str::from_utf8(token)
-                            .ok()
-                            .and_then(|s| s.parse::<i32>().ok())
-                            .and_then(Pid::from_raw);
-                        let Some(pid) = pid else {
-                            failed = true;
-                            continue;
-                        };
+            match proc_tree::direct_children(std::path::Path::new("/proc"), getpid()) {
+                Ok(children) => {
+                    for pid in children.into_iter().take(CHILD_BATCH) {
                         if !kill && term_seen.contains(&pid) {
                             continue;
                         }
