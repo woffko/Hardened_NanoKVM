@@ -151,9 +151,10 @@ impl Config {
     /// A new full-SD/factory installation starts on HTTPS; an existing config
     /// keeps its explicit protocol choice.
     pub fn new_install() -> Self {
-        let mut config = Self::default();
-        config.proto = "https".to_string();
-        config
+        Self {
+            proto: "https".to_string(),
+            ..Self::default()
+        }
     }
 }
 

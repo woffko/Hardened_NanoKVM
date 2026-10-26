@@ -379,6 +379,7 @@ struct Install {
 
 /// A raw write owns the broker from its accepted offer to the exec. It never
 /// returns to Running: the writer reboots, and a failure stays here.
+#[allow(clippy::large_enum_variant)]
 enum RawWrite {
     Draining {
         session: raw_install::Session,

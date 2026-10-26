@@ -562,8 +562,10 @@ pub(crate) fn fixture() -> (TempDir, Config) {
         password: bcrypt::hash("synthetic fixture password", 4).unwrap(),
     };
     put(root.path(), ACCOUNT, &serde_json::to_vec(&account).unwrap());
-    let mut config = Config::default();
-    config.proto = "http".to_string();
+    let mut config = Config {
+        proto: "http".to_string(),
+        ..Config::default()
+    };
     config.jwt.secret_key = "synthetic runtime key, not a credential".to_string();
     write_config(root.path(), CONFIG_PATH, &config);
     (root, config)

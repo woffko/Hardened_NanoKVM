@@ -4283,7 +4283,7 @@ mod tests {
         assert_eq!(transaction, ticket.transaction_id());
         assert_eq!(version, "0.3.0-raw.13");
         assert_eq!(phase, Phase::Prepared);
-        let (sent_transaction, sizes, sha256) = sent.borrow().clone().unwrap();
+        let (sent_transaction, sizes, sha256) = (*sent.borrow()).unwrap();
         assert_eq!(sent_transaction, transaction);
         assert_eq!(sizes, [10, 12]);
         assert_eq!(sha256, [[1; 32], [2; 32]]);
