@@ -185,6 +185,16 @@ if [ -n "$CONFIG_FRAGMENT" ]; then
 		}
 	done < "$CONFIG_FRAGMENT"
 fi
+if [ "${KERNEL_5_10_265_REQUIRE_PROC_CHILDREN:-0}" = 1 ]; then
+	grep -Fqx 'CONFIG_PROC_CHILDREN=y' "$OUTPUT_DIR/.config" || {
+		echo "kernel config does not enable CONFIG_PROC_CHILDREN" >&2
+		exit 1
+	}
+	if grep -Fqx 'CONFIG_CHECKPOINT_RESTORE=y' "$OUTPUT_DIR/.config"; then
+		echo "kernel config unexpectedly enables CONFIG_CHECKPOINT_RESTORE" >&2
+		exit 1
+	fi
+fi
 make -j"$JOBS" -C "$KERNEL_SOURCE" O="$OUTPUT_DIR" Image modules dtbs
 
 CVITEK_DTB_DIR="$OUTPUT_DIR/arch/riscv/boot/dts/cvitek"
