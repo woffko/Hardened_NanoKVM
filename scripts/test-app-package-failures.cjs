@@ -42,7 +42,9 @@ try {
   // Host ELF bytes exercise packaging, not RISC-V/native ABI acceptance.
   const native = path.join(work, 'native');
   fs.mkdirSync(native);
-  for (const name of ['libkvm.so', 'libkvm_mmf.so']) fs.copyFileSync('/bin/true', path.join(native, name));
+  for (const name of ['libkvm.so', 'libkvm_mmf.so', 'libopencv_video.so.409']) {
+    fs.copyFileSync('/bin/true', path.join(native, name));
+  }
   const web = path.join(work, 'web');
   fs.mkdirSync(web);
   fs.writeFileSync(path.join(web, 'index.html'), 'synthetic frontend\n');

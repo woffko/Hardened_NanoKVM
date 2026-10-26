@@ -50,9 +50,9 @@ try {
       assert.equal(source.status, 0, source.stderr);
       fs.writeFileSync(script, source.stdout);
     } else fs.copyFileSync(path.join(root, 'scripts', name), script);
-    const version = kind === 'app' ? '2.0.43' : '0.3.0-raw.13';
+    const version = kind === 'app' ? '2.0.44' : '0.3.0-raw.13';
     const archive = path.join(work, kind === 'app'
-      ? 'hardened-nanokvm-kvmapp-2.0.43.tar.gz' : 'hardened-nanokvm-system-0.3.0-raw.13.tar.gz');
+      ? 'hardened-nanokvm-kvmapp-2.0.44.tar.gz' : 'hardened-nanokvm-system-0.3.0-raw.13.tar.gz');
     const payload = Buffer.from('Synthetic archive bytes for metadata generation tests.\n');
     fs.writeFileSync(archive, payload);
     let sequence = 0;

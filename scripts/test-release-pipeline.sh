@@ -40,7 +40,7 @@ openssl genrsa -out "$T/key.pem" 2048 2>/dev/null
 openssl rsa -in "$T/key.pem" -pubout -out "$T/key.pub.pem" 2>/dev/null
 openssl genrsa -out "$T/other.pem" 2048 2>/dev/null
 
-APP=2.0.43
+APP=2.0.44
 SYSTEM=0.3.0-raw.13
 mkdir -p "$T/app/kvmapp"
 echo "$APP" > "$T/app/kvmapp/version"
