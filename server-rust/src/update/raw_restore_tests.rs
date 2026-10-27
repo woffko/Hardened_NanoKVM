@@ -182,6 +182,78 @@ fn factory_image_without_the_marker_is_not_restored() {
 }
 
 #[test]
+fn fresh_image_restores_optional_and_nested_parents_before_committing() {
+    let (source, config) = fixture();
+    let paths = [
+        "etc/kvm/cache/wol",
+        "etc/kvm/network/dns.mode",
+        "etc/kvm/scripts/task.sh",
+        "root/.picoclaw/workspace/notes/nested/item.txt",
+    ];
+    for path in paths {
+        let target = source.path().join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, b"saved setting\n").unwrap();
+    }
+    let root = restored_root(source.path(), true);
+    for parent in ["etc/kvm/cache", "etc/kvm/network", "root/.picoclaw"] {
+        fs::remove_dir(root.path().join(parent)).unwrap();
+    }
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker = root.path().join("blocked");
+    let ticket = capture_ticket(source.path(), &config, capsules.path());
+    let mut store = Store::open_fixture(store_root.path()).unwrap();
+    store.publish_prepared(&ticket).unwrap();
+    assert_eq!(
+        run_observed(
+            root.path(),
+            &mut store,
+            capsules.path(),
+            staging.path(),
+            &marker,
+            &observation()
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    for path in paths {
+        let target = root.path().join(path);
+        assert_eq!(fs::read(&target).unwrap(), b"saved setting\n");
+        assert_eq!(
+            fs::metadata(target.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Committed);
+}
+
+#[test]
+fn target_parents_reject_symlinks_and_absence_does_not_create_directories() {
+    let root = private();
+    let outside = private();
+    fs::create_dir_all(root.path().join("etc/kvm")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("etc/kvm/cache")).unwrap();
+    assert!(parent_directory(root.path(), "etc/kvm/cache/wol", true).is_err());
+    assert!(remove_member(root.path(), "etc/kvm/cache/wol").is_err());
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    assert!(
+        parent_directory(root.path(), "root/.ssh/config", false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!root.path().join("root").exists());
+    for path in ["../outside", "/etc/passwd", "etc/../passwd", ""] {
+        assert!(parent_directory(root.path(), path, true).is_err());
+    }
+}
+
+#[test]
 fn raw_image_without_a_ticket_fails_closed_and_writes_the_block_marker() {
     let (source, _config) = fixture();
     let capsules = private();

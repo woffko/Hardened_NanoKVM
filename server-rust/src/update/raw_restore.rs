@@ -6,11 +6,12 @@ use super::{
     restore_identity::{self, IdentityCheckedRestore, RestoreIdentityError},
     restore_native::AccountFiles,
 };
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, mkdirat, renameat, statat, unlinkat};
 use serde::Deserialize;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path},
 };
 
@@ -40,6 +41,8 @@ pub enum Error {
     Abandoned,
     #[error("raw restore target path is unsafe")]
     UnsafePath,
+    #[error("raw restore target {path} failed: {source}")]
+    Target { path: String, source: Box<Error> },
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -223,17 +226,30 @@ fn read_optional(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
 }
 
 fn apply(root: &Path, mut identity: IdentityCheckedRestore) -> Result<()> {
+    // Validate every parent before replacing identity files. Fresh images do
+    // not contain optional settings/workspace directories. Create only parents
+    // of authenticated writes, privately, without following symlinks.
+    for member in identity.members() {
+        parent_directory(root, &member.path, member.action == RestoreAction::Write).map_err(
+            |source| Error::Target {
+                path: member.path.clone(),
+                source: Box::new(source),
+            },
+        )?;
+    }
     for index in 0..identity.members().len() {
         let (path, action, mode) = {
             let member = &identity.members()[index];
             (member.path.clone(), member.action, member.mode)
         };
-        match action {
-            RestoreAction::Write => {
-                write_member(root, &path, mode, &mut identity, index)?;
-            }
-            RestoreAction::Absent => remove_member(root, &path)?,
-        }
+        let result = match action {
+            RestoreAction::Write => write_member(root, &path, mode, &mut identity, index),
+            RestoreAction::Absent => remove_member(root, &path),
+        };
+        result.map_err(|source| Error::Target {
+            path,
+            source: Box::new(source),
+        })?;
     }
     File::open(root)?.sync_all()?;
     Ok(())
@@ -246,48 +262,56 @@ fn write_member(
     identity: &mut IdentityCheckedRestore,
     index: usize,
 ) -> Result<()> {
-    let target = safe_target(root, path)?;
-    let parent = target.parent().ok_or(Error::UnsafePath)?;
-    if !parent.is_dir() {
-        return Err(Error::UnsafePath);
-    }
-    let temporary = parent.join(format!(".nanokvm-restore-{}-{index}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    #[cfg(target_os = "linux")]
-    options.custom_flags(nix::libc::O_NOFOLLOW);
-    let mut file = options.open(&temporary)?;
+    let (parent, name) = parent_directory(root, path, true)?.ok_or(Error::UnsafePath)?;
+    let temporary = format!(".nanokvm-restore-{}-{index}", std::process::id());
+    let mut file: File = rustix::fs::openat(
+        &parent,
+        &temporary,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(io::Error::from)?
+    .into();
     let result = (|| -> Result<()> {
         identity.copy_file(index, &mut file)?;
         file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
-        fs::rename(&temporary, &target)?;
-        File::open(parent)?.sync_all()?;
+        renameat(&parent, &temporary, &parent, name).map_err(io::Error::from)?;
+        parent.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = unlinkat(&parent, &temporary, AtFlags::empty());
     }
     result
 }
 
 fn remove_member(root: &Path, path: &str) -> Result<()> {
-    let target = safe_target(root, path)?;
-    match fs::symlink_metadata(&target) {
-        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-            fs::remove_file(&target)?;
-            if let Some(parent) = target.parent() {
-                File::open(parent)?.sync_all()?;
-            }
+    let Some((parent, name)) = parent_directory(root, path, false)? else {
+        return Ok(());
+    };
+    match statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata)
+            if matches!(
+                FileType::from_raw_mode(metadata.st_mode),
+                FileType::RegularFile | FileType::Symlink
+            ) =>
+        {
+            unlinkat(&parent, name, AtFlags::empty()).map_err(io::Error::from)?;
+            parent.sync_all()?;
             Ok(())
         }
         Ok(_) => Err(Error::UnsafePath),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => Err(io::Error::from(error).into()),
     }
 }
 
-fn safe_target(root: &Path, relative: &str) -> Result<std::path::PathBuf> {
+fn parent_directory<'a>(
+    root: &Path,
+    relative: &'a str,
+    create: bool,
+) -> Result<Option<(File, &'a str)>> {
     let path = Path::new(relative);
     if path.is_absolute()
         || path
@@ -296,7 +320,46 @@ fn safe_target(root: &Path, relative: &str) -> Result<std::path::PathBuf> {
     {
         return Err(Error::UnsafePath);
     }
-    Ok(root.join(path))
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::UnsafePath)?;
+    let mut directory = super::restore_fs::open_root(root, false)?;
+    for (index, component) in path
+        .parent()
+        .ok_or(Error::UnsafePath)?
+        .components()
+        .enumerate()
+    {
+        let Component::Normal(part) = component else {
+            return Err(Error::UnsafePath);
+        };
+        let part = part.to_str().ok_or(Error::UnsafePath)?;
+        if index == 0 && part == "boot" {
+            // The one admitted cross-mount parent is the protected boot store.
+            directory = super::restore_fs::open_boot(&directory)?;
+            continue;
+        }
+        match super::restore_fs::open_beneath(&directory, part, OFlags::RDONLY | OFlags::DIRECTORY)
+        {
+            Ok(child) => directory = child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match mkdirat(&directory, part, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                    Ok(()) => directory.sync_all()?,
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(io::Error::from(error).into()),
+                }
+                directory = super::restore_fs::open_beneath(
+                    &directory,
+                    part,
+                    OFlags::RDONLY | OFlags::DIRECTORY,
+                )?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some((directory, name)))
 }
 
 fn capsule_path(directory: &Path, ticket: &RestoreTicket) -> std::path::PathBuf {

@@ -47,7 +47,29 @@ echo "$APP" > "$T/app/kvmapp/version"
 tar -czf "$T/hardened-nanokvm-kvmapp-$APP.tar.gz" -C "$T/app" kvmapp
 
 mkdir -p "$T/system/payload/images" "$T/system-out"
-head -c 65536 /dev/urandom > "$T/rootfs.sd"
+# The raw release gate checks restore prerequisites inside the filesystem.
+# Synthetic bytes are sufficient for boot/SD identity tests, but not rootfs.
+truncate -s 16M "$T/rootfs.sd"
+mke2fs -q -t ext2 -F "$T/rootfs.sd"
+printf 'nanokvm-raw-restore-required-v1\n' > "$T/restore-marker"
+printf '#!/bin/sh\nexit 0\n' > "$T/restore-helper"
+cat > "$T/restore-fixture.debugfs" <<EOF
+mkdir /etc
+mkdir /etc/kvm
+mkdir /etc/kvm/.raw-restore
+sif /etc/kvm/.raw-restore mode 040700
+mkdir /etc/init.d
+mkdir /usr
+mkdir /usr/libexec
+write $T/restore-marker /etc/kvm/raw-restore-required
+sif /etc/kvm/raw-restore-required mode 0100644
+write $T/restore-helper /usr/libexec/nanokvm-early-restore
+sif /usr/libexec/nanokvm-early-restore mode 0100755
+write $T/restore-helper /etc/init.d/S01restore
+sif /etc/init.d/S01restore mode 0100755
+EOF
+debugfs -w -f "$T/restore-fixture.debugfs" "$T/rootfs.sd" >/dev/null 2>&1
+sh "$REPO/scripts/validate-raw-restore-rootfs.sh" "$T/rootfs.sd" >/dev/null
 head -c 4096 /dev/urandom > "$T/boot.vfat"
 gzip -c "$T/rootfs.sd" > "$T/system/payload/images/rootfs.sd.gz"
 gzip -c "$T/boot.vfat" > "$T/system/payload/images/boot.vfat.gz"

@@ -89,6 +89,9 @@ image() {
 	[ "$size" = "$4" ] || fail "$1 image size"
 	[ "$(jq -r --arg label "$1" '.raw_images[] | select(.label == $label) | .sha256' "$manifest")" = "$sha" ] || \
 		fail "manifest $1 hash"
+	if [ "$1" = ROOTFS ]; then
+		sh "$ROOT_DIR/scripts/validate-raw-restore-rootfs.sh" "$tmp/image" || fail "raw restore prerequisites"
+	fi
 	rm -f "$tmp/image"
 }
 image ROOTFS images/rootfs.sd.gz "$RAW_ROOTFS_SHA256" "$RAW_ROOTFS_SIZE"

@@ -138,6 +138,10 @@ mark_raw_restore_required() {
   printf 'nanokvm-raw-restore-required-v1\n' > "$marker"
   debugfs_cmds="$STAGE_DIR/raw-restore.debugfs"
   {
+    printf 'mkdir /etc/kvm/.raw-restore\n'
+    printf 'sif /etc/kvm/.raw-restore mode 040700\n'
+    printf 'sif /etc/kvm/.raw-restore uid 0\n'
+    printf 'sif /etc/kvm/.raw-restore gid 0\n'
     printf 'write %s /etc/kvm/raw-restore-required\n' "$marker"
     printf 'sif /etc/kvm/raw-restore-required mode 0100644\n'
     printf 'sif /etc/kvm/raw-restore-required uid 0\n'
@@ -153,6 +157,8 @@ mark_raw_restore_required() {
   } > "$debugfs_cmds"
   debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1 || \
     die "failed to install the raw restore discriminator, helper or S01restore"
+  sh "$ROOT_DIR/scripts/validate-raw-restore-rootfs.sh" "$rootfs" || \
+    die "raw restore image prerequisites are invalid"
 }
 
 if [ "$#" -ne 5 ]; then

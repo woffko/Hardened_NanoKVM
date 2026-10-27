@@ -153,6 +153,10 @@ impl Config {
     pub fn new_install() -> Self {
         Self {
             proto: "https".to_string(),
+            cert: Cert {
+                crt: "/etc/kvm/server.crt".to_string(),
+                key: "/etc/kvm/server.key".to_string(),
+            },
             ..Self::default()
         }
     }
@@ -633,6 +637,34 @@ mod tests {
         assert_eq!(Config::read_path(&path).unwrap().proto, "http");
         fs::remove_file(&path).unwrap();
         assert_eq!(Config::read_path(&path).unwrap().proto, "https");
+    }
+
+    #[test]
+    fn new_install_can_create_and_reload_its_tls_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::read_path(&dir.path().join("missing.yaml")).unwrap();
+        // Mirror the factory paths beneath a private root, without changing cwd
+        // or touching the host's /etc. Bare legacy defaults must fail this gate.
+        let cert = dir
+            .path()
+            .join(Path::new(&config.cert.crt).strip_prefix("/").unwrap());
+        let key = dir
+            .path()
+            .join(Path::new(&config.cert.key).strip_prefix("/").unwrap());
+        crate::http::tls::install_crypto_provider();
+        assert!(
+            crate::http::tls::ensure_server_cert(&cert, &key, vec!["localhost".to_string()])
+                .unwrap()
+        );
+        assert!(crate::http::tls::load_server_config(&cert, &key).is_ok());
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !crate::http::tls::ensure_server_cert(&cert, &key, vec!["localhost".to_string()])
+                .unwrap()
+        );
     }
 
     #[test]

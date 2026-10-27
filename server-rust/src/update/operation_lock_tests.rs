@@ -32,24 +32,36 @@ fn same_inode_conflicts_and_drop_unlocks_without_removing_it() {
 #[test]
 fn transferred_description_stays_busy_until_its_last_alias_closes() {
     let temporary = tempfile::tempdir().unwrap();
-    let mut original = acquire(temporary.path()).unwrap();
+    // Other aggregate tests fork concurrently. CLOEXEC closes inherited aliases
+    // at exec, not at fork, so they can outlive our local aliases. Run these
+    // immediate-release assertions in a process with only this probe active.
+    assert!(
+        child(temporary.path(), "aliases")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+fn assert_transferred_alias_lifetime(root: &Path) {
+    let mut original = acquire(root).unwrap();
     let receiver = original.transfer_alias().unwrap();
     // Deterministically model an inherited pre-exec FD without a timing race
     // or unsafe fork in this multithreaded test process. This is not evidence
     // that a particular failed aggregate was caused by a particular child.
     let inherited = receiver.try_clone().unwrap();
     drop(original);
-    assert!(matches!(acquire(temporary.path()), Err(LockError::Busy)));
+    assert!(matches!(acquire(root), Err(LockError::Busy)));
     drop(receiver);
-    assert!(matches!(acquire(temporary.path()), Err(LockError::Busy)));
+    assert!(matches!(acquire(root), Err(LockError::Busy)));
     drop(inherited);
-    let next = acquire(temporary.path()).unwrap();
+    let next = acquire(root).unwrap();
     let identity = next.directory.metadata().unwrap();
     assert_eq!(
         identity.ino(),
-        fs::metadata(temporary.path().join(DIRECTORY))
-            .unwrap()
-            .ino()
+        fs::metadata(root.join(DIRECTORY)).unwrap().ino()
     );
 }
 
@@ -93,6 +105,10 @@ fn child_lock_probe() {
     };
     let mode = std::env::var("NANOKVM_OPERATION_LOCK_EXPECT").unwrap();
     let root = Path::new(&root);
+    if mode == "aliases" {
+        assert_transferred_alias_lifetime(root);
+        return;
+    }
     let result = acquire(root);
     if mode == "busy" {
         assert!(matches!(result, Err(LockError::Busy)));
