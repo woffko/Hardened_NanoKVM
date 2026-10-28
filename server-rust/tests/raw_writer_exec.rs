@@ -110,8 +110,14 @@ fn writer_log(mismatch: bool) -> (String, String) {
 fn the_sealed_writer_receives_the_images_and_stops_at_the_missing_ticket_store() {
     let (log, stderr) = writer_log(false);
     assert!(
-        log.starts_with("<3>nanokvm-raw-writer: raw write not started: boot restore I/O failed"),
+        log.lines().any(|line| line
+            .starts_with("<3>nanokvm-raw-writer: raw write not started: boot restore I/O failed")),
         "{log}\n{stderr}"
+    );
+    assert!(!log.contains("raw write step:"), "{log}");
+    assert!(
+        !log.contains("raw writer received verified inputs:"),
+        "{log}"
     );
 }
 
@@ -119,9 +125,14 @@ fn the_sealed_writer_receives_the_images_and_stops_at_the_missing_ticket_store()
 fn images_sent_under_another_context_are_refused_before_the_ticket() {
     let (log, stderr) = writer_log(true);
     assert!(
-        log.starts_with(
+        log.lines().any(|line| line.starts_with(
             "<3>nanokvm-raw-writer: raw write not started: invalid or truncated raw transfer"
-        ),
+        )),
         "{log}\n{stderr}"
+    );
+    assert!(!log.contains("raw write step:"), "{log}");
+    assert!(
+        !log.contains("raw writer received verified inputs:"),
+        "{log}"
     );
 }

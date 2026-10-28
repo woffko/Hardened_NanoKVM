@@ -1,5 +1,83 @@
 use super::*;
 
+#[test]
+fn diagnostic_is_bounded_and_survives_reopening() {
+    let root = tempfile::tempdir().unwrap();
+    let mut log = DiagnosticLog::at(root.path(), root.path().metadata().unwrap().dev()).unwrap();
+    log.append("raw write: Rootfs written and verified")
+        .unwrap();
+    let remaining = log.remaining;
+    assert!(log.append(&"x".repeat(remaining)).is_err());
+    log.append(&"x".repeat(remaining - 1)).unwrap();
+    assert!(log.append("").is_err());
+    drop(log);
+    let bytes = fs::read(root.path().join("latest.log")).unwrap();
+    assert_eq!(bytes.len(), DIAGNOSTIC_LIMIT);
+    assert!(bytes.starts_with(DIAGNOSTIC_HEADER));
+    assert!(
+        String::from_utf8(bytes)
+            .unwrap()
+            .contains("Rootfs written and verified\n")
+    );
+}
+
+#[test]
+fn diagnostic_replacement_does_not_write_through_links() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let victim = root.path().join("victim");
+    fs::write(&victim, "preserve this evidence").unwrap();
+    let latest = root.path().join("latest.log");
+    let device = root.path().metadata().unwrap().dev();
+    for hard_link in [false, true] {
+        if hard_link {
+            fs::hard_link(&victim, &latest).unwrap();
+        } else {
+            symlink(&victim, &latest).unwrap();
+        }
+        DiagnosticLog::at(root.path(), device)
+            .unwrap()
+            .append("new attempt")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "preserve this evidence"
+        );
+        assert!(
+            fs::read_to_string(&latest)
+                .unwrap()
+                .ends_with("new attempt\n")
+        );
+        fs::remove_file(&latest).unwrap();
+    }
+    let alias = root.path().join("alias");
+    symlink(root.path(), &alias).unwrap();
+    assert!(DiagnosticLog::at(&alias, device).is_err());
+    assert!(DiagnosticLog::at(root.path(), device.wrapping_add(1)).is_err());
+    assert!(!latest.exists());
+}
+
+#[test]
+fn diagnostic_failure_preserves_prefix_and_keeps_kmsg_logging() {
+    let root = tempfile::tempdir().unwrap();
+    DiagnosticLog::at(root.path(), root.path().metadata().unwrap().dev()).unwrap();
+    let latest = root.path().join("latest.log");
+    let kmsg_path = root.path().join("kmsg");
+    let mut system = DeviceSystem {
+        kmsg: Some(File::create(&kmsg_path).unwrap()),
+        diagnostic: Some(DiagnosticLog {
+            file: File::open(&latest).unwrap(), // injected write failure
+            remaining: DIAGNOSTIC_LIMIT,
+        }),
+    };
+    system.log("raw write failed: injected failure");
+    assert!(system.diagnostic.is_none());
+    assert_eq!(fs::read(&latest).unwrap(), DIAGNOSTIC_HEADER);
+    let kmsg = fs::read_to_string(&kmsg_path).unwrap();
+    assert!(kmsg.contains("persistent diagnostic stopped"));
+    assert!(kmsg.contains("raw write failed: injected failure"));
+}
+
 fn stat(pid: u32, comm: &str, state: &str, flags: u64) -> String {
     format!("{pid} ({comm}) {state} 1 {pid} {pid} 0 -1 {flags} 120 0 0 0 0 0 0 0 20 0 1 0 100\n")
 }

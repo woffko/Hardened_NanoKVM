@@ -38,10 +38,22 @@ pub enum WriteError {
 type Result<T> = std::result::Result<T, WriteError>;
 
 /// Copies `size` bytes of `image` to the start of `device` in 1 MiB chunks,
-/// syncs them, drops the cached pages and reads the range back from the
-/// medium; the result must hash to `sha256`, the authenticated image digest.
+/// syncs them, advises cache eviction when supported, and reads the entire
+/// partition range back; it must hash to the authenticated image digest.
 /// `image` is the immutable verified snapshot; nothing here undoes a write.
 pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
+    write_image_with_advice(image, device, size, sha256, |device, length| {
+        fadvise(device, 0, Some(length), Advice::DontNeed)
+    })
+}
+
+fn write_image_with_advice(
+    image: &File,
+    device: &File,
+    size: u64,
+    sha256: &[u8; 32],
+    advise: impl FnOnce(&File, NonZeroU64) -> rustix::io::Result<()>,
+) -> Result<()> {
     if seek(device, SeekFrom::End(0)).map_err(io::Error::from)? < size {
         return Err(WriteError::TooSmall);
     }
@@ -61,7 +73,14 @@ pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) ->
         }
     });
     if let Some(length) = NonZeroU64::new(size) {
-        fadvise(device, 0, Some(length), Advice::DontNeed).map_err(io::Error::from)?;
+        match advise(device, length) {
+            // CONFIG_ADVISE_SYSCALLS=n returns ENOSYS on deployed kernels.
+            // DONTNEED is an advisory hint, not a durability barrier. The
+            // completed sync_data above and full hash read-back below remain
+            // mandatory even when the kernel has no advisory syscall.
+            Ok(()) | Err(rustix::io::Errno::NOSYS) => {}
+            Err(error) => return Err(io::Error::from(error).into()),
+        }
     }
     let mut hash = Sha256::new();
     offset = 0;
@@ -136,12 +155,14 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
     ];
     // One at a time: a failed step must not let the next one run.
     for (step, run) in steps {
+        system.log(&format!("raw write step: {step}"));
         if let Err(error) = run(system) {
             system.log(&format!("raw write not started: {step} failed: {error}"));
             return Outcome::NotStarted;
         }
     }
     for (index, partition) in [(1, Partition::Rootfs), (0, Partition::Boot)] {
+        system.log(&format!("raw write: opening {partition:?}"));
         let device = match system.open_partition(partition) {
             Ok(device) => device,
             Err(error) if partition == Partition::Rootfs => {
@@ -157,6 +178,7 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
                 return Outcome::Failed;
             }
         };
+        system.log(&format!("raw write: writing and verifying {partition:?}"));
         if let Err(error) = write_image(
             plan.images[index],
             &device,
@@ -168,6 +190,7 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
         }
         system.log(&format!("raw write: {partition:?} written and verified"));
     }
+    system.log("raw write: publishing restore ticket");
     if let Err(error) = system.publish_ticket(plan.ticket) {
         system.log(&format!(
             "raw write failed: restore ticket not published: {error}"
@@ -263,6 +286,10 @@ pub fn run_device_writer(arguments: WriterArguments) -> io::Error {
     let mut system = device::DeviceSystem::new();
     match receive_inputs(&arguments) {
         Ok((boot, rootfs, ticket)) => {
+            system.log(&format!(
+                "raw writer received verified inputs: version={}",
+                arguments.version
+            ));
             quiet_output();
             let outcome = run_writer(
                 &mut system,

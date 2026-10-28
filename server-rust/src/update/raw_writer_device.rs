@@ -15,7 +15,7 @@ use std::{
     io::{self, Write},
     os::{
         fd::OwnedFd,
-        unix::fs::{DirBuilderExt, FileTypeExt},
+        unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt},
     },
     path::Path,
     thread,
@@ -34,17 +34,74 @@ const STEP: Duration = Duration::from_millis(100);
 /// `PF_KTHREAD` in the flags field of /proc/PID/stat.
 const KERNEL_THREAD: u64 = 0x0020_0000;
 
-/// The device implementation of `WriterSystem`. Logs go to the kernel log
-/// only: stderr may be a file on the root filesystem being overwritten.
+/// The device implementation of `WriterSystem`. Never use stderr, which may
+/// be on the rootfs being overwritten. The bounded p3 log is diagnostic only,
+/// never update authority; kmsg remains available if p3 logging fails.
 pub struct DeviceSystem {
     kmsg: Option<File>,
+    diagnostic: Option<DiagnosticLog>,
+}
+
+const DIAGNOSTIC_LIMIT: usize = 16 * 1024;
+const DIAGNOSTIC_HEADER: &[u8] = b"nanokvm raw writer diagnostic v1\n";
+
+struct DiagnosticLog {
+    file: File,
+    remaining: usize,
+}
+
+impl DiagnosticLog {
+    fn open() -> io::Result<Self> {
+        // Refuse to put the log on the rootfs if /data is not mounted.
+        let data_device = fs::metadata("/data")?.dev();
+        if data_device == fs::metadata("/")?.dev() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Self::at(Path::new("/data/.nanokvm-writer-log"), data_device)
+    }
+
+    fn at(path: &Path, expected_device: u64) -> io::Result<Self> {
+        let directory = crate::update::staged_archive::StageDirectory::prepare(path)?;
+        let mut next = directory.create_download()?;
+        if next.file_mut().metadata()?.dev() != expected_device {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        next.file_mut().write_all(DIAGNOSTIC_HEADER)?;
+        let file = next.writer()?;
+        // Atomic replacement never follows an existing symlink or writes
+        // through a hard link. Keep the writable descriptor across shutdown.
+        next.publish("latest.log")?;
+        Ok(Self {
+            file,
+            remaining: DIAGNOSTIC_LIMIT - DIAGNOSTIC_HEADER.len(),
+        })
+    }
+
+    fn append(&mut self, line: &str) -> io::Result<()> {
+        let count = line
+            .len()
+            .checked_add(1)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        if count > self.remaining {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        self.remaining -= count;
+        self.file.write_all(line.as_bytes())?;
+        self.file.write_all(b"\n")?;
+        self.file.sync_data()
+    }
 }
 
 impl DeviceSystem {
     pub fn new() -> Self {
-        Self {
+        let mut system = Self {
             kmsg: OpenOptions::new().write(true).open("/dev/kmsg").ok(),
+            diagnostic: DiagnosticLog::open().ok(),
+        };
+        if system.diagnostic.is_none() {
+            system.log("persistent diagnostic unavailable; using kmsg only");
         }
+        system
     }
 }
 
@@ -164,6 +221,18 @@ impl WriterSystem for DeviceSystem {
     }
 
     fn log(&mut self, line: &str) {
+        if let Some(log) = &mut self.diagnostic
+            && log.append(line).is_err()
+        {
+            // e.g. sysrq-u remounted p3 read-only. Logging must not change the
+            // writer outcome; retain the already synced prefix for diagnosis.
+            self.diagnostic = None;
+            if let Some(kmsg) = &mut self.kmsg {
+                let _ = kmsg.write_all(
+                    b"<3>nanokvm-raw-writer: persistent diagnostic stopped; using kmsg only\n",
+                );
+            }
+        }
         if let Some(kmsg) = &mut self.kmsg {
             let _ = kmsg.write_all(format!("<3>nanokvm-raw-writer: {line}\n").as_bytes());
         }

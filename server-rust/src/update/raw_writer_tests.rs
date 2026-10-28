@@ -80,6 +80,65 @@ fn the_read_back_comes_from_the_partition_not_from_the_image() {
     assert!(matches!(result, Err(WriteError::Mismatch)));
 }
 
+#[test]
+fn missing_advice_syscall_still_writes_and_verifies_the_whole_partition_range() {
+    let bytes = vec![0x37; CHUNK + 17];
+    let device = image(&vec![0xee; bytes.len() + 32]);
+    write_image_with_advice(
+        &image(&bytes),
+        &device,
+        bytes.len() as u64,
+        &digest(&bytes),
+        |_, length| {
+            assert_eq!(length.get(), bytes.len() as u64);
+            Err(rustix::io::Errno::NOSYS)
+        },
+    )
+    .unwrap();
+    assert_eq!(contents(&device, bytes.len()), bytes);
+    let mut tail = [0; 32];
+    device.read_exact_at(&mut tail, bytes.len() as u64).unwrap();
+    assert_eq!(tail, [0xee; 32]);
+}
+
+#[test]
+fn missing_advice_syscall_does_not_skip_readback_or_digest_validation() {
+    let bytes = vec![7; CHUNK + 17];
+    let device = image(&vec![0; bytes.len()]);
+    let result = write_image_with_advice(
+        &image(&bytes),
+        &device,
+        bytes.len() as u64,
+        &digest(&bytes),
+        |device, _| {
+            // Corrupt the last chunk after sync; the source remains intact.
+            device.write_all_at(&[8], CHUNK as u64).unwrap();
+            Err(rustix::io::Errno::NOSYS)
+        },
+    );
+    assert!(matches!(result, Err(WriteError::Mismatch)));
+}
+
+#[test]
+fn other_advice_errors_are_not_hidden() {
+    for errno in [
+        rustix::io::Errno::IO,
+        rustix::io::Errno::PERM,
+        rustix::io::Errno::INVAL,
+    ] {
+        let result = write_image_with_advice(
+            &image(b"data"),
+            &image(b"zero"),
+            4,
+            &digest(b"data"),
+            |_, _| Err(errno),
+        );
+        assert!(
+            matches!(result, Err(WriteError::Io(error)) if error.raw_os_error() == Some(errno.raw_os_error()))
+        );
+    }
+}
+
 mod sequence {
     use super::*;
     use crate::update::restore_capsule::{
