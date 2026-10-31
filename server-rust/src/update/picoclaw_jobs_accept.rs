@@ -816,28 +816,18 @@ fn asset_digest(bytes: &[u8]) -> [u8; 32] {
 fn managed_assets(config: &serde_json::Value, home: &Path) -> Result<Vec<Asset>> {
     use crate::update::picoclaw_profile::{self, MAX_PROFILE_BYTES};
     let workspace = picoclaw_profile::workspace(config, home).ok_or_else(invalid)?;
-    let shipped = [
-        picoclaw_profile::SHIPPED_AGENT,
-        picoclaw_profile::SHIPPED_AGENT_KVM,
-    ];
     let mut assets = Vec::new();
     for (path, desired, executable) in super::super::super::onboard::GENERATED {
-        let current = read_workspace_asset(&workspace, path)?;
+        // An object that is no plain document stays where it is, and the jobs of
+        // this Home go on without its asset.
+        let Ok(current) = read_workspace_asset(&workspace, path) else {
+            continue;
+        };
         if current.as_deref() == Some(desired) {
             continue;
         }
-        if path == picoclaw_profile::AGENT {
-            let decision = picoclaw_profile::classify(current.as_deref(), desired, shipped);
-            let replace = match decision {
-                picoclaw_profile::Decision::Replace => true,
-                picoclaw_profile::Decision::Noop => false,
-                picoclaw_profile::Decision::Custom => current
-                    .as_deref()
-                    .is_some_and(picoclaw_profile::is_prior_shipped),
-            };
-            if !replace {
-                continue;
-            }
+        if path == picoclaw_profile::AGENT && !picoclaw_profile::settles(current.as_deref()) {
+            continue;
         }
         if desired.len() > MAX_PROFILE_BYTES {
             return Err(invalid());
@@ -852,22 +842,38 @@ fn managed_assets(config: &serde_json::Value, home: &Path) -> Result<Vec<Asset>>
     Ok(assets)
 }
 
-fn apply_assets(plan: &Plan, source: &Source) -> Result<()> {
-    if plan.assets.is_empty() {
-        return Ok(());
-    }
-    use crate::update::picoclaw_profile::workspace;
+fn plan_workspace(plan: &Plan, source: &Source) -> Result<std::path::PathBuf> {
     use std::os::unix::ffi::OsStrExt as _;
     let view = decode_source(source.bytes.as_slice())?;
     let config: serde_json::Value = serde_json::from_slice(&plan.config).map_err(|_| invalid())?;
     let home = Path::new(std::ffi::OsStr::from_bytes(view.home));
-    let workspace = workspace(&config, home).ok_or_else(invalid)?;
-    install_assets(&workspace, &plan.assets)
+    crate::update::picoclaw_profile::workspace(&config, home).ok_or_else(invalid)
 }
 
+/// Whether every planned asset still is what the plan saw.
+fn assets_as_planned(plan: &Plan, source: &Source) -> Result<bool> {
+    if plan.assets.is_empty() {
+        return Ok(true);
+    }
+    let workspace = plan_workspace(plan, source)?;
+    Ok(plan.assets.iter().all(|asset| {
+        read_workspace_asset(&workspace, &asset.path)
+            .is_ok_and(|current| current.as_deref().map(asset_digest) == asset.before)
+    }))
+}
+
+fn apply_assets(plan: &Plan, source: &Source) -> Result<()> {
+    if plan.assets.is_empty() {
+        return Ok(());
+    }
+    install_assets(&plan_workspace(plan, source)?, &plan.assets)
+}
+
+/// Install what `assets_as_planned` accepted. Past Applying an asset is no reason
+/// to fence the Home: whatever came to stand at its path stays, and the next
+/// Startup job looks at that path again.
 fn install_assets(workspace: &Path, assets: &[Asset]) -> Result<()> {
     use crate::update::picoclaw_profile::MAX_PROFILE_BYTES;
-    Directory::open(workspace, true)?;
     for asset in assets {
         let Some((_, expected, executable)) = super::super::super::onboard::GENERATED
             .iter()
@@ -884,22 +890,36 @@ fn install_assets(workspace: &Path, assets: &[Asset]) -> Result<()> {
             .and_then(|name| name.to_str())
             .ok_or_else(invalid)?;
         let parent = path.parent().unwrap_or(Path::new("."));
-        let directory = Directory::open(&workspace.join(parent), true)?;
-        let before = directory.inspect_document(name, MAX_PROFILE_BYTES)?;
-        let current = directory.read_document(name, MAX_PROFILE_BYTES)?;
-        if current.as_deref().map(Vec::as_slice) == Some(asset.desired.as_slice()) {
+        let Ok(directory) = Directory::open(&workspace.join(parent), true) else {
             continue;
-        }
-        if current.as_deref().map(|bytes| asset_digest(bytes)) != asset.before {
-            return Err(invalid());
+        };
+        let (Ok(before), Ok(current)) = (
+            directory.inspect_document(name, MAX_PROFILE_BYTES),
+            directory.read_document(name, MAX_PROFILE_BYTES),
+        ) else {
+            continue;
+        };
+        if current.as_deref().map(Vec::as_slice) == Some(asset.desired.as_slice())
+            || current.as_deref().map(|bytes| asset_digest(bytes)) != asset.before
+        {
+            continue;
         }
         let mut temporary = directory.temporary(MAX_PROFILE_BYTES)?;
         temporary.file.write_all(&asset.desired)?;
-        temporary.file.sync_all()?;
-        temporary.publish_document(name, before)?;
+        // The name never shows a bridge that cannot run: an interrupted job
+        // finds the right bytes and leaves them as they are.
         if asset.executable {
             fchmod(&temporary.file, Mode::from_raw_mode(0o755)).map_err(std::io::Error::from)?;
-            temporary.file.sync_all()?;
+        }
+        temporary.file.sync_all()?;
+        #[cfg(test)]
+        if asset.executable {
+            checkpoint("bridge", "staged")?;
+        }
+        temporary.publish_document(name, before)?;
+        #[cfg(test)]
+        if asset.executable {
+            checkpoint("bridge", "published")?;
         }
         directory.file.sync_all()?;
         if directory
@@ -1788,7 +1808,8 @@ pub(super) fn apply(payload: &mut Payload) -> Result<TransitionStatus> {
             (None, true) => true,
             (Some(value), false) => value.as_str() == plan.internal.as_str(),
             _ => false,
-        };
+        }
+        && assets_as_planned(plan, source)?;
     if !unchanged {
         // The scope is proven closed and nothing was changed: terminal failure.
         record.phase = Phase::Completed;
@@ -2573,6 +2594,11 @@ fn checkpoint(member: &str, phase: &str) -> Result<()> {
         return Ok(());
     }
     let point = format!("{member}-{phase}");
+    if std::env::var("NANOKVM_PICO_ACCEPT_WRITE").as_deref() == Ok(point.as_str()) {
+        // A writer outside the job, between its plan and its apply.
+        let target = std::env::var_os("NANOKVM_PICO_ACCEPT_TARGET").ok_or_else(invalid)?;
+        std::fs::write(target, b"synthetic concurrent edit\n")?;
+    }
     if std::env::var("NANOKVM_PICO_ACCEPT_FAIL").as_deref() == Ok(point.as_str()) {
         return Err(invalid());
     }

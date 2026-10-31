@@ -21,6 +21,16 @@ fn only_an_absent_or_exact_shipped_profile_is_replaced() {
 }
 
 #[test]
+fn a_startup_job_never_changes_a_profile_that_stands() {
+    assert!(settles(None));
+    assert!(!settles(Some(SHIPPED_AGENT)));
+    assert!(!settles(Some(b"my own notes\n")));
+    assert!(!settles(Some(b"")));
+    // The superseded list holds this document, the one last shipped as KVM.
+    assert!(settles(Some(SHIPPED_AGENT_KVM)));
+}
+
+#[test]
 fn the_workspace_follows_the_config_or_defaults_below_home() {
     let home = Path::new("/root/.picoclaw");
     assert_eq!(

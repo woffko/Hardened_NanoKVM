@@ -56,6 +56,10 @@ fn command(root: &Path, case: &str) -> Command {
     if let Some(point) = case.strip_prefix("fail:") {
         command.env("NANOKVM_PICO_ACCEPT_FAIL", point);
     }
+    if case == "settle-assets-changed-absent" {
+        command.env("NANOKVM_PICO_ACCEPT_WRITE", "closed-renamed");
+        command.env("NANOKVM_PICO_ACCEPT_TARGET", Path::new(HOME).join(SKILL));
+    }
     if let Some(point) = case.strip_prefix("kill:") {
         command.env("NANOKVM_PICO_ACCEPT_POINT", point);
     }
@@ -79,6 +83,9 @@ fn change_failure(case: &str) -> Option<&str> {
     [
         "settle-change-fail:",
         "settle-assets-fail:",
+        "settle-assets-foreign-fail:",
+        "settle-assets-edited-fail:",
+        "settle-assets-parent-fail:",
         "settle-internal-fail:",
         "settle-change-live-fail:",
         "settle-model-change-fail:",
@@ -244,6 +251,26 @@ fn startup_change_settlement_applies_once_and_records_the_exact_runtime_result()
 fn startup_asset_refresh_restores_missing_generated_files_without_rewriting_the_pair() {
     run("settle-assets-absent");
     run("settle-assets-fail:applying-renamed");
+    run("settle-assets-fail:bridge-staged");
+    run("settle-assets-fail:bridge-published");
+}
+
+#[test]
+fn startup_asset_refresh_keeps_the_default_profile_the_user_selected() {
+    run("settle-assets-default-absent");
+}
+
+#[test]
+fn an_object_at_an_asset_path_stays_and_blocks_no_startup_job() {
+    run("settle-assets-foreign-absent");
+    run("settle-assets-foreign-fail:applying-renamed");
+    run("settle-assets-parent-fail:applying-renamed");
+    run("settle-assets-edited-fail:applying-renamed");
+}
+
+#[test]
+fn a_document_changed_after_the_plan_ends_the_job_before_applying() {
+    run("settle-assets-changed-absent");
 }
 
 #[test]
@@ -1133,11 +1160,18 @@ pub(crate) fn settle_home(case: &str) -> SettlePair {
     }
     if case.starts_with("settle-assets-") {
         fs::write(Path::new(HOME).join("workspace/AGENT.md"), AGENT).unwrap();
-        fs::remove_file(Path::new(HOME).join("workspace/skills/kvm-control/SKILL.md")).unwrap();
-        fs::remove_file(
-            Path::new(HOME).join("workspace/skills/kvm-control/scripts/nanokvm-bridge.sh"),
+        fs::remove_file(Path::new(HOME).join(SKILL)).unwrap();
+        fs::remove_file(Path::new(HOME).join(BRIDGE)).unwrap();
+    }
+    if case == "settle-assets-default-absent" {
+        fs::write(
+            Path::new(HOME).join("workspace/AGENT.md"),
+            crate::update::picoclaw_profile::SHIPPED_AGENT,
         )
         .unwrap();
+    }
+    if case == "settle-assets-foreign-absent" {
+        fs::create_dir(Path::new(HOME).join(SKILL)).unwrap();
     }
     let mut config = serde_json::json!({"agents": {"defaults": {"model": "fixture"}}});
     let mut security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
@@ -1203,6 +1237,9 @@ pub(crate) fn assert_pair_unchanged(pair: &SettlePair) {
 
 const BINARY: &str = "/usr/bin/picoclaw";
 const AGENT: &[u8] = b"synthetic custom agent profile, kept by removal\n";
+const EDIT: &[u8] = b"synthetic concurrent edit\n";
+const SKILL: &str = "workspace/skills/kvm-control/SKILL.md";
+const BRIDGE: &str = "workspace/skills/kvm-control/scripts/nanokvm-bridge.sh";
 
 // The managed executable (or a link in its place) and a user workspace file.
 fn remove_fixture(case: &str) {
@@ -1642,6 +1679,41 @@ pub(crate) fn members_present() -> [bool; 3] {
     })
 }
 
+// The bridge can run however its job went, nothing temporary is left beside it,
+// and whatever came to stand at an asset's path is still there.
+fn assert_assets_installed(case: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let skill = Path::new(HOME).join(SKILL);
+    if case.starts_with("settle-assets-foreign-") {
+        assert!(skill.is_dir());
+    } else if case.starts_with("settle-assets-edited-") {
+        assert_eq!(fs::read(&skill).unwrap(), EDIT);
+    } else {
+        assert_eq!(
+            fs::read(&skill).unwrap(),
+            crate::update::picoclaw_config::GENERATED[1].1
+        );
+    }
+    let bridge = Path::new(HOME).join(BRIDGE);
+    if case.starts_with("settle-assets-parent-") {
+        assert_eq!(fs::read(bridge.parent().unwrap()).unwrap(), EDIT);
+        return;
+    }
+    assert_eq!(
+        fs::read(&bridge).unwrap(),
+        crate::update::picoclaw_config::GENERATED[2].1
+    );
+    assert_eq!(
+        fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read_dir(bridge.parent().unwrap()).unwrap().count(),
+        1,
+        "a temporary stayed beside the bridge"
+    );
+}
+
 fn plan_present() -> bool {
     Path::new("/etc/kvm/picoclaw-operations/plan").exists()
 }
@@ -1919,6 +1991,19 @@ fn settle_case(
     if let Some(point) = change_failure(case) {
         let new_internal = case.starts_with("settle-internal-fail:");
         assert_eq!(status, MutationStatus::RecoveryRequired);
+        // Each came after the job stopped and before the recovery of the boot.
+        if case.starts_with("settle-assets-foreign-fail:") {
+            fs::create_dir(Path::new(HOME).join(SKILL)).unwrap();
+        }
+        if case.starts_with("settle-assets-edited-fail:") {
+            fs::write(Path::new(HOME).join(SKILL), EDIT).unwrap();
+        }
+        if case.starts_with("settle-assets-parent-fail:") {
+            let scripts = Path::new(HOME).join(BRIDGE);
+            let scripts = scripts.parent().unwrap();
+            fs::remove_dir(scripts).unwrap();
+            fs::write(scripts, EDIT).unwrap();
+        }
         for _ in 0..3 {
             assert_eq!(mutation.poll(), MutationStatus::RecoveryRequired);
         }
@@ -1958,23 +2043,13 @@ fn settle_case(
         let settled = activate_later_boot();
         assert!(settled[128..RECEIPT].iter().all(|byte| *byte == 0));
         assert_eq!(settled[RECEIPT + 169], 8, "Completed");
-        if case.starts_with("settle-assets-fail:") {
+        if case.starts_with("settle-assets-") {
             assert_pair_unchanged(pair);
             assert_eq!(
                 fs::read(Path::new(HOME).join("workspace/AGENT.md")).unwrap(),
                 AGENT
             );
-            let skill = Path::new(HOME).join("workspace/skills/kvm-control/SKILL.md");
-            let bridge =
-                Path::new(HOME).join("workspace/skills/kvm-control/scripts/nanokvm-bridge.sh");
-            assert_eq!(
-                fs::read(&skill).unwrap(),
-                crate::update::picoclaw_config::GENERATED[1].1
-            );
-            assert_eq!(
-                fs::read(&bridge).unwrap(),
-                crate::update::picoclaw_config::GENERATED[2].1
-            );
+            assert_assets_installed(case);
         }
         assert_eq!(settled[RECEIPT + 170], u8::from(live));
         let (outcome, runtime, resume) = match phase {
@@ -2004,7 +2079,7 @@ fn settle_case(
         if let Some(planned) = &planned {
             assert_eq!(&internal, planned, "never a second new credential");
         }
-        if case.starts_with("settle-assets-fail:") {
+        if case.starts_with("settle-assets-") {
             assert_pair_unchanged(pair);
         } else {
             assert_pair_desired(pair, &internal);
@@ -2077,6 +2152,22 @@ fn settle_case(
                 );
                 shutdown(broker);
             }
+        }
+        "settle-assets-changed-absent" => {
+            let MutationStatus::Superseded(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            let state = record();
+            assert_eq!(state[RECEIPT + 172], 3, "Failed");
+            assert_eq!(state[RECEIPT + 173], 2, "runtime NotRequested");
+            assert_pair_unchanged(pair);
+            assert_eq!(fs::read(Path::new(HOME).join(SKILL)).unwrap(), EDIT);
+            assert!(
+                !Path::new(HOME).join(BRIDGE).exists(),
+                "nothing was applied"
+            );
+            assert!(!plan_present());
+            drop(assert_released(mutation));
         }
         "settle-superseded-absent" => {
             let MutationStatus::Superseded(id) = status else {
@@ -2298,7 +2389,9 @@ fn settle_case(
                 shutdown(broker);
             }
         }
-        "settle-assets-absent" => {
+        "settle-assets-absent"
+        | "settle-assets-default-absent"
+        | "settle-assets-foreign-absent" => {
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };
@@ -2306,26 +2399,13 @@ fn settle_case(
                 assert_eq!(mutation.poll(), MutationStatus::Completed(id));
             }
             assert_pair_unchanged(pair);
-            assert_eq!(
-                fs::read(Path::new(HOME).join("workspace/AGENT.md")).unwrap(),
+            let agent = if case == "settle-assets-default-absent" {
+                crate::update::picoclaw_profile::SHIPPED_AGENT
+            } else {
                 AGENT
-            );
-            let skill = Path::new(HOME).join("workspace/skills/kvm-control/SKILL.md");
-            let bridge =
-                Path::new(HOME).join("workspace/skills/kvm-control/scripts/nanokvm-bridge.sh");
-            assert_eq!(
-                fs::read(&skill).unwrap(),
-                crate::update::picoclaw_config::GENERATED[1].1
-            );
-            assert_eq!(
-                fs::read(&bridge).unwrap(),
-                crate::update::picoclaw_config::GENERATED[2].1
-            );
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
-                0o755
-            );
+            };
+            assert!(fs::read(Path::new(HOME).join("workspace/AGENT.md")).unwrap() == agent);
+            assert_assets_installed(case);
             assert!(!plan_present());
             drop(assert_released(mutation));
         }

@@ -279,7 +279,7 @@ impl Temporary<'_> {
     fn publish_with(&mut self, name: &str, before: Option<Revision>, document: bool) -> Result<()> {
         let named = self
             .parent
-            .inspect_bounded(&self.name, self.limit)?
+            .inspect_with(&self.name, self.limit, document)?
             .ok_or_else(invalid)?;
         if named != Revision::from(&self.file.metadata()?)
             || self.parent.inspect_with(name, self.limit, document)? != before
@@ -313,7 +313,7 @@ impl Drop for Temporary<'_> {
     fn drop(&mut self) {
         // Never remove an unrelated inode, even on a failed publication.
         if self.linked
-            && let Ok(Some(named)) = self.parent.inspect_bounded(&self.name, self.limit)
+            && let Ok(Some(named)) = self.parent.inspect_with(&self.name, self.limit, true)
             && self
                 .file
                 .metadata()

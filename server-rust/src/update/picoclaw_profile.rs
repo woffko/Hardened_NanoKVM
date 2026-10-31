@@ -10,7 +10,9 @@ pub(crate) const SHIPPED: &str = "/kvmapp/picoclaw";
 /// The profile document inside the workspace.
 pub(crate) const AGENT: &str = "AGENT.md";
 pub(crate) const MAX_PROFILE_BYTES: usize = 64 * 1024;
+#[cfg(test)]
 pub(crate) const SHIPPED_AGENT: &[u8] = include_bytes!("../../../kvmapp/picoclaw/AGENT.md");
+#[cfg(test)]
 pub(crate) const SHIPPED_AGENT_KVM: &[u8] = include_bytes!("../../../kvmapp/picoclaw/AGENT_KVM.md");
 pub(crate) const PRIOR_SHIPPED: [[u8; 32]; 1] = [[
     0xcd, 0xf2, 0x0e, 0xfa, 0x3f, 0x7e, 0x4f, 0x60, 0xad, 0x68, 0x57, 0x31, 0x79, 0x5e, 0x00, 0x45,
@@ -23,6 +25,13 @@ pub(crate) fn is_prior_shipped(bytes: &[u8]) -> bool {
     PRIOR_SHIPPED
         .iter()
         .any(|prior| prior.as_slice() == digest.as_slice())
+}
+
+/// Whether a Startup job puts the shipped profile in place of `current`. It fills
+/// a workspace without a profile and retires a superseded shipped document. Any
+/// other profile stands, the default included: that is what the user selected.
+pub(crate) fn settles(current: Option<&[u8]>) -> bool {
+    current.is_none_or(is_prior_shipped)
 }
 
 /// The shipped document for the default or the KVM profile.
