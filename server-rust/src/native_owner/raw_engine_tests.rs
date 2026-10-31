@@ -318,7 +318,11 @@ fn the_server_takes_a_raw_offer_from_its_fixed_endpoint() {
             .unwrap()
             .send(handoff)
             .unwrap();
+        // The fixture's idle limit is shorter than this wait under load: leave
+        // at a complete reply boundary and come back, as a real observer does.
+        drop(control);
         until(|| path.join("raw-writer-exec").exists());
+        let mut control = connect(path);
         observed(&mut control, Mode::Uncertain);
         assert!(busy(path));
     });
