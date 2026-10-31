@@ -15,6 +15,8 @@ REPORT_DIR="$OUTPUT_DIR/report"
 JOBS="${KERNEL_BUILD_JOBS:-16}"
 EXPECTED_KERNEL_RELEASE="${EXPECTED_KERNEL_RELEASE:-5.10.265-tag-}"
 CONFIG_FRAGMENT="${KERNEL_5_10_265_CONFIG_FRAGMENT:-}"
+# Merged after the first fragment, so that one can stay the accepted file.
+EXTRA_FRAGMENT="${KERNEL_EXTRA_CONFIG_FRAGMENT:-}"
 
 require_file() {
 	[ -f "$1" ] || {
@@ -64,6 +66,11 @@ if [ -n "$CONFIG_FRAGMENT" ]; then
 	config_fragment_sha256="$(sha256sum "$CONFIG_FRAGMENT" | awk '{print $1}')"
 else
 	config_fragment_sha256="none"
+fi
+if [ -n "$EXTRA_FRAGMENT" ]; then
+	require_file "$EXTRA_FRAGMENT"
+	EXTRA_FRAGMENT="$(readlink -f "$EXTRA_FRAGMENT")"
+	config_fragment_sha256="$config_fragment_sha256+$(sha256sum "$EXTRA_FRAGMENT" | awk '{print $1}')"
 fi
 
 RISCV_TIME_SOURCE="$KERNEL_SOURCE/arch/riscv/kernel/time.c"
@@ -158,7 +165,7 @@ if [ "$new_output" = true ]; then
 	if [ -n "$CONFIG_FRAGMENT" ]; then
 		KCONFIG_CONFIG="$OUTPUT_DIR/.config" \
 			"$KERNEL_SOURCE/scripts/kconfig/merge_config.sh" \
-			-m -O "$OUTPUT_DIR" "$OUTPUT_DIR/.config" "$CONFIG_FRAGMENT"
+			-m -O "$OUTPUT_DIR" "$OUTPUT_DIR/.config" "$CONFIG_FRAGMENT" ${EXTRA_FRAGMENT:+"$EXTRA_FRAGMENT"}
 		make -C "$KERNEL_SOURCE" O="$OUTPUT_DIR" olddefconfig
 	fi
 fi
@@ -183,7 +190,7 @@ if [ -n "$CONFIG_FRAGMENT" ]; then
 			echo "kernel config fragment request was not retained: $requested" >&2
 			exit 1
 		}
-	done < "$CONFIG_FRAGMENT"
+	done < <(cat "$CONFIG_FRAGMENT" ${EXTRA_FRAGMENT:+"$EXTRA_FRAGMENT"})
 fi
 if [ "${KERNEL_5_10_265_REQUIRE_PROC_CHILDREN:-0}" = 1 ]; then
 	grep -Fqx 'CONFIG_PROC_CHILDREN=y' "$OUTPUT_DIR/.config" || {

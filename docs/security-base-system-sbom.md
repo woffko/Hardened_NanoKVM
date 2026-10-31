@@ -54,3 +54,17 @@ wpa_supplicant 2.11 patches are obsolete in 2.12 and the preparation script
 removes them, as upstream master did. The refreshed source tree is prepared
 as `build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2`; the device
 runs the 2026-10-23 set until a rootfs is built from it and accepted.
+
+## 2026-10-31 additions
+
+The 5.10.272 kernel is configured by the RC12 fragment unchanged,
+`phase3-04-init-on-alloc.config` (SHA-256 `13c9fede…f750`), plus one line,
+`CONFIG_PROC_CHILDREN=y`, in `support/sg2002/kernel/5.10.272/proc-children.config`
+(SHA-256 `3c68b34a…7bd6`). The native supervisors enumerate their children
+through it. `scripts/build-kernel-5.10.272-candidate-run.sh` pins both by hash and
+pins the kernel commits as constants: the environment can name a tree, not change
+what is accepted.
+
+BusyBox is 0755 in every image format: `board/sg2002/post-fakeroot.sh` clears the
+setuid bit that Buildroot's permission table sets, and the rootfs validator refuses
+anything else.

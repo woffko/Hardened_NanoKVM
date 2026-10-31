@@ -70,6 +70,27 @@ wrapper_refuses() {
 	*) fail "$script gave another refusal for $system with $app: $output" ;;
 	esac
 }
+# The environment can name a tree, but it cannot move the pinned commits.
+tree="$(mktemp -d)"
+git -C "$tree" init -q
+git -C "$tree" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
+printf '2.1.0\n' > "$stage/version"
+printf 'synthetic\n' > "$stage/server-file"
+mkdir -p "$stage/server"
+cp "$stage/server-file" "$stage/server/NanoKVM-Server"
+if output="$(EXPECTED_SYSTEM_VERSION=0.4.0-raw.1 EXPECTED_KVMAPP_VERSION=2.1.0 \
+	EXPECTED_KVMAPP_SERVER_SHA256="$(sha256sum "$stage/server-file" | cut -d' ' -f1)" \
+	NANOKVM_KVMAPP_SOURCE_DIR="$stage" KERNEL_5_10_272_REPRO_ROOT="$stage/run" \
+	KERNEL_5_10_272_SOURCE_DIR="$tree" EXPECTED_KERNEL_SOURCE_COMMIT="$(git -C "$tree" rev-parse HEAD)" \
+	bash "$ROOT_DIR/scripts/build-kernel-5.10.272-candidate-run.sh" 2>&1)"; then
+	fail "the wrapper took another kernel commit from the environment"
+fi
+case "$output" in
+*"does not match the pinned merge commit"*) ;;
+*) fail "the wrapper gave another refusal: $output" ;;
+esac
+rm -rf "$tree" "$stage/version" "$stage/server-file" "$stage/server"
+
 for script in build-kernel-5.10.272-candidate-run.sh build-kernel-5.10.265-candidate-run.sh; do
 	wrapper_refuses "$script" 0.3.0-raw.13 2.0.44 "already used"
 	wrapper_refuses "$script" 0.4.0-raw.1 2.0.45 "debug number"

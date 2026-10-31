@@ -7,11 +7,14 @@ set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT_DIR/scripts/lib/release-versions.sh"
-FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.265/configs/phase3-05-runtime-children.config"
-FRAGMENT_SHA256=82390ad4f7992a666efee6a2c0fe3e7b0ddc31a2e5c2d021990b792f6b241b3a
+FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.265/configs/phase3-04-init-on-alloc.config"
+FRAGMENT_SHA256=13c9fede1fdc4cfe59d1b6f2f90d4ae28d0b7e32876c9145b9999bb09816f750
+CHILDREN_FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.272/proc-children.config"
+CHILDREN_FRAGMENT_SHA256=3c68b34a5be8a51184862f8a17402ecb69146eb3e2d663257b35605a3e637bd6
 SOURCE_DIR="${KERNEL_5_10_272_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/kernel-5.10.272-v1/repo}"
-EXPECTED_SOURCE_COMMIT="${EXPECTED_KERNEL_SOURCE_COMMIT:-ddef97c3d978b67f7852dca05f0b3505f798c0b2}"
-EXPECTED_STABLE_PARENT="${EXPECTED_KERNEL_STABLE_PARENT:-aca95a35f1bcc0626c4fa4d1252bf2d4c990a1a2}"
+# Any tree may be named above; only these commits build.
+EXPECTED_SOURCE_COMMIT=ddef97c3d978b67f7852dca05f0b3505f798c0b2
+EXPECTED_STABLE_PARENT=aca95a35f1bcc0626c4fa4d1252bf2d4c990a1a2
 RUN_ROOT="${KERNEL_5_10_272_REPRO_ROOT:-}"
 SOURCE="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
 EXPECTED_SECURITY_PATCH_LEVEL="${EXPECTED_SECURITY_PATCH_LEVEL:-Buildroot 2026.05.1 security maintenance Linux 5.10.272 SG2002 vendor port}"
@@ -33,6 +36,9 @@ esac
 [ -f "$FRAGMENT" ] || refuse "missing accepted RC12 kernel fragment: $FRAGMENT"
 [ "$(sha256sum "$FRAGMENT" | awk '{print $1}')" = "$FRAGMENT_SHA256" ] \
 	|| refuse "kernel fragment $FRAGMENT does not match the accepted hash"
+[ -f "$CHILDREN_FRAGMENT" ] || refuse "missing kernel fragment: $CHILDREN_FRAGMENT"
+[ "$(sha256sum "$CHILDREN_FRAGMENT" | awk '{print $1}')" = "$CHILDREN_FRAGMENT_SHA256" ] \
+	|| refuse "kernel fragment $CHILDREN_FRAGMENT does not match the accepted hash"
 [ -f "$NANOKVM_KVMAPP_SOURCE_DIR/version" ] || refuse "application stage is missing its version file"
 [ -f "$NANOKVM_KVMAPP_SOURCE_DIR/server/NanoKVM-Server" ] || refuse "application stage is missing NanoKVM-Server"
 [ "$(cat "$NANOKVM_KVMAPP_SOURCE_DIR/version")" = "$EXPECTED_KVMAPP_VERSION" ] \
@@ -57,6 +63,7 @@ export EXPECTED_KVMAPP_VERSION
 export EXPECTED_KERNEL_RELEASE=5.10.272-tag-
 export EXPECTED_SECURITY_PATCH_LEVEL
 export KERNEL_5_10_265_CONFIG_FRAGMENT="$FRAGMENT"
+export KERNEL_EXTRA_CONFIG_FRAGMENT="$CHILDREN_FRAGMENT"
 export KERNEL_5_10_265_REQUIRE_PROC_CHILDREN=1
 export KERNEL_5_10_265_SOURCE_DIR="$SOURCE_DIR"
 export EXPECTED_UPDATE_KEY_ID=hardened-system-prod-2026q3

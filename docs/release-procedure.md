@@ -35,7 +35,8 @@ download. The value is `RELEASE_MINIMUM_SYSTEM` in the same library, and
 `scripts/build-kernel-5.10.272-candidate-run.sh` runs the whole system pipeline
 (kernel, modules, runtime, rootfs, `boot.itb`, recovery SD). It pins what the
 remediation fixed: the kernel source commit and its signed stable parent, the
-accepted kernel fragment by hash, kernel release `5.10.272-tag-`, the production
+accepted RC12 kernel fragment and the one-line `CONFIG_PROC_CHILDREN` fragment,
+both by hash, kernel release `5.10.272-tag-`, the production
 update key, and the refreshed Buildroot security source. It takes from the
 environment, and refuses to start without, what is decided per candidate:
 `EXPECTED_SYSTEM_VERSION` and `EXPECTED_KVMAPP_VERSION`,
