@@ -1,0 +1,16 @@
+# Version numbers that must never be given to a new build, one per line.
+# A number is used up once any build carrying it was published, signed with the
+# production key or installed on a device. Candidate wrappers refuse these.
+
+# Published.
+2.0.40
+2.0.41
+2.0.42
+0.3.0-raw.10
+0.3.0-raw.11
+0.3.0-raw.12
+
+# Signed or installed for testing, never published.
+2.0.43
+2.0.44
+0.3.0-raw.13
