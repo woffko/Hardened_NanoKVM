@@ -174,6 +174,16 @@ async function main() {
     const response = await context.post('/api/application/update/offline', {
       headers: { 'x-csrf-token': csrfToken },
       multipart: {
+        metadata: {
+          name: 'latest.json',
+          mimeType: 'application/json',
+          buffer: fs.readFileSync(process.env.APP_METADATA),
+        },
+        signature: {
+          name: 'latest.json.sig',
+          mimeType: 'application/octet-stream',
+          buffer: fs.readFileSync(process.env.APP_SIGNATURE),
+        },
         file: {
           name: `hardened-nanokvm-kvmapp-${EXPECTED_APP}-kvm-watchdog.tar.gz`,
           mimeType: 'application/gzip',

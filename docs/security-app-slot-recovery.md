@@ -2,8 +2,12 @@
 
 This describes source/host-tested preparation, independent daemon delivery,
 native-closed publication, rollback and early consumer gates, not a completed
-API installation lifecycle or WP-04/C1 fix. Since 2026-10-23 the online and
-offline app update API hands its verified candidate to this installer instead
+API installation lifecycle or WP-04/C1 fix. An offline update is the release's
+package with its `latest.json` and `latest.json.sig`: it passes the same trust set,
+size, digest and version checks as a download, in any signed version, and the lab
+setting for unsigned metadata does not apply to it, so a stolen session cannot
+install code as root. A self-built package goes in over SSH. Since 2026-10-23 the
+online and offline app update API hands its verified candidate to this installer instead
 of swapping `/kvmapp` itself; that path is host-tested with the fixed-root daemon
 and is not accepted on a device. The new helper is compile-bound into the linked RV64 backend and
 packaged under `/kvmapp/system/bin`. Build recipes now install an independent

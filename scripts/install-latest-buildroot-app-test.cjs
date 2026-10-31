@@ -198,6 +198,16 @@ async function main() {
   const upload = await context.post('/api/application/update/offline', {
     headers: { 'x-csrf-token': csrfToken },
     multipart: {
+      metadata: {
+        name: 'latest.json',
+        mimeType: 'application/json',
+        buffer: fs.readFileSync(process.env.APP_METADATA),
+      },
+      signature: {
+        name: 'latest.json.sig',
+        mimeType: 'application/octet-stream',
+        buffer: fs.readFileSync(process.env.APP_SIGNATURE),
+      },
       file: {
         name: `hardened-nanokvm-kvmapp-${APP_VERSION}.tar.gz`,
         mimeType: 'application/gzip',

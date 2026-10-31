@@ -312,7 +312,7 @@ async fn online_candidate_version_is_bound_to_verified_metadata_before_live_muta
             )
             .unwrap();
         let result =
-            prepare_app_candidate(source, stage, &InstallAuthority::OnlineMetadata(verified));
+            prepare_app_candidate(source, stage, &InstallAuthority::SignedMetadata(verified));
         assert_eq!(result.is_ok(), version == b"2.0.43\n");
         match result {
             Err(error) => assert!(error.to_string().contains("version differs")),
@@ -367,7 +367,7 @@ async fn online_candidate_rejects_each_mismatched_helper_even_with_valid_signed_
         // Archive/signature/version checks succeed. It is the independently
         // inconsistent helper payload that must prevent candidate issuance.
         let error =
-            prepare_app_candidate(archive, stage, &InstallAuthority::OnlineMetadata(verified))
+            prepare_app_candidate(archive, stage, &InstallAuthority::SignedMetadata(verified))
                 .err()
                 .unwrap();
         assert_eq!(
@@ -436,7 +436,7 @@ async fn opaque_candidate_cannot_relabel_other_archive_bytes_as_signed() {
     let mut download = stage.create_archive().unwrap();
     download.append(&changed).unwrap();
     let source = download.finish_manual_import().unwrap();
-    let error = prepare_app_candidate(source, stage, &InstallAuthority::OnlineMetadata(verified))
+    let error = prepare_app_candidate(source, stage, &InstallAuthority::SignedMetadata(verified))
         .err()
         .unwrap();
     assert!(
@@ -467,7 +467,7 @@ async fn lab_candidate_retains_exact_metadata_context_without_a_signature_claim(
     let candidate = prepare_app_candidate(
         download.finish_manual_import().unwrap(),
         stage,
-        &InstallAuthority::OnlineMetadata(verified),
+        &InstallAuthority::SignedMetadata(verified),
     )
     .unwrap()
     .into_slot();
@@ -481,4 +481,65 @@ async fn lab_candidate_retains_exact_metadata_context_without_a_signature_claim(
         candidate.archive_sha512,
         <[u8; 64]>::from(Sha512::digest(&bytes))
     );
+}
+
+#[tokio::test]
+async fn an_offline_package_passes_only_with_a_signature_of_the_trust_set() {
+    let fixture = SigningFixture::new();
+    let metadata = serde_json::to_vec_pretty(&latest_for(b"synthetic archive")).unwrap();
+    let signature = fixture.sign(&metadata);
+    authenticate_offline_metadata(metadata.clone(), signature, &fixture.config)
+        .await
+        .unwrap();
+    let foreign = SigningFixture::new().sign(&metadata);
+    assert!(
+        authenticate_offline_metadata(metadata.clone(), foreign, &fixture.config)
+            .await
+            .is_err()
+    );
+    assert!(
+        authenticate_offline_metadata(metadata, Vec::new(), &fixture.config)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn the_lab_setting_for_unsigned_downloads_does_not_reach_an_upload() {
+    let mut config = Config::default();
+    config.security.allow_unsigned_updates = true;
+    let mut latest = latest_for(b"synthetic archive");
+    latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    let metadata = serde_json::to_vec_pretty(&latest).unwrap();
+    authenticate_app_metadata(metadata.clone(), Vec::new(), &config)
+        .await
+        .unwrap();
+    let error = authenticate_offline_metadata(metadata, Vec::new(), &config)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("release signature"), "{error}");
+}
+
+#[tokio::test]
+async fn only_the_archive_the_signature_names_is_sealed() {
+    let fixture = SigningFixture::new();
+    let bytes = b"synthetic archive";
+    let metadata = serde_json::to_vec_pretty(&latest_for(bytes)).unwrap();
+    let signature = fixture.sign(&metadata);
+    let verified = authenticate_offline_metadata(metadata, signature, &fixture.config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    for changed in [&b"synthetic archivE"[..], b"synthetic"] {
+        let mut download = stage.create_archive().unwrap();
+        download.append(changed).unwrap();
+        let error = seal_signed(download, &verified).err().unwrap();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+    let mut download = stage.create_archive().unwrap();
+    download.append(bytes).unwrap();
+    assert!(seal_signed(download, &verified).is_ok());
 }

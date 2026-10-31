@@ -7232,6 +7232,10 @@ function setDeep(target: Record<string, unknown>, path: string, value: string) {
 }
 
 const updateRestartFallbackExtras: TranslationMap = {
+  'settings.update.offline.signedDesc':
+    'Select the package, latest.json and latest.json.sig of one signed release.',
+  'settings.update.offline.invalidPackage':
+    'Select exactly three files of one release: the package, latest.json and latest.json.sig.',
   'settings.update.outcomeUnknown':
     'The outcome of this update is not known. Reload the page and compare the version before installing again.',
   'settings.update.restarting':
@@ -7242,6 +7246,10 @@ const updateRestartFallbackExtras: TranslationMap = {
 
 const updateRestartLocalizedExtras: Record<string, TranslationMap> = {
   ru: {
+    'settings.update.offline.signedDesc':
+      'Выберите пакет, latest.json и latest.json.sig одного подписанного выпуска.',
+    'settings.update.offline.invalidPackage':
+      'Выберите ровно три файла одного выпуска: пакет, latest.json и latest.json.sig.',
     'settings.update.outcomeUnknown':
       'Результат обновления неизвестен. Перезагрузите страницу и сравните версию, прежде чем устанавливать снова.',
     'settings.update.restarting':

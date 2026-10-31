@@ -1,5 +1,4 @@
-//! Private rootfs application staging. Online digests must come from verified
-//! metadata; manual imports intentionally have no built-in signature proof.
+//! Private rootfs application staging. Digests must come from verified metadata.
 //! This is not the durable app-slot journal or protection from malicious root.
 
 use super::{
@@ -227,7 +226,7 @@ impl AppDownload {
         self.freeze()
     }
 
-    /// Explicit administrative offline import, NOT an unsigned online fallback.
+    #[cfg(test)]
     pub fn finish_manual_import(self) -> io::Result<AppArchive> {
         self.freeze()
     }

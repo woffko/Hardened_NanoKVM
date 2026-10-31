@@ -7,6 +7,8 @@ import * as api from '@/api/application.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
 import { appUpdateMessage, followAppUpdate } from './job.ts';
+import { pickOfflinePackage } from './package.ts';
+import type { OfflinePackage } from './package.ts';
 
 interface UpdateProps {
   status: string;
@@ -25,29 +27,19 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    if (!validateFilename(file.name)) {
+    const selected = pickOfflinePackage(Array.from(e.target.files ?? []));
+    // Choosing the same files again after a refusal must fire this again.
+    e.target.value = '';
+    if (!selected) {
       setStatus('failed');
-      setErrMsg(t('settings.update.offline.invalidName'));
+      setErrMsg(t('settings.update.offline.invalidPackage'));
       return;
     }
 
-    upload(file);
+    upload(selected);
   }
 
-  function upload(file: File | null) {
-    if (!file) return;
-
-    if (!validateFilename(file.name)) {
-      setStatus('failed');
-      setErrMsg(t('settings.update.offline.invalidName'));
-      return;
-    }
-
+  function upload(selected: OfflinePackage) {
     if (status === 'loading' || status === 'updating' || status === 'restarting') {
       return;
     }
@@ -57,7 +49,9 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
     setErrMsg('');
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('metadata', selected.metadata);
+    formData.append('signature', selected.signature);
+    formData.append('file', selected.file);
 
     api
       .offlineUpdate(formData)
@@ -96,12 +90,6 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
       });
   }
 
-  function validateFilename(filename: string) {
-    const regex: RegExp =
-      /^(nanokvm_\d+\.\d+\.\d+|hardened-nanokvm-kvmapp-\d+\.\d+\.\d+)\.tar\.gz$/;
-    return regex.test(filename);
-  }
-
   return (
     <>
       <div className="mt-8 flex items-center justify-between">
@@ -118,13 +106,16 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
             </a>
           </div>
 
-          <span className="text-xs text-neutral-500">{t('settings.update.offline.desc')}</span>
+          <span className="text-xs text-neutral-500">
+            {t('settings.update.offline.signedDesc')}
+          </span>
         </div>
 
         <input
           id="file-upload"
           ref={inputRef}
           type="file"
+          multiple
           onChange={handleFileChange}
           className="hidden"
         />

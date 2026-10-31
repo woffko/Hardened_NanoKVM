@@ -106,7 +106,9 @@ struct VerifiedAppMetadata {
 }
 
 enum InstallAuthority {
-    OnlineMetadata(VerifiedAppMetadata),
+    /// Size, digest and version come from metadata the trust set signed.
+    SignedMetadata(VerifiedAppMetadata),
+    #[cfg(test)]
     ManualImport,
 }
 
@@ -224,22 +226,11 @@ pub async fn update(
             check_forward(&current_app_version(), &verified.latest.version)?;
             let handoff = job.prepare_install_handoff(writers)?;
             job.blocking("verify and hand over app", move || {
-                let archive = archive
-                    .finish_online(
-                        verified.latest.size,
-                        &decode_sha512(&verified.latest.sha512)?,
-                    )
-                    .map_err(|error| {
-                        if error.kind() == io::ErrorKind::InvalidData {
-                            AppError::BadRequest("update archive size or checksum mismatch".into())
-                        } else {
-                            error.into()
-                        }
-                    })?;
+                let archive = seal_signed(archive, &verified)?;
                 submit_package(
                     archive,
                     stage,
-                    InstallAuthority::OnlineMetadata(verified),
+                    InstallAuthority::SignedMetadata(verified),
                     handoff,
                 )
             })
@@ -264,16 +255,34 @@ pub async fn offline_update(
                     Ok((stage, archive))
                 })
                 .await?;
-            let archive = time::timeout(
+            let package = time::timeout(
                 DOWNLOAD_TIMEOUT,
                 save_uploaded_update(archive, &mut multipart, &job),
             )
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
+            // A session alone must not be enough to install code as root, so
+            // an upload passes what a download passes. Any signed version is
+            // accepted: this is how a device goes back to an earlier release.
             let writers = state.drain_writers(WRITER_DRAIN_TIMEOUT).await?;
+            let (config, writers) = writers
+                .blocking(&job, "reread app install policy", Config::read_frozen)
+                .await?;
+            let OfflinePackage {
+                archive,
+                metadata,
+                signature,
+            } = package;
+            let verified = authenticate_offline_metadata(metadata, signature, &config).await?;
             let handoff = job.prepare_install_handoff(writers)?;
-            job.blocking("hand over offline app", move || {
-                submit_package(archive, stage, InstallAuthority::ManualImport, handoff)
+            job.blocking("verify and hand over offline app", move || {
+                let archive = seal_signed(archive, &verified)?;
+                submit_package(
+                    archive,
+                    stage,
+                    InstallAuthority::SignedMetadata(verified),
+                    handoff,
+                )
             })
             .await
         })
@@ -508,20 +517,64 @@ async fn receive_app_archive(
     result
 }
 
+/// An upload in the form a release publishes it, not yet trusted in any part.
+struct OfflinePackage {
+    archive: AppDownload,
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+async fn read_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|err| AppError::BadRequest(format!("invalid multipart data: {err}")))?
+    {
+        if chunk.len() > limit - bytes.len() {
+            return Err(AppError::BadRequest("update metadata is too large".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 async fn save_uploaded_update(
     mut archive: AppDownload,
     multipart: &mut Multipart,
     owner: &UpdateOwner,
-) -> Result<AppArchive> {
+) -> Result<OfflinePackage> {
     let mut found = false;
+    let mut metadata = None;
+    let mut signature = None;
 
     while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|err| AppError::BadRequest(format!("invalid multipart data: {err}")))?
     {
-        if field.name() != Some("file") {
-            continue;
+        match field.name() {
+            Some("metadata") => {
+                let bytes = read_field(&mut field, MAX_METADATA).await?;
+                if metadata.replace(bytes).is_some() {
+                    return Err(AppError::BadRequest(
+                        "multiple update metadata files".into(),
+                    ));
+                }
+                continue;
+            }
+            Some("signature") => {
+                let bytes = read_field(&mut field, MAX_SIGNATURE).await?;
+                if signature.replace(bytes).is_some() {
+                    return Err(AppError::BadRequest("multiple update signatures".into()));
+                }
+                continue;
+            }
+            Some("file") => {}
+            _ => continue,
         }
         if found {
             return Err(AppError::BadRequest(
@@ -565,11 +618,45 @@ async fn save_uploaded_update(
     if !found {
         return Err(AppError::BadRequest("no update file uploaded".into()));
     }
-    owner
-        .blocking("seal manual app import", move || {
-            Ok(archive.finish_manual_import()?)
+    let (Some(metadata), Some(signature)) = (metadata, signature) else {
+        return Err(AppError::BadRequest(
+            "an offline update needs the release's latest.json and latest.json.sig".into(),
+        ));
+    };
+    Ok(OfflinePackage {
+        archive,
+        metadata,
+        signature,
+    })
+}
+
+/// The lab setting for unsigned metadata covers downloads only.
+async fn authenticate_offline_metadata(
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+    config: &Config,
+) -> Result<VerifiedAppMetadata> {
+    if app_metadata_is_unsigned(&parse_exact_app_metadata(&metadata)?) {
+        return Err(AppError::BadRequest(
+            "an offline update must carry a release signature".into(),
+        ));
+    }
+    authenticate_app_metadata(metadata, signature, config).await
+}
+
+fn seal_signed(archive: AppDownload, verified: &VerifiedAppMetadata) -> Result<AppArchive> {
+    archive
+        .finish_online(
+            verified.latest.size,
+            &decode_sha512(&verified.latest.sha512)?,
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                AppError::BadRequest("update archive size or checksum mismatch".into())
+            } else {
+                error.into()
+            }
         })
-        .await
 }
 
 fn prepare_app_candidate(
@@ -581,8 +668,9 @@ fn prepare_app_candidate(
     use sha2::{Digest, Sha256};
     let (size, archive_sha512) = source.fingerprint()?;
     let (import, metadata_sha256, signature_sha256) = match authority {
+        #[cfg(test)]
         InstallAuthority::ManualImport => (Import::Manual, [0; 32], [0; 32]),
-        InstallAuthority::OnlineMetadata(verified) => {
+        InstallAuthority::SignedMetadata(verified) => {
             if size != verified.latest.size
                 || archive_sha512 != decode_sha512(&verified.latest.sha512)?
             {
@@ -605,7 +693,7 @@ fn prepare_app_candidate(
     let extracted = stage.extract(source)?;
     let update_root = resolve_update_root(&extracted)?;
     let version = validate_update_root(&update_root)?;
-    if let InstallAuthority::OnlineMetadata(verified) = authority
+    if let InstallAuthority::SignedMetadata(verified) = authority
         && version != verified.latest.version
     {
         return Err(AppError::BadRequest(
@@ -1115,18 +1203,36 @@ mod tests {
         }
     }
 
-    async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
+    async fn multipart_fixture(body: Vec<u8>) -> Multipart {
         use axum::{body::Body, extract::FromRequest, http::Request};
-        let mut body = b"--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hardened-nanokvm-kvmapp-fixture.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n".to_vec();
-        body.extend_from_slice(payload);
-        if complete {
-            body.extend_from_slice(b"\r\n--fixture--\r\n");
-        }
         let request = Request::builder()
             .header("content-type", "multipart/form-data; boundary=fixture")
             .body(Body::from(body))
             .unwrap();
         Multipart::from_request(request, &()).await.unwrap()
+    }
+
+    fn signed_parts() -> Vec<u8> {
+        let mut body = Vec::new();
+        for (name, bytes) in [("metadata", "{}"), ("signature", "synthetic signature")] {
+            body.extend_from_slice(
+                format!(
+                    "--fixture\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{bytes}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body
+    }
+
+    async fn upload_fixture(payload: &[u8], complete: bool) -> Multipart {
+        let mut body = signed_parts();
+        body.extend_from_slice(b"--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hardened-nanokvm-kvmapp-2.0.43.tar.gz\"\r\n\r\n");
+        body.extend_from_slice(payload);
+        if complete {
+            body.extend_from_slice(b"\r\n--fixture--\r\n");
+        }
+        multipart_fixture(body).await
     }
 
     #[tokio::test]
@@ -1140,18 +1246,94 @@ mod tests {
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let payload = b"synthetic archive bytes, not an installable archive";
         let mut multipart = upload_fixture(payload, true).await;
-        let mut archive =
+        let package =
             owner
                 .run(move |job| async move {
                     save_uploaded_update(download, &mut multipart, &job).await
                 })
                 .await
                 .unwrap();
+        assert_eq!(package.metadata, b"{}");
+        assert_eq!(package.signature, b"synthetic signature");
+        let mut archive = package.archive.finish_manual_import().unwrap();
         let mut actual = Vec::new();
         archive.read_to_end(&mut actual).unwrap();
         assert_eq!(actual, payload);
         let snapshot = coordinator.snapshot().unwrap();
         assert!(snapshot.active.is_none() && snapshot.last.unwrap().phase == Phase::Finished);
+    }
+
+    #[tokio::test]
+    async fn an_upload_needs_the_metadata_and_the_signature_of_its_release() {
+        use crate::update::operation::UpdateCoordinator;
+        use std::sync::Arc;
+        let file = b"--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hardened-nanokvm-kvmapp-2.0.43.tar.gz\"\r\n\r\nsynthetic archive\r\n";
+        let signature =
+            b"--fixture\r\nContent-Disposition: form-data; name=\"signature\"\r\n\r\nsynthetic\r\n";
+        let metadata =
+            b"--fixture\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{}\r\n";
+        for parts in [
+            vec![&file[..]],
+            vec![&file[..], &signature[..]],
+            vec![&file[..], &metadata[..]],
+        ] {
+            let mut body = parts.concat();
+            body.extend_from_slice(b"--fixture--\r\n");
+            let mut multipart = multipart_fixture(body).await;
+            let temporary = tempfile::tempdir().unwrap();
+            let stage = AppStage::fixture(temporary.path()).unwrap();
+            let download = stage.create_archive().unwrap();
+            let owner = Arc::new(UpdateCoordinator::in_process_fixture())
+                .acquire(Kind::ApplicationOffline)
+                .unwrap();
+            let error = owner
+                .run(move |job| async move {
+                    save_uploaded_update(download, &mut multipart, &job).await
+                })
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("latest.json"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_or_oversized_release_files_are_refused() {
+        use crate::update::operation::UpdateCoordinator;
+        use std::sync::Arc;
+        let part = |name: &str, bytes: &str| {
+            format!(
+                "--fixture\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{bytes}\r\n"
+            )
+        };
+        let oversized = "x".repeat(MAX_METADATA + 1);
+        for (body, expected) in [
+            (
+                part("metadata", "{}") + &part("metadata", "{}"),
+                "multiple update metadata",
+            ),
+            (
+                part("signature", "a") + &part("signature", "b"),
+                "multiple update signatures",
+            ),
+            (part("metadata", &oversized), "too large"),
+        ] {
+            let mut multipart = multipart_fixture((body + "--fixture--\r\n").into_bytes()).await;
+            let temporary = tempfile::tempdir().unwrap();
+            let stage = AppStage::fixture(temporary.path()).unwrap();
+            let download = stage.create_archive().unwrap();
+            let owner = Arc::new(UpdateCoordinator::in_process_fixture())
+                .acquire(Kind::ApplicationOffline)
+                .unwrap();
+            let error = owner
+                .run(move |job| async move {
+                    save_uploaded_update(download, &mut multipart, &job).await
+                })
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[tokio::test]

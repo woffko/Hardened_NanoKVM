@@ -37,6 +37,7 @@ const job = load('web/src/pages/desktop/menu/settings/update/job.ts', {
   '@/api/application.ts': {},
   '@/lib/localstorage.ts': { getAppUpdateJob() {}, removeAppUpdateJob() {}, setAppUpdateJob() {} },
 });
+const offlinePackage = load('web/src/pages/desktop/menu/settings/update/package.ts', {});
 const reconnect = load('web/src/lib/reconnect.ts', { '@/lib/service.ts': { getBaseUrl: () => 'http://test' } });
 const OPTIONS = { interval: 2000, restartGrace: 15000, deadline: 120000 };
 
@@ -119,6 +120,24 @@ async function test(name, work) {
     const offline = fs.readFileSync(path.join(ROOT, 'web/src/pages/desktop/menu/settings/update/offline.tsx'), 'utf8');
     assert(/status === 'updating' \|\| status === 'restarting'\) \{\s*return;/.test(offline),
       'a second upload must be refused while the page waits for the restart');
+  });
+
+  await test('an offline update needs the three files of one release', () => {
+    const files = (...names) => names.map((name) => ({ name }));
+    const release = ['latest.json.sig', 'hardened-nanokvm-kvmapp-2.1.0.tar.gz', 'latest.json'];
+    const picked = offlinePackage.pickOfflinePackage(files(...release));
+    assert.equal(picked.file.name, release[1]);
+    assert.equal(picked.metadata.name, release[2]);
+    assert.equal(picked.signature.name, release[0]);
+    assert.equal(offlinePackage.pickOfflinePackage(files(release[1])), null);
+    assert.equal(offlinePackage.pickOfflinePackage(files(release[1], release[2])), null);
+    assert.equal(offlinePackage.pickOfflinePackage(files(release[1], release[0])), null);
+    assert.equal(offlinePackage.pickOfflinePackage(files('other.tar.gz', release[2], release[0])), null);
+    assert.equal(offlinePackage.pickOfflinePackage(files(...release, 'extra.txt')), null);
+    const form = fs.readFileSync(path.join(ROOT, 'web/src/pages/desktop/menu/settings/update/offline.tsx'), 'utf8');
+    for (const part of ['metadata', 'signature', 'file']) {
+      assert(form.includes(`formData.append('${part}', selected.${part})`), `the form does not send ${part}`);
+    }
   });
 
   await test('only a committed update reloads; every other ending stays on the page', () => {
