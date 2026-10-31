@@ -18,6 +18,9 @@ use std::{
 };
 
 const CHUNK: usize = 1024 * 1024;
+/// Holds the superblock of the ROOTFS image, at 1 KiB.
+const ROOT_HEADER: usize = 4096;
+const DROP_CACHES: &str = "/proc/sys/vm/drop_caches";
 
 #[cfg(test)]
 thread_local! {
@@ -42,9 +45,32 @@ type Result<T> = std::result::Result<T, WriteError>;
 /// partition range back; it must hash to the authenticated image digest.
 /// `image` is the immutable verified snapshot; nothing here undoes a write.
 pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
-    write_image_with_advice(image, device, size, sha256, |device, length| {
-        fadvise(device, 0, Some(length), Advice::DontNeed)
-    })
+    write_image_with_advice(image, device, size, sha256, evict_cache)
+}
+
+/// The read-back has to come from the medium. Deployed kernels have no fadvise
+/// (CONFIG_ADVISE_SYSCALLS=n), and this process is the only one left running.
+fn evict_cache(device: &File, length: NonZeroU64) -> rustix::io::Result<()> {
+    match fadvise(device, 0, Some(length), Advice::DontNeed) {
+        Err(rustix::io::Errno::NOSYS) => {
+            let _ = fs::write(DROP_CACHES, "1\n");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn hash_of(file: &File, size: u64) -> Result<[u8; 32]> {
+    let mut buffer = vec![0; CHUNK];
+    let mut hash = Sha256::new();
+    let mut offset = 0;
+    while offset < size {
+        let chunk = &mut buffer[..CHUNK.min((size - offset) as usize)];
+        file.read_exact_at(chunk, offset)?;
+        hash.update(&*chunk);
+        offset += chunk.len() as u64;
+    }
+    Ok(hash.finalize().into())
 }
 
 fn write_image_with_advice(
@@ -74,7 +100,6 @@ fn write_image_with_advice(
     });
     if let Some(length) = NonZeroU64::new(size) {
         match advise(device, length) {
-            // CONFIG_ADVISE_SYSCALLS=n returns ENOSYS on deployed kernels.
             // DONTNEED is an advisory hint, not a durability barrier. The
             // completed sync_data above and full hash read-back below remain
             // mandatory even when the kernel has no advisory syscall.
@@ -82,18 +107,17 @@ fn write_image_with_advice(
             Err(error) => return Err(io::Error::from(error).into()),
         }
     }
-    let mut hash = Sha256::new();
-    offset = 0;
-    while offset < size {
-        let chunk = &mut buffer[..CHUNK.min((size - offset) as usize)];
-        device.read_exact_at(chunk, offset)?;
-        hash.update(&*chunk);
-        offset += chunk.len() as u64;
-    }
-    if <[u8; 32]>::from(hash.finalize()) != *sha256 {
+    if hash_of(device, size)? != *sha256 {
         return Err(WriteError::Mismatch);
     }
     Ok(())
+}
+
+/// A root of unknown bytes must not run as this system: without its superblock
+/// the kernel stops at the mount, and only a reflash goes on from there.
+fn disable_root(device: &File) -> io::Result<()> {
+    device.write_all_at(&[0; ROOT_HEADER], 0)?;
+    device.sync_data()
 }
 
 /// The two partitions a raw update writes.
@@ -161,6 +185,25 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
             return Outcome::NotStarted;
         }
     }
+    // The images were verified before they went through a spool on the data
+    // partition. This is the last moment a bad read costs nothing.
+    for (index, partition) in [(0, Partition::Boot), (1, Partition::Rootfs)] {
+        match hash_of(plan.images[index], plan.sizes[index]) {
+            Ok(hash) if hash == plan.sha256[index] => {}
+            Ok(_) => {
+                system.log(&format!(
+                    "raw write not started: the {partition:?} image changed"
+                ));
+                return Outcome::NotStarted;
+            }
+            Err(error) => {
+                system.log(&format!(
+                    "raw write not started: the {partition:?} image: {error}"
+                ));
+                return Outcome::NotStarted;
+            }
+        }
+    }
     for (index, partition) in [(1, Partition::Rootfs), (0, Partition::Boot)] {
         system.log(&format!("raw write: opening {partition:?}"));
         let device = match system.open_partition(partition) {
@@ -186,6 +229,11 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
             &plan.sha256[index],
         ) {
             system.log(&format!("raw write failed: {partition:?}: {error}"));
+            if partition == Partition::Rootfs
+                && let Err(error) = disable_root(&device)
+            {
+                system.log(&format!("raw write: ROOTFS not disabled: {error}"));
+            }
             return Outcome::Failed;
         }
         system.log(&format!("raw write: {partition:?} written and verified"));

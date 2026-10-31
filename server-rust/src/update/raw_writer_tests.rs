@@ -315,15 +315,85 @@ mod sequence {
     }
 
     #[test]
-    fn a_failure_after_the_first_write_is_manual_recovery_and_never_publishes_the_ticket() {
-        let (mut images, ticket) = (images(), ticket());
-        // ROOTFS reads back wrong: BOOT is never opened, no ticket.
-        images.sha256[1][0] ^= 1;
-        let mut fake = Fake::default();
-        assert_eq!(run(&mut fake, &images, &ticket), Outcome::Failed);
+    fn an_image_that_changed_after_verification_is_never_written() {
+        for index in 0..2 {
+            let (mut images, ticket) = (images(), ticket());
+            images.sha256[index][0] ^= 1;
+            let mut fake = Fake::default();
+            assert_eq!(run(&mut fake, &images, &ticket), Outcome::NotStarted);
+            assert_eq!(fake.calls, ["stop", "freeze", "release"]);
+            assert_eq!(fake.partition(Partition::Rootfs), [0; 4096]);
+            assert_eq!(fake.partition(Partition::Boot), [0; 4096]);
+            assert!(fake.log.iter().any(|line| line.contains("not started")));
+        }
+    }
+
+    #[test]
+    fn a_root_that_reads_back_wrong_cannot_boot_and_boot_stays_as_it_was() {
+        let (images, ticket) = (images(), ticket());
+        let rootfs = device(0xee);
+        let medium = rootfs.try_clone().unwrap();
+        AFTER_SYNC.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                medium.write_all_at(&[1], 2048).unwrap();
+            }))
+        });
+        let mut fake = Fake {
+            partitions: vec![(Partition::Boot, device(0xbb)), (Partition::Rootfs, rootfs)],
+            ..Fake::default()
+        };
+        let outcome = run_writer(
+            &mut fake,
+            &WritePlan {
+                images: [&images.files[0], &images.files[1]],
+                sizes: [4096, 4096],
+                sha256: images.sha256,
+                ticket: &ticket,
+            },
+        );
+        AFTER_SYNC.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(outcome, Outcome::Failed);
         assert_eq!(fake.calls, ["stop", "freeze", "release", "open-rootfs"]);
-        assert_eq!(fake.partition(Partition::Boot), [0; 4096]);
-        images.sha256[1][0] ^= 1;
+        assert_eq!(fake.partition(Partition::Rootfs), [0; 4096]);
+        assert_eq!(fake.partition(Partition::Boot), [0xbb; 4096]);
+    }
+
+    #[test]
+    fn a_boot_that_reads_back_wrong_leaves_both_partitions_for_the_operator() {
+        let (images, ticket) = (images(), ticket());
+        let boot = device(0xee);
+        let medium = boot.try_clone().unwrap();
+        let mut syncs = 0;
+        AFTER_SYNC.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                syncs += 1;
+                if syncs == 2 {
+                    medium.write_all_at(&[1], 2048).unwrap();
+                }
+            }))
+        });
+        let mut fake = Fake {
+            partitions: vec![(Partition::Boot, boot), (Partition::Rootfs, device(0))],
+            ..Fake::default()
+        };
+        let outcome = run_writer(
+            &mut fake,
+            &WritePlan {
+                images: [&images.files[0], &images.files[1]],
+                sizes: [4096, 4096],
+                sha256: images.sha256,
+                ticket: &ticket,
+            },
+        );
+        AFTER_SYNC.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(fake.partition(Partition::Rootfs), [0x5f; 4096]);
+        assert_ne!(fake.partition(Partition::Boot), [0; 4096]);
+    }
+
+    #[test]
+    fn a_failure_after_the_first_write_is_manual_recovery_and_never_publishes_the_ticket() {
+        let (images, ticket) = (images(), ticket());
         for (fail, calls) in [
             (
                 "open-boot",

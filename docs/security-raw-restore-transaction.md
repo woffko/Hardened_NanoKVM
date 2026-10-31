@@ -1191,6 +1191,24 @@ can keep a restored system off the network.
 - `S01restore` treats any helper failure as blocked, including a helper that was
   killed or could not start, which cannot write the marker itself.
 
+## From the verified image to the partition
+
+The bundle's images are hashed as they are unpacked and then sit in spools on the
+data partition, which the writer reads minutes later. So the writer hashes both once
+more after the system is frozen and before the first write: a mismatch writes
+nothing, and a reboot returns to the old system. After a write it evicts the cache
+and hashes the partition. Deployed kernels have no `fadvise`, so it uses
+`drop_caches`, and the read-back comes from the medium. A ROOTFS that still differs
+loses its first 4 KiB, superblock included, before the reboot: the kernel stops at
+the mount instead of running unknown bytes as the system. That device needs a reflash.
+
+## Who may start a raw update
+
+The switch is read from `server.yaml` under the writer drain, so turning raw updates
+off applies to the next attempt, not to the next backend start. A raw image always
+needs signed metadata: `allow_unsigned_updates` stops at file updates, because a raw
+image replaces everything that could check a later update.
+
 ## What the first boot finishes
 
 The image's init names the system from its own `/etc/hostname` before the early

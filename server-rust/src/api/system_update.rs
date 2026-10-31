@@ -1624,6 +1624,7 @@ fn install_staged_update(
         let (owner, writers) = raw.ok_or_else(|| {
             AppError::Internal("raw install requires retained owner and writer drain".into())
         })?;
+        check_raw_policy(&writers, &latest, &manifest)?;
         return install_raw_image_update(
             stage_dir,
             &manifest,
@@ -1714,8 +1715,6 @@ fn install_raw_image_update(
     owner: UpdateOwner,
     writers: crate::update::state_writers::WriterDrain,
 ) -> Result<SystemPendingUpdate> {
-    validate_raw_install(config, manifest)?;
-
     let staging = Path::new(RAW_PRIVATE_STAGING);
     let mountpoint = staging.join("mount");
     let ssh_roots = staging.join("ssh");
@@ -1814,10 +1813,30 @@ fn install_raw_image_update(
     })
 }
 
-fn validate_raw_install(config: &Config, manifest: &SystemManifest) -> Result<()> {
-    if !config.security.allow_raw_system_updates {
+/// The switch as the disk has it now, not as this process read it at start.
+fn check_raw_policy(
+    writers: &crate::update::state_writers::WriterDrain,
+    latest: &SystemLatest,
+    manifest: &SystemManifest,
+) -> Result<()> {
+    validate_raw_install(&Config::read_frozen(writers)?, latest, manifest)
+}
+
+fn validate_raw_install(
+    policy: &Config,
+    latest: &SystemLatest,
+    manifest: &SystemManifest,
+) -> Result<()> {
+    if !policy.security.allow_raw_system_updates {
         return Err(AppError::Forbidden(
             "raw partition system updates are disabled".to_string(),
+        ));
+    }
+    // A raw image replaces everything that could check a later update, so the
+    // lab setting for unsigned metadata stops at file updates.
+    if system_metadata_is_unsigned(latest) {
+        return Err(AppError::Forbidden(
+            "a raw system update must carry a release signature".to_string(),
         ));
     }
     if !manifest.files.is_empty() {
@@ -4266,9 +4285,42 @@ mod tests {
         let mut config = Config::default();
         config.security.allow_raw_system_updates = false;
         assert!(matches!(
-            validate_raw_install(&config, &valid_raw_manifest()),
+            validate_raw_install(&config, &valid_latest(), &valid_raw_manifest()),
             Err(AppError::Forbidden(_))
         ));
+    }
+
+    #[test]
+    fn the_lab_setting_for_unsigned_metadata_does_not_reach_a_raw_update() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = true;
+        config.security.allow_unsigned_updates = true;
+        validate_raw_install(&config, &valid_latest(), &valid_raw_manifest()).unwrap();
+        let mut latest = valid_latest();
+        latest.signature_algorithm = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        latest.signature_key_id = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        assert!(matches!(
+            validate_raw_install(&config, &latest, &valid_raw_manifest()),
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_raw_switch_is_the_one_on_disk_under_the_freeze() {
+        use crate::update::state_writers::StateWriters;
+        let stored = tempfile::tempdir().unwrap();
+        for (enabled, allowed) in [(false, false), (true, true)] {
+            let writers = StateWriters::for_test_config(
+                std::fs::File::open(stored.path()).unwrap(),
+                stored.path().join("server.yaml"),
+            );
+            let mut config = Config::default();
+            config.security.allow_raw_system_updates = enabled;
+            config.write(&writers.configuration().unwrap()).unwrap();
+            let freeze = writers.drain(Duration::from_secs(5)).await.unwrap();
+            let result = check_raw_policy(&freeze, &valid_latest(), &valid_raw_manifest());
+            assert_eq!(result.is_ok(), allowed);
+        }
     }
 
     #[test]
@@ -4283,7 +4335,7 @@ mod tests {
             sha256: "a".repeat(64),
         });
         assert!(matches!(
-            validate_raw_install(&config, &manifest),
+            validate_raw_install(&config, &valid_latest(), &manifest),
             Err(AppError::BadRequest(_))
         ));
     }

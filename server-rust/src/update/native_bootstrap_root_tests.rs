@@ -88,9 +88,11 @@ impl Fixture {
     }
     fn run(&self, expected: &str) {
         let mut command = self.command(expected);
+        // A hang check, not a speed check: a child takes about a second, and other
+        // work on the machine has stretched it past 20 s (ledger 2026-10-31).
         let output = super::super::app_bootstrap::root_tests::run_probe(
             &mut command,
-            Duration::from_secs(20),
+            Duration::from_secs(60),
         )
         .unwrap();
         assert!(output.status.success(), "{expected}: {output:?}");
