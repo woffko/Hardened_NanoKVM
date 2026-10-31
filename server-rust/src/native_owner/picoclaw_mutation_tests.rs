@@ -60,6 +60,13 @@ fn command(root: &Path, case: &str) -> Command {
         command.env("NANOKVM_PICO_ACCEPT_WRITE", "closed-renamed");
         command.env("NANOKVM_PICO_ACCEPT_TARGET", Path::new(HOME).join(SKILL));
     }
+    if case == "settle-assets-raced-absent" {
+        command.env("NANOKVM_PICO_ACCEPT_WRITE", "bridge-staged");
+        command.env("NANOKVM_PICO_ACCEPT_TARGET", Path::new(HOME).join(BRIDGE));
+    }
+    if case == "settle-assets-nospace-absent" {
+        command.env("NANOKVM_PICO_ACCEPT_FAIL", "asset-staging");
+    }
     if let Some(point) = case.strip_prefix("kill:") {
         command.env("NANOKVM_PICO_ACCEPT_POINT", point);
     }
@@ -266,6 +273,8 @@ fn an_object_at_an_asset_path_stays_and_blocks_no_startup_job() {
     run("settle-assets-foreign-fail:applying-renamed");
     run("settle-assets-parent-fail:applying-renamed");
     run("settle-assets-edited-fail:applying-renamed");
+    run("settle-assets-raced-absent");
+    run("settle-assets-nospace-absent");
 }
 
 #[test]
@@ -1700,17 +1709,21 @@ fn assert_assets_installed(case: &str) {
         return;
     }
     assert_eq!(
+        fs::read_dir(bridge.parent().unwrap()).unwrap().count(),
+        1,
+        "a temporary stayed beside the bridge"
+    );
+    if case.starts_with("settle-assets-raced-") {
+        assert_eq!(fs::read(&bridge).unwrap(), EDIT);
+        return;
+    }
+    assert_eq!(
         fs::read(&bridge).unwrap(),
         crate::update::picoclaw_config::GENERATED[2].1
     );
     assert_eq!(
         fs::metadata(&bridge).unwrap().permissions().mode() & 0o777,
         0o755
-    );
-    assert_eq!(
-        fs::read_dir(bridge.parent().unwrap()).unwrap().count(),
-        1,
-        "a temporary stayed beside the bridge"
     );
 }
 
@@ -2153,6 +2166,16 @@ fn settle_case(
                 shutdown(broker);
             }
         }
+        "settle-assets-nospace-absent" => {
+            let MutationStatus::Completed(_) = status else {
+                panic!("{case}: {status:?}");
+            };
+            assert_pair_unchanged(pair);
+            assert!(!Path::new(HOME).join(SKILL).exists());
+            assert!(!Path::new(HOME).join(BRIDGE).exists());
+            assert!(!plan_present());
+            drop(assert_released(mutation));
+        }
         "settle-assets-changed-absent" => {
             let MutationStatus::Superseded(_) = status else {
                 panic!("{case}: {status:?}");
@@ -2391,7 +2414,8 @@ fn settle_case(
         }
         "settle-assets-absent"
         | "settle-assets-default-absent"
-        | "settle-assets-foreign-absent" => {
+        | "settle-assets-foreign-absent"
+        | "settle-assets-raced-absent" => {
             let MutationStatus::Completed(id) = status else {
                 panic!("{case}: {status:?}");
             };

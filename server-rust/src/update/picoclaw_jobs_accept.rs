@@ -869,9 +869,25 @@ fn apply_assets(plan: &Plan, source: &Source) -> Result<()> {
     install_assets(&plan_workspace(plan, source)?, &plan.assets)
 }
 
-/// Install what `assets_as_planned` accepted. Past Applying an asset is no reason
-/// to fence the Home: whatever came to stand at its path stays, and the next
-/// Startup job looks at that path again.
+/// The asset's bytes and mode under a temporary name. The name never shows a
+/// bridge that cannot run: an interrupted job finds the right bytes and leaves
+/// them as they are.
+fn stage_asset<'a>(directory: &'a Directory, asset: &Asset) -> Result<Temporary<'a>> {
+    use crate::update::picoclaw_profile::MAX_PROFILE_BYTES;
+    #[cfg(test)]
+    checkpoint("asset", "staging")?;
+    let mut temporary = directory.temporary(MAX_PROFILE_BYTES)?;
+    temporary.file.write_all(&asset.desired)?;
+    if asset.executable {
+        fchmod(&temporary.file, Mode::from_raw_mode(0o755)).map_err(std::io::Error::from)?;
+    }
+    temporary.file.sync_all()?;
+    Ok(temporary)
+}
+
+/// Install what `assets_as_planned` accepted. Past Applying no asset is a reason
+/// to fence the Home: one that does not go in stays as it stands, and the next
+/// Startup job looks at that path again. The plan's own validity still counts.
 fn install_assets(workspace: &Path, assets: &[Asset]) -> Result<()> {
     use crate::update::picoclaw_profile::MAX_PROFILE_BYTES;
     for asset in assets {
@@ -904,32 +920,21 @@ fn install_assets(workspace: &Path, assets: &[Asset]) -> Result<()> {
         {
             continue;
         }
-        let mut temporary = directory.temporary(MAX_PROFILE_BYTES)?;
-        temporary.file.write_all(&asset.desired)?;
-        // The name never shows a bridge that cannot run: an interrupted job
-        // finds the right bytes and leaves them as they are.
-        if asset.executable {
-            fchmod(&temporary.file, Mode::from_raw_mode(0o755)).map_err(std::io::Error::from)?;
-        }
-        temporary.file.sync_all()?;
+        let Ok(mut temporary) = stage_asset(&directory, asset) else {
+            continue;
+        };
         #[cfg(test)]
         if asset.executable {
             checkpoint("bridge", "staged")?;
         }
-        temporary.publish_document(name, before)?;
+        if temporary.publish_document(name, before).is_err() {
+            continue;
+        }
         #[cfg(test)]
         if asset.executable {
             checkpoint("bridge", "published")?;
         }
-        directory.file.sync_all()?;
-        if directory
-            .read_document(name, MAX_PROFILE_BYTES)?
-            .as_deref()
-            .map(Vec::as_slice)
-            != Some(asset.desired.as_slice())
-        {
-            return Err(invalid());
-        }
+        let _ = directory.file.sync_all();
     }
     Ok(())
 }

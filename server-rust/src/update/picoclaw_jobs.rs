@@ -2,7 +2,7 @@
 //! No query initializes/repairs state or supplies native closure authority.
 //! The only recovery is the typed early-boot settlement of a job a previous
 //! kernel boot left behind; same-boot jobs stay with their native owner.
-use super::{Directory, Revision};
+use super::{Directory, Revision, Temporary};
 use crate::{
     AppError, Result,
     update::{operation_lock::ProcessLock, restore_fs, state_writers::ConfigPermit},
