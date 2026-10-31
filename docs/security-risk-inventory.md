@@ -110,8 +110,8 @@ Known exceptions:
   reply marks truncated output, and output still held by a process left
   running after the script ended.
 - USB network: `usb0` leads to the computer under control. A new card does not bring
-  it up, and in every firewall mode the first rule stops its new connections, ahead
-  of any rule that accepts by address. Turning USB network on does not open
+  it up, and in every firewall mode the first rule of the NanoKVM chain stops its new
+  connections, ahead of any rule there that accepts by address. Turning USB network on does not open
   management: that takes `/etc/kvm/usb_management` and a firewall restart, and a raw
   update keeps the file. Traffic of a connection the device started is unaffected.
 - Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing

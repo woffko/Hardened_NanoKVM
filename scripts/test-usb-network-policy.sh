@@ -11,6 +11,7 @@ grep -Fq 'if [ -e /boot/usb.rndis0 ]' "$USBDEV" || fail "RNDIS is not opt-in"
 # test-s40firewall.sh. A new card must not bring usb0 up at all.
 for image in buildroot-external/hardened-sg2002/board/sg2002/genimage.cfg \
 	scripts/assemble-latest-buildroot-sg2002-sd-image.sh; do
+	[ -f "$ROOT/$image" ] || fail "$image is gone: this check says nothing"
 	if grep -Fq 'usb.rndis0' "$ROOT/$image"; then
 		fail "$image still ships usb.rndis0"
 	fi
