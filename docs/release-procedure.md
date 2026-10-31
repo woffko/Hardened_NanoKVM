@@ -7,33 +7,48 @@ publishes it. Publication needs its own explicit approval. The RC11 and RC12
 helpers refuse to run unless `HARDENED_LEGACY_RC11=1` or
 `HARDENED_LEGACY_RC12=1` asks for them.
 
+## Version numbers
+
+One number means one build. `scripts/release-burned-versions.txt` lists every
+number that was published, signed with the production key or installed on a
+device, and such a number is never given to a new build, even if the earlier
+build was only a test. The rules live in `scripts/lib/release-versions.sh`; the
+candidate wrappers, the raw packager and `prepare-release.sh` all use them.
+
+| Build | Application | System |
+| --- | --- | --- |
+| Debug, for iterations on test devices | 2.0.45 and up | 0.3.0-raw.14 and up |
+| Release candidate | 2.1.N | 0.4.0-raw.N |
+
+Debug numbers stay below the release, so a test device always accepts it, and
+`prepare-release.sh` refuses them outside `--draft`. A candidate that fails
+acceptance burns its numbers and the next one takes the next numbers.
+
+A raw update names the oldest system it can restore from in the signed
+`minimum_system_version` field of its metadata and manifest; older systems
+install that release first. The application refuses the update before any
+download. The value is `RELEASE_MINIMUM_SYSTEM` in the same library, and
+`scripts/verify-raw-bundle.sh` requires it.
+
 ## Building the candidate
 
-`scripts/build-kernel-5.10.265-candidate-run.sh` runs the whole system
-pipeline (kernel, modules, runtime, rootfs, `boot.itb`, recovery SD) for a
-candidate, in the style of the RC12 wrapper. It pins what the remediation
-fixed: the accepted RC12 kernel fragment by hash, kernel release
-`5.10.265-tag-`, the production update key, and the refreshed Buildroot
-security source (OpenSSL 3.6.5, OpenSSH 10.6p1, expat 2.9.0, curl 8.23.0,
-wpa_supplicant 2.12). It takes from the environment, and refuses to start
-without, what the owner decides: `EXPECTED_SYSTEM_VERSION` and
-`EXPECTED_KVMAPP_VERSION` (an already published version is refused),
+`scripts/build-kernel-5.10.272-candidate-run.sh` runs the whole system pipeline
+(kernel, modules, runtime, rootfs, `boot.itb`, recovery SD). It pins what the
+remediation fixed: the kernel source commit and its signed stable parent, the
+accepted kernel fragment by hash, kernel release `5.10.272-tag-`, the production
+update key, and the refreshed Buildroot security source. It takes from the
+environment, and refuses to start without, what is decided per candidate:
+`EXPECTED_SYSTEM_VERSION` and `EXPECTED_KVMAPP_VERSION`,
 `EXPECTED_KVMAPP_SERVER_SHA256` of the accepted application stage,
-`NANOKVM_KVMAPP_SOURCE_DIR` (the stage; its version file must match) and a
-new `KERNEL_5_10_265_REPRO_ROOT`. Run it twice with independent run roots
-for the G5 comparison. The underlying `build-kernel-5.10.265-repro-run.sh`
-also refuses a dirty worktree and an existing run root. The wrapper signs
-and publishes nothing.
+`NANOKVM_KVMAPP_SOURCE_DIR` (the stage; its version file must match) and a new
+`KERNEL_5_10_272_REPRO_ROOT`. Run it twice with independent run roots for the G5
+comparison. The underlying repro-run script also refuses a dirty worktree and an
+existing run root. The wrapper signs and publishes nothing.
 
-`scripts/build-kernel-5.10.272-candidate-run.sh` is the 5.10.272 variant. It
-pins the clean merged source tree
-`build/latestbuildroot/kernel-5.10.272-v1/repo`, the merge commit
-`ddef97c3d978b67f7852dca05f0b3505f798c0b2`, its signed stable parent
-`aca95a35f1bcc0626c4fa4d1252bf2d4c990a1a2`, kernel release `5.10.272-tag-`,
-the same accepted RC12 fragment hash, refreshed r2 source and production key.
-It takes the same owner inputs but requires a new
-`KERNEL_5_10_272_REPRO_ROOT`; run it twice with independent roots for G5. The
-5.10.265 wrapper remains for reproducing the RC12 baseline.
+`scripts/package-latest-buildroot-sg2002-raw-update.sh` then packages the raw
+bundle. `HARDENED_SG2002_SYSTEM_VERSION`, `EXPECTED_KVMAPP_VERSION` and
+`SYSTEM_UPDATE_REQUIRED_APP_VERSION` are required, because any default would
+describe another release.
 
 ## Preparing
 

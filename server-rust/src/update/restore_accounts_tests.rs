@@ -14,22 +14,57 @@ fn files(gshadow: Option<&'static [u8]>) -> AccountFiles<'static> {
     }
 }
 
+fn facts() -> ImageFacts {
+    ImageFacts {
+        app_version: "2.1.0".to_string(),
+        restorable: true,
+    }
+}
+
 #[test]
 fn tables_round_trip_with_and_without_gshadow() {
     for gshadow in [Some(GSHADOW), None] {
-        let encoded = encode(&files(gshadow)).unwrap();
+        let encoded = encode(&files(gshadow), &facts()).unwrap();
         let decoded = decode(&encoded).unwrap();
         let tables = decoded.as_files();
         assert_eq!(tables.passwd, PASSWD);
         assert_eq!(tables.group, GROUP);
         assert_eq!(tables.shadow, SHADOW);
         assert_eq!(tables.gshadow, gshadow);
+        assert_eq!(decoded.facts(), &facts());
+    }
+}
+
+#[test]
+fn image_facts_travel_exactly_and_an_invalid_field_is_refused() {
+    let unrestorable = ImageFacts {
+        app_version: "2.0.45".to_string(),
+        restorable: false,
+    };
+    let encoded = encode(&files(None), &unrestorable).unwrap();
+    assert_eq!(decode(&encoded).unwrap().facts(), &unrestorable);
+
+    let flag = HEADER - 2;
+    let mut invalid = encoded.to_vec();
+    invalid[flag] = 2;
+    assert!(decode(&invalid).is_err());
+    let mut non_text = encoded.to_vec();
+    let last = non_text.len() - 1;
+    non_text[last] = 0xff;
+    assert!(decode(&non_text).is_err());
+
+    for version in ["", &"1".repeat(MAX_APP_VERSION + 1)] {
+        let facts = ImageFacts {
+            app_version: version.to_string(),
+            restorable: true,
+        };
+        assert!(encode(&files(None), &facts).is_err());
     }
 }
 
 #[test]
 fn truncated_extended_or_reframed_input_is_refused() {
-    let encoded = encode(&files(Some(GSHADOW))).unwrap();
+    let encoded = encode(&files(Some(GSHADOW)), &facts()).unwrap();
     for length in 0..encoded.len() {
         assert!(
             decode(&encoded[..length]).is_err(),
@@ -73,15 +108,17 @@ fn oversized_or_invalid_tables_are_refused_both_ways() {
         shadow: SHADOW,
         gshadow: None,
     };
-    assert!(encode(&invalid).is_err());
+    assert!(encode(&invalid, &facts()).is_err());
     let mut forged = MAGIC.to_vec();
     for table in [invalid.passwd, GROUP, SHADOW] {
         forged.extend_from_slice(&(table.len() as u32).to_le_bytes());
     }
     forged.extend_from_slice(&ABSENT.to_le_bytes());
+    forged.extend_from_slice(&[1, 5]);
     for table in [invalid.passwd, GROUP, SHADOW] {
         forged.extend_from_slice(table);
     }
+    forged.extend_from_slice(b"2.1.0");
     assert!(
         decode(&forged).is_err(),
         "a table that fails validation was decoded"

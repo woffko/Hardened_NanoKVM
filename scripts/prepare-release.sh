@@ -18,6 +18,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT_DIR/scripts/lib/release-versions.sh"
 PUBLIC_KEY="${PUBLIC_KEY:-$ROOT_DIR/kvmapp/system/keys/update-keys/hardened-system-prod-2026q3.pub.pem}"
 SIGNATURE_KEY_ID="${SIGNATURE_KEY_ID:-hardened-system-prod-2026q3}"
 DRAFT=0
@@ -43,6 +44,10 @@ for name in RELEASE_TAG APP_VERSION SYSTEM_VERSION KERNEL_VERSION APP_INPUT APP_
 do
 	[ -n "${!name:-}" ] || fail "$name is required"
 done
+release_check_versions "$SYSTEM_VERSION" "$APP_VERSION" || fail "the release numbers are refused"
+if [ "$DRAFT" -ne 1 ] && [[ "$SYSTEM_VERSION" != 0.4.0-raw.* ]]; then
+	fail "debug numbers are never released: $SYSTEM_VERSION"
+fi
 for command in base64 git gzip jq openssl python3 sha256sum sha512sum tar xz
 do
 	command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
@@ -88,6 +93,7 @@ pin "$SD_INPUT" "$SD_INPUT_SHA256"
 
 RAW_VERSION="$SYSTEM_VERSION" \
 RAW_REQUIRED_APP_VERSION="$APP_VERSION" \
+RAW_MINIMUM_SYSTEM_VERSION="$RELEASE_MINIMUM_SYSTEM" \
 RAW_KERNEL_VERSION="$KERNEL_VERSION" \
 RAW_SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short "$BUILD_COMMIT")" \
 RAW_REQUIRED_OPERATION="$RAW_REQUIRED_OPERATION" \

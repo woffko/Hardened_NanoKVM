@@ -181,6 +181,8 @@ contains:
 - `base_version`: base image marker expected before update.
 - `kernel_version`: kernel version expected after update.
 - `required_app_version`: minimum application version, currently `2.0.42`.
+- `minimum_system_version`: the oldest system this update restores from; older
+  systems install that release first. Optional, format 2 only.
 - `required_free_bytes`: required free space on `/data`.
 - `requires_reboot`: whether the update must reboot.
 - `operations`: fixed backend operation list.

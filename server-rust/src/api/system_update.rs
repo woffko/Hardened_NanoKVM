@@ -125,6 +125,12 @@ pub struct SystemLatest {
     pub security_patch_level: Option<String>,
     #[serde(default, alias = "required_app_version")]
     pub required_app_version: Option<String>,
+    #[serde(
+        default,
+        alias = "minimum_system_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub minimum_system_version: Option<String>,
     #[serde(alias = "signature_algorithm")]
     pub signature_algorithm: String,
     #[serde(alias = "signature_key_id")]
@@ -312,6 +318,8 @@ struct SystemManifest {
     security_patch_level: Option<String>,
     #[serde(default)]
     required_app_version: Option<String>,
+    #[serde(default)]
+    minimum_system_version: Option<String>,
     source_commit: String,
     created_utc: String,
     required_free_bytes: u64,
@@ -451,14 +459,17 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
     match get_latest_system(is_preview_enabled(), &state.config).await {
         Ok(latest) => {
             let app_requirement_error = application_requirement_error(&latest);
+            let requirement_error = app_requirement_error
+                .clone()
+                .or_else(|| source_system_error(&current.version, &latest));
             let update_available =
-                app_requirement_error.is_none() && system_update_is_newer(&current, &latest);
+                requirement_error.is_none() && system_update_is_newer(&current, &latest);
             Ok(Json(ApiResponse::ok(SystemCheckRsp {
                 current,
                 latest: Some(latest),
                 update_available,
                 app_update_required: app_requirement_error.is_some(),
-                error: app_requirement_error,
+                error: requirement_error,
             })))
         }
         Err(err) => {
@@ -559,6 +570,7 @@ async fn download_owned(
     let verified = get_verified_latest_system(is_preview_enabled(), &state.config).await?;
     let latest = verified.latest.clone();
     enforce_required_application_version(&latest)?;
+    enforce_source_system(&current.version, &latest)?;
 
     if latest.target != current.target {
         return Err(AppError::BadRequest(format!(
@@ -1339,6 +1351,14 @@ fn validate_latest_system(latest: &SystemLatest) -> Result<()> {
                 )
             })?;
             validate_application_version("required_app_version", required)?;
+            if let Some(minimum) = latest.minimum_system_version.as_deref() {
+                validate_token("minimum_system_version", minimum)?;
+                if ParsedSystemVersion::parse(minimum).is_none() {
+                    return Err(AppError::BadRequest(
+                        "invalid minimum_system_version".to_string(),
+                    ));
+                }
+            }
         }
         _ => {
             return Err(AppError::BadRequest(format!(
@@ -1412,11 +1432,34 @@ fn application_requirement_error_for(current: &str, latest: &SystemLatest) -> Op
     }
 }
 
+/// Why this device cannot take the release directly: the release names the
+/// oldest system it can restore from, and older ones go through it first.
+fn source_system_error(current: &str, latest: &SystemLatest) -> Option<String> {
+    let minimum = latest.minimum_system_version.as_deref()?;
+    match compare_system_versions(current, minimum) {
+        Some(Ordering::Less) => Some(format!(
+            "install system {minimum} first: current {current}, release {}",
+            latest.version
+        )),
+        Some(_) => None,
+        None => Some(format!(
+            "cannot compare system versions: current {current}, minimum {minimum}"
+        )),
+    }
+}
+
 fn enforce_required_application_version(latest: &SystemLatest) -> Result<()> {
     if let Some(error) = application_requirement_error(latest) {
         return Err(AppError::BadRequest(error));
     }
     Ok(())
+}
+
+fn enforce_source_system(current: &str, latest: &SystemLatest) -> Result<()> {
+    match source_system_error(current, latest) {
+        Some(error) => Err(AppError::BadRequest(error)),
+        None => Ok(()),
+    }
 }
 
 fn validate_system_metadata_signature_fields(latest: &SystemLatest) -> Result<()> {
@@ -1542,6 +1585,7 @@ fn install_staged_update(
     ensure_no_pending_system_update()?;
     let latest = verified.latest;
     enforce_required_application_version(&latest)?;
+    enforce_source_system(&read_current_system_version().version, &latest)?;
 
     let mut source = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
     write_update_progress(
@@ -1718,10 +1762,6 @@ fn install_raw_image_update(
         ssh_roots: &ssh_roots,
         hostname: &hostname,
     };
-    let target_app = manifest
-        .required_app_version
-        .clone()
-        .unwrap_or_else(current_app_version);
     let request = CaptureRequest {
         source_root: Path::new("/"),
         private_staging: staging,
@@ -1730,7 +1770,6 @@ fn install_raw_image_update(
         working_dir: Path::new("/etc/kvm"),
         config_path: Path::new("/etc/kvm/server.yaml"),
         target_version: &manifest.version,
-        target_app_version: &target_app,
         target: &manifest.target,
         boot_image_sha256: sha256[0],
         rootfs_image_sha256: sha256[1],
@@ -2610,6 +2649,11 @@ fn validate_manifest_shape(manifest: &SystemManifest, latest: &SystemLatest) -> 
     if manifest.required_app_version != latest.required_app_version {
         return Err(AppError::BadRequest(
             "system update manifest required application version mismatch".to_string(),
+        ));
+    }
+    if manifest.minimum_system_version != latest.minimum_system_version {
+        return Err(AppError::BadRequest(
+            "system update manifest minimum system version mismatch".to_string(),
         ));
     }
     validate_token("manifest version", &manifest.version)?;
@@ -3802,6 +3846,7 @@ mod tests {
             release_notes_url: "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
             signature_key_id: "hardened-system-test".to_string(),
         }
@@ -3816,6 +3861,7 @@ mod tests {
             kernel_version: "5.10.4-tag-".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 67_108_864,
@@ -3839,6 +3885,7 @@ mod tests {
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,
@@ -3905,6 +3952,30 @@ mod tests {
         assert!(application_requirement_error_for("2.0.40", &latest).is_some());
         assert!(application_requirement_error_for("2.0.41", &latest).is_none());
         assert!(application_requirement_error_for("2.1.0", &latest).is_none());
+
+        // The oldest system the release restores from is optional and signed.
+        assert_eq!(source_system_error("0.1.0-raw.1", &latest), None);
+        latest.minimum_system_version = Some("0.3.0-raw.12".to_string());
+        manifest.minimum_system_version = latest.minimum_system_version.clone();
+        validate_latest_system(&latest).unwrap();
+        validate_manifest_shape(&manifest, &latest).unwrap();
+        for older in ["0.3.0-raw.10", "0.3.0-raw.11", "0.2.23-raw.1"] {
+            let error = source_system_error(older, &latest).unwrap();
+            assert!(
+                error.contains("install system 0.3.0-raw.12 first"),
+                "{error}"
+            );
+            assert!(enforce_source_system(older, &latest).is_err());
+        }
+        for accepted in ["0.3.0-raw.12", "0.3.0-raw.13", "0.4.0-raw.1"] {
+            assert_eq!(source_system_error(accepted, &latest), None);
+            assert!(enforce_source_system(accepted, &latest).is_ok());
+        }
+        assert!(source_system_error("unknown", &latest).is_some());
+        manifest.minimum_system_version = None;
+        assert!(validate_manifest_shape(&manifest, &latest).is_err());
+        latest.minimum_system_version = Some("not a version".to_string());
+        assert!(validate_latest_system(&latest).is_err());
     }
 
     #[test]
@@ -3952,6 +4023,7 @@ mod tests {
                     .to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
             signature_key_id: "hardened-system-test".to_string(),
         };
@@ -4384,7 +4456,14 @@ mod tests {
                 _: &AtomicBool,
             ) -> std::result::Result<restore_accounts::SignedAccounts, raw_capture::CaptureError>
             {
-                let encoded = restore_accounts::encode(&signed_accounts()).unwrap();
+                let encoded = restore_accounts::encode(
+                    &signed_accounts(),
+                    &restore_accounts::ImageFacts {
+                        app_version: "2.0.43".into(),
+                        restorable: true,
+                    },
+                )
+                .unwrap();
                 Ok(restore_accounts::decode(&encoded).unwrap())
             }
             fn check_ssh(
@@ -4413,7 +4492,6 @@ mod tests {
         };
         let published = RefCell::new(None);
         let sent = RefCell::new(None);
-        let target_app = "2.0.43";
         let request = CaptureRequest {
             source_root: source.path(),
             private_staging: private.path(),
@@ -4422,7 +4500,6 @@ mod tests {
             working_dir: Path::new(CWD),
             config_path: Path::new(CONFIG_PATH),
             target_version: "0.3.0-raw.13",
-            target_app_version: target_app,
             target: "sg2002-licheervnano-sd",
             boot_image_sha256: [2; 32],
             rootfs_image_sha256: [3; 32],
@@ -4675,6 +4752,7 @@ mod tests {
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,
@@ -4720,6 +4798,7 @@ mod tests {
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 805_306_368,
@@ -4762,6 +4841,7 @@ mod tests {
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
             required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,

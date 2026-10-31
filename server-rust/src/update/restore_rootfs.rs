@@ -5,7 +5,9 @@
 //! readonly file, and close all writable aliases before descriptor transfer.
 
 use super::{
+    raw_restore::{REQUIRED_BYTES, REQUIRED_PATH},
     raw_transport::ImageReader,
+    restore_accounts::{ImageFacts, MAX_APP_VERSION},
     restore_fs,
     restore_native::{self, AccountFiles},
 };
@@ -160,6 +162,13 @@ impl RootfsView {
         })
     }
 
+    /// The application version early boot will observe, and whether the image
+    /// carries everything its restore needs. Reads fixed paths of the pinned
+    /// image only, with no symlinks or nested mounts.
+    pub fn facts(&self) -> Result<ImageFacts, RootfsError> {
+        read_facts(&self.root, 0)
+    }
+
     /// Read only fixed native account paths from the pinned image, with no
     /// symlinks or nested mounts. No live /etc, target/ tree or p3 fallback.
     pub fn accounts(&self) -> Result<RootfsAccounts, RootfsError> {
@@ -295,6 +304,85 @@ fn check_mountpoint(directory: &File) -> Result<(), RootfsError> {
         }
     }
     Ok(())
+}
+
+fn read_facts(root: &File, owner: u32) -> Result<ImageFacts, RootfsError> {
+    let version = read_fixed(
+        root,
+        "kvmapp/version",
+        owner,
+        0o7022,
+        MAX_APP_VERSION as u64 + 1,
+    )?
+    .ok_or(RootfsError::Accounts)?;
+    let app_version = std::str::from_utf8(&version)
+        .map_err(|_| RootfsError::Accounts)?
+        .trim()
+        .to_string();
+    if app_version.is_empty()
+        || app_version.len() > MAX_APP_VERSION
+        || !app_version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return Err(RootfsError::Accounts);
+    }
+    let marker = read_fixed(
+        root,
+        REQUIRED_PATH,
+        owner,
+        0o7133,
+        REQUIRED_BYTES.len() as u64 + 1,
+    )?;
+    let restorable = marker.as_deref() == Some(REQUIRED_BYTES)
+        && restore_executable(root, "usr/libexec/nanokvm-early-restore", owner)?
+        && restore_executable(root, "etc/init.d/S01restore", owner)?;
+    Ok(ImageFacts {
+        app_version,
+        restorable,
+    })
+}
+
+/// A fixed regular file, single link, owned as required, none of the `denied`
+/// mode bits set. Absent is `None`; any other shape refuses the image.
+fn read_fixed(
+    root: &File,
+    path: &str,
+    owner: u32,
+    denied: u32,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, RootfsError> {
+    let file = match restore_fs::open_beneath(root, path, OFlags::RDONLY | OFlags::NONBLOCK) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(RootfsError::Accounts),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.nlink() != 1
+        || metadata.mode() & denied != 0
+        || metadata.len() > limit
+    {
+        return Err(RootfsError::Accounts);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn restore_executable(root: &File, path: &str, owner: u32) -> Result<bool, RootfsError> {
+    let file = match restore_fs::open_beneath(root, path, OFlags::RDONLY | OFlags::NONBLOCK) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(RootfsError::Accounts),
+    };
+    let metadata = file.metadata()?;
+    Ok(metadata.is_file()
+        && metadata.uid() == owner
+        && metadata.len() > 0
+        && metadata.mode() & 0o7022 == 0
+        && metadata.mode() & 0o100 != 0)
 }
 
 fn read_accounts(root: &File) -> Result<RootfsAccounts, RootfsError> {

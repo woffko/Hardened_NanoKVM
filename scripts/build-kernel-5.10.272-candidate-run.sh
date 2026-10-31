@@ -6,6 +6,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT_DIR/scripts/lib/release-versions.sh"
 FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.265/configs/phase3-05-runtime-children.config"
 FRAGMENT_SHA256=82390ad4f7992a666efee6a2c0fe3e7b0ddc31a2e5c2d021990b792f6b241b3a
 SOURCE_DIR="${KERNEL_5_10_272_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/kernel-5.10.272-v1/repo}"
@@ -23,15 +24,8 @@ for name in EXPECTED_SYSTEM_VERSION EXPECTED_KVMAPP_VERSION EXPECTED_KVMAPP_SERV
 	NANOKVM_KVMAPP_SOURCE_DIR KERNEL_5_10_272_REPRO_ROOT; do
 	[ -n "${!name:-}" ] || refuse "$name is required (an owner decision, not a default)"
 done
-[[ "$EXPECTED_SYSTEM_VERSION" =~ ^0\.3\.0-raw\.[0-9]+$ ]] || refuse "EXPECTED_SYSTEM_VERSION must look like 0.3.0-raw.N"
-[[ "$EXPECTED_KVMAPP_VERSION" =~ ^2\.0\.[0-9]+$ ]] || refuse "EXPECTED_KVMAPP_VERSION must look like 2.0.N"
+release_check_versions "$EXPECTED_SYSTEM_VERSION" "$EXPECTED_KVMAPP_VERSION" || exit 1
 [[ "$EXPECTED_KVMAPP_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] || refuse "EXPECTED_KVMAPP_SERVER_SHA256 must be 64 hex digits"
-case "$EXPECTED_SYSTEM_VERSION" in
-	0.3.0-raw.10|0.3.0-raw.11|0.3.0-raw.12) refuse "system $EXPECTED_SYSTEM_VERSION is already published" ;;
-esac
-case "$EXPECTED_KVMAPP_VERSION" in
-	2.0.40|2.0.41|2.0.42) refuse "application $EXPECTED_KVMAPP_VERSION is already published" ;;
-esac
 case "$EXPECTED_SECURITY_PATCH_LEVEL" in
 	*';'*) refuse "EXPECTED_SECURITY_PATCH_LEVEL must not contain ';'" ;;
 esac

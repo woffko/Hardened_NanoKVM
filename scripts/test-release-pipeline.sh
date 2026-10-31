@@ -40,8 +40,8 @@ openssl genrsa -out "$T/key.pem" 2048 2>/dev/null
 openssl rsa -in "$T/key.pem" -pubout -out "$T/key.pub.pem" 2>/dev/null
 openssl genrsa -out "$T/other.pem" 2048 2>/dev/null
 
-APP=2.0.44
-SYSTEM=0.3.0-raw.13
+APP=2.1.0
+SYSTEM=0.4.0-raw.1
 mkdir -p "$T/app/kvmapp"
 echo "$APP" > "$T/app/kvmapp/version"
 tar -czf "$T/hardened-nanokvm-kvmapp-$APP.tar.gz" -C "$T/app" kvmapp
@@ -82,6 +82,7 @@ cat > "$T/system/manifest.json" <<EOF
   "target": "sg2002-licheervnano-sd",
   "kernel_version": "5.10.265-tag-",
   "required_app_version": "$APP",
+  "minimum_system_version": "0.3.0-raw.12",
   "source_commit": "$(git -C "$REPO" rev-parse --short "$BUILD_COMMIT")",
   "operations": ["restore-required"],
   "raw_images": [
@@ -93,7 +94,8 @@ EOF
 SYSTEM_ARCHIVE="$T/system-out/hardened-nanokvm-system-$SYSTEM.tar.gz"
 tar -czf "$SYSTEM_ARCHIVE" -C "$T/system" manifest.json payload
 CHANNEL=preview TARGET=sg2002-licheervnano-sd SYSTEM_UPDATE_FORMAT=2 \
-SYSTEM_UPDATE_REQUIRED_APP_VERSION="$APP" SYSTEM_UPDATE_SIGNING_KEY="$T/key.pem" \
+SYSTEM_UPDATE_REQUIRED_APP_VERSION="$APP" SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION=0.3.0-raw.12 \
+SYSTEM_UPDATE_SIGNING_KEY="$T/key.pem" \
 SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-prod-2026q3 \
 	"$REPO/scripts/create-system-update-metadata.sh" "$SYSTEM" "hardened-system-$SYSTEM" \
 	"$SYSTEM_ARCHIVE" "$T/system-out/system-latest.json" >/dev/null
@@ -118,10 +120,14 @@ good_env() {
 	export OUTPUT_DIR="$T/out/release"
 }
 
-# refused_prepare NAME: prepare must fail and leave no release or stage.
+# refused_prepare NAME [REASON]: prepare must fail, for that reason when one is
+# named, and leave no release or stage.
 refused_prepare() {
 	if "$REPO/scripts/prepare-release.sh" > "$T/prepare.log" 2>&1; then
 		fail "$1: prepare succeeded"
+	fi
+	if [ -n "${2:-}" ] && ! grep -Fq "$2" "$T/prepare.log"; then
+		fail "$1: refused for another reason: $(tail -n 1 "$T/prepare.log")"
 	fi
 	[ ! -e "$OUTPUT_DIR" ] || fail "$1: a release directory was left"
 	[ -z "$(find "$T/out" -maxdepth 1 -name '.prepare-release.*' 2>/dev/null)" ] || \
@@ -163,6 +169,21 @@ ROOTFS_SHA256="$BOOT_SHA256" refused_prepare "a raw image other than the accepte
 SD_INPUT="$T/empty.img" SD_INPUT_SHA256="$(sha "$T/empty.img")" refused_prepare "an empty SD image"
 printf 'RELEASE_BLOCKED_DEVICE_GATE\n' > "$T/blocked.md"
 NOTES_INPUT="$T/blocked.md" refused_prepare "notes with a release blocker"
+SYSTEM_VERSION=0.3.0-raw.13 APP_VERSION=2.0.44 refused_prepare "a used version number" "already used"
+SYSTEM_VERSION=0.3.0-raw.14 APP_VERSION=2.0.45 refused_prepare "debug numbers" \
+	"debug numbers are never released"
+mkdir -p "$T/system-open/stage" "$T/system-open-out"
+cp -r "$T/system/." "$T/system-open/stage/"
+jq 'del(.minimum_system_version)' "$T/system/manifest.json" > "$T/system-open/stage/manifest.json"
+OPEN_ARCHIVE="$T/system-open-out/hardened-nanokvm-system-$SYSTEM.tar.gz"
+tar -czf "$OPEN_ARCHIVE" -C "$T/system-open/stage" manifest.json payload
+CHANNEL=preview TARGET=sg2002-licheervnano-sd SYSTEM_UPDATE_FORMAT=2 \
+SYSTEM_UPDATE_REQUIRED_APP_VERSION="$APP" SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION=0.3.0-raw.12 \
+SYSTEM_UPDATE_SIGNING_KEY="$T/key.pem" SYSTEM_UPDATE_SIGNATURE_KEY_ID=hardened-system-prod-2026q3 \
+	"$REPO/scripts/create-system-update-metadata.sh" "$SYSTEM" "hardened-system-$SYSTEM" \
+	"$OPEN_ARCHIVE" "$T/system-open-out/system-latest.json" >/dev/null
+SYSTEM_INPUT_DIR="$T/system-open-out" SYSTEM_INPUT_SHA256="$(sha "$OPEN_ARCHIVE")" \
+	refused_prepare "a manifest without the minimum system" "manifest system requirement"
 touch "$REPO/untracked"
 refused_prepare "a dirty worktree"
 rm "$REPO/untracked"

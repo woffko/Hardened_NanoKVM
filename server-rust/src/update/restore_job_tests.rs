@@ -411,7 +411,11 @@ mod accounts {
     fn the_parent_decodes_exactly_one_valid_frame_from_a_successful_helper() {
         let dir = tempfile::tempdir().unwrap();
         let frame = dir.path().join("frame");
-        std::fs::write(&frame, &*restore_accounts::encode(&TABLES).unwrap()).unwrap();
+        let facts = restore_accounts::ImageFacts {
+            app_version: "2.1.0".to_string(),
+            restorable: true,
+        };
+        std::fs::write(&frame, &*restore_accounts::encode(&TABLES, &facts).unwrap()).unwrap();
         let cancel = AtomicBool::new(false);
         let accounts =
             collect_accounts(helper(&format!("cat '{}'", frame.display())), &cancel).unwrap();

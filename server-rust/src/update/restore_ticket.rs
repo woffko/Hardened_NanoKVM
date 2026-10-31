@@ -169,6 +169,10 @@ impl RestoreTicket {
     pub fn target_version(&self) -> &str {
         &self.target_version
     }
+    /// The application version the target image carries.
+    pub fn target_app_version(&self) -> &str {
+        &self.binding.target_app_version
+    }
     /// BOOT and ROOTFS image digests bound at capture.
     pub fn image_digests(&self) -> [[u8; 32]; 2] {
         [

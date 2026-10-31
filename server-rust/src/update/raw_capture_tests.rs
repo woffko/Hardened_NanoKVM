@@ -102,6 +102,7 @@ mod composed {
     };
 
     const SOURCE: &str = "11111111-1111-4111-8111-111111111111";
+    const IMAGE_APP: &str = "2.1.3";
 
     #[derive(Default)]
     struct Image {
@@ -109,10 +110,15 @@ mod composed {
         fail_ssh: bool,
         cancel_in_ssh: bool,
         account_members: Vec<String>,
+        no_restore: bool,
     }
     impl TargetImage for Image {
         fn signed_accounts(&mut self, _: &AtomicBool) -> Result<SignedAccounts> {
-            let encoded = restore_accounts::encode(&signed_accounts()).unwrap();
+            let facts = restore_accounts::ImageFacts {
+                app_version: IMAGE_APP.to_string(),
+                restorable: !self.no_restore,
+            };
+            let encoded = restore_accounts::encode(&signed_accounts(), &facts).unwrap();
             Ok(restore_accounts::decode(&encoded).unwrap())
         }
         fn check_ssh(
@@ -151,7 +157,6 @@ mod composed {
             working_dir: Path::new(CWD),
             config_path: Path::new(CONFIG_PATH),
             target_version: VERSION,
-            target_app_version: "2.0.43",
             target: "sg2002-licheervnano-sd",
             boot_image_sha256: [2; 32],
             rootfs_image_sha256: [3; 32],
@@ -183,11 +188,33 @@ mod composed {
         );
         let ticket = captured.into_ticket();
         assert_eq!(ticket.phase(), Phase::Prepared);
+        assert_eq!(ticket.target_app_version(), IMAGE_APP);
         assert_eq!(
             format!("{}{SUFFIX}", hex(&ticket.transaction_id())),
             names(capsules.path())[0]
         );
         assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_image_without_its_early_restore_is_refused_before_anything_is_sealed() {
+        let (source, config) = fixture();
+        let (staging, capsules) = (private(), private());
+        let directory = File::open(capsules.path()).unwrap();
+        let mut image = Image {
+            no_restore: true,
+            ..Image::default()
+        };
+        assert!(matches!(
+            capture(
+                &request(source.path(), staging.path(), &directory, &config),
+                &mut image,
+                &AtomicBool::new(false),
+            ),
+            Err(CaptureError::NotRestorable)
+        ));
+        assert!(!image.ssh_checked);
+        assert!(names(capsules.path()).is_empty());
     }
 
     #[test]

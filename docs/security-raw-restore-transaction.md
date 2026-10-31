@@ -1118,6 +1118,18 @@ be connected by the writer/early helper; none may be taken from p3 JSON or HTTP
 parameters. Host fixtures do not exercise the production `/boot` entry point or
 prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 
+## What the image says about itself
+
+The sandbox that exports the image's accounts also reports, from the same
+authenticated mount, the content of `kvmapp/version` and whether the image holds
+the restore marker with its exact bytes, the early helper and `S01restore`.
+Capture refuses an image without its restore before anything is sealed: written
+to a card it would never restore, and the next update would retire the only
+capsule of this device's identity. The ticket binds the application version
+read from the image, which is the value early boot observes. The metadata's
+`required_app_version` only says which application may install the update, and
+the two may differ.
+
 ## End of the restore requirement
 
 A raw image carries `/etc/kvm/raw-restore-required`, which tells the early

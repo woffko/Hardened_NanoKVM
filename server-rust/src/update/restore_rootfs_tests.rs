@@ -265,3 +265,95 @@ fn rootfs_mount_requires_fresh_lease_and_empty_private_mountpoint() {
         assert!(matches!(check_mountpoint(&root), Err(RootfsError::Layout)));
     }
 }
+
+const RESTORE_HELPER: &str = "usr/libexec/nanokvm-early-restore";
+const RESTORE_SCRIPT: &str = "etc/init.d/S01restore";
+
+fn facts_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for directory in ["kvmapp", "etc/kvm", "etc/init.d", "usr/libexec"] {
+        fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    let write = |path: &str, bytes: &[u8], mode: u32| {
+        let path = root.path().join(path);
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write("kvmapp/version", b"2.1.0\n", 0o644);
+    write(REQUIRED_PATH, REQUIRED_BYTES, 0o644);
+    write(RESTORE_HELPER, b"\x7fELF", 0o755);
+    write(RESTORE_SCRIPT, b"#!/bin/sh\n", 0o755);
+    root
+}
+
+fn facts_of(root: &tempfile::TempDir) -> Result<ImageFacts, RootfsError> {
+    let directory = restore_fs::open_root(root.path(), false).unwrap();
+    read_facts(&directory, geteuid().as_raw())
+}
+
+#[test]
+fn facts_report_the_image_version_and_a_complete_restore() {
+    let facts = facts_of(&facts_root()).unwrap();
+    assert_eq!(facts.app_version, "2.1.0");
+    assert!(facts.restorable);
+}
+
+#[test]
+fn an_image_missing_any_part_of_its_restore_is_not_restorable() {
+    for missing in [REQUIRED_PATH, RESTORE_HELPER, RESTORE_SCRIPT] {
+        let root = facts_root();
+        fs::remove_file(root.path().join(missing)).unwrap();
+        assert!(!facts_of(&root).unwrap().restorable, "{missing}");
+    }
+    let root = facts_root();
+    fs::write(
+        root.path().join(REQUIRED_PATH),
+        b"nanokvm-raw-restore-required-v0\n",
+    )
+    .unwrap();
+    assert!(!facts_of(&root).unwrap().restorable, "wrong marker bytes");
+    let root = facts_root();
+    let helper = root.path().join(RESTORE_HELPER);
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        !facts_of(&root).unwrap().restorable,
+        "helper not executable"
+    );
+    let root = facts_root();
+    fs::write(root.path().join(RESTORE_HELPER), b"").unwrap();
+    assert!(!facts_of(&root).unwrap().restorable, "empty helper");
+}
+
+#[test]
+fn a_malformed_or_missing_application_version_refuses_the_image() {
+    for version in [
+        &b""[..],
+        b"\n",
+        b"2.1.0-dev\n",
+        b"2.1.0 extra\n",
+        &[b'1'; 40],
+    ] {
+        let root = facts_root();
+        fs::write(root.path().join("kvmapp/version"), version).unwrap();
+        assert!(matches!(facts_of(&root), Err(RootfsError::Accounts)));
+    }
+    let root = facts_root();
+    fs::remove_file(root.path().join("kvmapp/version")).unwrap();
+    assert!(matches!(facts_of(&root), Err(RootfsError::Accounts)));
+}
+
+#[test]
+fn a_symlinked_or_writable_fact_refuses_the_image() {
+    let root = facts_root();
+    let version = root.path().join("kvmapp/version");
+    fs::remove_file(&version).unwrap();
+    symlink("/etc/passwd", &version).unwrap();
+    assert!(facts_of(&root).is_err());
+    let root = facts_root();
+    fs::set_permissions(
+        root.path().join("kvmapp/version"),
+        fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    assert!(facts_of(&root).is_err());
+}

@@ -26,6 +26,7 @@ SIGNING_KEY="${SYSTEM_UPDATE_SIGNING_KEY:-}"
 SECURITY_PATCH_LEVEL="${SECURITY_PATCH_LEVEL:-}"
 SYSTEM_UPDATE_FORMAT="${SYSTEM_UPDATE_FORMAT:-1}"
 REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-}"
+MINIMUM_SYSTEM_VERSION="${SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION:-}"
 
 if [ -n "$SIGNING_KEY" ]; then
   SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-sha256-rsa-pkcs1-v1_5}"
@@ -66,8 +67,8 @@ esac
 
 case "$SYSTEM_UPDATE_FORMAT" in
   1)
-    [ -z "$REQUIRED_APP_VERSION" ] || {
-      echo "system metadata v1 cannot require an application version" >&2
+    [ -z "$REQUIRED_APP_VERSION" ] && [ -z "$MINIMUM_SYSTEM_VERSION" ] || {
+      echo "system metadata v1 cannot require an application or system version" >&2
       exit 1
     }
     ;;
@@ -151,6 +152,7 @@ cat > "$metadata_work/metadata.json" <<EOF
   "release_notes_url": "$RELEASE_NOTES_URL",
 $(if [ -n "$SECURITY_PATCH_LEVEL" ]; then printf '  "security_patch_level": "%s",\n' "$SECURITY_PATCH_LEVEL"; fi)
 $(if [ -n "$REQUIRED_APP_VERSION" ]; then printf '  "required_app_version": "%s",\n' "$REQUIRED_APP_VERSION"; fi)
+$(if [ -n "$MINIMUM_SYSTEM_VERSION" ]; then printf '  "minimum_system_version": "%s",\n' "$MINIMUM_SYSTEM_VERSION"; fi)
   "signature_algorithm": "$SIGNATURE_ALGORITHM",
   "signature_key_id": "$SIGNATURE_KEY_ID"
 }

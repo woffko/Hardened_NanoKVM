@@ -3,7 +3,8 @@
 # the accepted candidate. Every expectation is required; there is no unsigned
 # mode. verify-rc12-raw-bundle.sh stays the fixed historical RC12 check.
 #
-# Required environment: RAW_VERSION RAW_REQUIRED_APP_VERSION RAW_KERNEL_VERSION
+# Required environment: RAW_VERSION RAW_REQUIRED_APP_VERSION
+# RAW_MINIMUM_SYSTEM_VERSION RAW_KERNEL_VERSION
 # RAW_SOURCE_COMMIT (short) RAW_REQUIRED_OPERATION RAW_ROOTFS_SHA256
 # RAW_ROOTFS_SIZE RAW_BOOT_SHA256 RAW_BOOT_SIZE. Optional: RAW_KEY_ID
 # (hardened-system-prod-2026q3), RAW_TARGET (sg2002-licheervnano-sd),
@@ -29,7 +30,7 @@ METADATA="$(readlink -f "$2")"
 SIGNATURE="$3"
 PUBLIC_KEY="$4"
 
-for name in RAW_VERSION RAW_REQUIRED_APP_VERSION RAW_KERNEL_VERSION RAW_SOURCE_COMMIT \
+for name in RAW_VERSION RAW_REQUIRED_APP_VERSION RAW_MINIMUM_SYSTEM_VERSION RAW_KERNEL_VERSION RAW_SOURCE_COMMIT \
 	RAW_REQUIRED_OPERATION RAW_ROOTFS_SHA256 RAW_ROOTFS_SIZE RAW_BOOT_SHA256 RAW_BOOT_SIZE
 do
 	[ -n "${!name:-}" ] || fail "$name is required"
@@ -59,6 +60,8 @@ archive_size="$(wc -c < "$ARCHIVE" | tr -d ' ')"
 [ "$(jq -r .target "$METADATA")" = "$TARGET" ] || fail "metadata target"
 [ "$(jq -r .required_app_version "$METADATA")" = "$RAW_REQUIRED_APP_VERSION" ] || \
 	fail "metadata app requirement"
+[ "$(jq -r .minimum_system_version "$METADATA")" = "$RAW_MINIMUM_SYSTEM_VERSION" ] || \
+	fail "metadata system requirement"
 [ "$(jq -r .sha256 "$METADATA")" = "$archive_sha" ] || fail "metadata archive hash"
 [ "$(jq -r .size "$METADATA")" = "$archive_size" ] || fail "metadata archive size"
 
@@ -72,6 +75,8 @@ manifest="$tmp/manifest.json"
 [ "$(jq -r .kernel_version "$manifest")" = "$RAW_KERNEL_VERSION" ] || fail "manifest kernel"
 [ "$(jq -r .required_app_version "$manifest")" = "$RAW_REQUIRED_APP_VERSION" ] || \
 	fail "manifest app requirement"
+[ "$(jq -r .minimum_system_version "$manifest")" = "$RAW_MINIMUM_SYSTEM_VERSION" ] || \
+	fail "manifest system requirement"
 [ "$(jq -r .source_commit "$manifest")" = "$RAW_SOURCE_COMMIT" ] || fail "manifest source commit"
 jq -e --arg operation "$RAW_REQUIRED_OPERATION" \
 	'.operations | index($operation) != null' "$manifest" >/dev/null || \

@@ -56,6 +56,8 @@ pub enum CaptureError {
     Preflight(#[from] PrepareRootError),
     #[error("the SSH probe context is invalid")]
     Context,
+    #[error("the image does not carry its early restore")]
+    NotRestorable,
 }
 type Result<T> = std::result::Result<T, CaptureError>;
 
@@ -200,7 +202,6 @@ pub struct CaptureRequest<'a> {
     pub working_dir: &'a Path,
     pub config_path: &'a Path,
     pub target_version: &'a str,
-    pub target_app_version: &'a str,
     pub target: &'a str,
     pub boot_image_sha256: [u8; 32],
     pub rootfs_image_sha256: [u8; 32],
@@ -235,6 +236,11 @@ pub fn capture(
 ) -> Result<Captured> {
     cancelled(cancel)?;
     let signed = image.signed_accounts(cancel)?;
+    // Without its helper a written image would never restore, and the next
+    // update would then retire the only capsule of this device's identity.
+    if !signed.facts().restorable {
+        return Err(CaptureError::NotRestorable);
+    }
     cancelled(cancel)?;
     let mut archive = restore_identity::capture_effective(
         request.source_root,
@@ -269,7 +275,8 @@ pub fn capture(
             capsule_sha256: *sealed.sha256(),
             boot_image_sha256: request.boot_image_sha256,
             rootfs_image_sha256: request.rootfs_image_sha256,
-            target_app_version: request.target_app_version.to_string(),
+            // The version early boot observes, not the minimum to install.
+            target_app_version: signed.facts().app_version.clone(),
             target: request.target.to_string(),
         };
         Ok(RestoreTicket::prepared(sealed.into_secret(), binding)?)

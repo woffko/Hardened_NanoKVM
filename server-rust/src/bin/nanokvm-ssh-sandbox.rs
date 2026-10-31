@@ -232,7 +232,8 @@ fn run(mode: Mode<'_>) -> Result<Infallible, RunError> {
 
 fn export_accounts(view: RootfsView, output: OwnedFd) -> Result<Infallible, RunError> {
     let accounts = view.accounts()?;
-    let encoded = restore_accounts::encode(&accounts.as_files())
+    let facts = view.facts()?;
+    let encoded = restore_accounts::encode(&accounts.as_files(), &facts)
         .map_err(|_| RunError::Rootfs(RootfsError::Accounts))?;
     File::from(output)
         .write_all(&encoded)

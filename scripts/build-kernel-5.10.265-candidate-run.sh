@@ -13,8 +13,8 @@
 # accepted application stage's server binary, the stage itself, the run root.
 #
 # Required:
-#   EXPECTED_SYSTEM_VERSION        the new system version (0.3.0-raw.N; a published one is refused)
-#   EXPECTED_KVMAPP_VERSION        the new application version (2.0.N; a published one is refused);
+#   EXPECTED_SYSTEM_VERSION        the new system version (rules: scripts/lib/release-versions.sh)
+#   EXPECTED_KVMAPP_VERSION        the new application version (same rules);
 #                                  must equal <stage>/version
 #   EXPECTED_KVMAPP_SERVER_SHA256  SHA-256 of <stage>/server/NanoKVM-Server from the accepted G2 run
 #   NANOKVM_KVMAPP_SOURCE_DIR      the accepted application stage directory
@@ -30,6 +30,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT_DIR/scripts/lib/release-versions.sh"
 FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.265/configs/phase3-04-init-on-alloc.config"
 FRAGMENT_SHA256=13c9fede1fdc4cfe59d1b6f2f90d4ae28d0b7e32876c9145b9999bb09816f750
 SOURCE_DIR="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
@@ -43,15 +44,8 @@ for name in EXPECTED_SYSTEM_VERSION EXPECTED_KVMAPP_VERSION EXPECTED_KVMAPP_SERV
 	NANOKVM_KVMAPP_SOURCE_DIR KERNEL_5_10_265_REPRO_ROOT; do
 	[ -n "${!name:-}" ] || refuse "$name is required (an owner decision, not a default)"
 done
-[[ "$EXPECTED_SYSTEM_VERSION" =~ ^0\.3\.0-raw\.[0-9]+$ ]] || refuse "EXPECTED_SYSTEM_VERSION must look like 0.3.0-raw.N"
-[[ "$EXPECTED_KVMAPP_VERSION" =~ ^2\.0\.[0-9]+$ ]] || refuse "EXPECTED_KVMAPP_VERSION must look like 2.0.N"
+release_check_versions "$EXPECTED_SYSTEM_VERSION" "$EXPECTED_KVMAPP_VERSION" || exit 1
 [[ "$EXPECTED_KVMAPP_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] || refuse "EXPECTED_KVMAPP_SERVER_SHA256 must be 64 hex digits"
-case "$EXPECTED_SYSTEM_VERSION" in
-	0.3.0-raw.10|0.3.0-raw.11|0.3.0-raw.12) refuse "system $EXPECTED_SYSTEM_VERSION is already published" ;;
-esac
-case "$EXPECTED_KVMAPP_VERSION" in
-	2.0.40|2.0.41|2.0.42) refuse "application $EXPECTED_KVMAPP_VERSION is already published" ;;
-esac
 case "$EXPECTED_SECURITY_PATCH_LEVEL" in
 	*';'*) refuse "EXPECTED_SECURITY_PATCH_LEVEL must not contain ';'" ;;
 esac

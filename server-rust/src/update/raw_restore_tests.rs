@@ -23,7 +23,14 @@ impl TargetImage for Image {
         &mut self,
         _: &AtomicBool,
     ) -> std::result::Result<restore_accounts::SignedAccounts, CaptureError> {
-        let encoded = restore_accounts::encode(&signed_accounts()).unwrap();
+        let encoded = restore_accounts::encode(
+            &signed_accounts(),
+            &restore_accounts::ImageFacts {
+                app_version: APP.into(),
+                restorable: true,
+            },
+        )
+        .unwrap();
         Ok(restore_accounts::decode(&encoded).unwrap())
     }
     fn check_ssh(
@@ -61,7 +68,6 @@ fn capture_ticket_for(
         working_dir: Path::new(CWD),
         config_path: Path::new(CONFIG_PATH),
         target_version: version,
-        target_app_version: APP,
         target: TARGET,
         boot_image_sha256: [2; 32],
         rootfs_image_sha256: [3; 32],

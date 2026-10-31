@@ -187,10 +187,12 @@ REQUIRED_FREE_BYTES="${REQUIRED_FREE_BYTES:-671088640}"
 BUNDLE_NAME="${BUNDLE_NAME:-hardened-nanokvm-system-$VERSION.tar.gz}"
 SYSTEM_UPDATE_FORMAT="${SYSTEM_UPDATE_FORMAT:-1}"
 REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-}"
+MINIMUM_SYSTEM_VERSION="${SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION:-}"
 
 case "$SYSTEM_UPDATE_FORMAT" in
   1)
     [ -z "$REQUIRED_APP_VERSION" ] || die "manifest v1 cannot require an application version"
+    [ -z "$MINIMUM_SYSTEM_VERSION" ] || die "manifest v1 cannot require a system version"
     ;;
   2)
     printf '%s' "$REQUIRED_APP_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
@@ -274,6 +276,9 @@ MANIFEST="$STAGE_DIR/manifest.json"
   fi
   if [ -n "$REQUIRED_APP_VERSION" ]; then
     printf '  "required_app_version": "%s",\n' "$REQUIRED_APP_VERSION"
+  fi
+  if [ -n "$MINIMUM_SYSTEM_VERSION" ]; then
+    printf '  "minimum_system_version": "%s",\n' "$MINIMUM_SYSTEM_VERSION"
   fi
   printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
   printf '  "created_utc": "%s",\n' "$CREATED_UTC"
