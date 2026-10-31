@@ -71,7 +71,9 @@ grep -Fq 'EXPECTED_RUST_RUNPATH=' "$POST_BUILD"
 grep -Fq 'restore_rust_elf server/NanoKVM-Server' "$POST_BUILD"
 reject_text '/tmp/server/dl_lib' "$ROOT/server-rust/scripts/build-linked-libkvm.sh"
 reject_text '/tmp/server/dl_lib' "$ROOT/kvmapp/system/init.d/S95nanokvm"
-require_line '            "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",' \
+require_line 'pub const LIBRARY_PATH: &str = "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd";' \
+	"$ROOT/server-rust/src/native_owner/mod.rs"
+require_line '            nanokvm_rust_server::native_owner::LIBRARY_PATH,' \
 	"$ROOT/server-rust/src/bin/nanokvm-native-owner.rs"
 require_line '            "/kvmapp/server/NanoKVM-Server",' \
 	"$ROOT/server-rust/src/bin/nanokvm-native-owner.rs"
