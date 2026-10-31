@@ -16,14 +16,16 @@ pub enum HostKey {
     Rsa,
     Ecdsa,
     Ed25519,
+    Mldsa44Ed25519,
 }
 impl HostKey {
-    pub const ALL: [Self; 3] = [Self::Rsa, Self::Ecdsa, Self::Ed25519];
+    pub const ALL: [Self; 4] = [Self::Rsa, Self::Ecdsa, Self::Ed25519, Self::Mldsa44Ed25519];
     pub fn private_path(self) -> &'static str {
         match self {
             Self::Rsa => "/etc/ssh/ssh_host_rsa_key",
             Self::Ecdsa => "/etc/ssh/ssh_host_ecdsa_key",
             Self::Ed25519 => "/etc/ssh/ssh_host_ed25519_key",
+            Self::Mldsa44Ed25519 => "/etc/ssh/ssh_host_mldsa44_ed25519_key",
         }
     }
     pub(super) fn signature_path(self) -> &'static str {
@@ -31,6 +33,7 @@ impl HostKey {
             Self::Rsa => "/run/restore-rsa.sig",
             Self::Ecdsa => "/run/restore-ecdsa.sig",
             Self::Ed25519 => "/run/restore-ed25519.sig",
+            Self::Mldsa44Ed25519 => "/run/restore-mldsa44-ed25519.sig",
         }
     }
     pub(super) fn allowed_path(self) -> &'static str {
@@ -38,6 +41,7 @@ impl HostKey {
             Self::Rsa => "/run/restore-rsa.allowed",
             Self::Ecdsa => "/run/restore-ecdsa.allowed",
             Self::Ed25519 => "/run/restore-ed25519.allowed",
+            Self::Mldsa44Ed25519 => "/run/restore-mldsa44-ed25519.allowed",
         }
     }
 }
@@ -61,6 +65,7 @@ impl KeyOperation {
                 "rsa" => HostKey::Rsa,
                 "ecdsa" => HostKey::Ecdsa,
                 "ed25519" => HostKey::Ed25519,
+                "mldsa44-ed25519" => HostKey::Mldsa44Ed25519,
                 _ => return None,
             },
             stage: match stage {
@@ -76,12 +81,15 @@ impl KeyOperation {
             (KeyStage::Public, HostKey::Rsa) => "public:rsa",
             (KeyStage::Public, HostKey::Ecdsa) => "public:ecdsa",
             (KeyStage::Public, HostKey::Ed25519) => "public:ed25519",
+            (KeyStage::Public, HostKey::Mldsa44Ed25519) => "public:mldsa44-ed25519",
             (KeyStage::Sign, HostKey::Rsa) => "sign:rsa",
             (KeyStage::Sign, HostKey::Ecdsa) => "sign:ecdsa",
             (KeyStage::Sign, HostKey::Ed25519) => "sign:ed25519",
+            (KeyStage::Sign, HostKey::Mldsa44Ed25519) => "sign:mldsa44-ed25519",
             (KeyStage::Verify, HostKey::Rsa) => "verify:rsa",
             (KeyStage::Verify, HostKey::Ecdsa) => "verify:ecdsa",
             (KeyStage::Verify, HostKey::Ed25519) => "verify:ed25519",
+            (KeyStage::Verify, HostKey::Mldsa44Ed25519) => "verify:mldsa44-ed25519",
         }
     }
     pub(super) fn native_arguments(self) -> Vec<&'static str> {
@@ -164,6 +172,7 @@ pub(super) fn parse_public(
     let kind = match (algorithm, kind) {
         (HostKey::Rsa, b"ssh-rsa") => "ssh-rsa",
         (HostKey::Ed25519, b"ssh-ed25519") => "ssh-ed25519",
+        (HostKey::Mldsa44Ed25519, b"ssh-mldsa44-ed25519") => "ssh-mldsa44-ed25519",
         (HostKey::Ecdsa, b"ecdsa-sha2-nistp256") => "ecdsa-sha2-nistp256",
         (HostKey::Ecdsa, b"ecdsa-sha2-nistp384") => "ecdsa-sha2-nistp384",
         (HostKey::Ecdsa, b"ecdsa-sha2-nistp521") => "ecdsa-sha2-nistp521",

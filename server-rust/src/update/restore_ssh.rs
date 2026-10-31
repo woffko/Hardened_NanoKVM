@@ -4,6 +4,7 @@
 use super::restore_archive::{
     self, CanonicalSetting, RestoreAction, RestoreArchiveError, SourceRoot, ValidatedRestore,
 };
+use super::restore_native;
 use std::{
     collections::BTreeSet,
     io::{self, Write},
@@ -29,6 +30,7 @@ const HOST_KEYS: &[&str] = &[
     "etc/ssh/ssh_host_rsa_key",
     "etc/ssh/ssh_host_ecdsa_key",
     "etc/ssh/ssh_host_ed25519_key",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key",
 ];
 const FLAGS: &[&str] = &["etc/kvm/ssh_stop", "boot/start_ssh_once"];
 const FILES: &[&str] = &[
@@ -40,14 +42,18 @@ const FILES: &[&str] = &[
     "etc/ssh/ssh_host_ecdsa_key.pub",
     "etc/ssh/ssh_host_ed25519_key",
     "etc/ssh/ssh_host_ed25519_key.pub",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key.pub",
     "etc/ssh/ssh_host_rsa_key-cert.pub",
     "etc/ssh/ssh_host_ecdsa_key-cert.pub",
     "etc/ssh/ssh_host_ed25519_key-cert.pub",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key-cert.pub",
     "etc/ssh/banner",
     "etc/ssh/trusted-user-ca-keys.pub",
     "etc/ssh/revoked_keys",
     "etc/ssh/authorized_principals",
     "etc/ssh/ssh_known_hosts",
+    "etc/ssh/ssh_known_hosts2",
     "etc/ssh/shosts.equiv",
     "etc/hosts.equiv",
     "root/.rhosts",
@@ -64,6 +70,8 @@ pub enum SshRestoreError {
     Limit,
     #[error("SSH restore authority/layout requires an explicit verified migration")]
     Unsupported,
+    #[error("a raw update would lose {0:?}: move it away first")]
+    Unlisted(String),
     #[error("SSH private key is invalid, unusable or does not match its public identity")]
     InvalidKey,
     #[error("SSH key preflight runtime failed")]
@@ -92,6 +100,12 @@ impl Snapshot {
                 return Err(SshRestoreError::Unsupported);
             }
         }
+        // The new rootfs keeps only what the archive carries, so a file the
+        // schema does not know stops capture instead of being lost.
+        if let Some(path) = restore_archive::unlisted(source, "etc/ssh")? {
+            return Err(SshRestoreError::Unlisted(path));
+        }
+        check_other_homes(source)?;
         let mut paths = BTreeSet::new();
         let mut absent = Vec::with_capacity(FILES.len() + FLAGS.len());
         for path in FILES.iter().chain(FLAGS) {
@@ -140,6 +154,31 @@ impl Snapshot {
         }
         result
     }
+}
+
+// Homes other than root's are outside the schema; see the transaction document.
+fn check_other_homes(source: &SourceRoot) -> Result<()> {
+    let passwd = source
+        .read_setting("etc/passwd", restore_native::MAX_TABLE_BYTES)?
+        .ok_or(SshRestoreError::Invalid)?;
+    let passwd = std::str::from_utf8(&passwd).map_err(|_| SshRestoreError::Invalid)?;
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        let [name, _, _, _, _, home, shell] = fields[..] else {
+            continue;
+        };
+        if name == "root" || !restore_native::login_shell(shell) {
+            continue;
+        }
+        let path = match home.trim_matches('/') {
+            "" => ".ssh".to_string(),
+            home => format!("{home}/.ssh"),
+        };
+        if source.exists(&path)? {
+            return Err(SshRestoreError::Unlisted(path));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn check_archive(archive: &mut ValidatedRestore) -> Result<()> {
@@ -195,8 +234,9 @@ pub(super) async fn check_host_keys(
     private_staging: &Path,
 ) -> Result<()> {
     use super::restore_key::HostKey as Algorithm;
-    for (index, path) in HOST_KEYS.iter().enumerate() {
-        let private_index = archive.members().iter().position(|m| m.path == *path);
+    for algorithm in Algorithm::ALL {
+        let path = &algorithm.private_path()[1..];
+        let private_index = archive.members().iter().position(|m| m.path == path);
         let public_path = format!("{path}.pub");
         let public_index = archive.members().iter().position(|m| m.path == public_path);
         let Some(private_index) = private_index else {
@@ -232,7 +272,7 @@ pub(super) async fn check_host_keys(
         key_probe::check_pair(
             &private,
             public.as_deref().map(|b| b.as_slice()),
-            [Algorithm::Rsa, Algorithm::Ecdsa, Algorithm::Ed25519][index],
+            algorithm,
             private_staging,
         )
         .await?;
@@ -372,12 +412,7 @@ fn check_line(line: &lexer::Line, files: &[File]) -> Result<()> {
         Rule::HostCertificate => {
             let path = only(line)?;
             if !path.eq_ignore_ascii_case("none")
-                && ![
-                    "/etc/ssh/ssh_host_rsa_key-cert.pub",
-                    "/etc/ssh/ssh_host_ecdsa_key-cert.pub",
-                    "/etc/ssh/ssh_host_ed25519_key-cert.pub",
-                ]
-                .contains(&path)
+                && !HOST_KEYS.iter().any(|p| path == format!("/{p}-cert.pub"))
             {
                 return Err(SshRestoreError::Unsupported);
             }

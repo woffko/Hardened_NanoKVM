@@ -538,6 +538,10 @@ impl SourceRoot {
         }
     }
 
+    pub(super) fn exists(&self, relative: &str) -> Result<bool> {
+        Ok(self.open_path(relative, OFlags::PATH)?.is_some())
+    }
+
     pub(super) fn metadata(&self, relative: &str) -> Result<Option<fs::Metadata>> {
         let Some(file) = self.open_path(relative, OFlags::PATH)? else {
             return Ok(None);
@@ -602,6 +606,25 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
         && a.ctime_nsec() == b.ctime_nsec()
 }
 
+/// The first entry of a directory that the schema does not cover.
+pub(super) fn unlisted(root: &SourceRoot, relative: &str) -> Result<Option<String>> {
+    let Some(directory) = root.open_path(relative, OFlags::RDONLY | OFlags::DIRECTORY)? else {
+        return Ok(None);
+    };
+    for entry in Dir::new(directory).map_err(io::Error::from)? {
+        let entry = entry.map_err(io::Error::from)?;
+        let name = String::from_utf8_lossy(entry.file_name().to_bytes());
+        if name == "." || name == ".." {
+            continue;
+        }
+        let path = format!("{relative}/{name}");
+        if !policy::allowed(&path) && !policy::TREES.contains(&path.as_str()) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn collect_tree(
     root: &SourceRoot,
     relative: &str,
@@ -635,8 +658,12 @@ pub(super) fn collect_tree(
             .ok_or(RestoreArchiveError::InvalidSource)?
             .metadata()?;
         if metadata.is_dir() {
-            // Do not descend into signed skill/profile state excluded by policy.
-            if relative != "root/.picoclaw/workspace/skills/kvm-control" {
+            // Do not descend into signed skill/profile state excluded by policy,
+            // or into the sockets sshd keeps for forwarded agents.
+            if !matches!(
+                relative.as_str(),
+                "root/.picoclaw/workspace/skills/kvm-control" | "root/.ssh/agent"
+            ) {
                 collect_tree(root, &relative, out, depth + 1, scanned)?;
             }
         } else if metadata.is_file() && policy::allowed(&relative) {

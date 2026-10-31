@@ -41,14 +41,18 @@ pub(super) const FIXED: &[&str] = &[
     "etc/ssh/ssh_host_ed25519_key.pub",
     "etc/ssh/ssh_host_ecdsa_key",
     "etc/ssh/ssh_host_ecdsa_key.pub",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key.pub",
     "etc/ssh/ssh_host_rsa_key-cert.pub",
     "etc/ssh/ssh_host_ed25519_key-cert.pub",
     "etc/ssh/ssh_host_ecdsa_key-cert.pub",
+    "etc/ssh/ssh_host_mldsa44_ed25519_key-cert.pub",
     "etc/ssh/banner",
     "etc/ssh/trusted-user-ca-keys.pub",
     "etc/ssh/revoked_keys",
     "etc/ssh/authorized_principals",
     "etc/ssh/ssh_known_hosts",
+    "etc/ssh/ssh_known_hosts2",
     "etc/ssh/shosts.equiv",
     "etc/hosts.equiv",
     "root/.rhosts",
@@ -123,13 +127,18 @@ pub(super) const TREES: &[&str] = &[
     "root/.picoclaw/workspace",
     "etc/ssh/sshd_config.d",
     "etc/ssh/ssh_config.d",
+    "root/.ssh",
 ];
 
 pub(super) fn allowed(path: &str) -> bool {
     if REQUIRED.contains(&path) || FIXED.contains(&path) || PRESENCE.contains(&path) {
         return true;
     }
-    for root in ["etc/kvm/scripts/", "etc/kvm/autostart/"] {
+    // sshd runs the first and imports the second; restore_ssh refuses both.
+    if matches!(path, "root/.ssh/rc" | "root/.ssh/environment") {
+        return false;
+    }
+    for root in ["etc/kvm/scripts/", "etc/kvm/autostart/", "root/.ssh/"] {
         if let Some(name) = path.strip_prefix(root) {
             return !name.is_empty()
                 && !name.contains('/')
@@ -160,7 +169,9 @@ pub(super) fn allowed(path: &str) -> bool {
 
 pub(super) fn mode(path: &str) -> u32 {
     match path {
-        "etc/passwd" | "etc/group" | "etc/hostname" | "etc/hosts" | "etc/machine-id" => 0o644,
+        "etc/passwd" | "etc/group" | "etc/hostname" | "etc/hosts" | "etc/machine-id"
+        | "etc/ssh/ssh_config" => 0o644,
+        _ if path.starts_with("etc/ssh/") && path.ends_with(".pub") => 0o644,
         _ => 0o600,
     }
 }

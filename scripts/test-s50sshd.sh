@@ -126,4 +126,19 @@ listening || fail "the older sshd is not listening"
 [ -z "$(daemon_args)" ] || fail "the older sshd got options: $(daemon_args)"
 run_s50 stop >/dev/null
 
+# 3. One missing key type is generated, whichever it is, and the others stay.
+# This host build has no RSA, so a placeholder stands for a key that exists.
+printf 'not a usable key\n' > /etc/ssh/ssh_host_rsa_key
+chmod 0600 /etc/ssh/ssh_host_rsa_key
+kept="$(sha256sum /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key)"
+rm -f /etc/ssh/ssh_host_mldsa44_ed25519_key /etc/ssh/ssh_host_mldsa44_ed25519_key.pub
+install_sshd ':'
+output="$(run_s50 start 2>&1)" || fail "start with a missing key failed: $output"
+echo "start with a missing key: $output"
+listening || fail "sshd is not listening after the key was generated"
+[ -s /etc/ssh/ssh_host_mldsa44_ed25519_key ] || fail "the missing MLDSA key was not generated"
+[ "$(sha256sum /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key)" = "$kept" ] ||
+    fail "an existing key changed"
+run_s50 stop >/dev/null
+
 echo "S50sshd: PASS"

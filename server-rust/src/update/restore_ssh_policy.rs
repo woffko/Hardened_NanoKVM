@@ -1,4 +1,4 @@
-//! Restore-only authority inventory for pinned OpenSSH 10.5p1 directives.
+//! Restore-only authority inventory for pinned OpenSSH 10.6p1 directives.
 //! Scalar means no server-side file/socket/command authority, not syntax PASS.
 
 #[derive(Clone, Copy)]
@@ -54,7 +54,7 @@ pub(super) const RULES: &[(&[&str], Rule)] = &[
         ],
         Rule::Data,
     ),
-    (&["hostkeyagent"], Rule::Agent),
+    (&["hostkeyagent", "agentsocketpath"], Rule::Agent),
     (&["securitykeyprovider"], Rule::Provider),
     (&["pidfile"], Rule::Pid),
     (&["sshdsessionpath"], Rule::Session),
@@ -98,6 +98,7 @@ pub(super) const RULES: &[(&[&str], Rule)] = &[
             "permituserrc",
             "strictmodes",
             "tcpkeepalive",
+            "warnweakcrypto",
             "ciphers",
             "macs",
             "kexalgorithms",

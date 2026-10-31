@@ -80,7 +80,7 @@ pub struct PreparedSshRoot {
 
 impl PreparedSshRoot {
     pub(super) fn host_keys(&self) -> Vec<HostKey> {
-        let mut keys = Vec::with_capacity(3);
+        let mut keys = Vec::with_capacity(HostKey::ALL.len());
         for key in HostKey::ALL {
             if self
                 .created
@@ -361,7 +361,7 @@ pub fn prepare_sshd_root(
     let mut prepared = PreparedSshRoot {
         root,
         path: path.to_path_buf(),
-        created: Vec::with_capacity(MAX_FILES + DIRECTORIES.len() + 17),
+        created: Vec::with_capacity(MAX_FILES + DIRECTORIES.len() + 19),
     };
     for directory in DIRECTORIES {
         let (parent, name) = checked_parent(&prepared.root, directory)?;

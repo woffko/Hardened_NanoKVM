@@ -503,7 +503,7 @@ proves SSH availability or complete C1 closure.
 
 `restore_ssh` checks a bounded immutable snapshot before archive creation and
 rechecks authenticated archive contents before returning `IdentityCheckedRestore`.
-The closed directive/alias inventory matches the pinned OpenSSH 10.5p1 parser;
+The closed directive/alias inventory matches the pinned OpenSSH 10.6p1 parser;
 unknown directives require explicit verified migration. Its lexical guard follows
 the pinned keyword/argument splitting rules, including quotes, escapes, equals
 and token-start comments. It is not a replacement sshd syntax parser.
@@ -526,6 +526,17 @@ PermitUserEnvironment must stay disabled for this pinned layout. Existing
 `sshrc`, root `.ssh/rc` or `.ssh/environment` requires explicit migration, not
 silent deletion or automatic activation. Valid custom key/trust/helper layouts
 outside this schema also stop preflight; they are not silently rewritten.
+
+The new rootfs keeps only what the archive carries, so nothing may fall outside
+the schema unnoticed. Capture lists `/etc/ssh` and stops, naming the file, on any
+entry the schema does not cover, such as a `_sk` host key or a key type of a later
+OpenSSH. `/root/.ssh` is a flat tree of safe file names and is kept whole, apart
+from `rc`, `environment` and the agent socket directory `agent`, which sshd
+recreates. A `.ssh` directory in the home of another account with a login shell
+stops capture the same way, because homes are outside the schema. The schema holds
+every host key type of the pinned OpenSSH, including `mldsa44_ed25519` with its
+certificate. Public keys and `ssh_config` come back world-readable, as OpenSSH
+installs them.
 
 The snapshot owns the exact checked bytes and records absence of all selected
 fixed SSH files. It also pins both SSH enablement flags. Canonical archive capture
@@ -768,7 +779,7 @@ select it. SPEC is a bounded fixed root-user profile: host, numeric peer/local
 addresses, nonzero local port and optional rdomain. No other username, command,
 extra connection key or environment is accepted. `Match version` uses sshd's own
 compiled version, not an invented `-C version=` key. This contract was checked
-against pinned [OpenSSH 10.5p1 source](https://github.com/openssh/openssh-portable/blob/V_10_5_P1/servconf.c).
+against pinned [OpenSSH 10.6p1 source](https://github.com/openssh/openssh-portable/blob/V_10_6_P1/servconf.c).
 
 Native stdin/stderr stay `/dev/null`; effective stdout must be an owned root-owned,
 blocking write-only anonymous PIPEFS descriptor above stdio, CLOEXEC until its
@@ -955,7 +966,7 @@ key-generation fallback is introduced.
 
 The shared parser preserves native comments and public-companion compatibility:
 it compares the first non-comment key identity, never copies comment strings
-into allowed-signers. Pinned OpenSSH10.5p1 `do_print_public` prints arbitrary
+into allowed-signers. Pinned OpenSSH 10.6p1 `do_print_public` prints arbitrary
 stored comments, so enforcing exactly one output line would reject usable keys.
 Cryptographic verify is bound to the exact reconstructed public key, not to
 ignored trailing comment bytes. `-y` alone is NOT possession evidence. No-key

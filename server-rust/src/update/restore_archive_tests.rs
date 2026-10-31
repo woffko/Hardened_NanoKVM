@@ -732,3 +732,18 @@ fn too_many_archive_members_are_rejected_with_bounded_index() {
     }
     rejects(&encode(items));
 }
+
+#[test]
+fn root_ssh_admits_flat_safe_names_but_never_what_sshd_runs_or_imports() {
+    assert!(policy::allowed("root/.ssh/id_work"));
+    assert!(policy::allowed("root/.ssh/known_hosts.old"));
+    for path in [
+        "root/.ssh/rc",
+        "root/.ssh/environment",
+        "root/.ssh/nested/key",
+        "root/.ssh/.hidden",
+        "root/.ssh/a name",
+    ] {
+        assert!(!policy::allowed(path), "{path}");
+    }
+}

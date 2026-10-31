@@ -171,6 +171,56 @@ fn required_raw_image_applies_once_and_commits_the_ticket() {
     assert_eq!(second, Outcome::NotRequired);
 }
 
+#[test]
+fn the_mldsa_key_pair_survives_capture_archive_and_apply() {
+    let (source, config) = fixture();
+    let files: [(&str, &[u8], u32); 4] = [
+        (
+            "etc/ssh/ssh_host_mldsa44_ed25519_key",
+            b"synthetic private key",
+            0o600,
+        ),
+        (
+            "etc/ssh/ssh_host_mldsa44_ed25519_key.pub",
+            b"synthetic public key",
+            0o644,
+        ),
+        (
+            "etc/ssh/ssh_host_mldsa44_ed25519_key-cert.pub",
+            b"synthetic certificate",
+            0o644,
+        ),
+        ("etc/ssh/ssh_config", b"# synthetic client config\n", 0o644),
+    ];
+    for (path, bytes, _) in files {
+        fs::write(source.path().join(path), bytes).unwrap();
+    }
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let root = restored_root(source.path(), true);
+    let ticket = capture_ticket(source.path(), &config, capsules.path());
+    let mut store = Store::open_fixture(store_root.path()).unwrap();
+    store.publish_prepared(&ticket).unwrap();
+    let outcome = run_observed(
+        root.path(),
+        &mut store,
+        capsules.path(),
+        staging.path(),
+        &marker_dir.path().join("blocked"),
+        &observation(),
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::Applied);
+    for (path, bytes, mode) in files {
+        let target = root.path().join(path);
+        assert_eq!(fs::read(&target).unwrap(), bytes, "{path}");
+        let found = fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(found, mode, "{path}");
+    }
+}
+
 struct Restored {
     root: TempDir,
     capsules: TempDir,

@@ -1687,3 +1687,54 @@ async fn native_key_probe_keeps_disabled_ssh_keyless_but_rejects_invalid_latent_
         assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn root_ssh_is_kept_whole_apart_from_the_agent_sockets_sshd_makes() {
+    let (source, config) = fixture();
+    put(source.path(), "root/.ssh/id_work", b"synthetic client key");
+    put(source.path(), "root/.ssh/known_hosts.old", b"synthetic");
+    fs::create_dir_all(source.path().join("root/.ssh/agent")).unwrap();
+    let _socket =
+        std::os::unix::net::UnixListener::bind(source.path().join("root/.ssh/agent/s.1")).unwrap();
+    let mut restored = checked(&captured(source.path(), &config, CWD, CONFIG_PATH)).unwrap();
+    assert_eq!(
+        member(&mut restored, "root/.ssh/id_work"),
+        b"synthetic client key"
+    );
+    assert_eq!(
+        member(&mut restored, "root/.ssh/known_hosts.old"),
+        b"synthetic"
+    );
+    assert!(
+        restored
+            .members()
+            .iter()
+            .all(|member| !member.path.starts_with("root/.ssh/agent"))
+    );
+}
+
+#[test]
+fn a_root_ssh_entry_the_tree_cannot_keep_stops_capture() {
+    for path in [
+        "root/.ssh/nested/key",
+        "root/.ssh/a name",
+        "root/.ssh/rc",
+        "root/.ssh/environment",
+    ] {
+        let (source, config) = fixture();
+        put(source.path(), path, b"synthetic");
+        let staging = tempdir().unwrap();
+        assert!(
+            capture_effective(
+                source.path(),
+                staging.path(),
+                &config,
+                Path::new(CWD),
+                Path::new(CONFIG_PATH),
+                &signed_accounts(),
+            )
+            .is_err(),
+            "{path}"
+        );
+    }
+}

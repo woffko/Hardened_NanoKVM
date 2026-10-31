@@ -341,10 +341,7 @@ impl<'a> Tables<'a> {
         if root.fields[2] != "0"
             || root.fields[3] != "0"
             || root.fields[5] != "/root"
-            || !matches!(
-                root.fields[6],
-                "/bin/sh" | "/bin/ash" | "/bin/bash" | "/usr/bin/bash"
-            )
+            || !login_shell(root.fields[6])
         {
             return Err(NativeAccountError::Unsupported);
         }
@@ -460,6 +457,12 @@ fn absolute(value: &str) -> bool {
                 .split('/')
                 .all(|p| !p.is_empty() && p != "." && p != "..")
             && !value.chars().any(char::is_whitespace))
+}
+pub(super) fn login_shell(value: &str) -> bool {
+    matches!(
+        value,
+        "/bin/sh" | "/bin/ash" | "/bin/bash" | "/usr/bin/bash"
+    )
 }
 fn non_login_shell(value: &str) -> bool {
     matches!(value, "/bin/false" | "/sbin/nologin" | "/usr/sbin/nologin")

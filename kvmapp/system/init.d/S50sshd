@@ -23,8 +23,8 @@ SSHD_LIMITS="-o MaxAuthTries=3 -o LoginGraceTime=60 -o PerSourceNetBlockSize=32:
 umask 077
 
 startssh() {
-    # Generate SSH keys if they do not exist
-    [ ! -f /etc/ssh/ssh_host_rsa_key ] && /usr/bin/ssh-keygen -A
+    # Generate the key of every type that does not exist. The rest stay.
+    /usr/bin/ssh-keygen -A
 
         printf "Starting sshd: "
         # An sshd that does not know these options still starts, without them.
