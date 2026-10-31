@@ -143,7 +143,9 @@ backend-only app trial rejects any non-backend slot that is neither absent nor
 closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
 native lifecycle compatibility epoch is now 8; epoch-1 through epoch-7 transitions
-are refused, and `support_transition=0` still refuses even a matching epoch-8 live transition.
+are refused. The support transition epoch is 1: the running build, the installed
+family and the candidate must declare exactly the same epochs, and a family that
+declares `support_transition=0` is refused even when everything else matches.
 The API reads these verdicts, and the live members the exchange would replace, before
 it records a package, while the backend runs, so such a package stops nothing. Whatever
 changed after that check is still known before anything is staged: the install engine
@@ -804,17 +806,19 @@ checks do not authenticate an outer backend or make its contents immutable.
 
 Actual linked-byte and private archive-preflight tests cover this representation;
 they do not establish a helper ABI, retained support swap or recovery capability.
-No production publisher consumes this catalog yet. The running broker's own
-compatibility must be checked as well: app update retains that process, so the
-new broker file on disk does not identify its current implementation. These
-requirements remain prerequisites to enabling the canonical update path.
+The app update reads this catalog through `app_slot::support`, in the API before
+it records a package and again in the broker before it stages one. Both families
+are compared with the constant of the executing build: app update retains the
+broker process, so the new broker file on disk does not identify its implementation.
 
 The build also emits a separate 128-byte `support_abi` declaration for the
 backend and each of the five helpers. Roles and format/group epochs are explicit;
 reserved fields and a domain-separated SHA-256 detect inconsistent framing.
 These declarations are not signatures, executable attestations or privileges.
-The current support-transition epoch is zero: matching zero never permits an
-exchange of independently installed helpers or scripts.
+The current support-transition epoch is one: this source implements stage,
+exchange, rollback, settlement and both early recovery entrypoints. Epoch zero,
+matching or not, never permits an exchange of independently installed helpers or
+scripts.
 
 `support_abi_catalog` checks one declaration in each verified helper image and
 one outside helper/script frames for the backend. It uses bounded positional
@@ -860,8 +864,9 @@ foreign alternatives refuse. Early NoTransaction and terminal deferral paths
 require a clear support store instead of bypassing pending evidence.
 
 A verdict before staging refuses before that store exists
-(`SlotError::UnsupportedTransition`, which the install
-engine turns into an automatic rollback). Stopped/prior-boot recovery now reconciles support
+(`SlotError::UnsupportedTransition`, which the install engine turns into an
+automatic rollback), and a failed copy of a successor ends the same way
+(`SlotError::NotStaged`). Stopped/prior-boot recovery now reconciles support
 before app slots under the same `FencedAppRecovery`, retained update/store/writer
 exclusions and durable recovery intent. Canonical `Committed` selects successor
 support; other supported app states restore predecessor. Terminal support cleanup
@@ -895,11 +900,12 @@ failure, caught unwind and panic-after-I/O fixtures retain the same accepted
 owner; production panic=abort still requires durable process recovery. Teardown
 joins before releasing admission, so kernel-blocked I/O can delay teardown.
 
-With support-transition epoch0 the production Engine still refuses before
-support or app publication; because that refusal precedes any staging, the Engine
-rolls back by itself (native journal resumed, slot RolledBack, broker Running)
-instead of waiting uncertain for an operator or a reboot. Unknown or incompatible
-contracts, and every failure after staging began, still leave it uncertain. Durable commit and rollback now use distinct fixed,
+A transition the Engine cannot make, unknown, incompatible or unsupported, is
+known before support or app publication. Because that refusal precedes any
+staging, the Engine rolls back by itself (native journal resumed, slot RolledBack,
+broker Running) instead of waiting uncertain for an operator or a reboot, and a
+failed copy of a successor does the same. Every later failure still leaves it
+uncertain. Durable commit and rollback now use distinct fixed,
 joined workers; rollback includes both support/app restoration and native-journal
 resume in the same result boundary. The broker retains the same Drain and checks
 closure before submission and after completion; it cannot resume or retire a
@@ -926,11 +932,11 @@ intended kernel operation did not complete; an arbitrary later error is not
 accepted. Host-side evidence and the parent mountpoint remain unchanged.
 
 Engine fixtures now carry synthetic complete predecessor/successor families,
-including successive installs and production fixed-root endpoint delivery. Their
-private opt-in permits only the unsupported-transition result; missing or
-incompatible declarations still fail. They check refusal of the executing
-epoch0, absent/matching-unknown contracts, every unknown live member, all-three
-scope closure before exchange, cancellation before app publication and foreign
+including successive installs and production fixed-root endpoint delivery;
+missing or incompatible declarations fail as they do in production. They check
+refusal of another declared epoch, absent/matching-unknown contracts, every
+unknown live member, all-three scope closure before exchange, cancellation before
+app publication and foreign
 support evidence after exchange. Commit acknowledgement, failed-trial rollback
 and missing-closure cases also retain/check the real nine-file journal. These
 payloads and child probes are not authenticated release/device acceptance.

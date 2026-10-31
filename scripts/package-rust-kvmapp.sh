@@ -190,10 +190,16 @@ if [ -n "$EXTRA_NATIVE_LIB_DIR" ]; then
   ln -sf libatomic.so.1.2.0 "$KVMAPP_STAGE/server/dl_lib/libatomic.so.1"
 fi
 
-if [ ! -e "$KVMAPP_STAGE/server/dl_lib/libopencv_video.so.409" ]; then
-  echo "missing extra native runtime libraries (libopencv_video); set EXTRA_NATIVE_LIB_DIR" >&2
-  exit 1
-fi
+# Each name must reach a real file, whichever directory provided it: a link
+# made above says nothing about the library it points at.
+for library in libopencv_video.so.409 libopencv_dnn.so.409 libopencv_calib3d.so.409 \
+  libopencv_features2d.so.409 libopencv_flann.so.409 libprotobuf.so.32 \
+  libstdc++.so.6 libgomp.so.1 libatomic.so.1; do
+  if [ ! -e "$KVMAPP_STAGE/server/dl_lib/$library" ]; then
+    echo "missing extra native runtime library $library; set EXTRA_NATIVE_LIB_DIR" >&2
+    exit 1
+  fi
+done
 
 # zlib is provided and maintained by Buildroot. Never shadow it with the
 # older vendor copy in the application's private RPATH directory.

@@ -205,7 +205,7 @@ pub async fn update(
             let config = job.blocking("read app update policy", Config::read).await?;
             let verified = get_latest(is_preview_enabled(), &config).await?;
             // Refuse before the download, and again for the reauthenticated metadata.
-            check_forward(&current_app_version(), &verified.latest.version)?;
+            check_forward_of(APP_VERSION_FILE, &verified.latest.version)?;
             let (stage, archive) = job
                 .blocking("prepare private app staging", || {
                     let stage = AppStage::prepare()?;
@@ -223,7 +223,7 @@ pub async fn update(
                 .await?;
             let verified =
                 authenticate_app_metadata(verified.metadata, verified.signature, &config).await?;
-            check_forward(&current_app_version(), &verified.latest.version)?;
+            check_forward_of(APP_VERSION_FILE, &verified.latest.version)?;
             let handoff = job.prepare_install_handoff(writers)?;
             job.blocking("verify and hand over app", move || {
                 let archive = seal_signed(archive, &verified)?;
@@ -343,6 +343,17 @@ fn check_forward(installed: &str, offered: &str) -> Result<()> {
             "the installed and offered app versions cannot be compared".to_string(),
         )),
     }
+}
+
+/// The version an online update has to beat. The stand-in that
+/// `current_app_version` shows would make every signed release look newer.
+fn check_forward_of(version_file: &str, offered: &str) -> Result<()> {
+    let installed = read_trimmed(version_file).ok_or_else(|| {
+        AppError::Conflict(format!(
+            "the installed app version cannot be read from {version_file}"
+        ))
+    })?;
+    check_forward(&installed, offered)
 }
 
 pub(crate) fn compare_application_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
@@ -1205,6 +1216,28 @@ mod tests {
                 Err(AppError::BadRequest(_))
             ));
         }
+    }
+
+    #[test]
+    fn an_online_update_needs_a_readable_installed_version() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("version");
+        let file = path.to_str().unwrap();
+        assert!(matches!(
+            check_forward_of(file, "2.1.0"),
+            Err(AppError::Conflict(_))
+        ));
+        fs::write(&path, "\n").unwrap();
+        assert!(matches!(
+            check_forward_of(file, "2.1.0"),
+            Err(AppError::Conflict(_))
+        ));
+        fs::write(&path, "2.0.44\n").unwrap();
+        check_forward_of(file, "2.1.0").unwrap();
+        assert!(matches!(
+            check_forward_of(file, "2.0.44"),
+            Err(AppError::Conflict(_))
+        ));
     }
 
     async fn multipart_fixture(body: Vec<u8>) -> Multipart {

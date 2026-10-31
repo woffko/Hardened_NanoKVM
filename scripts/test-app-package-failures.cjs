@@ -42,9 +42,16 @@ try {
   // Host ELF bytes exercise packaging, not RISC-V/native ABI acceptance.
   const native = path.join(work, 'native');
   fs.mkdirSync(native);
-  for (const name of ['libkvm.so', 'libkvm_mmf.so', 'libopencv_video.so.409']) {
+  const libraries = ['libopencv_video.so.409', 'libopencv_dnn.so.409', 'libopencv_calib3d.so.409',
+    'libopencv_features2d.so.409', 'libopencv_flann.so.409', 'libprotobuf.so.32',
+    'libstdc++.so.6', 'libgomp.so.1', 'libatomic.so.1'];
+  for (const name of ['libkvm.so', 'libkvm_mmf.so', ...libraries]) {
     fs.copyFileSync('/bin/true', path.join(native, name));
   }
+  // Only one library of the extra set: the link step leaves the others dangling.
+  const partial = path.join(work, 'partial');
+  fs.mkdirSync(partial);
+  fs.copyFileSync('/bin/true', path.join(partial, 'libopencv_video.so.4.9.0'));
   const web = path.join(work, 'web');
   fs.mkdirSync(web);
   fs.writeFileSync(path.join(web, 'index.html'), 'synthetic frontend\n');
@@ -111,6 +118,8 @@ try {
       ['duplicate compile-bound boot scripts rejects', 'boot-binding-duplicate'],
       ['changed compatibility script rejects', 'boot-compat-corrupt'],
       ['nonrelease app version rejects before publication', 'version-prerelease'],
+      ...libraries.map(name => [`missing ${name} rejects`, `library-${name}`]),
+      ['a link without its library rejects', 'library-dangling'],
     ] : []),
   ];
   for (const [index, [label, fault]] of cases.entries()) {
@@ -149,6 +158,13 @@ try {
       EXTRA_NATIVE_LIB_DIR: '', WEB_DIST: web, APP_VERSION: '2.0.43' };
     const succeeds = !fault || fault === 'target-absolute' || fault === 'target-relative';
     if (fault === 'version-prerelease') env.APP_VERSION = '2.0.43-dev';
+    const library = fault && fault !== 'library-dangling' && fault.startsWith('library-')
+      ? fault.slice('library-'.length) : null;
+    if (library) fs.rmSync(path.join(native, library));
+    if (fault === 'library-dangling') {
+      for (const name of libraries) fs.rmSync(path.join(native, name));
+      env.EXTRA_NATIVE_LIB_DIR = partial;
+    }
     if (fault === 'target-absolute' || fault === 'target-relative') {
       const target = path.join(build, 'custom-target');
       const release = path.join(target, 'riscv64gc-unknown-linux-musl', 'release');
@@ -243,6 +259,10 @@ try {
         }
       } else {
         assert.notEqual(result.status, 0, 'faulty package reported success');
+        if (library || fault === 'library-dangling') {
+          const named = library || 'libopencv_dnn.so.409';
+          assert(result.stderr.includes(`missing extra native runtime library ${named};`), result.stderr);
+        }
         if (fault === 'existing') assert.equal(fs.readFileSync(archive, 'utf8'), 'previous archive\n');
         else assert(!fs.existsSync(archive), 'failed packaging published an archive');
       }
@@ -255,6 +275,10 @@ try {
       if (fault === 'app-binding-bundled') fs.rmSync(bundledRecovery);
       if (bundledNative) fs.rmSync(bundledNative);
       if (fault === 'boot-compat-corrupt') fs.writeFileSync(compat, compatBytes);
+      if (library) fs.copyFileSync('/bin/true', path.join(native, library));
+      if (fault === 'library-dangling') {
+        for (const name of libraries) fs.copyFileSync('/bin/true', path.join(native, name));
+      }
     }
   }
 } finally {

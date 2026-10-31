@@ -1202,8 +1202,9 @@ impl Engine {
         #[cfg(test)]
         if self.fixture.is_some() {
             // Synthetic payload only; production never rewrites accepted roots.
-            // Positive engine fixtures bypass ONLY epoch0 below, not staging,
-            // source/live validation, retained ownership or recovery ordering.
+            // Positive engine fixtures replace the accepted family and nothing
+            // else: staging, source/live validation, retained ownership and
+            // recovery ordering all still run.
             app_slot::support::populate_retained_fixture(&install);
         }
         Ok(install)
