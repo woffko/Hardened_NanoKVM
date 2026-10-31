@@ -767,7 +767,7 @@ fn normalize_wifi_secret(content: &str) -> String {
     content.replace(['\r', '\n'], "")
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let max_len = a.len().max(b.len());

@@ -108,7 +108,10 @@ async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>>
     config.log_runtime_warnings();
     nanokvm_rust_server::api::system_time::apply_saved_timezone();
     nanokvm_rust_server::api::system_update::settle_raw_progress(&config);
-    nanokvm_rust_server::auth::claim::ensure(&config.paths.account_file)?;
+    if let Err(error) = nanokvm_rust_server::auth::claim::ensure(&config.paths.account_file) {
+        // First setup stays refused, and video, HID and the network keep working.
+        warn!(%error, "no first-boot claim token");
+    }
     if config.proto == "https" {
         tls::ensure_server_cert(
             &config.cert.crt,

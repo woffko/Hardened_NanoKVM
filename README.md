@@ -129,7 +129,11 @@ the security, update, and administration model substantially:
 - **Hardened login and sessions:** first-boot account setup, per-device session
   secret, CSRF binding, Origin checks, login rate limiting/lockout, explicit
   session revocation, Argon2id for new passwords, and compatibility with
-  existing bcrypt password files.
+  existing bcrypt password files. First setup asks for a one-time claim token.
+  The device prints it on the serial console and keeps it in
+  `/etc/kvm/first-boot-claim` for root, and never writes it to a log. It ends
+  with the boot or after 24 hours of uptime; the next backend start issues a
+  new one.
 - **Safer terminal access:** the web terminal is guarded by the authenticated
   web session instead of being merely hidden by a toolbar toggle.
 - **Signed application updates:** GitHub-hosted app updates use signed

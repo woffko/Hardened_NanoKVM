@@ -36,7 +36,7 @@ const en = {
       setupDescription:
         'No web account exists on this device yet. Create the first administrator account to continue.',
       setupRecovery: 'If this password is lost, recovery requires reflashing the SD card.',
-      claimPlaceholder: 'First-boot claim token from the device serial console or OLED',
+      claimPlaceholder: 'First-boot claim token: serial console, or /etc/kvm/first-boot-claim',
       claimRequired: 'Enter the one-time claim token shown on the device',
       setupButtonText: 'Create account',
       tips: {

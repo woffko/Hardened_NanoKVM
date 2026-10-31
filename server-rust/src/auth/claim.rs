@@ -1,36 +1,67 @@
-use crate::{AppError, Result};
+use crate::{AppError, Result, api::network::constant_time_eq, system::files};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
 };
 
 const NAME: &str = "first-boot-claim";
 const MAX: u64 = 256;
-const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const TTL_SECONDS: u64 = 24 * 60 * 60;
+const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
+const UPTIME: &str = "/proc/uptime";
+/// The serial console alone: the kernel log goes on to syslog and to a remote
+/// server, and whoever reads either could claim the device. Root reads the token
+/// from the file beside the account store.
+const CONSOLE: &str = "/dev/console";
+
+/// A device without a real-time clock starts in the past, so the age of a token
+/// counts in this boot's uptime and a token ends with its boot.
+struct Moment {
+    boot: String,
+    seconds: u64,
+}
+
+fn now() -> Result<Moment> {
+    let uptime = fs::read_to_string(UPTIME)?;
+    Ok(Moment {
+        boot: fs::read_to_string(BOOT_ID)?.trim().to_string(),
+        seconds: uptime
+            .split('.')
+            .next()
+            .and_then(|whole| whole.parse().ok())
+            .ok_or_else(|| AppError::Config("the system uptime is unreadable".to_string()))?,
+    })
+}
 
 pub fn ensure(account_file: &Path) -> Result<Option<String>> {
+    ensure_at(account_file, &now()?, Path::new(CONSOLE))
+}
+
+fn ensure_at(account_file: &Path, now: &Moment, console: &Path) -> Result<Option<String>> {
     let path = path(account_file);
     if account_file.exists() {
         let _ = fs::remove_file(&path);
         return Ok(None);
     }
-    if let Some(token) = read(&path)? {
-        announce(&token);
+    // Damaged, unsafe, expired or from an earlier boot, the old file only stands
+    // in the way of a device that nobody can set up.
+    if let Ok(Some(token)) = read(&path, now) {
+        announce(console, &token);
         return Ok(Some(token));
     }
     let token = crate::auth::token::random_token(9);
-    write(&path, &token)?;
-    announce(&token);
+    let record = format!("{token}\n{} {}\n", now.boot, now.seconds);
+    files::write_atomic(&path, record.as_bytes(), 0o600)?;
+    announce(console, &token);
     Ok(Some(token))
 }
 
 pub fn check(account_file: &Path, supplied: &str) -> Result<()> {
-    let token = read(&path(account_file))?
+    let token = read(&path(account_file), &now()?)?
         .ok_or_else(|| AppError::Forbidden("first-boot claim token required".to_string()))?;
-    if token.as_bytes() != supplied.as_bytes() {
+    if !constant_time_eq(&token, supplied) {
         return Err(AppError::Forbidden(
             "invalid first-boot claim token".to_string(),
         ));
@@ -60,8 +91,8 @@ fn path(account_file: &Path) -> PathBuf {
         .join(NAME)
 }
 
-fn read(path: &Path) -> Result<Option<String>> {
-    let metadata = match fs::metadata(path) {
+fn read(path: &Path, now: &Moment) -> Result<Option<String>> {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -75,52 +106,33 @@ fn read(path: &Path) -> Result<Option<String>> {
             "first-boot claim state is not private".to_string(),
         ));
     }
-    let modified = metadata
-        .modified()
-        .map_err(|_| AppError::Config("first-boot claim state has no timestamp".to_string()))?;
-    if SystemTime::now()
-        .duration_since(modified)
-        .is_ok_and(|age| age > TTL)
-    {
-        let _ = fs::remove_file(path);
-        return Ok(None);
-    }
-    let token = fs::read_to_string(path)?;
-    let token = token.trim();
+    let record = fs::read_to_string(path)?;
+    let malformed = || AppError::Config("first-boot claim state is malformed".to_string());
+    let (token, issued) = record.split_once('\n').ok_or_else(malformed)?;
+    let (boot, seconds) = issued.trim().split_once(' ').ok_or_else(malformed)?;
+    let seconds: u64 = seconds.parse().map_err(|_| malformed())?;
     if token.len() < 8
         || token.len() > 64
         || token
             .bytes()
             .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
     {
-        return Err(AppError::Config(
-            "first-boot claim state is malformed".to_string(),
-        ));
+        return Err(malformed());
+    }
+    if boot != now.boot || now.seconds.saturating_sub(seconds) > TTL_SECONDS {
+        return Ok(None);
     }
     Ok(Some(token.to_string()))
 }
 
-fn write(path: &Path, token: &str) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)?;
-    file.write_all(token.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.sync_all()?;
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-fn announce(token: &str) {
-    if let Ok(mut kmsg) = OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(kmsg, "NanoKVM first-boot claim token: {token}");
+/// A port that nobody drains must not hold up the start of the backend.
+fn announce(console: &Path, token: &str) {
+    if let Ok(mut console) = OpenOptions::new()
+        .append(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+        .open(console)
+    {
+        let _ = writeln!(console, "NanoKVM first-boot claim token: {token}");
     }
 }
 
