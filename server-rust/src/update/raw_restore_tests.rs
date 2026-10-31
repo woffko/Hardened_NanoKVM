@@ -42,6 +42,15 @@ fn private() -> TempDir {
 }
 
 fn capture_ticket(source: &Path, config: &crate::config::Config, capsules: &Path) -> RestoreTicket {
+    capture_ticket_for(VERSION, source, config, capsules)
+}
+
+fn capture_ticket_for(
+    version: &str,
+    source: &Path,
+    config: &crate::config::Config,
+    capsules: &Path,
+) -> RestoreTicket {
     let staging = private();
     let capsule_directory = fs::File::open(capsules).unwrap();
     let request = CaptureRequest {
@@ -51,7 +60,7 @@ fn capture_ticket(source: &Path, config: &crate::config::Config, capsules: &Path
         config,
         working_dir: Path::new(CWD),
         config_path: Path::new(CONFIG_PATH),
-        target_version: VERSION,
+        target_version: version,
         target_app_version: APP,
         target: TARGET,
         boot_image_sha256: [2; 32],
@@ -143,6 +152,7 @@ fn required_raw_image_applies_once_and_commits_the_ticket() {
     assert!(!marker.exists());
     assert_eq!(fs::read_dir(capsules.path()).unwrap().count(), 0);
     assert!(root.path().join("etc/kvm/server.yaml").exists());
+    assert!(!root.path().join(REQUIRED_PATH).exists());
     let second = run_observed(
         root.path(),
         &mut store,
@@ -152,7 +162,184 @@ fn required_raw_image_applies_once_and_commits_the_ticket() {
         &observation(),
     )
     .unwrap();
-    assert_eq!(second, Outcome::AlreadyCommitted);
+    assert_eq!(second, Outcome::NotRequired);
+}
+
+struct Restored {
+    root: TempDir,
+    capsules: TempDir,
+    staging: TempDir,
+    marker: TempDir,
+    store: Store,
+    _store_root: TempDir,
+}
+
+impl Restored {
+    fn new() -> (Self, TempDir, crate::config::Config) {
+        let (source, config) = fixture();
+        let capsules = private();
+        let store_root = private();
+        let staging = private();
+        let marker = tempfile::tempdir().unwrap();
+        let root = restored_root(source.path(), true);
+        let ticket = capture_ticket(source.path(), &config, capsules.path());
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        store.publish_prepared(&ticket).unwrap();
+        let mut restored = Self {
+            root,
+            capsules,
+            staging,
+            marker,
+            store,
+            _store_root: store_root,
+        };
+        assert_eq!(restored.boot().unwrap(), Outcome::Applied);
+        (restored, source, config)
+    }
+
+    fn boot(&mut self) -> Result<Outcome> {
+        run_observed(
+            self.root.path(),
+            &mut self.store,
+            self.capsules.path(),
+            self.staging.path(),
+            &self.marker.path().join("blocked"),
+            &observation(),
+        )
+    }
+
+    fn blocked(&self) -> bool {
+        self.marker.path().join("blocked").exists()
+    }
+}
+
+#[test]
+fn a_restored_system_boots_whatever_later_happens_to_the_boot_ticket() {
+    let (mut restored, source, config) = Restored::new();
+    let next = capture_ticket_for(
+        "0.4.0-raw.1",
+        source.path(),
+        &config,
+        restored.capsules.path(),
+    );
+    restored.store.publish_prepared(&next).unwrap();
+    assert_eq!(restored.boot().unwrap(), Outcome::NotRequired);
+    assert!(!restored.blocked());
+    let current = restored.store.load().unwrap().unwrap();
+    restored.store.abandon_prepared(&current).unwrap();
+    assert_eq!(restored.boot().unwrap(), Outcome::NotRequired);
+    assert!(!restored.blocked());
+}
+
+#[test]
+fn a_boot_interrupted_after_the_commit_finishes_on_the_next_boot() {
+    let (mut restored, _source, _config) = Restored::new();
+    let requirement = restored.root.path().join(REQUIRED_PATH);
+    fs::write(&requirement, REQUIRED_BYTES).unwrap();
+    fs::set_permissions(&requirement, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(restored.boot().unwrap(), Outcome::AlreadyCommitted);
+    assert!(!requirement.exists());
+    assert!(!restored.blocked());
+}
+
+#[test]
+fn a_fresh_image_does_not_inherit_the_receipt_of_an_earlier_system() {
+    let (mut restored, _source, _config) = Restored::new();
+    let requirement = restored.root.path().join(REQUIRED_PATH);
+    fs::write(&requirement, REQUIRED_BYTES).unwrap();
+    fs::set_permissions(&requirement, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut newer = observation();
+    newer.system_version = "0.4.0-raw.1".into();
+    let result = run_observed(
+        restored.root.path(),
+        &mut restored.store,
+        restored.capsules.path(),
+        restored.staging.path(),
+        &restored.marker.path().join("blocked"),
+        &newer,
+    );
+    assert!(matches!(
+        result,
+        Err(Error::Ticket(ticket::TicketError::WrongBoot))
+    ));
+    assert!(restored.blocked());
+    assert!(requirement.exists());
+}
+
+#[test]
+fn a_cleanup_failure_after_the_commit_does_not_block_management() {
+    let (source, config) = fixture();
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("blocked");
+    let root = restored_root(source.path(), true);
+    let ticket = capture_ticket(source.path(), &config, capsules.path());
+    let mut store = Store::open_fixture(store_root.path()).unwrap();
+    store.publish_prepared(&ticket).unwrap();
+    assert_eq!(
+        run_observed(
+            root.path(),
+            &mut store,
+            capsules.path(),
+            staging.path(),
+            &marker,
+            &observation(),
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    // The capsule directory is gone now, as on a damaged data partition.
+    let requirement = root.path().join(REQUIRED_PATH);
+    fs::write(&requirement, REQUIRED_BYTES).unwrap();
+    fs::set_permissions(&requirement, fs::Permissions::from_mode(0o644)).unwrap();
+    let file_not_directory = capsules.path().join("not-a-directory");
+    fs::write(&file_not_directory, b"x").unwrap();
+    assert_eq!(
+        run_observed(
+            root.path(),
+            &mut store,
+            &file_not_directory,
+            staging.path(),
+            &marker,
+            &observation(),
+        )
+        .unwrap(),
+        Outcome::AlreadyCommitted
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
+fn a_temporary_file_left_by_a_power_cut_does_not_block_the_restore() {
+    let (source, config) = fixture();
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("blocked");
+    let root = restored_root(source.path(), true);
+    for index in 0..256 {
+        let name = format!(".nanokvm-restore-{}-{index}", std::process::id());
+        fs::write(root.path().join("etc/kvm").join(&name), b"partial").unwrap();
+    }
+    let ticket = capture_ticket(source.path(), &config, capsules.path());
+    let mut store = Store::open_fixture(store_root.path()).unwrap();
+    store.publish_prepared(&ticket).unwrap();
+    assert_eq!(
+        run_observed(
+            root.path(),
+            &mut store,
+            capsules.path(),
+            staging.path(),
+            &marker,
+            &observation(),
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    assert!(!marker.exists());
 }
 
 #[test]

@@ -12,6 +12,7 @@ use crate::{
         operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
         raw_capture::{self, CaptureRequest, TargetImage},
         raw_install_lease::{RawImages, RawSender},
+        raw_restore,
         raw_transport::TransferContext,
         restore_capsule::ticket::{BootId, Phase, RestoreTicket, Store},
         restore_job::PinnedSshHelper,
@@ -1670,7 +1671,6 @@ fn install_raw_image_update(
     writers: crate::update::state_writers::WriterDrain,
 ) -> Result<SystemPendingUpdate> {
     validate_raw_install(config, manifest)?;
-    retire_stale_prepared_ticket()?;
 
     let staging = Path::new(RAW_PRIVATE_STAGING);
     let mountpoint = staging.join("mount");
@@ -1740,11 +1740,15 @@ fn install_raw_image_update(
             .map_err(|error| AppError::Internal(format!("device identity unavailable: {error}")))?,
     };
     let publish = |ticket: &RestoreTicket| -> Result<()> {
-        Store::open_boot()
-            .and_then(|mut store| store.publish_prepared(ticket))
-            .map_err(|error| {
-                AppError::Internal(format!("prepared ticket was not published: {error}"))
-            })
+        let mut store = Store::open_boot().map_err(|error| {
+            AppError::Internal(format!("raw ticket store unavailable: {error}"))
+        })?;
+        publish_outgoing_ticket(
+            Path::new("/"),
+            &mut store,
+            Path::new(RAW_CAPSULE_DIR),
+            ticket,
+        )
     };
     let send = move |transaction: [u8; 16], images: RawImages| -> Result<()> {
         let handoff = owner.prepare_raw_handoff(transaction, images, writers)?;
@@ -1784,10 +1788,23 @@ fn validate_raw_install(config: &Config, manifest: &SystemManifest) -> Result<()
     Ok(())
 }
 
-fn retire_stale_prepared_ticket() -> Result<()> {
-    let mut store = Store::open_boot()
-        .map_err(|error| AppError::Internal(format!("raw ticket store unavailable: {error}")))?;
-    retire_prepared_ticket(&mut store, Path::new(RAW_CAPSULE_DIR))
+/// The last local step before the handoff, reached only after every capture
+/// refusal. The running system first stops needing the boot ticket, so an
+/// attempt that never reaches the writer cannot keep it from booting; only then
+/// is an older attempt retired and this one published in its place.
+fn publish_outgoing_ticket(
+    root: &Path,
+    store: &mut Store,
+    capsule_directory: &Path,
+    ticket: &RestoreTicket,
+) -> Result<()> {
+    raw_restore::retire_required(root).map_err(|error| {
+        AppError::Internal(format!("raw restore requirement was not retired: {error}"))
+    })?;
+    retire_prepared_ticket(store, capsule_directory)?;
+    store
+        .publish_prepared(ticket)
+        .map_err(|error| AppError::Internal(format!("prepared ticket was not published: {error}")))
 }
 
 fn retire_prepared_ticket(store: &mut Store, capsule_directory: &Path) -> Result<()> {
@@ -4189,6 +4206,157 @@ mod tests {
         retire_prepared_ticket(&mut store, capsules.path()).unwrap();
         assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Abandoned);
         assert!(!capsule.exists());
+    }
+
+    fn outgoing_ticket(version: &str) -> crate::update::restore_capsule::ticket::RestoreTicket {
+        use crate::update::restore_capsule::{
+            prepare_capsule,
+            ticket::{Binding, BootId, RestoreTicket},
+        };
+        use std::io::Cursor;
+
+        let plaintext = b"fixture".repeat(128);
+        let mut encrypted = Vec::new();
+        let secret = prepare_capsule(
+            version,
+            plaintext.len() as u64,
+            &mut Cursor::new(&plaintext),
+            &mut encrypted,
+        )
+        .unwrap();
+        RestoreTicket::prepared(
+            secret,
+            Binding {
+                source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                device_id: [1; 32],
+                capsule_sha256: Sha256::digest(&encrypted).into(),
+                boot_image_sha256: [2; 32],
+                rootfs_image_sha256: [3; 32],
+                target_app_version: "2.1.0".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn private_directory() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    fn restored_system_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("etc/kvm")).unwrap();
+        let requirement = root.path().join(raw_restore::REQUIRED_PATH);
+        std::fs::write(&requirement, raw_restore::REQUIRED_BYTES).unwrap();
+        std::fs::set_permissions(&requirement, std::fs::Permissions::from_mode(0o644)).unwrap();
+        root
+    }
+
+    fn source_boot_outcome(
+        root: &Path,
+        store: &mut crate::update::restore_capsule::ticket::Store,
+        capsules: &Path,
+    ) -> (
+        std::result::Result<raw_restore::Outcome, raw_restore::Error>,
+        bool,
+    ) {
+        use crate::update::restore_capsule::ticket::BootId;
+
+        let staging = private_directory();
+        let marker_directory = tempfile::tempdir().unwrap();
+        let marker = marker_directory.path().join("blocked");
+        let outcome = raw_restore::run_observed(
+            root,
+            store,
+            capsules,
+            staging.path(),
+            &marker,
+            &raw_restore::Observation {
+                boot_id: BootId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                device_id: [1; 32],
+                system_version: "0.3.0-raw.13".into(),
+                app_version: "2.0.45".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        );
+        (outcome, marker.exists())
+    }
+
+    #[test]
+    fn an_attempt_that_never_reaches_the_writer_leaves_the_source_system_bootable() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let ticket = outgoing_ticket("0.4.0-raw.1");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &ticket).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Prepared);
+        let (outcome, blocked) = source_boot_outcome(root.path(), &mut store, capsules.path());
+        assert!(matches!(outcome, Ok(raw_restore::Outcome::NotRequired)));
+        assert!(!blocked, "the source system must keep its network and SSH");
+    }
+
+    #[test]
+    fn a_retired_attempt_leaves_the_source_system_bootable_too() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let first = outgoing_ticket("0.4.0-raw.1");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &first).unwrap();
+        retire_prepared_ticket(&mut store, capsules.path()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Abandoned);
+        let (outcome, blocked) = source_boot_outcome(root.path(), &mut store, capsules.path());
+        assert!(matches!(outcome, Ok(raw_restore::Outcome::NotRequired)));
+        assert!(!blocked);
+    }
+
+    #[test]
+    fn publishing_replaces_a_stale_attempt_and_its_capsule() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let stale = outgoing_ticket("0.4.0-raw.1");
+        store.publish_prepared(&stale).unwrap();
+        let capsule = capsules.path().join(format!(
+            "{:032x}.capsule",
+            u128::from_be_bytes(stale.transaction_id())
+        ));
+        std::fs::write(&capsule, b"stale ciphertext").unwrap();
+        let next = outgoing_ticket("0.4.0-raw.2");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &next).unwrap();
+        let current = store.load().unwrap().unwrap();
+        assert_eq!(current.phase(), Phase::Prepared);
+        assert_eq!(current.transaction_id(), next.transaction_id());
+        assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn a_requirement_that_cannot_be_retired_stops_before_any_ticket_changes() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = tempfile::tempdir().unwrap();
+        // A directory at the marker path cannot be removed as a file.
+        std::fs::create_dir_all(root.path().join(raw_restore::REQUIRED_PATH).join("x")).unwrap();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let stale = outgoing_ticket("0.4.0-raw.1");
+        store.publish_prepared(&stale).unwrap();
+        let next = outgoing_ticket("0.4.0-raw.2");
+        assert!(publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &next).is_err());
+        let current = store.load().unwrap().unwrap();
+        assert_eq!(current.phase(), Phase::Prepared);
+        assert_eq!(current.transaction_id(), stale.transaction_id());
     }
 
     #[test]

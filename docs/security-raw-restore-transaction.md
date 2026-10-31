@@ -1118,6 +1118,27 @@ be connected by the writer/early helper; none may be taken from p3 JSON or HTTP
 parameters. Host fixtures do not exercise the production `/boot` entry point or
 prove vendor FAT flock/rename/fsync and physical power-loss behavior.
 
+## End of the restore requirement
+
+A raw image carries `/etc/kvm/raw-restore-required`, which tells the early
+helper that this rootfs is factory state until its restore commits. The
+requirement ends with that commit: the helper removes the marker, so later
+boots no longer read the boot ticket at all. Update attempts replace that ticket
+and it lives on a FAT partition, so neither a failed attempt nor a damaged file
+can keep a restored system off the network.
+
+- A commit interrupted before the marker is removed finishes on the next boot,
+  which finds its own Committed ticket. A Committed ticket of another system
+  blocks instead: a fresh image never inherits an earlier receipt.
+- Cleanup after the commit (capsule, marker) logs a failure and continues. The
+  ticket has lost its key by then, so a leftover capsule is inert.
+- The API repeats the removal for the running system before it publishes an
+  outgoing ticket, after every capture refusal. This also protects systems whose
+  helper predates this rule. A marker that cannot be removed stops the attempt
+  before any ticket changes.
+- `S01restore` treats any helper failure as blocked, including a helper that was
+  killed or could not start, which cannot write the marker itself.
+
 ## Capsule sealing on the data partition (component; capture not wired)
 
 A raw write replaces p1 and p2, so the capsule must live on p3 in a private

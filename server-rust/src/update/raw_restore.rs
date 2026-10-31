@@ -132,15 +132,18 @@ fn run_required(
     observed: &Observation,
 ) -> Result<Outcome> {
     let mut ticket = store.load()?.ok_or(Error::MissingTicket)?;
+    let boot = observed.boot();
     match ticket.phase() {
         Phase::Committed => {
-            remove_capsule(capsule_dir, &ticket)?;
+            // Only this system's own restore ends the requirement: a fresh
+            // image never inherits the receipt of an earlier one.
+            ticket.belongs_to(&boot)?;
+            finish(root, capsule_dir, &ticket);
             return Ok(Outcome::AlreadyCommitted);
         }
         Phase::Abandoned => return Err(Error::Abandoned),
         Phase::Prepared | Phase::Applying | Phase::Restored => {}
     }
-    let boot = observed.boot();
     if matches!(ticket.phase(), Phase::Prepared | Phase::Applying) {
         store.begin_apply(&mut ticket, &boot)?;
     }
@@ -150,8 +153,33 @@ fn run_required(
         store.mark_restored(&mut ticket, &boot)?;
     }
     store.commit(&mut ticket, &boot)?;
-    remove_capsule(capsule_dir, &ticket)?;
+    finish(root, capsule_dir, &ticket);
     Ok(Outcome::Applied)
+}
+
+/// The commit is the restore's last durable fact. What follows is cleanup, and
+/// a failure here must not keep the owner out: the ticket has lost its key, so
+/// a leftover capsule is inert, and a requirement that stays is retired by the
+/// next boot.
+fn finish(root: &Path, capsule_dir: &Path, ticket: &RestoreTicket) {
+    if let Err(error) = remove_capsule(capsule_dir, ticket) {
+        eprintln!("raw early restore: capsule not removed: {error}");
+    }
+    if let Err(error) = retire_required(root) {
+        eprintln!("raw early restore: requirement not retired: {error}");
+    }
+}
+
+/// Ends the requirement on a restored rootfs. From here on its boots no longer
+/// read the boot ticket, which later update attempts replace and which sits on
+/// a FAT partition, so neither can keep this system off the network.
+pub fn retire_required(root: &Path) -> io::Result<()> {
+    let path = root.join(REQUIRED_PATH);
+    match fs::remove_file(&path) {
+        Ok(()) => File::open(root.join("etc/kvm"))?.sync_all(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn required(root: &Path) -> Result<bool> {
@@ -264,6 +292,11 @@ fn write_member(
 ) -> Result<()> {
     let (parent, name) = parent_directory(root, path, true)?.ok_or(Error::UnsafePath)?;
     let temporary = format!(".nanokvm-restore-{}-{index}", std::process::id());
+    // A power cut can leave this name behind, and early boot PIDs repeat.
+    match unlinkat(&parent, &temporary, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(io::Error::from(error).into()),
+    }
     let mut file: File = rustix::fs::openat(
         &parent,
         &temporary,

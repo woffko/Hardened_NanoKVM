@@ -201,6 +201,18 @@ impl RestoreTicket {
         Ok(payload)
     }
 
+    /// Whether this ticket was bound to the observed system and device. Unlike
+    /// `matches_boot` this holds on every later boot and after an app update.
+    pub fn belongs_to(&self, observed: &BootObservation<'_>) -> Result<()> {
+        if observed.device_id != self.binding.device_id
+            || observed.system_version != self.target_version
+            || observed.target != self.binding.target
+        {
+            return Err(TicketError::WrongBoot);
+        }
+        Ok(())
+    }
+
     fn matches_boot(&self, observed: &BootObservation<'_>) -> Result<()> {
         if observed.boot_id == self.binding.source_boot
             || observed.device_id != self.binding.device_id

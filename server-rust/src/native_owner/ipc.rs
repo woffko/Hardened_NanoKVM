@@ -1255,7 +1255,8 @@ impl Engine {
                     self.roles = [4; 2];
                     self.backend_status = Some(Status::Closed(Completion::Stopped));
                     // Returns only if the exec failed; every scope stays stopped.
-                    let _ = self.start_writer(&arguments, images);
+                    let error = self.start_writer(&arguments, images);
+                    eprintln!("raw writer did not start: {error}");
                     self.mode = Mode::Uncertain;
                     RawWrite::Failed {
                         session,
@@ -1804,7 +1805,10 @@ impl Server {
                 match offer.poll() {
                     Ok(Some(accepted)) => {
                         // As for an app offer: from here this daemon owns it.
-                        self.engine.accept_raw(accepted);
+                        let code = self.engine.accept_raw(accepted);
+                        if code != Code::Ok {
+                            eprintln!("raw update offer refused: {code:?}");
+                        }
                         self.raw_offer = None;
                     }
                     Ok(None) if since.elapsed() < self.idle => {}

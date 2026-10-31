@@ -9,4 +9,10 @@ if [ ! -x /usr/libexec/nanokvm-early-restore ]; then
     echo "S01restore: raw restore helper is missing" >&2
     exit 1
 fi
-/usr/libexec/nanokvm-early-restore
+if ! /usr/libexec/nanokvm-early-restore; then
+    # The helper writes this itself, unless it was killed or could not start.
+    printf 'raw early restore failed\n' > /run/nanokvm-restore-blocked
+    chmod 0600 /run/nanokvm-restore-blocked
+    echo "S01restore: raw early restore failed" >&2
+    exit 1
+fi
