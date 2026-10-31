@@ -261,7 +261,9 @@ async function main() {
   if (!password) fail('secret stdin was empty');
 
   step('validating local app and signed replacement inputs');
-  for (const filename of [APP_ARCHIVE, RAW_ARCHIVE, METADATA, SIGNATURE, PUBLIC_KEY, SSHPASS]) {
+  if (!process.env.APP_METADATA || !process.env.APP_SIGNATURE) fail('APP_METADATA and APP_SIGNATURE are required');
+  for (const filename of [APP_ARCHIVE, RAW_ARCHIVE, METADATA, SIGNATURE, PUBLIC_KEY, SSHPASS,
+    process.env.APP_METADATA, process.env.APP_SIGNATURE]) {
     if (!fs.existsSync(filename)) fail(`missing input: ${filename}`);
   }
   if ((await hashFile(APP_ARCHIVE)) !== APP_ARCHIVE_SHA256) fail('application archive sha256 mismatch');

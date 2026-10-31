@@ -164,6 +164,8 @@ async function main() {
     EXPECTED_LIBKVM_SHA256: LIBKVM_SHA256,
     EXPECTED_LIBKVM_MMF_SHA256: LIBKVM_MMF_SHA256,
     EXPECTED_REMOTE_SYSLOG: REMOTE_SYSLOG,
+    APP_METADATA: process.env.APP_METADATA,
+    APP_SIGNATURE: process.env.APP_SIGNATURE,
   })) {
     if (!value) fail(`${name} is required`);
   }

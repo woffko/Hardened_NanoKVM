@@ -158,6 +158,7 @@ async function main() {
   const password = await readSecret();
   if (!password) fail('secret stdin was empty');
   if (!fs.existsSync(APP_ARCHIVE)) fail('application archive is missing');
+  if (!process.env.APP_METADATA || !process.env.APP_SIGNATURE) fail('APP_METADATA and APP_SIGNATURE are required');
   const archiveSha = await fileSha256(APP_ARCHIVE);
   if (archiveSha !== EXPECTED_ARCHIVE_SHA256) fail(`application archive sha mismatch: ${archiveSha}`);
   step(`archive_sha256=${archiveSha}`);

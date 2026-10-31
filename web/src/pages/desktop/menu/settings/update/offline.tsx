@@ -4,6 +4,7 @@ import { ExternalLinkIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/application.ts';
+import { removeToken } from '@/lib/cookie.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
 import { appUpdateMessage, followAppUpdate } from './job.ts';
@@ -30,6 +31,9 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
     const selected = pickOfflinePackage(Array.from(e.target.files ?? []));
     // Choosing the same files again after a refusal must fire this again.
     e.target.value = '';
+    if (status === 'loading' || status === 'updating' || status === 'restarting') {
+      return;
+    }
     if (!selected) {
       setStatus('failed');
       setErrMsg(t('settings.update.offline.invalidPackage'));
@@ -40,10 +44,6 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
   }
 
   function upload(selected: OfflinePackage) {
-    if (status === 'loading' || status === 'updating' || status === 'restarting') {
-      return;
-    }
-
     setIsLocked(true);
     setStatus('updating');
     setErrMsg('');
@@ -55,9 +55,18 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
 
     api
       .offlineUpdate(formData)
-      .then((rsp: Response) => {
-        if (!rsp.ok) throw new Error(`HTTP error ${rsp.status}`);
-        return rsp.json();
+      .then(async (rsp: Response) => {
+        if (rsp.ok) {
+          return rsp.json();
+        }
+        // An answer means the device did not restart for this upload.
+        const answer = await rsp.json().catch(() => null);
+        const csrf = rsp.status === 403 && /csrf/i.test(String(answer?.msg));
+        if (rsp.status === 401 || csrf) {
+          removeToken();
+          window.location.reload();
+        }
+        return { code: rsp.status, msg: answer?.msg };
       })
       .then((rspj: any) => {
         if (rspj.code !== 0 || !rspj.data?.transactionId) {

@@ -138,7 +138,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
           const isLatest = isVersionAtLeast(rsp.data.current, rsp.data.latest);
           setStatus(isLatest ? 'latest' : 'outdated');
         } else {
-          setStatus('latest');
+          // No answer from the release feed says nothing about being up to date.
+          setStatus('failed');
+          setErrMsg(t('settings.update.queryFailed'));
         }
       })
       .catch(() => {

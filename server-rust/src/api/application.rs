@@ -262,8 +262,18 @@ pub async fn offline_update(
             .await
             .map_err(|_| AppError::BadRequest("app upload timed out".into()))??;
             // A session alone must not be enough to install code as root, so
-            // an upload passes what a download passes. Any signed version is
-            // accepted: this is how a device goes back to an earlier release.
+            // an upload passes what a download passes. Any signed version with
+            // this build's transition epochs is accepted: this is how a device
+            // goes back to an earlier release of the same family. It is checked
+            // here so that a refused upload drains nothing, and again below
+            // under the frozen policy.
+            let config = job.blocking("read app update policy", Config::read).await?;
+            authenticate_offline_metadata(
+                package.metadata.clone(),
+                package.signature.clone(),
+                &config,
+            )
+            .await?;
             let writers = state.drain_writers(WRITER_DRAIN_TIMEOUT).await?;
             let (config, writers) = writers
                 .blocking(&job, "reread app install policy", Config::read_frozen)
