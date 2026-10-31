@@ -45,6 +45,8 @@ are no longer reported: the lock holds rustls 0.23.46.
 
 ## Web interface
 
-`pnpm audit --prod` reports no advisories. The twelve `axios` advisories of
+`pnpm audit --prod` reports no advisories. follow-redirects went to 1.16.2 on
+2026-10-31 for GHSA-mrwp-f3q8-3g9p; the browser build of axios replaces the node
+adapter, so the bundle does not run that package. The twelve `axios` advisories of
 the audit stage are gone since the axios update of this branch. Development
 dependencies are not part of the shipped package and are not claimed here.
