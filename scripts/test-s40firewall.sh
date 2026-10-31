@@ -97,7 +97,8 @@ same_snapshot() {
 
 chains_header() {
     printf '%s\n' "-P INPUT $1" "-P FORWARD $2" "-P OUTPUT $3" "-N NKVM-INPUT" "-N NKVM-OUTPUT" \
-        "-A INPUT -j NKVM-INPUT" "-A OUTPUT -j NKVM-OUTPUT"
+        "-A INPUT -j NKVM-INPUT" "-A OUTPUT -j NKVM-OUTPUT" \
+        "-A NKVM-INPUT -i usb0 -m state --state NEW -j DROP"
 }
 
 ipv6_control() {
@@ -290,6 +291,31 @@ for mode in restricted paranoid; do
     expect_ok reload
     expect_tables moderate "$mode without HTTPS"
 done
+# The computer under control stays out of management in every mode: the first
+# rule any input meets stops its new connections, ahead of every ACCEPT and in
+# the mode whose policy accepts. The operator opens it with a file.
+for mode in baseline moderate restricted paranoid; do
+    set_mode "$mode"
+    set_https 8443
+    expect_ok restart
+    for family in $FAMILIES; do
+        [ "$("$family" -S INPUT | sed -n 2p)" = "-A INPUT -j NKVM-INPUT" ] ||
+            fail "$family $mode: something runs before the managed chain"
+        [ "$("$family" -S NKVM-INPUT | sed -n 2p)" = "-A NKVM-INPUT -i usb0 -m state --state NEW -j DROP" ] ||
+            fail "$family $mode: usb0 is not closed first"
+    done
+    touch /etc/kvm/usb_management
+    expect_ok restart
+    for family in $FAMILIES; do
+        if "$family" -S NKVM-INPUT | grep -q usb0; then
+            fail "$family $mode: the operator's opening was ignored"
+        fi
+    done
+    rm /etc/kvm/usb_management
+done
+set_mode paranoid
+set_https off
+
 # The script reads HTTPS as the server does. A missing file is HTTP.
 rm -f /etc/kvm/server.yaml
 expect_ok reload

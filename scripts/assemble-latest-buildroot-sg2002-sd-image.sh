@@ -98,8 +98,7 @@ cp "$ROOTFS_IMAGE" "$OUTPUT_DIR/input/rootfs.sd"
 cp "$LOGO_IMAGE" "$OUTPUT_DIR/input/logo.jpeg"
 
 touch "$OUTPUT_DIR/input/usb.dev" "$OUTPUT_DIR/input/usb.disk0" \
-	"$OUTPUT_DIR/input/usb.rndis0" "$OUTPUT_DIR/input/wifi.sta" \
-	"$OUTPUT_DIR/input/gt9xx"
+	"$OUTPUT_DIR/input/wifi.sta" "$OUTPUT_DIR/input/gt9xx"
 printf 'hardened-sg2002-port-%s.img\n' "$BUILDROOT_VERSION" > "$OUTPUT_DIR/input/ver"
 find "$OUTPUT_DIR/input" -print0 | xargs -0 -r touch -hd "@$ASSEMBLY_EPOCH"
 

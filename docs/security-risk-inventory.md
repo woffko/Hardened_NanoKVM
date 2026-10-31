@@ -109,6 +109,11 @@ Known exceptions:
   read and discarded, so a chatty script no longer blocks on a full pipe. The
   reply marks truncated output, and output still held by a process left
   running after the script ended.
+- USB network: `usb0` leads to the computer under control. A new card does not bring
+  it up, and in every firewall mode the first rule stops its new connections, ahead
+  of any rule that accepts by address. Turning USB network on does not open
+  management: that takes `/etc/kvm/usb_management` and a firewall restart, and a raw
+  update keeps the file. Traffic of a connection the device started is unaffected.
 - Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
   executes these files; historical autostart uploads are never activated.
 - Settings files (syslog, time and timezone, firewall, inittab): replaced

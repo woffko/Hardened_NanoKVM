@@ -6,6 +6,7 @@ fi
 
 CONFIG_FILE=/etc/kvm/firewall.json
 SERVER_CONFIG=/etc/kvm/server.yaml
+USB_MANAGEMENT=/etc/kvm/usb_management
 SYSLOG_CONFIG=/etc/kvm/syslog.json
 LOCAL_IPV4_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
 LOCAL_IPV4_LOOPBACK_CIDRS="127.0.0.0/8"
@@ -121,6 +122,13 @@ allow_ipv6_control() {
         input_rule -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT
         output_rule -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT
     done
+}
+
+# usb0 leads to the computer under control. In every mode its new connections
+# stop here, ahead of any rule that would take them by address, unless the
+# operator opened management to it.
+close_usb_management() {
+    [ -e "$USB_MANAGEMENT" ] || input_rule -i usb0 -m state --state NEW -j DROP
 }
 
 baseline_ipv4_rules() {
@@ -278,6 +286,7 @@ verify_table() {
 # a flushed or half-built ruleset behind.
 apply_table() {
     RULES=
+    close_usb_management
     "$2"
     current="$("$1"-save -t filter)" || return 1
     payload="$(restore_payload "$current")"

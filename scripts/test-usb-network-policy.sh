@@ -7,12 +7,14 @@ FIREWALL="$ROOT/kvmapp/system/init.d/S40firewall"
 
 grep -Fq 'if [ -e /boot/usb.ncm ]' "$USBDEV" || fail "NCM is not opt-in"
 grep -Fq 'if [ -e /boot/usb.rndis0 ]' "$USBDEV" || fail "RNDIS is not opt-in"
-for port in 80 443 22; do
-	if grep -Eq -- "-i[[:space:]]+usb0.*--dport[[:space:]]+$port" "$FIREWALL"; then
-		fail "usb0 management port $port is accepted by default"
+# What the rules do with usb0 in every mode is tested on real tables in
+# test-s40firewall.sh. A new card must not bring usb0 up at all.
+for image in buildroot-external/hardened-sg2002/board/sg2002/genimage.cfg \
+	scripts/assemble-latest-buildroot-sg2002-sd-image.sh; do
+	if grep -Fq 'usb.rndis0' "$ROOT/$image"; then
+		fail "$image still ships usb.rndis0"
 	fi
 done
-if grep -Eq -- "-i[[:space:]]+usb0.*(-j[[:space:]]+ACCEPT)" "$FIREWALL"; then
-	fail "usb0 has a default ACCEPT rule"
-fi
+grep -Fq 'etc/kvm/usb_management' "$ROOT/server-rust/src/update/restore_policy.rs" ||
+	fail "a raw update would forget the operator's opening of usb0"
 echo "usb network policy: PASS"

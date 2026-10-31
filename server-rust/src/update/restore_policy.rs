@@ -114,6 +114,7 @@ pub(super) const PRESENCE: &[&str] = &[
     "boot/start_ssh_once",
     "boot/logo.ico",
     "etc/kvm/ssh_stop",
+    "etc/kvm/usb_management",
     "etc/kvm/hdmi_disable",
     "etc/kvm/h264_safe_mode",
     "etc/kvm/preview_updates",
