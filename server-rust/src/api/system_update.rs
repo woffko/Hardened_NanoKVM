@@ -1780,6 +1780,7 @@ fn install_raw_image_update(
     };
     let publish = |ticket: &RestoreTicket| -> Result<()> {
         let mut store = Store::open_boot().map_err(|error| {
+            discard_capsule(Path::new(RAW_CAPSULE_DIR), ticket);
             AppError::Internal(format!("raw ticket store unavailable: {error}"))
         })?;
         publish_outgoing_ticket(
@@ -1837,13 +1838,26 @@ fn publish_outgoing_ticket(
     capsule_directory: &Path,
     ticket: &RestoreTicket,
 ) -> Result<()> {
-    raw_restore::retire_required(root).map_err(|error| {
-        AppError::Internal(format!("raw restore requirement was not retired: {error}"))
-    })?;
-    retire_prepared_ticket(store, capsule_directory)?;
-    store
-        .publish_prepared(ticket)
-        .map_err(|error| AppError::Internal(format!("prepared ticket was not published: {error}")))
+    let published = (|| {
+        raw_restore::retire_required(root).map_err(|error| {
+            AppError::Internal(format!("raw restore requirement was not retired: {error}"))
+        })?;
+        retire_prepared_ticket(store, capsule_directory)?;
+        store.publish_prepared(ticket).map_err(|error| {
+            AppError::Internal(format!("prepared ticket was not published: {error}"))
+        })
+    })();
+    if published.is_err() {
+        discard_capsule(capsule_directory, ticket);
+    }
+    published
+}
+
+/// No later attempt would find the capsule of a ticket that was never published.
+fn discard_capsule(capsule_directory: &Path, ticket: &RestoreTicket) {
+    if let Err(error) = raw_restore::remove_capsule(capsule_directory, ticket) {
+        tracing::warn!(%error, "an unpublished restore capsule stays on the data partition");
+    }
 }
 
 fn retire_prepared_ticket(store: &mut Store, capsule_directory: &Path) -> Result<()> {
@@ -4425,6 +4439,27 @@ mod tests {
         let (outcome, blocked) = source_boot_outcome(root.path(), &mut store, capsules.path());
         assert!(matches!(outcome, Ok(raw_restore::Outcome::NotRequired)));
         assert!(!blocked);
+    }
+
+    #[test]
+    fn a_ticket_that_was_not_published_takes_its_capsule_with_it() {
+        use crate::update::restore_capsule::ticket::Store;
+
+        let root = restored_system_root();
+        // A requirement that cannot be retired stops the publication.
+        let requirement = root.path().join(raw_restore::REQUIRED_PATH);
+        std::fs::remove_file(&requirement).unwrap();
+        std::fs::create_dir(&requirement).unwrap();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let ticket = outgoing_ticket("0.4.0-raw.2");
+        let capsule = raw_restore::capsule_path(capsules.path(), &ticket);
+        std::fs::write(&capsule, b"sealed").unwrap();
+        assert!(
+            publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &ticket).is_err()
+        );
+        assert!(!capsule.exists());
     }
 
     #[test]

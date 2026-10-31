@@ -312,6 +312,7 @@ fn read_facts(root: &File, owner: u32) -> Result<ImageFacts, RootfsError> {
         "kvmapp/version",
         owner,
         0o7022,
+        0,
         MAX_APP_VERSION as u64 + 1,
     )?
     .ok_or(RootfsError::Accounts)?;
@@ -327,11 +328,13 @@ fn read_facts(root: &File, owner: u32) -> Result<ImageFacts, RootfsError> {
     {
         return Err(RootfsError::Accounts);
     }
+    // Early boot takes the marker only in exactly this mode.
     let marker = read_fixed(
         root,
         REQUIRED_PATH,
         owner,
         0o7133,
+        0o644,
         REQUIRED_BYTES.len() as u64 + 1,
     )?;
     let restorable = marker.as_deref() == Some(REQUIRED_BYTES)
@@ -350,6 +353,7 @@ fn read_fixed(
     path: &str,
     owner: u32,
     denied: u32,
+    required: u32,
     limit: u64,
 ) -> Result<Option<Vec<u8>>, RootfsError> {
     let file = match restore_fs::open_beneath(root, path, OFlags::RDONLY | OFlags::NONBLOCK) {
@@ -362,6 +366,7 @@ fn read_fixed(
         || metadata.uid() != owner
         || metadata.nlink() != 1
         || metadata.mode() & denied != 0
+        || metadata.mode() & required != required
         || metadata.len() > limit
     {
         return Err(RootfsError::Accounts);

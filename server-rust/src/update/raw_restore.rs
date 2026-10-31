@@ -80,9 +80,9 @@ impl Observation {
 }
 
 pub fn run_early() -> Result<Outcome> {
-    let result = (|| -> Result<Outcome> {
+    let root = Path::new("/");
+    early(root, Path::new(BLOCK_MARKER), || {
         let mut store = Store::open_boot()?;
-        let root = Path::new("/");
         let observed = observe(root)?;
         run_observed(
             root,
@@ -92,9 +92,22 @@ pub fn run_early() -> Result<Outcome> {
             Path::new(BLOCK_MARKER),
             &observed,
         )
-    })();
+    })
+}
+
+/// A restored system ends at the first check: neither its boot ticket on FAT nor
+/// a file an interrupted application swap has moved away can keep it off the
+/// network, or from the recovery that would finish that swap.
+fn early(root: &Path, marker: &Path, restore: impl FnOnce() -> Result<Outcome>) -> Result<Outcome> {
+    let result = required(root).and_then(|required| {
+        if required {
+            restore()
+        } else {
+            Ok(Outcome::NotRequired)
+        }
+    });
     if result.is_err() {
-        let _ = write_marker(Path::new(BLOCK_MARKER));
+        let _ = write_marker(marker);
     }
     result
 }
@@ -395,14 +408,14 @@ fn parent_directory<'a>(
     Ok(Some((directory, name)))
 }
 
-fn capsule_path(directory: &Path, ticket: &RestoreTicket) -> std::path::PathBuf {
+pub(crate) fn capsule_path(directory: &Path, ticket: &RestoreTicket) -> std::path::PathBuf {
     directory.join(format!(
         "{:032x}.capsule",
         u128::from_be_bytes(ticket.transaction_id())
     ))
 }
 
-fn remove_capsule(directory: &Path, ticket: &RestoreTicket) -> Result<()> {
+pub(crate) fn remove_capsule(directory: &Path, ticket: &RestoreTicket) -> Result<()> {
     match fs::remove_file(capsule_path(directory, ticket)) {
         Ok(()) => {
             File::open(directory)?.sync_all()?;

@@ -452,13 +452,42 @@ fn the_ssh_state_of_another_person_stops_capture() {
         b"root:x:0:0:root:/root:/bin/sh\n\
 alice:x:1000:1000:Alice:/home/alice:/bin/sh\n\
 sshd:x:101:102:SSH:/var/empty:/bin/false\n\
-sync:x:4:100:sync:/bin:/bin/sync\n",
+sync:x:4:100:sync:/bin:/bin/sync\n\
+second:x:1001:1001:Second root home:/root:/bin/sh\n\
+nobody:x:65534:65534:nobody:/home:/bin/false\n",
     );
     put(root.path(), "home/alice/notes", b"synthetic");
+    put(root.path(), "home/.ssh/stray", b"synthetic");
     put(root.path(), "root/.ssh/authorized_keys", b"");
     put(root.path(), "var/empty/.ssh/stray", b"synthetic");
     put(root.path(), "bin/.ssh/stray", b"synthetic");
     assert_eq!(unlisted(&root), None);
     put(root.path(), "home/alice/.ssh/authorized_keys", b"synthetic");
     assert_eq!(unlisted(&root).as_deref(), Some("home/alice/.ssh"));
+}
+
+#[test]
+fn a_key_only_account_counts_as_a_person_whatever_its_shell() {
+    let root = source_fixture();
+    put(
+        root.path(),
+        "etc/passwd",
+        b"root:x:0:0:root:/root:/bin/sh\n\
+files:x:1000:1000:Files:/home/files:/bin/false\n",
+    );
+    assert_eq!(unlisted(&root), None);
+    put(root.path(), "home/files/.ssh/authorized_keys", b"synthetic");
+    assert_eq!(unlisted(&root).as_deref(), Some("home/files/.ssh"));
+}
+
+#[test]
+fn what_root_ssh_cannot_keep_stops_capture_by_name() {
+    let root = source_fixture();
+    put(root.path(), "root/.ssh/known_hosts.old", b"synthetic");
+    assert_eq!(unlisted(&root), None);
+    put(root.path(), "root/.ssh/nested/key", b"synthetic");
+    assert_eq!(unlisted(&root).as_deref(), Some("root/.ssh/nested"));
+    let root = source_fixture();
+    put(root.path(), "root/.ssh/a name", b"synthetic");
+    assert_eq!(unlisted(&root).as_deref(), Some("root/.ssh/a name"));
 }

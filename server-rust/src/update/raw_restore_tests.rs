@@ -497,6 +497,31 @@ fn a_temporary_file_left_by_a_power_cut_does_not_block_the_restore() {
 }
 
 #[test]
+fn a_restored_system_never_opens_the_ticket_store_or_reads_the_application() {
+    let (source, _) = fixture();
+    let root = restored_root(source.path(), false);
+    fs::remove_file(root.path().join("kvmapp/version")).unwrap();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("blocked");
+    let outcome = early(root.path(), &marker, || {
+        panic!("a damaged ticket must not reach this boot")
+    })
+    .unwrap();
+    assert_eq!(outcome, Outcome::NotRequired);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn a_required_restore_that_cannot_start_blocks_the_boot() {
+    let (source, _) = fixture();
+    let root = restored_root(source.path(), true);
+    let marker_dir = tempfile::tempdir().unwrap();
+    let marker = marker_dir.path().join("blocked");
+    assert!(early(root.path(), &marker, || Err(Error::InvalidMarker)).is_err());
+    assert!(marker.exists());
+}
+
+#[test]
 fn factory_image_without_the_marker_is_not_restored() {
     let (source, config) = fixture();
     let capsules = private();

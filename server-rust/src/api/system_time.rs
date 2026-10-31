@@ -112,6 +112,9 @@ pub fn apply_saved_timezone() {
 }
 
 fn apply_saved_timezone_in(paths: &TimePaths) -> Result<()> {
+    if !paths.config.exists() {
+        return Ok(());
+    }
     let config = read_config(paths)?;
     if current_timezone(paths).as_deref() != Some(config.timezone.as_str()) {
         set_timezone(&config.timezone, paths)?;
@@ -708,11 +711,16 @@ mod tests {
     }
 
     #[test]
-    fn without_a_saved_zone_the_link_of_the_image_stays() {
+    fn without_a_saved_zone_the_local_time_of_the_device_stays() {
         let dir = tempfile::tempdir().unwrap();
         let paths = image_paths(dir.path());
         apply_saved_timezone_in(&paths).unwrap();
         assert_eq!(link(&paths), Path::new("../usr/share/zoneinfo/Etc/UTC"));
+        // An operator's copy, which no zone name describes.
+        fs::remove_file(&paths.localtime).unwrap();
+        fs::write(&paths.localtime, b"TZif2 compiled zone").unwrap();
+        apply_saved_timezone_in(&paths).unwrap();
+        assert!(fs::symlink_metadata(&paths.localtime).unwrap().is_file());
     }
 
     #[test]

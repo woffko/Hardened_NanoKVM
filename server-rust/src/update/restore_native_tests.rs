@@ -586,3 +586,20 @@ fn a_service_with_another_home_or_shell_takes_the_row_of_the_image() {
     assert!(text(&result.passwd).contains("sshd:x:101:102:SSH:/var/empty:/bin/false\n"));
     assert!(!text(&result.passwd).contains("/run/sshd"));
 }
+
+#[test]
+fn an_account_made_on_the_device_stays_whatever_its_shell_and_lock() {
+    let mut device = compact();
+    device
+        .passwd
+        .extend_from_slice(b"files:x:1000:1000:Files:/home/files:/bin/false\n");
+    device
+        .group
+        .extend_from_slice(b"files:x:1000:\nshare:x:1001:\n");
+    device.shadow.extend_from_slice(b"files:*:::::::\n");
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert!(text(&result.passwd).contains("files:x:1000:1000:Files:/home/files:/bin/false\n"));
+    assert!(text(&result.shadow).contains("files:*:::::::\n"));
+    assert!(text(&result.group).contains("files:x:1000:\n"));
+    assert!(text(&result.group).contains("share:x:1001:\n"));
+}

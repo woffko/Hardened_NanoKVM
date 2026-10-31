@@ -48,6 +48,11 @@ trap 'rm -f "$RELEASE_BURNED_VERSIONS"' EXIT
 printf '2.1.0\n' > "$RELEASE_BURNED_VERSIONS"
 refused 0.4.0-raw.1 2.1.0
 accepted 0.4.0-raw.2 2.1.1
+RELEASE_BURNED_VERSIONS=/nonexistent/list
+if release_check_versions 0.4.0-raw.2 2.1.1 2>/dev/null; then
+	echo "a list that cannot be read must refuse every number" >&2
+	exit 1
+fi
 unset RELEASE_BURNED_VERSIONS
 
 stage="$(mktemp -d)"
@@ -83,6 +88,8 @@ packager_refuses() {
 }
 packager_refuses "HARDENED_SG2002_SYSTEM_VERSION is required" \
 	HARDENED_SG2002_SYSTEM_VERSION= EXPECTED_KVMAPP_VERSION=2.1.0 SYSTEM_UPDATE_REQUIRED_APP_VERSION=2.1.0
+packager_refuses "is for 0.3.0-raw.12" HARDENED_LEGACY_RC12=1 \
+	HARDENED_SG2002_SYSTEM_VERSION=0.3.0-raw.13 EXPECTED_KVMAPP_VERSION=2.0.45 SYSTEM_UPDATE_REQUIRED_APP_VERSION=2.0.45
 packager_refuses "EXPECTED_KVMAPP_VERSION is required" \
 	HARDENED_SG2002_SYSTEM_VERSION=0.4.0-raw.1 EXPECTED_KVMAPP_VERSION= SYSTEM_UPDATE_REQUIRED_APP_VERSION=2.1.0
 packager_refuses "SYSTEM_UPDATE_REQUIRED_APP_VERSION is required" \

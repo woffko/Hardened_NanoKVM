@@ -31,6 +31,11 @@ for name in HARDENED_SG2002_SYSTEM_VERSION EXPECTED_KVMAPP_VERSION SYSTEM_UPDATE
 	}
 done
 if [ "${HARDENED_LEGACY_RC12:-0}" = 1 ]; then
+	# Only what RC12 published may skip the number check.
+	[ "$SYSTEM_VERSION" = 0.3.0-raw.12 ] || {
+		echo "HARDENED_LEGACY_RC12 is for 0.3.0-raw.12, not $SYSTEM_VERSION" >&2
+		exit 1
+	}
 	MINIMUM_SYSTEM=
 else
 	release_check_versions "$SYSTEM_VERSION" "$EXPECTED_KVMAPP_VERSION" || exit 1

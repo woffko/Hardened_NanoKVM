@@ -11,7 +11,7 @@ use axum::{
     extract::connect_info::Connected,
     serve::{IncomingStream, Listener},
 };
-use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rcgen::{CertificateParams, CertifiedKey, KeyPair, generate_simple_self_signed};
 use tokio::{net::TcpListener, task::JoinSet, time};
 use tokio_rustls::{
     TlsAcceptor,
@@ -163,23 +163,42 @@ fn absent(path: &Path) -> bool {
     matches!(fs::symlink_metadata(path), Err(err) if err.kind() == io::ErrorKind::NotFound)
 }
 
+fn generation_failed(error: rcgen::Error) -> AppError {
+    AppError::Internal(format!("failed to generate TLS certificate: {error}"))
+}
+
 /// Publishes a new self-signed pair for `names` when neither file exists, key
-/// first and each file atomically, and loads it back. Returns whether it did.
-/// Anything already there stays, usable or not: it may be an administrator's
-/// own pair, and a read that failed once is no reason to lose it.
+/// first and each file atomically, and loads it back. Returns whether it wrote
+/// anything. A power cut between the two writes leaves the key alone, and a
+/// certificate for that key completes the pair. Anything else already there
+/// stays, usable or not: it may be an administrator's own pair, and a read that
+/// failed once is no reason to lose it.
 pub fn ensure_server_cert(
     cert_path: impl AsRef<Path>,
     key_path: impl AsRef<Path>,
     names: Vec<String>,
 ) -> Result<bool> {
     let (cert_path, key_path) = (cert_path.as_ref(), key_path.as_ref());
-    if !absent(cert_path) || !absent(key_path) {
+    if !absent(cert_path) {
         return Ok(false);
     }
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(names)
-        .map_err(|err| AppError::Internal(format!("failed to generate TLS certificate: {err}")))?;
-    files::write_atomic(key_path, key_pair.serialize_pem().as_bytes(), 0o600)?;
-    files::write_atomic(cert_path, cert.pem().as_bytes(), 0o644)?;
+    if absent(key_path) {
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(names).map_err(generation_failed)?;
+        files::write_atomic(key_path, key_pair.serialize_pem().as_bytes(), 0o600)?;
+        files::write_atomic(cert_path, cert.pem().as_bytes(), 0o644)?;
+    } else {
+        let Some(key_pair) = fs::read_to_string(key_path)
+            .ok()
+            .and_then(|pem| KeyPair::from_pem(&pem).ok())
+        else {
+            return Ok(false);
+        };
+        let cert = CertificateParams::new(names)
+            .and_then(|params| params.self_signed(&key_pair))
+            .map_err(generation_failed)?;
+        files::write_atomic(cert_path, cert.pem().as_bytes(), 0o644)?;
+    }
     load_server_config(cert_path, key_path)?;
     Ok(true)
 }
@@ -203,14 +222,15 @@ pub fn server_config_or_temporary(
     key_path: impl AsRef<Path>,
     names: Vec<String>,
 ) -> Result<ServerConfig> {
-    load_server_config(cert_path, key_path).or_else(|error| {
-        warn!(%error, "the TLS pair is unusable; serving a temporary certificate");
-        let CertifiedKey { cert, key_pair } =
-            generate_simple_self_signed(names).map_err(|err| {
-                AppError::Internal(format!("failed to generate TLS certificate: {err}"))
-            })?;
-        server_config_from_pem(cert.pem().as_bytes(), key_pair.serialize_pem().as_bytes())
-    })
+    load_server_config(cert_path, key_path).or_else(|error| temporary_server_config(error, names))
+}
+
+/// Nothing of this reaches the disk.
+pub fn temporary_server_config(reason: AppError, names: Vec<String>) -> Result<ServerConfig> {
+    warn!(error = %reason, "the TLS pair is unusable; serving a temporary certificate");
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(names).map_err(generation_failed)?;
+    server_config_from_pem(cert.pem().as_bytes(), key_pair.serialize_pem().as_bytes())
 }
 
 #[cfg(test)]
@@ -406,7 +426,7 @@ mod tests {
                 Some(other_key_pem.as_bytes()),
             ),
             (Some(cert_pem.as_bytes()), None),
-            (None, Some(other_key_pem.as_bytes())),
+            (None, Some(b"not a key".as_slice())),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let cert = dir.path().join("server.crt");
@@ -425,6 +445,21 @@ mod tests {
                 assert_eq!(fs::read(path).ok().as_deref(), bytes);
             }
         }
+    }
+
+    #[test]
+    fn a_power_cut_between_the_two_writes_keeps_the_key_and_completes_the_pair() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        let (_, key_pem) = pair("one.example.net");
+        fs::write(&key, &key_pem).unwrap();
+        let names = vec!["kvm-test.local".to_string()];
+        assert!(ensure_server_cert(&cert, &key, names).unwrap());
+        assert_eq!(fs::read_to_string(&key).unwrap(), key_pem);
+        assert!(load_server_config(&cert, &key).is_ok());
+        assert!(verifies_for(&fs::read(&cert).unwrap(), "kvm-test.local"));
     }
 
     #[test]

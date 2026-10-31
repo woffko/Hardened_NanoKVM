@@ -1824,7 +1824,11 @@ impl Server {
                         *slot = None;
                     }
                     Ok(None) if since.elapsed() < self.idle => {}
-                    _ => *slot = None,
+                    // The leases of a bad packet are closed already.
+                    _ => {
+                        offer.answer(false);
+                        *slot = None;
+                    }
                 }
             }
             if let Some((offer, since)) = self.raw_offer.as_mut() {

@@ -399,8 +399,10 @@ that way, so no update moves a device to HTTPS by itself. The image's file never
 reaches an updated device, because restore always writes the canonical
 configuration over it. A relative TLS path in an older file means `/etc/kvm`,
 where capture reads it. A self-signed pair is written only when neither file
-exists. A pair that does not load stays on disk, the server presents a temporary
-certificate for that run and logs it, and turning HTTPS on refuses such a pair.
+exists, and a key that a power cut left alone gets a certificate for that same key.
+A pair that does not load stays on disk: the server and its trial present a
+temporary certificate for that run and log it, while turning HTTPS on and raw
+capture refuse such a pair.
 
 All known Rust Config fields are retained except these fixed paths and the
 redundant legacy key alias. In particular, unchanged persisted HTTP stays HTTP:
@@ -465,13 +467,15 @@ with image defaults, unlocked, regenerated or rehashed.
 Service accounts belong to the image. Deployed systems number them differently:
 `.132` carries reservations for removed packages (`named`, `dbus`) and `sshd` at
 103:104, while a clean raw.12 has `sshd` at 101:102 and neither reservation. One
-image serves both. A device row with a non-login shell and a locked password is
-a service account: if it does not equal the image's row in UID, GID, home and
-shell, it leaves the device tables and the image's row takes its place. Its
-memberships and gshadow admin entries leave with it. A group leaves when no
-remaining account has it as primary group or member and the image has no group
-of that name and number. This is safe because every restored file is owned by
-root, so no preserved file depends on a service number.
+image serves both. A device row below UID 1000 with a non-login shell and a locked
+password is a service account: if it does not equal the image's row in UID, GID,
+home and shell, it leaves the device tables and the image's row takes its place.
+The UID matters because in this sshd `*` does not stop a key login, so `/bin/false`
+with `*` can be a key-only SFTP account of a person. Its memberships and gshadow
+admin entries leave with it. A group below GID 1000 leaves when no remaining account
+has it as primary group or member and the image has no group of that name and
+number. This is safe because every restored file is owned by root, so no preserved
+file depends on a service number.
 
 Accounts people use are never renumbered. New signed-image users must have unused
 nonzero UID/GID, a locked password and non-login shell. A common user with a login
@@ -539,11 +543,13 @@ outside this schema also stop preflight; they are not silently rewritten.
 
 The new rootfs keeps only what the archive carries, so nothing may fall outside
 the schema unnoticed. Capture lists `/etc/ssh` and stops, naming the file, on any
-entry the schema does not cover, such as a `_sk` host key or a key type of a later
-OpenSSH. `/root/.ssh` is a flat tree of safe file names and is kept whole, apart
-from `rc`, `environment` and the agent socket directory `agent`, which sshd
-recreates. A `.ssh` directory in the home of another account with a login shell
-stops capture the same way, because homes are outside the schema. The schema holds
+entry the schema does not cover, such as a `_sk` host key, a key type of a later
+OpenSSH or a temporary file an interrupted `ssh-keygen -A` left. `/root/.ssh` is a
+flat tree of safe file names and is kept whole, apart from `rc`, `environment` and
+the agent socket directory `agent`, which sshd recreates; anything else in it stops
+capture by name. A `.ssh` directory in the home of another person, meaning an account
+with a login shell or a UID from 1000, stops capture the same way, because homes are
+outside the schema. The schema holds
 every host key type of the pinned OpenSSH, including `mldsa44_ed25519` with its
 certificate. Public keys and `ssh_config` come back world-readable, as OpenSSH
 installs them.

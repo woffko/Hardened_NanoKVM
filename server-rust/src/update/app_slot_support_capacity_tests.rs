@@ -305,7 +305,12 @@ fn capacity_child() {
         Ok(())
     } else {
         let closed = ClosedRuntime::fixture(install.transaction());
-        super::prepare(&mut install, closed).map(drop)
+        super::prepare(&mut install, closed)
+            .map(drop)
+            .map_err(|error| match error {
+                SlotError::NotStaged(cause) => *cause,
+                other => panic!("{case}: must stay a rollback, got {other:?}"),
+            })
     };
     if case == "ample" {
         result.unwrap();

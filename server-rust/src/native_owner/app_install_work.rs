@@ -31,13 +31,21 @@ enum Payload {
     Rollback(JournaledInstall),
 }
 
-/// What one fixed operation reported. `Refused` is a transition the executing
-/// build declined before anything was staged; it is not an I/O failure.
+/// What one fixed operation reported. `Refused` means nothing was staged, so the
+/// previous runtime can resume; `Failed` needs an operator or a reboot.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Outcome {
     Complete,
     Refused,
     Failed,
+}
+
+fn support_outcome<T>(result: Result<T, SlotError>) -> Outcome {
+    match result {
+        Ok(_) => Outcome::Complete,
+        Err(SlotError::UnsupportedTransition | SlotError::NotStaged(_)) => Outcome::Refused,
+        Err(_) => Outcome::Failed,
+    }
 }
 impl From<bool> for Outcome {
     fn from(succeeded: bool) -> Self {
@@ -79,11 +87,7 @@ impl Operation {
         match (self, payload) {
             (Self::Support { closed }, Payload::Install(install)) => {
                 let prepared = crate::update::app_slot::support::prepare(install, closed);
-                match prepared.and_then(|mut support| support.exchange()) {
-                    Ok(_) => Outcome::Complete,
-                    Err(SlotError::UnsupportedTransition) => Outcome::Refused,
-                    Err(_) => Outcome::Failed,
-                }
+                support_outcome(prepared.and_then(|mut support| support.exchange()))
             }
             (Self::Publish(closed), Payload::Install(install)) => Outcome::from(matches!(
                 install.publish(&closed),
@@ -501,5 +505,23 @@ impl InstallWork {
             Ok(handle) => State::Running(Worker(Some(handle))),
             Err(_) => State::Failed,
         };
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_failure_after_staging_began_needs_an_operator() {
+        let refused = [
+            SlotError::UnsupportedTransition,
+            SlotError::NotStaged(Box::new(SlotError::Invalid)),
+        ];
+        for error in refused {
+            assert!(support_outcome::<()>(Err(error)) == Outcome::Refused);
+        }
+        assert!(support_outcome::<()>(Err(SlotError::Invalid)) == Outcome::Failed);
+        assert!(support_outcome(Ok(())) == Outcome::Complete);
     }
 }

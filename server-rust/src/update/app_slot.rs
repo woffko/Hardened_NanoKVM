@@ -64,6 +64,9 @@ pub enum SlotError {
         "the executing broker declares no support for this helper transition; nothing was staged"
     )]
     UnsupportedTransition,
+    /// Failed before the support plan became durable, so a rollback is safe.
+    #[error("nothing was staged: {0}")]
+    NotStaged(#[source] Box<SlotError>),
     #[error("application slot recovery is owned by another operation")]
     Busy,
     #[error("application slot recovery I/O failed; inspect durable state before retry")]

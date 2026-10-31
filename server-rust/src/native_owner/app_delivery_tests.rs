@@ -758,6 +758,23 @@ async fn invalid_canonical_receipt_rejects_valid_leases_before_any_native_stop()
     });
 }
 
+#[test]
+fn a_packet_the_installer_cannot_read_is_answered_as_a_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let uid = nix::unistd::geteuid().as_raw();
+    serve(root.path(), uid, || {
+        let directory = File::open(root.path().join("native-runtime-owner")).unwrap();
+        let socket = journal::socket::connect_install(&directory, uid).unwrap();
+        rustix::net::send(&socket, b"not an offer", rustix::net::SendFlags::NOSIGNAL).unwrap();
+        let flags = rustix::fs::fcntl_getfl(&socket).unwrap();
+        rustix::fs::fcntl_setfl(&socket, flags - rustix::fs::OFlags::NONBLOCK).unwrap();
+        let mut answer = [0];
+        let (read, _) =
+            rustix::net::recv(&socket, &mut answer, rustix::net::RecvFlags::empty()).unwrap();
+        assert_eq!((read, answer), (1, *b"R"));
+    });
+}
+
 #[cfg(feature = "sandbox-test-fixture")]
 #[test]
 fn fixed_root_delivery_child() {

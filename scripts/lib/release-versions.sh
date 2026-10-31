@@ -10,8 +10,11 @@
 # this release first.
 RELEASE_MINIMUM_SYSTEM=0.3.0-raw.12
 
+# A list that cannot be read proves nothing, so every number counts as used.
 release_version_used() {
-	grep -Fxq -- "$1" "${RELEASE_BURNED_VERSIONS:-$ROOT_DIR/scripts/release-burned-versions.txt}"
+	local list="${RELEASE_BURNED_VERSIONS:-$ROOT_DIR/scripts/release-burned-versions.txt}"
+	[ -r "$list" ] || return 0
+	grep -Fxq -- "$1" "$list"
 }
 
 # release_check_versions SYSTEM APP: refuses with a message on stderr.

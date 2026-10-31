@@ -131,10 +131,11 @@ impl KeptAccounts {
     }
 }
 
-/// A locked, non-login row is a service account; root is neither, by `parse`.
-/// One that matches the image stays; any other leaves, and the merge then adds
-/// the image's row. A group leaves when no remaining account needs it and the
-/// image has no equal.
+/// A locked, non-login row below the range of people is a service account; root
+/// is neither, by `parse`. In this sshd `*` does not stop a key login, so the shell
+/// and the lock alone do not make an account disposable. One that matches the image
+/// stays; any other leaves, and the merge then adds the image's row. A group leaves
+/// when no remaining account needs it and the image has no equal.
 fn without_replaced_services(
     source: &AccountFiles<'_>,
     old: &Tables<'_>,
@@ -144,7 +145,10 @@ fn without_replaced_services(
     for row in &old.passwd {
         let name = row.fields[0];
         let auth = find(&old.shadow, name).ok_or(NativeAccountError::Invalid)?;
-        if !non_login_shell(row.fields[6]) || !(locked(row.fields[1]) || locked(auth.fields[1])) {
+        if person_id(number(row.fields[2])?)
+            || !non_login_shell(row.fields[6])
+            || !(locked(row.fields[1]) || locked(auth.fields[1]))
+        {
             continue;
         }
         let same = find(&image.passwd, name).is_some_and(|signed| {
@@ -164,6 +168,7 @@ fn without_replaced_services(
             !users.contains(user.fields[0]) && number(user.fields[3]).ok() == Some(gid)
         }) || !staying(row.fields[3], &users).is_empty();
         if !needed
+            && !person_id(gid)
             && find(&image.group, name)
                 .is_none_or(|signed| number(signed.fields[2]).ok() != Some(gid))
         {
@@ -458,6 +463,18 @@ fn absolute(value: &str) -> bool {
                 .all(|p| !p.is_empty() && p != "." && p != "..")
             && !value.chars().any(char::is_whitespace))
 }
+/// Where the images' own accounts end and accounts made on a device begin. The
+/// top of the range leaves `nobody` to the image.
+fn person_id(id: u32) -> bool {
+    (1000..60000).contains(&id)
+}
+
+/// Whose SSH state a raw update would lose: not root's, which is carried, and not
+/// that of an account the image owns.
+pub(super) fn person(uid: &str, shell: &str) -> bool {
+    number(uid).is_ok_and(|uid| uid != 0 && (person_id(uid) || login_shell(shell)))
+}
+
 pub(super) fn login_shell(value: &str) -> bool {
     matches!(
         value,

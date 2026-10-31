@@ -313,6 +313,16 @@ fn an_image_missing_any_part_of_its_restore_is_not_restorable() {
     .unwrap();
     assert!(!facts_of(&root).unwrap().restorable, "wrong marker bytes");
     let root = facts_root();
+    fs::set_permissions(
+        root.path().join(REQUIRED_PATH),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(
+        facts_of(&root).is_err(),
+        "early boot would refuse this mode"
+    );
+    let root = facts_root();
     let helper = root.path().join(RESTORE_HELPER);
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(

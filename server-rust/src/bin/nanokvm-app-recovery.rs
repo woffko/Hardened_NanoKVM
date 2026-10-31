@@ -46,7 +46,8 @@ fn main() -> ExitCode {
                 app_slot::SlotError::Busy => 75,
                 app_slot::SlotError::Unsafe
                 | app_slot::SlotError::Invalid
-                | app_slot::SlotError::UnsupportedTransition => 78,
+                | app_slot::SlotError::UnsupportedTransition
+                | app_slot::SlotError::NotStaged(_) => 78,
                 app_slot::SlotError::Io(_) => 74,
             })
         }

@@ -102,8 +102,10 @@ impl Snapshot {
         }
         // The new rootfs keeps only what the archive carries, so a file the
         // schema does not know stops capture instead of being lost.
-        if let Some(path) = restore_archive::unlisted(source, "etc/ssh")? {
-            return Err(SshRestoreError::Unlisted(path));
+        for directory in ["etc/ssh", "root/.ssh"] {
+            if let Some(path) = restore_archive::unlisted(source, directory)? {
+                return Err(SshRestoreError::Unlisted(path));
+            }
         }
         check_other_homes(source)?;
         let mut paths = BTreeSet::new();
@@ -164,10 +166,10 @@ fn check_other_homes(source: &SourceRoot) -> Result<()> {
     let passwd = std::str::from_utf8(&passwd).map_err(|_| SshRestoreError::Invalid)?;
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        let [name, _, _, _, _, home, shell] = fields[..] else {
+        let [_, _, uid, _, _, home, shell] = fields[..] else {
             continue;
         };
-        if name == "root" || !restore_native::login_shell(shell) {
+        if home == "/root" || !restore_native::person(uid, shell) {
             continue;
         }
         let path = match home.trim_matches('/') {

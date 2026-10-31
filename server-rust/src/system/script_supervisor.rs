@@ -21,8 +21,9 @@ use std::{
 mod proc_tree;
 
 const CHILD_DRAIN: Duration = Duration::from_secs(1);
-/// The script ended and processes it started could not be stopped.
-pub const LEFT_BEHIND: i32 = 125;
+/// The script ended and processes it started could not be stopped. Not one of
+/// the codes that timeout, env or a shell use for themselves.
+pub const LEFT_BEHIND: i32 = 199;
 
 pub fn run(args: &[OsString]) -> i32 {
     let Some((timeout, grace, program, script_args)) = parse(args) else {

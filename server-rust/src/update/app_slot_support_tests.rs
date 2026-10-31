@@ -252,6 +252,13 @@ async fn what_the_support_step_would_refuse_is_known_before_anything_stops() {
     assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
     write(&live, &bytes[..bytes.len() - 1], 0o755);
     assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    write(&live, &bytes, 0o700);
+    assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    write(&live, &bytes, 0o755);
+    let alias = live.with_extension("alias");
+    fs::hard_link(&live, &alias).unwrap();
+    assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    fs::remove_file(alias).unwrap();
     fs::remove_file(&live).unwrap();
     assert!(check().is_err());
     write(&live, &bytes, 0o755);

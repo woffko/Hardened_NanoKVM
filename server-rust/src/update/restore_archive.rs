@@ -22,6 +22,8 @@ const BLOCK: u64 = 512;
 const MAX_FILES: usize = 4096;
 const MAX_PATH: usize = 240;
 const MAX_DEPTH: usize = 16;
+/// sshd keeps the sockets of forwarded agents here and recreates the directory.
+const AGENT_SOCKETS: &str = "root/.ssh/agent";
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -618,7 +620,12 @@ pub(super) fn unlisted(root: &SourceRoot, relative: &str) -> Result<Option<Strin
             continue;
         }
         let path = format!("{relative}/{name}");
-        if !policy::allowed(&path) && !policy::TREES.contains(&path.as_str()) {
+        let listed = if entry.file_type() == rustix::fs::FileType::Directory {
+            policy::TREES.contains(&path.as_str()) || path == AGENT_SOCKETS
+        } else {
+            policy::allowed(&path)
+        };
+        if !listed {
             return Ok(Some(path));
         }
     }
@@ -662,7 +669,7 @@ pub(super) fn collect_tree(
             // or into the sockets sshd keeps for forwarded agents.
             if !matches!(
                 relative.as_str(),
-                "root/.picoclaw/workspace/skills/kvm-control" | "root/.ssh/agent"
+                "root/.picoclaw/workspace/skills/kvm-control" | AGENT_SOCKETS
             ) {
                 collect_tree(root, &relative, out, depth + 1, scanned)?;
             }

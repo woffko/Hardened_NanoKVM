@@ -231,7 +231,11 @@ fn check_live_members(rootfs: &File, specs: &[Spec; COUNT]) -> Result<()> {
             &format!("{parent}/{}", live_name(index)),
             OFlags::RDONLY | OFlags::NONBLOCK,
         )?;
-        if live.metadata()?.len() != spec.size || hash_at(&live, 0, spec.size, None)? != spec.sha256
+        let metadata = live.metadata()?;
+        if metadata.len() != spec.size
+            || metadata.mode() & 0o7777 != 0o755
+            || metadata.nlink() != 1
+            || hash_at(&live, 0, spec.size, None)? != spec.sha256
         {
             return Err(SlotError::UnsupportedTransition);
         }
@@ -1201,14 +1205,21 @@ fn space(directories: &Directories, specs: &[Spec; COUNT], first: usize) -> Resu
     Ok(())
 }
 
-fn stage(
-    install: &mut AcceptedInstall,
-    closed: ClosedRuntime,
-    sources: Sources,
-) -> Result<Prepared<'_>> {
-    #[cfg(test)]
-    let _elapsed = diagnostics::Elapsed::start("stage.total", None);
-    sources.check(install, &closed)?;
+/// What exists when the plan becomes durable: the successors are still anonymous
+/// and nothing outlives a failure but an empty directory.
+struct Copied {
+    directories: Directories,
+    plan: Plan,
+    old_files: [Option<File>; COUNT],
+    successors: [Option<File>; COUNT],
+}
+
+fn copy_successors(
+    install: &AcceptedInstall,
+    closed: &ClosedRuntime,
+    sources: &Sources,
+) -> Result<Copied> {
+    sources.check(install, closed)?;
     let store = &install._store;
     let directories = support_operation!(
         "stage.directories",
@@ -1224,7 +1235,7 @@ fn stage(
     for index in 0..COUNT {
         #[cfg(test)]
         let _elapsed = diagnostics::Elapsed::start("stage.member-total", Some(index));
-        sources.check(install, &closed)?;
+        sources.check(install, closed)?;
         directories.check(store)?;
         space(&directories, &sources.new.specs, index)?;
         let old = &sources.old.specs[index];
@@ -1290,12 +1301,12 @@ fn stage(
         support_operation!("stage.source-root-sync", None, source.root.sync_all())?;
     }
     point("source-roots-synced")?;
-    sources.check(install, &closed)?;
+    sources.check(install, closed)?;
     directories.check(store)?;
     space(&directories, &sources.new.specs, COUNT)?;
-    let mut plan = Plan {
+    let plan = Plan {
         phase: SupportPhase::Staging,
-        app: prepared_record(install, &closed)?,
+        app: prepared_record(install, closed)?,
         parents: directories.identities,
         entries: entries.try_into().map_err(|_| SlotError::Invalid)?,
     };
@@ -1303,6 +1314,31 @@ fn stage(
     for (index, entry) in plan.entries.iter().enumerate() {
         named_object(directories.live(index), live_name(index), store, entry.old)?;
     }
+    Ok(Copied {
+        directories,
+        plan,
+        old_files,
+        successors,
+    })
+}
+
+fn stage(
+    install: &mut AcceptedInstall,
+    closed: ClosedRuntime,
+    sources: Sources,
+) -> Result<Prepared<'_>> {
+    #[cfg(test)]
+    let _elapsed = diagnostics::Elapsed::start("stage.total", None);
+    // No space, a live member that changed or any failed read: until the plan
+    // is durable these are verdicts too, and the rollback resumes the runtime.
+    let Copied {
+        directories,
+        mut plan,
+        old_files,
+        successors,
+    } = copy_successors(install, &closed, &sources)
+        .map_err(|error| SlotError::NotStaged(Box::new(error)))?;
+    let store = &install._store;
     publish_plan(&directories, store, &plan, None)?;
     point("staging-durable")?;
     for index in 0..COUNT {

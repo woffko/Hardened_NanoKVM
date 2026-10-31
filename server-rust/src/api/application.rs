@@ -745,17 +745,19 @@ fn submit_package(
     let installer = match connect_installer() {
         Ok(installer) => installer,
         Err(error) => {
-            withdraw_refused(transaction);
+            let _ = withdraw_refused(transaction);
             return Err(error);
         }
     };
     match installer.offer(handoff) {
         Ok(Answer::Refused(handoff)) => {
-            withdraw_refused(transaction);
+            let withdrawn = withdraw_refused(transaction);
             drop(handoff);
-            Err(AppError::Conflict(
-                "the installer did not take this update; nothing changed, try again".into(),
-            ))
+            Err(AppError::Conflict(if withdrawn {
+                "the installer did not take this update; nothing changed, try again".into()
+            } else {
+                "the installer did not take this update; the next one waits for a reboot".into()
+            }))
         }
         Ok(_) => Ok(transaction),
         Err(error) => Err(AppError::Internal(format!(
@@ -767,10 +769,12 @@ fn submit_package(
 }
 
 /// Otherwise the record stops further updates until boot recovery retires it.
-fn withdraw_refused(transaction: [u8; 16]) {
-    if let Err(error) = app_slot::withdraw(transaction) {
+fn withdraw_refused(transaction: [u8; 16]) -> bool {
+    let withdrawn = app_slot::withdraw(transaction);
+    if let Err(error) = &withdrawn {
         tracing::warn!(%error, "the refused update stays recorded until the next boot");
     }
+    withdrawn.is_ok()
 }
 
 fn connect_installer() -> Result<Sender> {

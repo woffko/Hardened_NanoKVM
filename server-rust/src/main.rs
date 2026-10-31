@@ -393,7 +393,13 @@ async fn run_https(
     let http_addr = config.listen_addr()?;
     let https_addr = config.https_listen_addr()?;
     let tls_config = match &startup {
-        Some(startup) => startup.tls_configuration(&config)?,
+        Some(startup) => match startup.tls_configuration(&config) {
+            Ok(tls_config) => tls_config,
+            // As at any start: an update does not depend on a damaged pair.
+            Err(error) => {
+                tls::temporary_server_config(error, nanokvm_rust_server::api::vm::tls_names())?
+            }
+        },
         None => tls::server_config_or_temporary(
             &config.cert.crt,
             &config.cert.key,

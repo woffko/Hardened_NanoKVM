@@ -359,9 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn key_proof_selects_only_nine_fixed_image_operations() {
+    fn key_proof_selects_only_the_fixed_image_operations() {
         for stage in ["public", "sign", "verify"] {
-            for key in ["rsa", "ecdsa", "ed25519"] {
+            for key in ["rsa", "ecdsa", "ed25519", "mldsa44-ed25519"] {
                 let mut image = args();
                 image.extend(["--host-key-proof".into(), format!("{stage}:{key}").into()]);
                 assert!(matches!(
