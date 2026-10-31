@@ -98,10 +98,143 @@ pub fn check_for_image(files: &AccountFiles<'_>, signed: &AccountFiles<'_>) -> R
     Ok(())
 }
 
-/// Preserve existing account/password rows and append only locked non-login
-/// service accounts from the signed image. Never renumber IDs or rehash secrets.
-/// Common group membership is the stable union required by both sets.
+/// Keep root and the accounts people use, and take every service account from
+/// the signed image. Deployed systems number the same services differently, and
+/// removed packages leave rows behind, so a device's service rows that differ
+/// from the image go first. Restored files are all root's, so nothing depends
+/// on those numbers. Accounts of people are never renumbered and hashes are never
+/// rehashed: a clash with one of them refuses the update.
 pub fn merge(source: &AccountFiles<'_>, signed: &AccountFiles<'_>) -> Result<MergedAccounts> {
+    let old = Tables::parse(source)?;
+    let image = Tables::parse(signed)?;
+    match without_replaced_services(source, &old, &image)? {
+        Some(kept) => merge_into(&kept.files(), signed),
+        None => merge_into(source, signed),
+    }
+}
+
+// No Debug/Clone/serde, as for MergedAccounts.
+struct KeptAccounts {
+    passwd: Zeroizing<Vec<u8>>,
+    group: Zeroizing<Vec<u8>>,
+    shadow: Zeroizing<Vec<u8>>,
+    gshadow: Option<Zeroizing<Vec<u8>>>,
+}
+impl KeptAccounts {
+    fn files(&self) -> AccountFiles<'_> {
+        AccountFiles {
+            passwd: &self.passwd,
+            group: &self.group,
+            shadow: &self.shadow,
+            gshadow: self.gshadow.as_deref().map(|v| v.as_slice()),
+        }
+    }
+}
+
+/// A locked, non-login row is a service account; root is neither, by `parse`.
+/// One that matches the image stays; any other leaves, and the merge then adds
+/// the image's row. A group leaves when no remaining account needs it and the
+/// image has no equal.
+fn without_replaced_services(
+    source: &AccountFiles<'_>,
+    old: &Tables<'_>,
+    image: &Tables<'_>,
+) -> Result<Option<KeptAccounts>> {
+    let mut users = BTreeSet::new();
+    for row in &old.passwd {
+        let name = row.fields[0];
+        let auth = find(&old.shadow, name).ok_or(NativeAccountError::Invalid)?;
+        if !non_login_shell(row.fields[6]) || !(locked(row.fields[1]) || locked(auth.fields[1])) {
+            continue;
+        }
+        let same = find(&image.passwd, name).is_some_and(|signed| {
+            [2, 3, 5, 6]
+                .iter()
+                .all(|field| signed.fields[*field] == row.fields[*field])
+        });
+        if !same {
+            users.insert(name);
+        }
+    }
+    let mut groups = BTreeSet::new();
+    for row in &old.group {
+        let name = row.fields[0];
+        let gid = number(row.fields[2])?;
+        let needed = old.passwd.iter().any(|user| {
+            !users.contains(user.fields[0]) && number(user.fields[3]).ok() == Some(gid)
+        }) || !staying(row.fields[3], &users).is_empty();
+        if !needed
+            && find(&image.group, name)
+                .is_none_or(|signed| number(signed.fields[2]).ok() != Some(gid))
+        {
+            groups.insert(name);
+        }
+    }
+    if users.is_empty() && groups.is_empty() {
+        return Ok(None);
+    }
+    let keep_user = |out: &mut Vec<u8>, name: &str, line: &str| {
+        if users.contains(name) {
+            return Ok(());
+        }
+        append_line(out, line.as_bytes())
+    };
+    Ok(Some(KeptAccounts {
+        passwd: rewrite(source.passwd, &old.passwd, |out, row| {
+            keep_user(out, row.fields[0], row.line)
+        })?,
+        shadow: rewrite(source.shadow, &old.shadow, |out, row| {
+            keep_user(out, row.fields[0], row.line)
+        })?,
+        group: rewrite(source.group, &old.group, |out, row| {
+            if groups.contains(row.fields[0]) {
+                return Ok(());
+            }
+            write_fields(out, &row.fields[..3], &staying(row.fields[3], &users))
+        })?,
+        gshadow: match (source.gshadow, &old.gshadow) {
+            (Some(bytes), Some(rows)) => Some(rewrite(bytes, rows, |out, row| {
+                if groups.contains(row.fields[0]) {
+                    return Ok(());
+                }
+                let admins = staying(row.fields[2], &users).join(",");
+                write_fields(
+                    out,
+                    &[row.fields[0], row.fields[1], &admins],
+                    &staying(row.fields[3], &users),
+                )
+            })?),
+            _ => None,
+        },
+    }))
+}
+
+/// Comments stay as they are; each row goes through `write`.
+fn rewrite<const N: usize>(
+    source: &[u8],
+    rows: &[Row<'_, N>],
+    mut write: impl FnMut(&mut Vec<u8>, &Row<'_, N>) -> Result<()>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(MAX_TABLE_BYTES));
+    let text = std::str::from_utf8(source).map_err(|_| NativeAccountError::Invalid)?;
+    for chunk in text.split_inclusive('\n') {
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        match rows.iter().find(|row| row.line == line) {
+            Some(row) => write(&mut out, row)?,
+            None => push(&mut out, chunk.as_bytes())?,
+        }
+    }
+    Ok(out)
+}
+
+fn staying<'a>(field: &'a str, users: &BTreeSet<&str>) -> Vec<&'a str> {
+    field
+        .split(',')
+        .filter(|member| !member.is_empty() && !users.contains(member))
+        .collect()
+}
+
+fn merge_into(source: &AccountFiles<'_>, signed: &AccountFiles<'_>) -> Result<MergedAccounts> {
     let old = Tables::parse(source)?;
     let image = Tables::parse(signed)?;
     let mut passwd = bounded_copy(source.passwd)?;

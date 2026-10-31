@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the deployed raw12 account ABI in the final filesystem image."""
+"""Check the pinned service accounts in the final filesystem image."""
 import os
 from pathlib import Path
 import subprocess
@@ -8,12 +8,9 @@ import tempfile
 
 USERS = {
     "avahi": (100, 101, "/"),
-    "named": (101, 102, "/etc/bind"),
-    "dbus": (102, 103, "/run/dbus"),
-    "sshd": (103, 104, "/var/empty"),
+    "sshd": (101, 102, "/var/empty"),
 }
-GROUPS = {"avahi": 101, "named": 102, "dbus": 103, "sshd": 104,
-          "input": 105, "kvm": 106, "sgx": 107}
+GROUPS = {"avahi": 101, "sshd": 102, "input": 103, "kvm": 104, "sgx": 105}
 
 
 def validate(passwd, group):
@@ -31,11 +28,11 @@ def validate(passwd, group):
     for name, (uid, gid, home) in USERS.items():
         row = by_user.get(name)
         if row is None or (int(row[2]), int(row[3]), row[5], row[6]) != (uid, gid, home, "/bin/false"):
-            raise ValueError(f"raw12 account ABI mismatch: {name}")
+            raise ValueError(f"service account mismatch: {name}")
     for name, gid in GROUPS.items():
         row = by_group.get(name)
         if row is None or int(row[2]) != gid:
-            raise ValueError(f"raw12 group ABI mismatch: {name}")
+            raise ValueError(f"service group mismatch: {name}")
 
 
 def main():
@@ -49,7 +46,7 @@ def main():
                            check=True, capture_output=True, env=dict(os.environ, LC_ALL="C"))
             contents.append(target.read_text())
         validate(*contents)
-    print("PASS: final rootfs preserves raw12 native account/group IDs")
+    print("PASS: final rootfs carries the pinned service account/group IDs")
 
 
 if __name__ == "__main__":

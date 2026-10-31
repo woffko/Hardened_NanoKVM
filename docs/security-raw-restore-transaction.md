@@ -450,11 +450,24 @@ extra UID 0 and unsupported root layout require an explicit migration.
 
 Root remains UID/GID 0 with `/root` and a recognized shell. Existing password
 rows, expiry fields, account locks and root shell are preserved, never replaced
-with image defaults, unlocked, regenerated or rehashed. New signed-image users
-must have unused nonzero UID/GID, a locked password and non-login shell. Common
-users must retain UID/GID; non-root service home/shell and a required locked state
-cannot silently disagree with the image. Conflicts stop capture rather than
-renumbering existing files or changing account policy behind the operator's back.
+with image defaults, unlocked, regenerated or rehashed.
+
+Service accounts belong to the image. Deployed systems number them differently:
+`.132` carries reservations for removed packages (`named`, `dbus`) and `sshd` at
+103:104, while a clean raw.12 has `sshd` at 101:102 and neither reservation. One
+image serves both. A device row with a non-login shell and a locked password is
+a service account: if it does not equal the image's row in UID, GID, home and
+shell, it leaves the device tables and the image's row takes its place. Its
+memberships and gshadow admin entries leave with it. A group leaves when no
+remaining account has it as primary group or member and the image has no group
+of that name and number. This is safe because every restored file is owned by
+root, so no preserved file depends on a service number.
+
+Accounts people use are never renumbered. New signed-image users must have unused
+nonzero UID/GID, a locked password and non-login shell. A common user with a login
+shell or a password must retain UID/GID, and a required locked state cannot
+silently disagree with the image. Conflicts stop capture rather than renumbering
+existing files or changing account policy behind the operator's back.
 
 Existing group membership is retained and extended by exact signed-image member
 requirements in stable order. gshadow retains existing password/admin state and

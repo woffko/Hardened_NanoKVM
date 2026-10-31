@@ -1,12 +1,10 @@
-# Persistent account ABI: deployed raw.12 (verified on primary 10.0.87.132).
-# Keep removed services' IDs reserved by locked, non-login accounts. Removing
-# their packages must not renumber sshd or reuse IDs of preserved user files.
+# Service accounts of the image. A raw update moves a device to these numbers
+# whatever layout it had, and keeps root and the accounts people use; see
+# "Native account preflight" in docs/security-raw-restore-transaction.md.
 # Buildroot mkusers resolves explicit IDs before package auto-ID entries.
 # user uid group gid password home shell supplementary-groups comment
 avahi 100 avahi 101 * - /bin/false -
-named 101 named 102 * /etc/bind /bin/false - BIND daemon (reserved)
-dbus 102 dbus 103 * /run/dbus /bin/false - DBus messagebus user (reserved)
-sshd 103 sshd 104 * /var/empty /bin/false - SSH drop priv user
-- -1 input 105 - - - -
-- -1 kvm 106 - - - -
-- -1 sgx 107 - - - -
+sshd 101 sshd 102 * /var/empty /bin/false - SSH drop priv user
+- -1 input 103 - - - -
+- -1 kvm 104 - - - -
+- -1 sgx 105 - - - -

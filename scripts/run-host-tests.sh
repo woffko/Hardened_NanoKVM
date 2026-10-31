@@ -10,6 +10,8 @@
 #   S40FIREWALL_TEST_IPV4_ONLY=1 when ip6_tables cannot be loaded; the IPv6 half is then NOT TESTED
 #   NTPD_BIN, NTPQ_BIN           host build of ntp 4.2.8p18 (test-s49ntp)
 #   SSHD_BIN, SSH_KEYGEN_BIN     host build of OpenSSH (test-s50sshd)
+#   LATEST_BUILDROOT_SOURCE_DIR  Buildroot tree with its mkusers (test-sg2002-account-ids); default:
+#                                build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2
 #   NANOKVM_HOST_BUILD_SCRIPT    compiled Cargo build script (test-ssh-runtime-build-script);
 #                                default: the newest server-rust/target/release/build/nanokvm-rust-server-*/build-script-build
 #   NANOKVM_HOST_HELPER_DIR      static RV64 helpers of the linked build; default:
@@ -109,6 +111,14 @@ for f in scripts/test-*.py; do
 			skip "$n" "no static helpers in $helpers (run the linked build or set NANOKVM_HOST_HELPER_DIR)"; continue
 		fi
 		run "$n" python3 -B "$f" "$build_script" "$helpers/nanokvm-ssh-sandbox" "$helpers/nanokvm-app-recovery" "$helpers"
+		continue
+	fi
+	if [ "$n" = test-sg2002-account-ids ]; then
+		tree="${LATEST_BUILDROOT_SOURCE_DIR:-build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
+		if [ ! -f "$tree/support/scripts/mkusers" ]; then
+			skip "$n" "no Buildroot tree in $tree (set LATEST_BUILDROOT_SOURCE_DIR)"; continue
+		fi
+		run "$n" python3 -B "$f" "$tree"
 		continue
 	fi
 	run "$n" python3 -B "$f"

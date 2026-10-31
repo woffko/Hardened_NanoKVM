@@ -127,7 +127,7 @@ fn source_without_final_newline_cannot_concatenate_a_new_account_into_old_row() 
 }
 
 #[test]
-fn uid_gid_and_common_service_layout_conflicts_require_explicit_migration() {
+fn a_clash_with_an_account_people_use_requires_explicit_migration() {
     for kind in 0..5 {
         let source = Fixture::source();
         let mut image = Fixture::image();
@@ -145,16 +145,24 @@ fn uid_gid_and_common_service_layout_conflicts_require_explicit_migration() {
                     "picoclaw:x:200:1000",
                 );
             }
-            2 => replace(&mut image.passwd, "daemon:x:1:1", "daemon:x:11:1"),
+            2 => image
+                .passwd
+                .extend_from_slice(b"operator:x:1001:1000:Service:/var/empty:/bin/false\n"),
             3 => {
-                replace(&mut image.group, "daemon:x:1", "daemon:x:11");
-                replace(&mut image.passwd, "daemon:x:1:1", "daemon:x:1:11");
+                image.group.extend_from_slice(b"users:x:1001:\n");
+                image
+                    .passwd
+                    .extend_from_slice(b"operator:x:1000:1001:Operator:/home/operator:/bin/sh\n");
             }
-            _ => replace(
-                &mut image.passwd,
-                "/usr/sbin:/bin/false",
-                "/var/empty:/bin/false",
-            ),
+            _ => image
+                .passwd
+                .extend_from_slice(b"operator:x:1000:1000:Other:/var/empty:/bin/false\n"),
+        }
+        if kind >= 2 {
+            image.shadow.extend_from_slice(b"operator:!:::::::\n");
+        }
+        if kind == 2 || kind == 4 {
+            image.group.extend_from_slice(b"users:x:1000:\n");
         }
         assert!(
             matches!(
@@ -380,4 +388,201 @@ fn malformed_or_unsupported_modular_password_hashes_are_not_native_ready() {
             "unsupported hash format was accepted"
         );
     }
+}
+
+const COMPACT_PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\navahi:x:100:101:avahi:/:/bin/false\nsshd:x:101:102:SSH:/var/empty:/bin/false\n";
+const COMPACT_GROUP: &str =
+    "root:x:0:\navahi:x:101:\nsshd:x:102:\ninput:x:103:\nkvm:x:104:\nsgx:x:105:\n";
+const COMPACT_SHADOW: &str = "root:*:::::::\navahi:*:::::::\nsshd:*:::::::\n";
+const EXPANDED_PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\navahi:x:100:101:avahi:/:/bin/false\nnamed:x:101:102:BIND:/etc/bind:/bin/false\ndbus:x:102:103:DBus:/run/dbus:/bin/false\nsshd:x:103:104:SSH:/var/empty:/bin/false\n";
+const EXPANDED_GROUP: &str = "root:x:0:\navahi:x:101:\nnamed:x:102:\ndbus:x:103:\nsshd:x:104:\ninput:x:105:\nkvm:x:106:\nsgx:x:107:\n";
+const EXPANDED_SHADOW: &str = "root:$5$synthetic$...........................................:20000:0:99999:7:::\navahi:*:::::::\nnamed:*:::::::\ndbus:*:::::::\nsshd:*:::::::\n";
+
+fn compact() -> Fixture {
+    Fixture {
+        passwd: COMPACT_PASSWD.into(),
+        group: COMPACT_GROUP.into(),
+        shadow: COMPACT_SHADOW.into(),
+        gshadow: None,
+    }
+}
+fn expanded() -> Fixture {
+    Fixture {
+        passwd: EXPANDED_PASSWD.into(),
+        group: EXPANDED_GROUP.into(),
+        shadow: EXPANDED_SHADOW.into(),
+        gshadow: None,
+    }
+}
+fn text(bytes: &[u8]) -> &str {
+    std::str::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_device_of_either_layout_takes_the_service_numbers_of_the_image() {
+    let result = merge(&expanded().files(), &compact().files()).unwrap();
+    let passwd = text(&result.passwd);
+    assert!(passwd.contains("sshd:x:101:102:SSH:/var/empty:/bin/false\n"));
+    assert!(!passwd.contains("named:") && !passwd.contains("dbus:"));
+    let group = text(&result.group);
+    for row in [
+        "sshd:x:102:\n",
+        "input:x:103:\n",
+        "kvm:x:104:\n",
+        "sgx:x:105:\n",
+    ] {
+        assert!(group.contains(row), "{row}");
+    }
+    assert!(!group.contains("named:") && !group.contains("dbus:"));
+    let shadow = text(&result.shadow);
+    assert!(shadow.contains(SYNTHETIC_HASH), "root keeps its hash");
+    assert!(!shadow.contains("named:") && !shadow.contains("dbus:"));
+
+    let result = merge(&compact().files(), &expanded().files()).unwrap();
+    let passwd = text(&result.passwd);
+    assert!(passwd.contains("sshd:x:103:104:"));
+    assert!(passwd.contains("named:x:101:102:") && passwd.contains("dbus:x:102:103:"));
+    assert!(text(&result.group).contains("input:x:105:\n"));
+}
+
+#[test]
+fn the_merged_tables_satisfy_the_check_of_early_boot() {
+    for (device, image) in [
+        (expanded(), compact()),
+        (compact(), expanded()),
+        (compact(), compact()),
+    ] {
+        let merged = merge(&device.files(), &image.files()).unwrap();
+        let files = AccountFiles {
+            passwd: &merged.passwd,
+            group: &merged.group,
+            shadow: &merged.shadow,
+            gshadow: merged.gshadow.as_deref().map(|v| v.as_slice()),
+        };
+        check_for_image(&files, &image.files()).unwrap();
+    }
+}
+
+#[test]
+fn a_device_already_on_the_image_layout_keeps_its_exact_bytes() {
+    let mut device = compact();
+    replace(
+        &mut device.shadow,
+        "root:*:",
+        &format!("root:{SYNTHETIC_HASH}:"),
+    );
+    device.passwd.extend_from_slice(b"# local comment\n");
+    device.group.extend_from_slice(b"# local comment\n");
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert_eq!(&*result.passwd, &device.passwd);
+    assert_eq!(&*result.group, &device.group);
+    assert_eq!(&*result.shadow, &device.shadow);
+}
+
+#[test]
+fn accounts_people_use_stay_and_a_clash_refuses() {
+    // An ordinary account elsewhere stays, with its groups.
+    let mut device = expanded();
+    device
+        .passwd
+        .extend_from_slice(b"alice:x:1000:1000:Alice:/home/alice:/bin/sh\n");
+    device.group.extend_from_slice(b"alice:x:1000:\n");
+    device.shadow.extend_from_slice(b"alice:!:::::::\n");
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert!(text(&result.passwd).contains("alice:x:1000:1000:Alice:/home/alice:/bin/sh\n"));
+    assert!(text(&result.group).contains("alice:x:1000:\n"));
+
+    // An account with a login shell on a number the image needs.
+    let mut device = compact();
+    replace(
+        &mut device.passwd,
+        "avahi:x:100:101:avahi:/:/bin/false",
+        "alice:x:100:101:Alice:/home/alice:/bin/sh",
+    );
+    replace(&mut device.shadow, "avahi:*:", "alice:!:");
+    assert!(matches!(
+        merge(&device.files(), &compact().files()),
+        Err(NativeAccountError::Conflict)
+    ));
+
+    // sshd with a shell is not a service account here, whatever its name says.
+    let mut device = expanded();
+    replace(
+        &mut device.passwd,
+        "sshd:x:103:104:SSH:/var/empty:/bin/false",
+        "sshd:x:103:104:SSH:/var/empty:/bin/sh",
+    );
+    assert!(matches!(
+        merge(&device.files(), &compact().files()),
+        Err(NativeAccountError::Conflict)
+    ));
+
+    // A group with a person in it keeps its number, so a change refuses.
+    let mut device = expanded();
+    device
+        .passwd
+        .extend_from_slice(b"alice:x:1000:1000:Alice:/home/alice:/bin/sh\n");
+    device.group.extend_from_slice(b"alice:x:1000:\n");
+    device.shadow.extend_from_slice(b"alice:!:::::::\n");
+    replace(&mut device.group, "input:x:105:", "input:x:105:alice");
+    assert!(matches!(
+        merge(&device.files(), &compact().files()),
+        Err(NativeAccountError::Conflict)
+    ));
+}
+
+#[test]
+fn a_service_with_a_password_is_kept_out_of_the_replacement() {
+    let mut device = expanded();
+    replace(
+        &mut device.shadow,
+        "sshd:*:",
+        &format!("sshd:{SYNTHETIC_HASH}:"),
+    );
+    assert!(matches!(
+        merge(&device.files(), &compact().files()),
+        Err(NativeAccountError::Conflict)
+    ));
+}
+
+#[test]
+fn departing_services_leave_every_group_and_gshadow_row_consistent() {
+    let mut device = expanded();
+    device.group.extend_from_slice(b"video:x:44:named,root\n");
+    device.gshadow = Some(
+        "root:!::\navahi:!::\nnamed:!::\ndbus:!::\nsshd:!::\ninput:!::\nkvm:!::\nsgx:!::\nvideo:!:named:named,root\n"
+            .into(),
+    );
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert!(text(&result.group).contains("video:x:44:root\n"));
+    let gshadow = text(result.gshadow.as_deref().unwrap());
+    assert!(gshadow.contains("video:!::root\n"));
+    assert!(!gshadow.contains("named"));
+    assert!(gshadow.contains("input:!::\n"));
+}
+
+#[test]
+fn a_device_service_the_image_does_not_know_is_not_kept() {
+    let mut device = compact();
+    device
+        .passwd
+        .extend_from_slice(b"oldsvc:x:300:300:Old:/var/empty:/bin/false\n");
+    device.group.extend_from_slice(b"oldsvc:x:300:\n");
+    device.shadow.extend_from_slice(b"oldsvc:*:::::::\n");
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert_eq!(text(&result.passwd), COMPACT_PASSWD);
+    assert_eq!(text(&result.group), COMPACT_GROUP);
+}
+
+#[test]
+fn a_service_with_another_home_or_shell_takes_the_row_of_the_image() {
+    let mut device = compact();
+    replace(
+        &mut device.passwd,
+        "sshd:x:101:102:SSH:/var/empty:/bin/false",
+        "sshd:x:101:102:SSH:/run/sshd:/sbin/nologin",
+    );
+    let result = merge(&device.files(), &compact().files()).unwrap();
+    assert!(text(&result.passwd).contains("sshd:x:101:102:SSH:/var/empty:/bin/false\n"));
+    assert!(!text(&result.passwd).contains("/run/sshd"));
 }
