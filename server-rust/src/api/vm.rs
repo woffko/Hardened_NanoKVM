@@ -1205,7 +1205,7 @@ pub async fn set_tls(
                 .blocking(move |permit| {
                     let mut config = Config::read_for(permit)?;
                     if req.enabled {
-                        tls::ensure_server_cert(TLS_CERT_FILE, TLS_KEY_FILE, tls_names())?;
+                        tls::prepare_server_cert(TLS_CERT_FILE, TLS_KEY_FILE, tls_names())?;
                         config.proto = "https".to_string();
                         config.cert.crt = TLS_CERT_FILE.to_string();
                         config.cert.key = TLS_KEY_FILE.to_string();

@@ -506,7 +506,7 @@ fn effective_mode_for(config: &FirewallConfig, server_config: &Config) -> String
 }
 
 fn https_enabled(config: &Config) -> bool {
-    config.proto.eq_ignore_ascii_case("https")
+    config.proto == "https"
 }
 
 fn mode_requires_https(mode: &str) -> bool {
@@ -720,6 +720,18 @@ mod tests {
 
         config.proto = "https".to_string();
         assert_eq!(effective_mode_for(&firewall, &config), MODE_RESTRICTED);
+    }
+
+    #[test]
+    fn only_the_word_the_server_starts_tls_on_counts_as_https() {
+        let firewall = FirewallConfig {
+            mode: MODE_PARANOID.to_string(),
+        };
+        let config = Config {
+            proto: "HTTPS".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(effective_mode_for(&firewall, &config), MODE_MODERATE);
     }
 
     #[test]

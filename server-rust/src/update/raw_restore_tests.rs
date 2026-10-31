@@ -171,6 +171,54 @@ fn required_raw_image_applies_once_and_commits_the_ticket() {
     assert_eq!(second, Outcome::NotRequired);
 }
 
+fn applied(source: &Path, config: &crate::config::Config) -> TempDir {
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let root = restored_root(source, true);
+    fs::write(
+        root.path().join("etc/kvm/server.yaml"),
+        include_bytes!(
+            "../../../buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/kvm/server.yaml"
+        ),
+    )
+    .unwrap();
+    let ticket = capture_ticket(source, config, capsules.path());
+    let mut store = Store::open_fixture(store_root.path()).unwrap();
+    store.publish_prepared(&ticket).unwrap();
+    let outcome = run_observed(
+        root.path(),
+        &mut store,
+        capsules.path(),
+        staging.path(),
+        &marker_dir.path().join("blocked"),
+        &observation(),
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::Applied);
+    root
+}
+
+#[test]
+fn the_https_of_a_new_installation_never_reaches_a_device_on_http() {
+    let proto = |root: &TempDir| {
+        let yaml = fs::read(root.path().join("etc/kvm/server.yaml")).unwrap();
+        serde_yaml::from_slice::<crate::config::Config>(&yaml)
+            .unwrap()
+            .proto
+    };
+    let (source, config) = fixture();
+    assert_eq!(proto(&applied(source.path(), &config)), "http");
+    fs::remove_file(source.path().join("etc/kvm/server.yaml")).unwrap();
+    fs::write(
+        source.path().join("etc/kvm/session_secret"),
+        format!("{}\n", config.jwt.secret_key),
+    )
+    .unwrap();
+    assert_eq!(proto(&applied(source.path(), &config)), "http");
+}
+
 #[test]
 fn the_mldsa_key_pair_survives_capture_archive_and_apply() {
     let (source, config) = fixture();
@@ -195,24 +243,7 @@ fn the_mldsa_key_pair_survives_capture_archive_and_apply() {
     for (path, bytes, _) in files {
         fs::write(source.path().join(path), bytes).unwrap();
     }
-    let capsules = private();
-    let store_root = private();
-    let staging = private();
-    let marker_dir = tempfile::tempdir().unwrap();
-    let root = restored_root(source.path(), true);
-    let ticket = capture_ticket(source.path(), &config, capsules.path());
-    let mut store = Store::open_fixture(store_root.path()).unwrap();
-    store.publish_prepared(&ticket).unwrap();
-    let outcome = run_observed(
-        root.path(),
-        &mut store,
-        capsules.path(),
-        staging.path(),
-        &marker_dir.path().join("blocked"),
-        &observation(),
-    )
-    .unwrap();
-    assert_eq!(outcome, Outcome::Applied);
+    let root = applied(source.path(), &config);
     for (path, bytes, mode) in files {
         let target = root.path().join(path);
         assert_eq!(fs::read(&target).unwrap(), bytes, "{path}");

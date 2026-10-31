@@ -18,6 +18,7 @@ use crate::{
 };
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/kvm/server.yaml";
+const CONFIG_DIRECTORY: &str = "/etc/kvm";
 const DEFAULT_SECRET_PATH: &str = "/etc/kvm/session_secret";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,21 +148,6 @@ impl Default for Config {
     }
 }
 
-impl Config {
-    /// A new full-SD/factory installation starts on HTTPS; an existing config
-    /// keeps its explicit protocol choice.
-    pub fn new_install() -> Self {
-        Self {
-            proto: "https".to_string(),
-            cert: Cert {
-                crt: "/etc/kvm/server.crt".to_string(),
-                key: "/etc/kvm/server.key".to_string(),
-            },
-            ..Self::default()
-        }
-    }
-}
-
 impl Default for Port {
     fn default() -> Self {
         Self {
@@ -255,9 +241,7 @@ impl Config {
                 .map_err(|_| AppError::Config("invalid trial configuration".into()))?,
             None => Self::default(),
         };
-        config.normalize_legacy_fields();
-        config.validate_media_directory()?;
-        config.webrtc_limits()?;
+        config.settle()?;
         if config.jwt.secret_key.is_empty() {
             let bytes = startup
                 .read_state(&config.paths.session_secret_file, 4096)?
@@ -305,6 +289,8 @@ impl Config {
         Self::read_path(&writer_config_path(permit))
     }
 
+    /// A device without the file stays on HTTP. Only the image says HTTPS, in the
+    /// file it ships for a new installation.
     fn read_path(path: &Path) -> Result<Self> {
         let mut config = if path.exists() {
             let data = fs::read_to_string(path)?;
@@ -312,12 +298,17 @@ impl Config {
                 AppError::Config(format!("failed to parse {}: {err}", path.display()))
             })?
         } else {
-            Config::new_install()
+            Config::default()
         };
-        config.normalize_legacy_fields();
-        config.validate_media_directory()?;
-        config.webrtc_limits()?;
+        config.settle()?;
         Ok(config)
+    }
+
+    fn settle(&mut self) -> Result<()> {
+        self.normalize_legacy_fields();
+        self.anchor_tls_pair();
+        self.validate_media_directory()?;
+        self.webrtc_limits().map(|_| ())
     }
 
     pub(crate) fn webrtc_limits(&self) -> Result<WebRtcLimits> {
@@ -420,6 +411,16 @@ impl Config {
         }
         if self.paths.image_directory == Path::new("/data") {
             self.paths.image_directory = PathBuf::from(MEDIA_ROOT);
+        }
+    }
+
+    /// A raw capture reads a relative pair beside the configuration, so that is
+    /// where it is, whatever directory the server started in.
+    fn anchor_tls_pair(&mut self) {
+        for path in [&mut self.cert.crt, &mut self.cert.key] {
+            if !path.is_empty() && Path::new(path.as_str()).is_relative() {
+                *path = format!("{CONFIG_DIRECTORY}/{path}");
+            }
         }
     }
 
@@ -627,22 +628,63 @@ mod tests {
         assert!(!Config::default().security.allow_default_admin);
     }
 
+    const IMAGE_CONFIG: &str = include_str!(
+        "../../buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/kvm/server.yaml"
+    );
+
     #[test]
-    fn new_install_defaults_to_https_but_an_explicit_http_choice_is_kept() {
-        assert_eq!(Config::new_install().proto, "https");
-        assert_eq!(Config::default().proto, "http");
+    fn a_missing_file_is_http_and_an_explicit_choice_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server.yaml");
-        fs::write(&path, "proto: http\n").unwrap();
         assert_eq!(Config::read_path(&path).unwrap().proto, "http");
-        fs::remove_file(&path).unwrap();
-        assert_eq!(Config::read_path(&path).unwrap().proto, "https");
+        for proto in ["http", "https"] {
+            fs::write(&path, format!("proto: {proto}\n")).unwrap();
+            assert_eq!(Config::read_path(&path).unwrap().proto, proto);
+        }
     }
 
     #[test]
-    fn new_install_can_create_and_reload_its_tls_identity() {
+    fn the_image_says_https_and_nothing_else_differs_from_the_defaults() {
+        let config: Config = serde_yaml::from_str(IMAGE_CONFIG).unwrap();
+        assert_eq!(config.proto, "https");
+        let expected = Config {
+            proto: "https".to_string(),
+            cert: Cert {
+                crt: "/etc/kvm/server.crt".to_string(),
+                key: "/etc/kvm/server.key".to_string(),
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            serde_yaml::to_string(&config).unwrap(),
+            serde_yaml::to_string(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_relative_tls_pair_means_the_configuration_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let config = Config::read_path(&dir.path().join("missing.yaml")).unwrap();
+        let path = dir.path().join("server.yaml");
+        fs::write(
+            &path,
+            "proto: https\ncert:\n  crt: server.crt\n  key: tls/server.key\n",
+        )
+        .unwrap();
+        let config = Config::read_path(&path).unwrap();
+        assert_eq!(config.cert.crt, "/etc/kvm/server.crt");
+        assert_eq!(config.cert.key, "/etc/kvm/tls/server.key");
+        fs::write(&path, "cert:\n  crt: /data/own.crt\n  key: /data/own.key\n").unwrap();
+        let config = Config::read_path(&path).unwrap();
+        assert_eq!(config.cert.crt, "/data/own.crt");
+        assert_eq!(config.cert.key, "/data/own.key");
+        let missing = Config::read_path(&dir.path().join("missing.yaml")).unwrap();
+        assert_eq!(missing.cert.crt, "/etc/kvm/server.crt");
+    }
+
+    #[test]
+    fn a_new_installation_can_create_and_reload_its_tls_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_yaml::from_str(IMAGE_CONFIG).unwrap();
         // Mirror the factory paths beneath a private root, without changing cwd
         // or touching the host's /etc. Bare legacy defaults must fail this gate.
         let cert = dir

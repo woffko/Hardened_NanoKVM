@@ -392,6 +392,16 @@ secret-bearing output files are `0600`. Stale unused default copies never win
 over the actual custom source. The source files are not modified or migrated
 in place by this operation.
 
+A new installation serves HTTPS because the image ships an `/etc/kvm/server.yaml`
+that says so; nothing else makes that choice. A device without the file is on
+HTTP. The server, its trial run, capture and `S40firewall` all read a missing file
+that way, so no update moves a device to HTTPS by itself. The image's file never
+reaches an updated device, because restore always writes the canonical
+configuration over it. A relative TLS path in an older file means `/etc/kvm`,
+where capture reads it. A self-signed pair is written only when neither file
+exists. A pair that does not load stays on disk, the server presents a temporary
+certificate for that run and logs it, and turning HTTPS on refuses such a pair.
+
 All known Rust Config fields are retained except these fixed paths and the
 redundant legacy key alias. In particular, unchanged persisted HTTP stays HTTP:
 there is no forced HTTPS conversion or certificate generation. Latest explicitly

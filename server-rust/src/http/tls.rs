@@ -1,4 +1,11 @@
-use std::{fs::File, io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    fs::{self, File},
+    io,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     extract::connect_info::Connected,
@@ -152,18 +159,21 @@ fn server_config_from_readers(
     Ok(config)
 }
 
-/// Keeps a certificate and key that rustls loads as a matching pair, so the
-/// device keeps its TLS identity when HTTPS is enabled again and an
-/// administrator's own pair is never replaced. Otherwise publishes a new
-/// self-signed pair for `names`, key first and each file atomically, and loads
-/// it back. Returns whether a new pair was written.
+fn absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(err) if err.kind() == io::ErrorKind::NotFound)
+}
+
+/// Publishes a new self-signed pair for `names` when neither file exists, key
+/// first and each file atomically, and loads it back. Returns whether it did.
+/// Anything already there stays, usable or not: it may be an administrator's
+/// own pair, and a read that failed once is no reason to lose it.
 pub fn ensure_server_cert(
     cert_path: impl AsRef<Path>,
     key_path: impl AsRef<Path>,
     names: Vec<String>,
 ) -> Result<bool> {
     let (cert_path, key_path) = (cert_path.as_ref(), key_path.as_ref());
-    if load_server_config(cert_path, key_path).is_ok() {
+    if !absent(cert_path) || !absent(key_path) {
         return Ok(false);
     }
     let CertifiedKey { cert, key_pair } = generate_simple_self_signed(names)
@@ -172,6 +182,35 @@ pub fn ensure_server_cert(
     files::write_atomic(cert_path, cert.pem().as_bytes(), 0o644)?;
     load_server_config(cert_path, key_path)?;
     Ok(true)
+}
+
+/// For an operator turning HTTPS on: a pair that cannot serve is an error while
+/// the running protocol still works.
+pub fn prepare_server_cert(
+    cert_path: impl AsRef<Path>,
+    key_path: impl AsRef<Path>,
+    names: Vec<String>,
+) -> Result<()> {
+    let (cert_path, key_path) = (cert_path.as_ref(), key_path.as_ref());
+    ensure_server_cert(cert_path, key_path, names)?;
+    load_server_config(cert_path, key_path).map(|_| ())
+}
+
+/// The pair on disk or, when it cannot be loaded, a new one for this run alone,
+/// so a damaged file leaves the device reachable and nothing is replaced.
+pub fn server_config_or_temporary(
+    cert_path: impl AsRef<Path>,
+    key_path: impl AsRef<Path>,
+    names: Vec<String>,
+) -> Result<ServerConfig> {
+    load_server_config(cert_path, key_path).or_else(|error| {
+        warn!(%error, "the TLS pair is unusable; serving a temporary certificate");
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(names).map_err(|err| {
+                AppError::Internal(format!("failed to generate TLS certificate: {err}"))
+            })?;
+        server_config_from_pem(cert.pem().as_bytes(), key_pair.serialize_pem().as_bytes())
+    })
 }
 
 #[cfg(test)]
@@ -355,24 +394,88 @@ mod tests {
     }
 
     #[test]
-    fn a_mismatched_or_unreadable_pair_is_replaced() {
+    fn a_pair_that_cannot_load_stays_on_disk_and_a_temporary_one_serves() {
+        install_crypto_provider();
+        let names = || vec!["localhost".to_string()];
+        let (cert_pem, _) = pair("one.example.net");
+        let (_, other_key_pem) = pair("two.example.net");
+        for (cert_bytes, key_bytes) in [
+            (Some(cert_pem.as_bytes()), Some(other_key_pem.as_bytes())),
+            (
+                Some(b"not a certificate".as_slice()),
+                Some(other_key_pem.as_bytes()),
+            ),
+            (Some(cert_pem.as_bytes()), None),
+            (None, Some(other_key_pem.as_bytes())),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cert = dir.path().join("server.crt");
+            let key = dir.path().join("server.key");
+            for (path, bytes) in [(&cert, cert_bytes), (&key, key_bytes)] {
+                if let Some(bytes) = bytes {
+                    fs::write(path, bytes).unwrap();
+                }
+            }
+            assert!(load_server_config(&cert, &key).is_err());
+
+            assert!(!ensure_server_cert(&cert, &key, names()).unwrap());
+            assert!(server_config_or_temporary(&cert, &key, names()).is_ok());
+            assert!(prepare_server_cert(&cert, &key, names()).is_err());
+            for (path, bytes) in [(&cert, cert_bytes), (&key, key_bytes)] {
+                assert_eq!(fs::read(path).ok().as_deref(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_to_a_pair_that_is_not_there_yet_is_not_replaced() {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let cert = dir.path().join("server.crt");
         let key = dir.path().join("server.key");
-        let (cert_pem, _) = pair("one.example.net");
-        let (_, other_key_pem) = pair("two.example.net");
-        for (cert_bytes, key_bytes) in [
-            (cert_pem.as_bytes(), other_key_pem.as_bytes()),
-            (b"not a certificate".as_slice(), other_key_pem.as_bytes()),
-        ] {
-            fs::write(&cert, cert_bytes).unwrap();
-            fs::write(&key, key_bytes).unwrap();
-            assert!(load_server_config(&cert, &key).is_err());
+        std::os::unix::fs::symlink(dir.path().join("not-mounted"), &cert).unwrap();
+        assert!(!ensure_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap());
+        assert!(fs::symlink_metadata(&cert).unwrap().is_symlink());
+        assert!(!key.exists());
+    }
 
-            assert!(ensure_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap());
-            assert!(load_server_config(&cert, &key).is_ok());
-            assert_ne!(fs::read(&key).unwrap(), key_bytes);
+    #[test]
+    fn turning_https_on_creates_a_missing_pair_and_keeps_a_good_one() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        prepare_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap();
+        let (cert_bytes, key_bytes) = (fs::read(&cert).unwrap(), fs::read(&key).unwrap());
+        prepare_server_cert(&cert, &key, vec!["localhost".to_string()]).unwrap();
+        assert_eq!(fs::read(&cert).unwrap(), cert_bytes);
+        assert_eq!(fs::read(&key).unwrap(), key_bytes);
+    }
+
+    #[tokio::test]
+    async fn a_usable_pair_is_the_one_the_server_presents() {
+        install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        let (cert_pem, key_pem) = pair("kvm.example.net");
+        fs::write(&cert, &cert_pem).unwrap();
+        fs::write(&key, &key_pem).unwrap();
+        let server =
+            server_config_or_temporary(&cert, &key, vec!["localhost".to_string()]).unwrap();
+        let mut roots = RootCertStore::empty();
+        for certificate in CertificateDer::pem_slice_iter(cert_pem.as_bytes()) {
+            roots.add(certificate.unwrap()).unwrap();
         }
+        let client = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let (server_end, client_end) = tokio::io::duplex(64 * 1024);
+        let accept = TlsAcceptor::from(Arc::new(server)).accept(server_end);
+        let connect = TlsConnector::from(Arc::new(client))
+            .connect(ServerName::try_from("kvm.example.net").unwrap(), client_end);
+        let (accepted, connected) = tokio::join!(accept, connect);
+        accepted.unwrap();
+        connected.unwrap();
     }
 }

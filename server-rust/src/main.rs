@@ -392,7 +392,11 @@ async fn run_https(
     let https_addr = config.https_listen_addr()?;
     let tls_config = match &startup {
         Some(startup) => startup.tls_configuration(&config)?,
-        None => tls::load_server_config(&config.cert.crt, &config.cert.key)?,
+        None => tls::server_config_or_temporary(
+            &config.cert.crt,
+            &config.cert.key,
+            nanokvm_rust_server::api::vm::tls_names(),
+        )?,
     };
     let state = match &startup {
         Some(startup) => AppState::new_trial(config, startup)?,

@@ -290,6 +290,21 @@ for mode in restricted paranoid; do
     expect_ok reload
     expect_tables moderate "$mode without HTTPS"
 done
+# The script reads HTTPS as the server does. A missing file is HTTP.
+rm -f /etc/kvm/server.yaml
+expect_ok reload
+expect_tables moderate "paranoid without a configuration"
+for form in 'proto: "https"' "proto: 'https'" 'proto: https # a comment' 'proto:   https  '; do
+    printf '%s\nport:\n  http: 80\n  https: 8443\n' "$form" > /etc/kvm/server.yaml
+    expect_ok reload
+    expect_tables paranoid "$form"
+done
+for form in 'proto: HTTPS' 'proto: http' '# proto: https' 'proto: httpsx'; do
+    printf '%s\nport:\n  http: 80\n  https: 8443\n' "$form" > /etc/kvm/server.yaml
+    expect_ok reload
+    expect_tables moderate "$form"
+done
+set_https off
 expect_ok stop
 expect_tables baseline "stop"
 status_line='mode=paranoid effective=moderate https=disabled port=443 syslog_port=1514 local_ipv4="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 127.0.0.0/8" local_ipv6="fc00::/7 fe80::/10 ::1/128"'

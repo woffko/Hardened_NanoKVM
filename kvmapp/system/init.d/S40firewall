@@ -44,8 +44,10 @@ effective_mode() {
     echo "$mode"
 }
 
+# Reads the value as the server does: no file is HTTP, quotes and a comment are
+# not part of it, and only the lower-case word is HTTPS.
 https_enabled() {
-    grep -q '^proto:[[:space:]]*https[[:space:]]*$' "$SERVER_CONFIG" 2>/dev/null
+    grep -Eq "^proto:[[:space:]]*[\"']?https[\"']?[[:space:]]*(#.*)?\$" "$SERVER_CONFIG" 2>/dev/null
 }
 
 https_port() {
