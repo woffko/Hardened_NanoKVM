@@ -31,6 +31,7 @@ EXPECTED_SYSTEM_SECURITY_PATCH_LEVEL="${EXPECTED_SYSTEM_SECURITY_PATCH_LEVEL:-}"
 [ -f "$IMAGE" ] || die "rootfs image does not exist: $IMAGE"
 command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
 python3 "$ROOT/scripts/validate-sg2002-account-ids.py" "$IMAGE"
+"$ROOT/scripts/check-busybox-mode.sh" "$IMAGE" || die "the image carries a privileged BusyBox"
 LC_ALL=C debugfs -R "cat /etc/kvm/server.yaml" "$IMAGE" 2>/dev/null | grep -qx 'proto: https' || \
 	die "the image does not start a new installation on HTTPS"
 for zone in zone1970.tab posix/Etc/UTC posix/Europe/Berlin; do
