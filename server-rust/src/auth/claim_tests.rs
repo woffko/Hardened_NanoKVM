@@ -20,7 +20,7 @@ impl Fixture {
         self.root.path().join("pwd")
     }
     fn ensure(&self, moment: &Moment) -> Option<String> {
-        ensure_at(&self.account(), moment, &self.console).unwrap()
+        ensure_at(&self.account(), || Ok(moment.clone()), &self.console).unwrap()
     }
 }
 
@@ -123,7 +123,7 @@ fn a_console_that_nobody_reads_does_not_hold_up_the_backend() {
     let port = fixture.root.path().join("port");
     let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = done.send(ensure_at(&account, &moment("boot-a", 1), &port).is_ok());
+        let _ = done.send(ensure_at(&account, || Ok(moment("boot-a", 1)), &port).is_ok());
     });
     assert_eq!(finished.recv_timeout(Duration::from_secs(5)), Ok(true));
 }
@@ -145,7 +145,9 @@ fn an_initialized_account_removes_the_stale_claim() {
     let account = fixture.account();
     fixture.ensure(&moment("boot-a", 1)).unwrap();
     fs::write(&account, b"synthetic account").unwrap();
-    assert!(fixture.ensure(&moment("boot-a", 2)).is_none());
+    // An initialized device has no use for the clock, even a broken one.
+    let broken = || Err(AppError::Config("synthetic clock failure".to_string()));
+    assert_eq!(ensure_at(&account, broken, &fixture.console).unwrap(), None);
     assert!(!path(&account).exists());
 }
 

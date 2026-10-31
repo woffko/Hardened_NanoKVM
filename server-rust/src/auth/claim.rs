@@ -18,6 +18,7 @@ const CONSOLE: &str = "/dev/console";
 
 /// A device without a real-time clock starts in the past, so the age of a token
 /// counts in this boot's uptime and a token ends with its boot.
+#[derive(Clone)]
 struct Moment {
     boot: String,
     seconds: u64,
@@ -36,18 +37,23 @@ fn now() -> Result<Moment> {
 }
 
 pub fn ensure(account_file: &Path) -> Result<Option<String>> {
-    ensure_at(account_file, &now()?, Path::new(CONSOLE))
+    ensure_at(account_file, now, Path::new(CONSOLE))
 }
 
-fn ensure_at(account_file: &Path, now: &Moment, console: &Path) -> Result<Option<String>> {
+fn ensure_at(
+    account_file: &Path,
+    now: impl FnOnce() -> Result<Moment>,
+    console: &Path,
+) -> Result<Option<String>> {
     let path = path(account_file);
     if account_file.exists() {
         let _ = fs::remove_file(&path);
         return Ok(None);
     }
+    let now = now()?;
     // Damaged, unsafe, expired or from an earlier boot, the old file only stands
     // in the way of a device that nobody can set up.
-    if let Ok(Some(token)) = read(&path, now) {
+    if let Ok(Some(token)) = read(&path, &now) {
         announce(console, &token);
         return Ok(Some(token));
     }
