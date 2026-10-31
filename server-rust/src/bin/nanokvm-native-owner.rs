@@ -60,7 +60,7 @@ fn command(role: &str) -> Option<Command> {
     command
         .args([
             "--library-path",
-            "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",
+            nanokvm_rust_server::native_owner::LIBRARY_PATH,
             program,
         ])
         .env_clear()
@@ -154,7 +154,7 @@ mod tests {
             kvm.get_args().collect::<Vec<_>>(),
             [
                 "--library-path",
-                "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",
+                nanokvm_rust_server::native_owner::LIBRARY_PATH,
                 "/kvmapp/kvm_system/kvm_system"
             ]
         );
@@ -164,7 +164,7 @@ mod tests {
             backend.get_args().collect::<Vec<_>>(),
             [
                 "--library-path",
-                "/kvmapp/server/dl_lib:/mnt/system/usr/lib:/mnt/system/usr/lib/3rd",
+                nanokvm_rust_server::native_owner::LIBRARY_PATH,
                 "/kvmapp/server/NanoKVM-Server"
             ]
         );

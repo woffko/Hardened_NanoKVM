@@ -10,7 +10,7 @@ use nix::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::OpenOptionsExt,
@@ -29,7 +29,7 @@ use tokio::{
 
 use crate::{
     AppError, Result, auth::session::Session, error::ApiResponse, http::middleware::CurrentSession,
-    state::AppState,
+    native_owner::LIBRARY_PATH, state::AppState, system::script_supervisor,
 };
 
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
@@ -274,13 +274,32 @@ async fn run_script_foreground(command: Command, limits: RunLimits) -> Result<St
         .map_err(|_| AppError::Internal("script run ended without a result".to_string()))?
 }
 
+/// A device starts this program through the musl loader with an explicit library
+/// path, so the executable of this process is the loader and only argv[0] names
+/// the program. The loader takes the supervisor's option for its own and refuses.
+fn self_invocation(executable: PathBuf, argv0: Option<OsString>) -> (PathBuf, Vec<OsString>) {
+    let loader = executable
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.starts_with("ld-"));
+    match argv0 {
+        Some(program) if loader => (
+            executable,
+            vec!["--library-path".into(), LIBRARY_PATH.into(), program],
+        ),
+        _ => (executable, Vec::new()),
+    }
+}
+
 fn supervised_command(command: Command, limits: RunLimits) -> Result<Command> {
-    let executable = std::env::current_exe()?;
+    let (executable, prefix) =
+        self_invocation(std::env::current_exe()?, std::env::args_os().next());
     let standard = command.as_std();
     let program = standard.get_program().to_os_string();
     let arguments: Vec<_> = standard.get_args().map(|arg| arg.to_os_string()).collect();
     let mut supervised = Command::new(executable);
     supervised
+        .args(prefix)
         .arg("--script-supervisor")
         .arg(limits.timeout.as_secs().to_string())
         .arg(limits.grace.as_millis().to_string())
@@ -319,6 +338,11 @@ async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<Strin
             "script timed out; its process group was stopped".to_string(),
         ));
     };
+    if status.code() == Some(script_supervisor::LEFT_BEHIND) {
+        return Err(AppError::Internal(
+            "the script ended, but processes it started could not be stopped".to_string(),
+        ));
+    }
     if status.code() == Some(124) {
         return Err(AppError::Internal(
             "script timed out; its process tree was stopped".to_string(),
@@ -462,6 +486,42 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.arg(path);
         command
+    }
+
+    #[test]
+    fn the_supervisor_reruns_this_program_the_way_the_device_started_it() {
+        let (program, prefix) = self_invocation(
+            "/lib/ld-musl-riscv64xthead.so.1".into(),
+            Some("/kvmapp/server/NanoKVM-Server".into()),
+        );
+        assert_eq!(program, Path::new("/lib/ld-musl-riscv64xthead.so.1"));
+        assert_eq!(
+            prefix,
+            [
+                "--library-path",
+                LIBRARY_PATH,
+                "/kvmapp/server/NanoKVM-Server"
+            ]
+            .map(OsString::from)
+        );
+        let (program, prefix) = self_invocation("/opt/server".into(), Some("server".into()));
+        assert_eq!(program, Path::new("/opt/server"));
+        assert!(prefix.is_empty());
+    }
+
+    #[tokio::test]
+    async fn processes_left_behind_are_a_failure_with_their_own_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = script(
+            &dir,
+            "left.sh",
+            &format!("exit {}", script_supervisor::LEFT_BEHIND),
+        );
+        let error = run_foreground(command, LIMITS).await.unwrap_err();
+        assert!(
+            error.to_string().contains("could not be stopped"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

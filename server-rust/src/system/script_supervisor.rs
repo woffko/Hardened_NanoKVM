@@ -21,6 +21,8 @@ use std::{
 mod proc_tree;
 
 const CHILD_DRAIN: Duration = Duration::from_secs(1);
+/// The script ended and processes it started could not be stopped.
+pub const LEFT_BEHIND: i32 = 125;
 
 pub fn run(args: &[OsString]) -> i32 {
     let Some((timeout, grace, program, script_args)) = parse(args) else {
@@ -80,8 +82,11 @@ pub fn run(args: &[OsString]) -> i32 {
         let _ = child.wait();
         code = 124;
     }
-    kill_remaining_children();
-    code
+    exit_code(code, drain(CHILD_DRAIN, children))
+}
+
+fn exit_code(code: i32, children_gone: bool) -> i32 {
+    if children_gone { code } else { LEFT_BEHIND }
 }
 
 fn parse(args: &[OsString]) -> Option<(Duration, Duration, &OsString, &[OsString])> {
@@ -98,29 +103,26 @@ fn parse(args: &[OsString]) -> Option<(Duration, Duration, &OsString, &[OsString
     ))
 }
 
-fn kill_remaining_children() {
-    let deadline = Instant::now() + CHILD_DRAIN;
+/// Whether everything the script started is gone. An enumeration that keeps
+/// failing proves nothing, so it does not count as gone.
+fn drain(limit: Duration, mut children: impl FnMut() -> io::Result<Vec<ChildPid>>) -> bool {
+    let deadline = Instant::now() + limit;
     loop {
-        let children = match children() {
-            Ok(children) => children,
-            Err(_) => {
-                if Instant::now() >= deadline {
-                    return;
-                }
-                sleep(Duration::from_millis(10));
-                continue;
+        match children() {
+            Ok(children) if children.is_empty() => {
+                reap();
+                return true;
             }
-        };
-        if children.is_empty() {
-            reap();
-            return;
+            Ok(children) => {
+                for pid in children {
+                    let _ = proc_tree::signal_child(pid, ChildSignal::KILL);
+                }
+                reap();
+            }
+            Err(_) => {}
         }
-        for pid in children {
-            let _ = proc_tree::signal_child(pid, ChildSignal::KILL);
-        }
-        reap();
         if Instant::now() >= deadline {
-            return;
+            return false;
         }
         sleep(Duration::from_millis(10));
     }
@@ -140,5 +142,42 @@ fn reap() {
             Ok(WaitStatus::StillAlive) | Err(_) => break,
             Ok(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMIT: Duration = Duration::from_millis(30);
+
+    #[test]
+    fn a_child_left_behind_outranks_the_exit_code_of_the_script() {
+        assert_eq!(exit_code(0, true), 0);
+        assert_eq!(exit_code(124, true), 124);
+        assert_eq!(exit_code(0, false), LEFT_BEHIND);
+        assert_eq!(exit_code(124, false), LEFT_BEHIND);
+    }
+
+    #[test]
+    fn only_an_empty_listing_proves_the_children_are_gone() {
+        assert!(drain(LIMIT, || Ok(Vec::new())));
+        let mut listings = 0;
+        assert!(drain(LIMIT, || {
+            listings += 1;
+            Ok(if listings == 1 {
+                vec![ChildPid::from_raw(i32::MAX).unwrap()]
+            } else {
+                Vec::new()
+            })
+        }));
+    }
+
+    #[test]
+    fn a_child_that_stays_or_a_listing_that_fails_is_not_gone() {
+        assert!(!drain(LIMIT, || Ok(vec![
+            ChildPid::from_raw(i32::MAX).unwrap()
+        ])));
+        assert!(!drain(LIMIT, || Err(io::Error::other("no listing"))));
     }
 }

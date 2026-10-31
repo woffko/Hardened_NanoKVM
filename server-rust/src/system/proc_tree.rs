@@ -98,9 +98,12 @@ fn scan_proc(proc_root: &Path, parent: i32) -> io::Result<Vec<Pid>> {
         }
         let pid =
             Pid::from_raw(raw).ok_or_else(|| invalid("proc contains an invalid process ID"))?;
-        let stat = match File::open(entry.path().join("stat")) {
-            Ok(file) => read_limited(file, MAX_TASK_CHILDREN_BYTES)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+        let stat = File::open(entry.path().join("stat"))
+            .and_then(|file| read_limited(file, MAX_TASK_CHILDREN_BYTES));
+        let stat = match stat {
+            Ok(stat) if !stat.is_empty() => stat,
+            Ok(_) => continue,
+            Err(error) if gone(&error) => continue,
             Err(error) => return Err(error),
         };
         if parse_ppid(&stat)? == parent {
@@ -108,6 +111,11 @@ fn scan_proc(proc_root: &Path, parent: i32) -> io::Result<Vec<Pid>> {
         }
     }
     Ok(children)
+}
+
+/// A process that ended between the listing and this read.
+fn gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(nix::libc::ESRCH)
 }
 
 fn parse_ppid(stat: &[u8]) -> io::Result<i32> {
@@ -220,6 +228,17 @@ mod tests {
         fs::create_dir_all(&task).unwrap();
         fs::write(task.join("children"), "not-a-pid\n").unwrap();
         assert!(direct_children(root.path(), parent()).is_err());
+    }
+
+    #[test]
+    fn a_process_that_ends_during_the_scan_is_not_an_error() {
+        assert!(gone(&io::Error::from_raw_os_error(nix::libc::ESRCH)));
+        assert!(gone(&io::ErrorKind::NotFound.into()));
+        assert!(!gone(&io::Error::from_raw_os_error(nix::libc::EACCES)));
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("321")).unwrap();
+        fs::write(root.path().join("321/stat"), "").unwrap();
+        assert!(scan_proc(root.path(), 100).unwrap().is_empty());
     }
 
     #[test]
