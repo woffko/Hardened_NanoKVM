@@ -23,7 +23,7 @@ use crate::{
     state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
     update::{
-        app_install_lease::{Handoff, Sender},
+        app_install_lease::{Answer, Handoff, Sender},
         app_slot::{self, SlotError},
         app_stage::{AppArchive, AppDownload, AppStage, MAX_ARCHIVE_BYTES as MAX_UPDATE_BYTES},
         keys::verify_metadata_signature,
@@ -629,10 +629,9 @@ fn prepare_app_candidate(
 }
 
 /// Hands a verified candidate to the independent installer in the native
-/// broker. The prepared record is durable before the handoff; the installer
-/// then stops this backend for its frozen trial, so nothing here waits for an
-/// outcome. A queued handoff is not acceptance: observe the returned
-/// transaction instead of submitting again.
+/// broker. The prepared record is durable before the handoff, and the installer
+/// answers before it stops this backend for its frozen trial. Nothing here waits
+/// for an outcome: observe the returned transaction instead of submitting again.
 fn submit_package(
     source: AppArchive,
     stage: AppStage,
@@ -640,23 +639,50 @@ fn submit_package(
     handoff: Handoff,
 ) -> Result<[u8; 16]> {
     let candidate = prepare_app_candidate(source, stage, &authority)?;
+    // This backend still runs: past the installer's stop a refusal would cost
+    // the management path until a reboot.
+    app_slot::check_candidate(&candidate.input.root).map_err(|_| {
+        AppError::Conflict(
+            "this device cannot take that package by an application update; nothing changed".into(),
+        )
+    })?;
     // A prepared record that no installer accepts blocks further updates until
     // boot recovery retires it, so refuse first when nobody is listening.
     drop(connect_installer()?);
     let prepared = app_slot::prepare(candidate, handoff).map_err(slot_error)?;
     let transaction = prepared.transaction();
+    let handoff = prepared.into_handoff();
     // Connect again: the installer drops an idle offer after five seconds,
     // and preparation syncs the whole candidate first.
-    connect_installer()?
-        .send(prepared.into_handoff())
-        .map_err(|error| {
-            AppError::Internal(format!(
-                "the installer did not take update {:032x} ({error}); check its job status, \
-                 do not submit it again",
-                u128::from_be_bytes(transaction)
+    let installer = match connect_installer() {
+        Ok(installer) => installer,
+        Err(error) => {
+            withdraw_refused(transaction);
+            return Err(error);
+        }
+    };
+    match installer.offer(handoff) {
+        Ok(Answer::Refused(handoff)) => {
+            withdraw_refused(transaction);
+            drop(handoff);
+            Err(AppError::Conflict(
+                "the installer did not take this update; nothing changed, try again".into(),
             ))
-        })?;
-    Ok(transaction)
+        }
+        Ok(_) => Ok(transaction),
+        Err(error) => Err(AppError::Internal(format!(
+            "the installer did not take update {:032x} ({error}); check its job status, \
+             do not submit it again",
+            u128::from_be_bytes(transaction)
+        ))),
+    }
+}
+
+/// Otherwise the record stops further updates until boot recovery retires it.
+fn withdraw_refused(transaction: [u8; 16]) {
+    if let Err(error) = app_slot::withdraw(transaction) {
+        tracing::warn!(%error, "the refused update stays recorded until the next boot");
+    }
 }
 
 fn connect_installer() -> Result<Sender> {

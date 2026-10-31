@@ -242,9 +242,14 @@ SEQPACKET, distinct from the mode0600 STREAM lifecycle endpoint. Parent checks,
 pinned proc-fd addressing, CLOEXEC/NONBLOCK and exact-inode cleanup apply to both.
 There is no generic pathname/program/root selector or FD-carrying lifecycle op.
 
-`Sender::connect_broker` selects only this protected endpoint. `send` still means
-queued, not accepted, published, committed or healthy; an ambiguous send does
-not authorize submitting another transaction. The daemon retains at most four
+`Sender::connect_broker` selects only this protected endpoint. `offer` answers
+Taken, Refused or Unknown. Taken arrives before the backend is told to stop and
+says who owns the transaction, not that it is published, committed or healthy.
+On Refused nothing started and every lease of the offer is closed: the API
+withdraws the prepared record, which would otherwise block further updates,
+backend restarts and Pico until a reboot. An older daemon closes without a word,
+which reads as Unknown, and Unknown does not authorize submitting another
+transaction. The daemon retains at most four
 nonblocking offers, with the normal five-second idle budget, while continuing
 lifecycle servicing. It reuses the exact 72-byte/three-rights lease parser,
 validates the pinned protected lock domains and requires canonical prepared

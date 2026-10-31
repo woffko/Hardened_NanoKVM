@@ -30,6 +30,9 @@ use std::{
 const MAGIC: &[u8; 8] = b"NKAPPL01";
 const BYTES: usize = 72;
 const TIMEOUT: Duration = Duration::from_secs(2);
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+const TAKEN: u8 = b'T';
+const REFUSED: u8 = b'R';
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -128,8 +131,26 @@ impl Sender {
         Ok(Self { socket })
     }
 
-    /// Consumes once, including on error. Queued does NOT mean accepted,
-    /// installed or healthy. Do not retry an ambiguous send as a new install.
+    /// Consumes once, including on error. Taken does NOT mean installed or
+    /// healthy. Do not retry an ambiguous offer as a new install.
+    pub fn offer(self, handoff: Handoff) -> Result<Answer, Error> {
+        send(&self.socket, &handoff.transaction, &handoff.files)?;
+        // A connected endpoint is nonblocking, which would read as no answer.
+        let flags = fcntl_getfl(&self.socket).map_err(io::Error::from)?;
+        rustix::fs::fcntl_setfl(&self.socket, flags - OFlags::NONBLOCK).map_err(io::Error::from)?;
+        set_socket_timeout(&self.socket, Timeout::Recv, Some(ANSWER_TIMEOUT))
+            .map_err(io::Error::from)?;
+        let mut answer = [0];
+        Ok(
+            match rustix::net::recv(&self.socket, &mut answer, RecvFlags::empty()) {
+                Ok((1, _)) if answer[0] == TAKEN => Answer::Taken,
+                Ok((1, _)) if answer[0] == REFUSED => Answer::Refused(handoff),
+                _ => Answer::Unknown,
+            },
+        )
+    }
+
+    #[cfg(test)]
     pub fn send(self, handoff: Handoff) -> Result<(), Error> {
         send(&self.socket, &handoff.transaction, &handoff.files)
     }
@@ -173,6 +194,16 @@ fn send(socket: &OwnedFd, transaction: &[u8; 16], files: &Files) -> Result<(), E
         return Err(Error::Record);
     }
     Ok(())
+}
+
+/// What an installer said about one offer. `Unknown` is one that closed without
+/// a word, as an older build does, or did not answer in time: inspect the
+/// transaction, never submit again.
+pub enum Answer {
+    Taken,
+    /// Nothing started. Keep the handoff until the record is withdrawn.
+    Refused(Handoff),
+    Unknown,
 }
 
 /// Owns all three accepted kernel exclusions; Drop is close-only.
@@ -283,6 +314,12 @@ impl Incoming {
                 result.map(Some)
             }
         }
+    }
+
+    /// Best effort: a peer that is gone loses nothing by not hearing this.
+    pub(crate) fn answer(&self, taken: bool) {
+        let answer = [if taken { TAKEN } else { REFUSED }];
+        let _ = rustix::net::send(&self.socket, &answer, SendFlags::NOSIGNAL);
     }
 
     #[cfg(test)]

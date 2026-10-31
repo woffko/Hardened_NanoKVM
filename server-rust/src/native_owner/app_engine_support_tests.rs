@@ -102,6 +102,21 @@ fn refused(engine: &mut Engine, root: &Path, transaction: [u8; 16], old: u64) {
     }
 }
 
+/// A verdict before staging: nothing changed, and the previous runtime resumes
+/// instead of the device staying uncertain until a reboot.
+fn resumed(engine: &mut Engine, root: &Path, transaction: [u8; 16], old: u64) {
+    let before = live(root);
+    until(|| {
+        engine.tick();
+        engine.install.is_none() && engine.mode == Mode::Running
+    });
+    assert_eq!(live(root), before);
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
+    assert!(!root.join("application-slot/current").exists());
+    assert!(!root.join("trial-owner-started").exists());
+}
+
 #[tokio::test]
 async fn executing_epoch_one_stages_the_support_family_and_can_roll_back() {
     let root = tempfile::tempdir().unwrap();
@@ -164,7 +179,7 @@ async fn absent_or_matching_unknown_source_contracts_never_select_the_executing_
             }
             fs::write(backend, bytes).unwrap();
         }
-        refused(&mut engine, root, transaction, old);
+        resumed(&mut engine, root, transaction, old);
         assert!(!root.join("etc/kvm/application-support").exists());
     }
 }
@@ -179,7 +194,7 @@ async fn every_unknown_live_member_refuses_without_exchange_or_automatic_retry()
         preparing(&mut engine);
         let path = root.join(name);
         fs::write(&path, b"unknown live support must not be replaced").unwrap();
-        refused(&mut engine, root, transaction, old);
+        resumed(&mut engine, root, transaction, old);
         assert!(evidence(root).is_empty());
         assert_eq!(
             fs::read(path).unwrap(),

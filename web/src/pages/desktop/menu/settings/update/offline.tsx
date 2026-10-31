@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import * as api from '@/api/application.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
-import { followAppUpdate } from './job.ts';
+import { appUpdateMessage, followAppUpdate } from './job.ts';
 
 interface UpdateProps {
   status: string;
@@ -74,24 +74,24 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
         }
         return followAppUpdate(rspj.data.transactionId).then((outcome) => {
           setIsLocked(false);
-          if (outcome === 'rolled-back') {
+          const message = appUpdateMessage(outcome, 'settings.update.offline.updateFailed');
+          if (message) {
             setStatus('failed');
-            setErrMsg(t('settings.update.offline.updateFailed'));
+            setErrMsg(t(message));
             return;
           }
           window.location.reload();
         });
       })
       .catch(async () => {
-        // No reply: the device may already be restarting for the update.
+        // No reply: the device may already be restarting for the update, and
+        // without its transaction nothing here can say how that ended.
         setStatus('restarting');
         const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
-        if (outcome === 'back') {
-          window.location.reload();
-          return;
-        }
         setStatus('failed');
-        setErrMsg(t('settings.update.unreachable'));
+        setErrMsg(
+          t(outcome === 'back' ? 'settings.update.outcomeUnknown' : 'settings.update.unreachable')
+        );
         setIsLocked(false);
       });
   }

@@ -1133,40 +1133,24 @@ impl Engine {
         }
     }
 
-    fn accept_install(&mut self, admission: app_install_lease::Accepted) -> Code {
-        // Retained lifecycle/maintenance work cannot be replaced by an offer.
-        if self.mode != Mode::Running
-            || self.install.is_some()
-            || self.lease.is_some()
-            || self.abandoned
-            || self.backend_restart.is_some()
-            || self.picoclaw_stop.is_some()
-            || !matches!(self.owner, Some(Owner::Running(_)))
-        {
-            return Code::Busy;
-        }
-        #[cfg(test)]
-        let accepted = match &self.fixture {
-            Some(root) => app_slot::issuer_tests::accept_fixture(root, admission),
-            None => app_slot::accept_prepared(admission),
-        };
-        #[cfg(not(test))]
-        let accepted = app_slot::accept_prepared(admission);
-        let install = match accepted {
+    /// The peer hears the verdict before anything of it stops, and a refusal
+    /// comes after every lease of the offer is closed.
+    fn accept_install(
+        &mut self,
+        admission: app_install_lease::Accepted,
+        answer: impl FnOnce(bool),
+    ) -> Code {
+        let install = match self.admit_install(admission) {
             Ok(install) => install,
-            Err(app_slot::SlotError::Busy) => return Code::Busy,
-            Err(_) => return Code::Invalid,
+            Err(code) => {
+                answer(false);
+                return code;
+            }
         };
-        #[cfg(test)]
-        if self.fixture.is_some() || self.fixture_hold_published {
-            // Synthetic payload only; production never rewrites accepted roots.
-            // Positive engine fixtures bypass ONLY epoch0 below, not staging,
-            // source/live validation, retained ownership or recovery ordering.
-            app_slot::support::populate_retained_fixture(&install);
-        }
         let Some(Owner::Running(broker)) = self.owner.take() else {
             return Code::Uncertain;
         };
+        answer(true);
         self.install = Some(match broker.begin_app_install(install) {
             app_install::Start::Draining(session) => Install {
                 owner: InstallOwner::Draining(session),
@@ -1186,6 +1170,43 @@ impl Engine {
         } else {
             Code::Ok
         }
+    }
+
+    fn admit_install(
+        &mut self,
+        admission: app_install_lease::Accepted,
+    ) -> Result<app_slot::AcceptedInstall, Code> {
+        // Retained lifecycle/maintenance work cannot be replaced by an offer.
+        if self.mode != Mode::Running
+            || self.install.is_some()
+            || self.lease.is_some()
+            || self.abandoned
+            || self.backend_restart.is_some()
+            || self.picoclaw_stop.is_some()
+            || !matches!(self.owner, Some(Owner::Running(_)))
+        {
+            return Err(Code::Busy);
+        }
+        #[cfg(test)]
+        let accepted = match &self.fixture {
+            Some(root) => app_slot::issuer_tests::accept_fixture(root, admission),
+            None => app_slot::accept_prepared(admission),
+        };
+        #[cfg(not(test))]
+        let accepted = app_slot::accept_prepared(admission);
+        let install = match accepted {
+            Ok(install) => install,
+            Err(app_slot::SlotError::Busy) => return Err(Code::Busy),
+            Err(_) => return Err(Code::Invalid),
+        };
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            // Synthetic payload only; production never rewrites accepted roots.
+            // Positive engine fixtures bypass ONLY epoch0 below, not staging,
+            // source/live validation, retained ownership or recovery ordering.
+            app_slot::support::populate_retained_fixture(&install);
+        }
+        Ok(install)
     }
 
     fn accept_raw(&mut self, offer: RawAccepted) -> Code {
@@ -1794,7 +1815,12 @@ impl Server {
                     Ok(Some(admission)) => {
                         // Ownership moves to the independent daemon before any
                         // backend Stop. Peer EOF no longer controls this job.
-                        self.engine.accept_install(admission);
+                        let code = self
+                            .engine
+                            .accept_install(admission, |taken| offer.answer(taken));
+                        if code != Code::Ok {
+                            eprintln!("app update offer refused: {code:?}");
+                        }
                         *slot = None;
                     }
                     Ok(None) if since.elapsed() < self.idle => {}

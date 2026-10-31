@@ -7232,6 +7232,8 @@ function setDeep(target: Record<string, unknown>, path: string, value: string) {
 }
 
 const updateRestartFallbackExtras: TranslationMap = {
+  'settings.update.outcomeUnknown':
+    'The outcome of this update is not known. Reload the page and compare the version before installing again.',
   'settings.update.restarting':
     'Installed. Waiting for the device to come back (up to two minutes); keep it powered.',
   'settings.update.unreachable':
@@ -7240,6 +7242,8 @@ const updateRestartFallbackExtras: TranslationMap = {
 
 const updateRestartLocalizedExtras: Record<string, TranslationMap> = {
   ru: {
+    'settings.update.outcomeUnknown':
+      'Результат обновления неизвестен. Перезагрузите страницу и сравните версию, прежде чем устанавливать снова.',
     'settings.update.restarting':
       'Установлено. Ждём, пока устройство снова ответит (до двух минут); не выключайте питание.',
     'settings.update.unreachable':

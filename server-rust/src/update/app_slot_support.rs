@@ -186,19 +186,93 @@ pub(crate) fn prepare(
     install: &mut AcceptedInstall,
     closed: ClosedRuntime,
 ) -> Result<Prepared<'_>> {
-    let sources = Sources::open(install, &closed)?;
-    // The executing build's own declaration decides before anything is staged.
-    // A transition it does not support is a known refusal with its own name;
-    // an unknown or incompatible contract keeps the conservative verdict.
-    support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi).map_err(|error| {
-        match error {
-            support_abi_catalog::CompatibilityError::UnsupportedTransition => {
-                SlotError::UnsupportedTransition
-            }
-            support_abi_catalog::CompatibilityError::UnknownOrIncompatible => SlotError::Invalid,
-        }
-    })?;
+    // The API checks all this before it records the package. What changed since
+    // then still stages nothing, so every verdict here takes the rollback that
+    // resumes the previous runtime instead of leaving it stopped until a reboot.
+    let sources = Sources::open(install, &closed).map_err(|_| SlotError::UnsupportedTransition)?;
+    support_abi_catalog::check_transition(&sources.old.abi, &sources.new.abi)
+        .map_err(|_| SlotError::UnsupportedTransition)?;
+    check_live_members(&install._store.rootfs, &sources.old.specs)
+        .map_err(|_| SlotError::UnsupportedTransition)?;
     stage(install, closed, sources)
+}
+
+/// The verdicts of `prepare`, read while the backend runs and nothing is
+/// recorded: a package refused only after the stop would cost the management
+/// path until a reboot. Reads the predecessor's declared family, the candidate's,
+/// and the live members the exchange would replace. This grants nothing.
+pub(super) fn check_candidate(rootfs: &File, candidate: &File) -> Result<()> {
+    let read = |root: &File| -> Result<(support_abi_catalog::Catalog, [Spec; COUNT])> {
+        let backend = restore_fs::open_beneath(
+            root,
+            "server/NanoKVM-Server",
+            OFlags::RDONLY | OFlags::NONBLOCK,
+        )?;
+        family_of(&backend)
+    };
+    let old = restore_fs::open_beneath(rootfs, "kvmapp", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let (old_abi, old_specs) = read(&old)?;
+    let (new_abi, _) = read(candidate)?;
+    support_abi_catalog::check_transition(&old_abi, &new_abi)
+        .map_err(|_| SlotError::UnsupportedTransition)?;
+    check_live_members(rootfs, &old_specs)
+}
+
+/// The exchange replaces exactly what the predecessor declares, and nothing else.
+fn check_live_members(rootfs: &File, specs: &[Spec; COUNT]) -> Result<()> {
+    for (index, spec) in specs.iter().enumerate() {
+        let parent = if index < 5 {
+            "usr/libexec"
+        } else {
+            "etc/init.d"
+        };
+        let live = restore_fs::open_beneath(
+            rootfs,
+            &format!("{parent}/{}", live_name(index)),
+            OFlags::RDONLY | OFlags::NONBLOCK,
+        )?;
+        if live.metadata()?.len() != spec.size || hash_at(&live, 0, spec.size, None)? != spec.sha256
+        {
+            return Err(SlotError::UnsupportedTransition);
+        }
+    }
+    Ok(())
+}
+
+fn family_of(backend: &File) -> Result<(support_abi_catalog::Catalog, [Spec; COUNT])> {
+    let size = backend.metadata()?.len();
+    if size > helper_family::MAX_BACKEND_BYTES {
+        return Err(SlotError::Invalid);
+    }
+    let helpers = support_operation!("source.helpers", None, helper_family::inspect(backend))?;
+    let scripts = support_operation!(
+        "source.scripts",
+        None,
+        boot_script_catalog::inspect_in_family(backend, size, &helpers)
+    )?;
+    let abi = support_operation!(
+        "source.abi",
+        None,
+        support_abi_catalog::inspect_in_catalogs(backend, size, &helpers, &scripts)
+    )?;
+    let specs = std::array::from_fn(|index| {
+        if index < 5 {
+            let member = &helpers.members()[index];
+            Spec {
+                start: member.image_range().start,
+                size: member.size(),
+                sha256: *member.sha256(),
+            }
+        } else {
+            let member = &scripts.members()[index - 5];
+            Spec {
+                start: member.payload_range().start,
+                size: member.size(),
+                sha256: *member.sha256(),
+            }
+        }
+    });
+    Ok((abi, specs))
 }
 
 fn maximum(index: usize) -> u64 {
@@ -289,38 +363,7 @@ impl Source {
         let backend = open_regular(&server, "NanoKVM-Server", store, 0o755, None)?;
         let metadata = backend.metadata()?;
         let stamp = metadata_stamp(&metadata);
-        let size = metadata.len();
-        if size > helper_family::MAX_BACKEND_BYTES {
-            return Err(SlotError::Invalid);
-        }
-        let helpers = support_operation!("source.helpers", None, helper_family::inspect(&backend))?;
-        let scripts = support_operation!(
-            "source.scripts",
-            None,
-            boot_script_catalog::inspect_in_family(&backend, size, &helpers)
-        )?;
-        let abi = support_operation!(
-            "source.abi",
-            None,
-            support_abi_catalog::inspect_in_catalogs(&backend, size, &helpers, &scripts)
-        )?;
-        let specs = std::array::from_fn(|index| {
-            if index < 5 {
-                let member = &helpers.members()[index];
-                Spec {
-                    start: member.image_range().start,
-                    size: member.size(),
-                    sha256: *member.sha256(),
-                }
-            } else {
-                let member = &scripts.members()[index - 5];
-                Spec {
-                    start: member.payload_range().start,
-                    size: member.size(),
-                    sha256: *member.sha256(),
-                }
-            }
-        });
+        let (abi, specs) = family_of(&backend)?;
         let source = Self {
             root,
             backend,
@@ -1338,7 +1381,10 @@ fn point(name: &str) -> Result<()> {
 #[path = "app_slot_support_tests.rs"]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{fixture as accepted_fixture, populate_retained_fixture};
+pub(crate) use tests::{
+    candidate_family_fixture, fixture as accepted_fixture, populate_predecessor_fixture,
+    populate_retained_fixture,
+};
 
 #[cfg(test)]
 #[path = "app_slot_support_exchange_tests.rs"]

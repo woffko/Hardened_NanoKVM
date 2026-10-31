@@ -86,17 +86,21 @@ fn hash(prefix: &[u8]) -> [u8; 32] {
 
 /// Fixed current declaration. There is no path, executable or epoch override.
 pub fn encode(role: Role) -> [u8; BYTES] {
+    encode_epochs(role, CURRENT)
+}
+
+pub(crate) fn encode_epochs(role: Role, epochs: Epochs) -> [u8; BYTES] {
     let mut bytes = [0; BYTES];
     bytes[..8].copy_from_slice(MAGIC);
     bytes[8..10].copy_from_slice(&FORMAT.to_le_bytes());
     bytes[10..12].copy_from_slice(&(BYTES as u16).to_le_bytes());
     bytes[12] = role as u8;
     for (index, epoch) in [
-        CURRENT.app_storage,
-        CURRENT.native_lifecycle,
-        CURRENT.helper_framing,
-        CURRENT.boot_script_framing,
-        CURRENT.support_transition,
+        epochs.app_storage,
+        epochs.native_lifecycle,
+        epochs.helper_framing,
+        epochs.boot_script_framing,
+        epochs.support_transition,
     ]
     .into_iter()
     .enumerate()

@@ -36,7 +36,12 @@ async fn accept(engine: &mut Engine, root: &Path) -> (u64, [u8; 16]) {
     let transaction = prepared.transaction();
     let old = root.join("kvmapp").metadata().unwrap().ino();
     let admission = received_fixture(root, prepared);
-    assert_eq!(engine.accept_install(admission), Code::Ok);
+    let mut answer = None;
+    assert_eq!(
+        engine.accept_install(admission, |taken| answer = Some(taken)),
+        Code::Ok
+    );
+    assert_eq!(answer, Some(true));
     drop(owner);
     (old, transaction)
 }
@@ -963,6 +968,88 @@ async fn terminal_retry_cannot_clear_later_owner_loss_even_after_the_archive_col
     // The group reaped the exact probe but did not receive a closure receipt.
     // No owner destruction, PID disappearance or retry grants closure.
     drop(engine);
+}
+
+#[tokio::test]
+async fn a_refused_offer_is_answered_and_leaves_the_runtime_running() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut engine = engine(root);
+    start_all(&mut engine);
+    let (owner, prepared) = prepared_fixture(root).await;
+    let id = prepared.transaction();
+    let admission = received_fixture(root, prepared);
+    engine.abandoned = true;
+    let mut answer = None;
+    assert_eq!(
+        engine.accept_install(admission, |taken| answer = Some(taken)),
+        Code::Busy
+    );
+    engine.abandoned = false;
+    assert_eq!(answer, Some(false));
+    assert!(engine.install.is_none());
+    assert_eq!(engine.mode, Mode::Running);
+    assert_eq!(engine.backend_status, Some(Status::Running));
+    assert_eq!(phase(root, id), app_slot::Phase::Prepared as u8);
+    drop(owner);
+    shutdown(&mut engine);
+}
+
+#[tokio::test]
+async fn a_recorded_install_keeps_a_stopped_backend_down_until_it_is_withdrawn() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let (owner, prepared) = prepared_fixture(root).await;
+    let id = prepared.transaction();
+    // No lease of the offer remains: only the record stands in the way.
+    drop(prepared.into_handoff());
+    drop(owner);
+    let pico = |engine: &Engine| {
+        let Some(Owner::Running(broker)) = &engine.owner else {
+            panic!("the broker must stay in charge");
+        };
+        broker.check_picoclaw_launch().is_ok()
+    };
+    let mut blocked = engine(root);
+    assert_eq!(
+        blocked.request(1, Operation::EnsureBackend).code,
+        Code::Uncertain
+    );
+    assert!(!matches!(
+        blocked.backend_status,
+        Some(Status::Running | Status::Starting)
+    ));
+    assert!(!pico(&blocked));
+    drop(blocked);
+    app_slot::issuer_tests::withdraw_fixture(root, id);
+    let mut engine = engine(root);
+    assert!(pico(&engine));
+    start_all(&mut engine);
+    shutdown(&mut engine);
+}
+
+#[tokio::test]
+async fn a_verdict_before_staging_resumes_the_previous_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut engine = engine(root);
+    start_all(&mut engine);
+    // As if the disk changed after the API checked this package.
+    fs::create_dir_all(root.join("kvmapp/server")).unwrap();
+    fs::write(root.join("kvmapp/server/NanoKVM-Server"), b"not a backend").unwrap();
+    let (old, transaction) = accept(&mut engine, root).await;
+    until(|| {
+        engine.tick();
+        engine.install.is_none()
+            && engine.mode == Mode::Running
+            && engine.roles == [2; 2]
+            && engine.backend_status == Some(Status::Running)
+    });
+    assert_eq!(root.join("kvmapp").metadata().unwrap().ino(), old);
+    assert_eq!(phase(root, transaction), app_slot::Phase::RolledBack as u8);
+    assert!(!root.join("application-slot/current").exists());
+    assert!(support::evidence(root).is_empty());
+    shutdown(&mut engine);
 }
 
 #[tokio::test]

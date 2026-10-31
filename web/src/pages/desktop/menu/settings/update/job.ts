@@ -6,6 +6,13 @@ export type AppUpdateOutcome = 'committed' | 'rolled-back' | 'unknown';
 const POLL_INTERVAL_MS = 3000;
 const POLL_DEADLINE_MS = 20 * 60 * 1000;
 
+// The message that stays on the page, or null when the update committed and the
+// page reloads into the new version. Any other reload would wipe the report.
+export function appUpdateMessage(outcome: AppUpdateOutcome, failed: string): string | null {
+  if (outcome === 'committed') return null;
+  return outcome === 'rolled-back' ? failed : 'settings.update.outcomeUnknown';
+}
+
 // The transaction of an update that this browser submitted and has not seen end.
 export function pendingAppUpdate() {
   return getAppUpdateJob();

@@ -208,23 +208,28 @@ impl Broker {
         command: std::process::Command,
         _admission: &RuntimePermit,
     ) -> Result<(), StartFailure> {
-        #[cfg(test)]
-        let fixture = self.update_parent.is_some();
-        #[cfg(not(test))]
-        let fixture = false;
-        if !fixture
-            && !matches!(
-                crate::update::app_slot::status(),
-                Ok(crate::update::app_slot::Status::NoTransaction
-                    | crate::update::app_slot::Status::Transaction(
-                        crate::update::app_slot::Phase::Committed
-                            | crate::update::app_slot::Phase::RolledBack
-                    ))
-            )
-        {
+        if !self.no_app_transaction_open() {
             return Err(StartFailure::Journal(JournalError::Unsafe));
         }
         self.launch(Role::Backend, command)
+    }
+
+    fn no_app_transaction_open(&self) -> bool {
+        #[cfg(test)]
+        let status = match &self.update_parent {
+            Some(parent) => crate::update::app_slot::status_fixture(parent),
+            None => crate::update::app_slot::status(),
+        };
+        #[cfg(not(test))]
+        let status = crate::update::app_slot::status();
+        matches!(
+            status,
+            Ok(crate::update::app_slot::Status::NoTransaction
+                | crate::update::app_slot::Status::Transaction(
+                    crate::update::app_slot::Phase::Committed
+                        | crate::update::app_slot::Phase::RolledBack
+                ))
+        )
     }
 
     fn launch(&mut self, role: Role, command: std::process::Command) -> Result<(), StartFailure> {
@@ -279,20 +284,7 @@ impl Broker {
 
     /// Gate before any stopped-pair recovery as well as before native spawn.
     fn check_picoclaw_launch(&self) -> Result<(), JournalError> {
-        #[cfg(test)]
-        let fixture = self.update_parent.is_some();
-        #[cfg(not(test))]
-        let fixture = false;
-        if !fixture
-            && !matches!(
-                crate::update::app_slot::status(),
-                Ok(crate::update::app_slot::Status::NoTransaction
-                    | crate::update::app_slot::Status::Transaction(
-                        crate::update::app_slot::Phase::Committed
-                            | crate::update::app_slot::Phase::RolledBack
-                    ))
-            )
-        {
+        if !self.no_app_transaction_open() {
             return Err(JournalError::Unsafe);
         }
         Ok(())

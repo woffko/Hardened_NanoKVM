@@ -144,9 +144,11 @@ closed. Pico ownership uncertainty latches broker admission even though the
 existing fixed control reply still has only the KVM/hwmon status bytes. The
 native lifecycle compatibility epoch is now 8; epoch-1 through epoch-7 transitions
 are refused, and `support_transition=0` still refuses even a matching epoch-8 live transition.
-That refusal is known before anything is staged, and the install engine then takes
-the cancel path on its own: the previous runtime resumes and the slot ends RolledBack;
-it is not an uncertain state.
+The API reads these verdicts, and the live members the exchange would replace, before
+it records a package, while the backend runs, so such a package stops nothing. Whatever
+changed after that check is still known before anything is staged: the install engine
+takes the cancel path on its own, the previous runtime resumes and the slot ends
+RolledBack. It is not an uncertain state.
 The separate boot receipt now has a generation-bound v2 format; the native
 Active/Maintenance/Stopping journal is unchanged. No automatic legacy adoption
 was introduced.
@@ -857,8 +859,8 @@ exact inactive members, syncs each unlink and removes the plan last. A supported
 foreign alternatives refuse. Early NoTransaction and terminal deferral paths
 require a clear support store instead of bypassing pending evidence.
 
-The current transition epoch is still zero, so the production entry refuses
-before creating that store (`SlotError::UnsupportedTransition`, which the install
+A verdict before staging refuses before that store exists
+(`SlotError::UnsupportedTransition`, which the install
 engine turns into an automatic rollback). Stopped/prior-boot recovery now reconciles support
 before app slots under the same `FencedAppRecovery`, retained update/store/writer
 exclusions and durable recovery intent. Canonical `Committed` selects successor

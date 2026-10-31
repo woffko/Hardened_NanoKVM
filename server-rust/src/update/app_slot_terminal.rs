@@ -49,7 +49,29 @@ impl AcceptedInstall {
     }
 }
 
+/// A prepared transaction no installer took. Nothing was published and no
+/// runtime stopped for it, so this needs none of the proofs recovery asks for.
+pub fn withdraw(transaction: [u8; 16]) -> Result<()> {
+    let store = Store::open(true)?.ok_or(SlotError::Invalid)?;
+    store.withdraw(transaction)
+}
+
 impl Store {
+    pub(super) fn withdraw(&self, transaction: [u8; 16]) -> Result<()> {
+        let record = self.record()?;
+        let layout = self.layout(&record)?;
+        if record.phase != Phase::Prepared
+            || record.transaction != transaction
+            || layout.live != Some(record.old)
+            || layout.new != Some(record.new)
+            || layout.old.is_some()
+        {
+            return Err(SlotError::Invalid);
+        }
+        self.recover()?;
+        self.retire(&self.record()?).map(|_| ())
+    }
+
     pub(super) fn retire_recovered(
         &self,
         record: &Record,

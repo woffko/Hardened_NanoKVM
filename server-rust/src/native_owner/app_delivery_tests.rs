@@ -734,7 +734,7 @@ async fn invalid_canonical_receipt_rejects_valid_leases_before_any_native_stop()
     let mut record = fs::read(&state).unwrap();
     record[8] = app_slot::Phase::Published as u8; // Wrong phase and checksum.
     fs::write(&state, &record).unwrap();
-    assert_eq!(e.accept_install(admission), Code::Invalid);
+    assert_eq!(e.accept_install(admission, |_| ()), Code::Invalid);
     assert!(e.install.is_none());
     assert_eq!(e.mode, Mode::Running);
     assert_eq!(e.backend_status, Some(Status::Running));
@@ -767,6 +767,7 @@ fn fixed_root_delivery_child() {
             app_stage::AppStage,
             operation::{Kind, UpdateCoordinator},
             state_writers::StateWriters,
+            support_abi,
         },
     };
     use nix::mount::{MsFlags, mount};
@@ -798,12 +799,13 @@ fn fixed_root_delivery_child() {
     .unwrap();
     nix::unistd::chroot(root).unwrap();
     std::env::set_current_dir("/").unwrap();
+    app_slot::support::populate_predecessor_fixture(Path::new("/"));
     let uid = nix::unistd::geteuid().as_raw();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .unwrap();
-    let submit = || {
+    let submit_declaring = |epochs: support_abi::Epochs| {
         let coordinator = Arc::new(UpdateCoordinator::default());
         let owner = coordinator.acquire(Kind::ApplicationOffline).unwrap();
         let drain = runtime
@@ -812,14 +814,46 @@ fn fixed_root_delivery_child() {
         let handoff = owner.prepare_install_handoff(drain).unwrap();
         submit_manual_fixture(
             AppStage::prepare().unwrap(),
-            &app_slot::issuer_tests::archive(),
+            &app_slot::issuer_tests::archive_with(app_slot::support::candidate_family_fixture(
+                "delivery-candidate",
+                epochs,
+            )),
             handoff,
         )
     };
+    let submit = || submit_declaring(support_abi::CURRENT);
+    let no_record = || !Path::new("/etc/kvm/application-slot/current").exists();
+    // A package the support step would refuse is refused here, with the backend
+    // still running: nothing is recorded and no installer is even asked.
+    let other_runtime = support_abi::Epochs {
+        native_lifecycle: support_abi::CURRENT.native_lifecycle + 1,
+        ..support_abi::CURRENT
+    };
+    let error = submit_declaring(other_runtime).unwrap_err();
+    assert!(error.to_string().contains("cannot take"), "{error}");
+    assert!(no_record());
     // With no installer listening the API refuses before any durable record,
     // which would otherwise block every later update until boot recovery.
     assert!(matches!(submit(), Err(crate::AppError::Conflict(_))));
-    assert!(!Path::new("/etc/kvm/application-slot/current").exists());
+    assert!(no_record());
+    // An installer that refuses the offer: the record goes again, and the next
+    // update is not blocked until a reboot.
+    {
+        let mut server = Server::new(broker(Path::new("/etc/kvm")), uid).unwrap();
+        server.engine.abandoned = true;
+        let (send, recv) = std::sync::mpsc::channel();
+        server.cancel = Some(recv);
+        std::thread::scope(|scope| {
+            let thread = scope.spawn(move || server.run());
+            let guard = Cancel(send);
+            let error = submit().unwrap_err();
+            assert!(error.to_string().contains("did not take"), "{error}");
+            assert!(no_record());
+            drop(guard);
+            let result = thread.join().unwrap();
+            assert!(result.is_ok() || result.unwrap_err().kind() == io::ErrorKind::Interrupted);
+        });
+    }
     // Only native enrollment/process execution are fixture supplied. Endpoint
     // connect, Incoming::open, prepared issuer and acceptance use fixed roots.
     let mut server = Server::new(broker(Path::new("/etc/kvm")), uid).unwrap();

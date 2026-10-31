@@ -33,6 +33,10 @@ function load(file, requireMap) {
   return module.exports;
 }
 
+const job = load('web/src/pages/desktop/menu/settings/update/job.ts', {
+  '@/api/application.ts': {},
+  '@/lib/localstorage.ts': { getAppUpdateJob() {}, removeAppUpdateJob() {}, setAppUpdateJob() {} },
+});
 const reconnect = load('web/src/lib/reconnect.ts', { '@/lib/service.ts': { getBaseUrl: () => 'http://test' } });
 const OPTIONS = { interval: 2000, restartGrace: 15000, deadline: 120000 };
 
@@ -115,6 +119,19 @@ async function test(name, work) {
     const offline = fs.readFileSync(path.join(ROOT, 'web/src/pages/desktop/menu/settings/update/offline.tsx'), 'utf8');
     assert(/status === 'updating' \|\| status === 'restarting'\) \{\s*return;/.test(offline),
       'a second upload must be refused while the page waits for the restart');
+  });
+
+  await test('only a committed update reloads; every other ending stays on the page', () => {
+    assert.equal(job.appUpdateMessage('committed', 'failed'), null);
+    assert.equal(job.appUpdateMessage('rolled-back', 'failed'), 'failed');
+    assert.equal(job.appUpdateMessage('unknown', 'failed'), 'settings.update.outcomeUnknown');
+    for (const file of ['web/src/pages/desktop/menu/settings/update/offline.tsx', 'web/src/pages/desktop/menu/settings/update/index.tsx']) {
+      const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+      const noReply = source.slice(source.indexOf('.catch(async () => {'));
+      assert(!noReply.slice(0, noReply.indexOf('});')).includes('location.reload'),
+        `${file} reloads when it never got a reply`);
+      assert(source.includes('appUpdateMessage('), `${file} decides the reload by itself`);
+    }
   });
 
   process.stdout.write(`web update reconnect: ${passed} passed, ${failed} failed\n`);

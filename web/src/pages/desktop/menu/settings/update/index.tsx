@@ -23,7 +23,7 @@ import * as firewallApi from '@/api/system-firewall.ts';
 import type { FirewallStatus } from '@/api/system-firewall.ts';
 import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
-import { followAppUpdate, pendingAppUpdate } from './job.ts';
+import { appUpdateMessage, followAppUpdate, pendingAppUpdate } from './job.ts';
 import type { AppUpdateOutcome } from './job.ts';
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
@@ -67,9 +67,10 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
   function finishAppUpdate(outcome: AppUpdateOutcome) {
     setIsLocked(false);
-    if (outcome === 'rolled-back') {
+    const message = appUpdateMessage(outcome, 'settings.update.updateFailed');
+    if (message) {
       setStatus('failed');
-      setErrMsg(t('settings.update.updateFailed'));
+      setErrMsg(t(message));
       return;
     }
     window.location.reload();
@@ -471,15 +472,14 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         return followAppUpdate(rsp.data.transactionId).then(finishAppUpdate);
       })
       .catch(async () => {
-        // No reply: the device may already be restarting for the update.
+        // No reply: the device may already be restarting for the update, and
+        // without its transaction nothing here can say how that ended.
         setStatus('restarting');
         const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
-        if (outcome === 'back') {
-          window.location.reload();
-          return;
-        }
         setStatus('failed');
-        setErrMsg(t('settings.update.unreachable'));
+        setErrMsg(
+          t(outcome === 'back' ? 'settings.update.outcomeUnknown' : 'settings.update.unreachable')
+        );
         setIsLocked(false);
       });
   }

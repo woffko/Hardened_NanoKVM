@@ -19,8 +19,17 @@ fn write(path: &Path, bytes: &[u8], mode: u32) {
 }
 
 fn family(variant: &str) -> Vec<u8> {
+    family_declaring(variant, support_abi::CURRENT).0
+}
+
+/// A synthetic backend and the helper images it embeds, by archive name.
+fn family_declaring(
+    variant: &str,
+    epochs: support_abi::Epochs,
+) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
     let originals = helper_family::candidate_files_fixture();
     let mut backend = b"synthetic support backend; never executed\n".to_vec();
+    let mut images = Vec::new();
     for (index, role) in helper_family::ROLES.into_iter().enumerate() {
         let name = format!("kvmapp/system/bin/{}", role.filename());
         let mut image = originals
@@ -36,7 +45,10 @@ fn family(variant: &str) -> Vec<u8> {
         {
             image.resize(128 * 1024, b'P');
         }
-        image.extend_from_slice(&support_abi::encode(support_abi::ROLES[index + 1]));
+        image.extend_from_slice(&support_abi::encode_epochs(
+            support_abi::ROLES[index + 1],
+            epochs,
+        ));
         let magic = if index == 0 {
             restore_binding::APP_RECOVERY_MAGIC
         } else {
@@ -46,6 +58,7 @@ fn family(variant: &str) -> Vec<u8> {
         backend.extend_from_slice(&(image.len() as u64).to_le_bytes());
         backend.extend_from_slice(&Sha256::digest(&image));
         backend.extend_from_slice(&image);
+        images.push((name, image));
     }
     for ((_, body), role) in BOOT_SCRIPTS.iter().zip(boot_script_catalog::ROLES) {
         let mut body = body.to_vec();
@@ -55,8 +68,43 @@ fn family(variant: &str) -> Vec<u8> {
         backend.extend_from_slice(&Sha256::digest(&body));
         backend.extend_from_slice(&body);
     }
-    backend.extend_from_slice(&support_abi::encode(support_abi::Role::Backend));
-    backend
+    backend.extend_from_slice(&support_abi::encode_epochs(
+        support_abi::Role::Backend,
+        epochs,
+    ));
+    (backend, images)
+}
+
+/// The files a package carries when its backend declares a real support family.
+pub(crate) fn candidate_family_fixture(
+    variant: &str,
+    epochs: support_abi::Epochs,
+) -> Vec<(String, Vec<u8>)> {
+    let (backend, mut files) = family_declaring(variant, epochs);
+    files.push(("kvmapp/server/NanoKVM-Server".into(), backend.clone()));
+    files.push(("kvmapp/backends/NanoKVM-Server.rust".into(), backend));
+    files
+}
+
+/// A running predecessor and its live members, for a test that enters through
+/// the API and so meets the real check before anything is recorded.
+pub(crate) fn populate_predecessor_fixture(root: &Path) {
+    let rootfs = File::open(root).unwrap();
+    let server = fixture_directory(&rootfs, "kvmapp/server");
+    fixture_write_at(&server, "NanoKVM-Server", &family("predecessor"));
+    let backend = restore_fs::open_beneath(&server, "NanoKVM-Server", OFlags::RDONLY).unwrap();
+    let (_, specs) = family_of(&backend).unwrap();
+    let executable = fixture_directory(&rootfs, "usr/libexec");
+    let init = fixture_directory(&rootfs, "etc/init.d");
+    for (index, spec) in specs.iter().enumerate() {
+        let mut bytes = vec![0; spec.size as usize];
+        backend.read_exact_at(&mut bytes, spec.start).unwrap();
+        fixture_write_at(
+            if index < 5 { &executable } else { &init },
+            live_name(index),
+            &bytes,
+        );
+    }
 }
 
 pub(crate) async fn fixture(root: &Path) -> AcceptedInstall {
@@ -170,6 +218,45 @@ pub(crate) fn populate_retained_fixture(install: &AcceptedInstall) {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn what_the_support_step_would_refuse_is_known_before_anything_stops() {
+    let root = tempfile::tempdir().unwrap();
+    let install = fixture(root.path()).await;
+    let rootfs = File::open(root.path()).unwrap();
+    let new = root.path().join("application-slot/current/new");
+    let check = || check_candidate(&rootfs, &File::open(&new).unwrap());
+    check().unwrap();
+
+    // The next release declares another runtime protocol.
+    let backend = new.join("server/NanoKVM-Server");
+    let good = fs::read(&backend).unwrap();
+    let epochs = support_abi::Epochs {
+        native_lifecycle: support_abi::CURRENT.native_lifecycle + 1,
+        ..support_abi::CURRENT
+    };
+    write(&backend, &family_declaring("successor", epochs).0, 0o755);
+    assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    write(&backend, b"not a backend", 0o755);
+    assert!(check().is_err());
+    write(&backend, &good, 0o755);
+    check().unwrap();
+
+    // Live members the exchange would find changed.
+    let live = root.path().join("usr/libexec").join(live_name(0));
+    let bytes = fs::read(&live).unwrap();
+    let mut changed = bytes.clone();
+    changed[0] ^= 1;
+    write(&live, &changed, 0o755);
+    assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    write(&live, &bytes[..bytes.len() - 1], 0o755);
+    assert!(matches!(check(), Err(SlotError::UnsupportedTransition)));
+    fs::remove_file(&live).unwrap();
+    assert!(check().is_err());
+    write(&live, &bytes, 0o755);
+    check().unwrap();
+    drop(install);
 }
 
 #[test]

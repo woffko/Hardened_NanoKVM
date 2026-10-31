@@ -52,7 +52,7 @@ use support::support_operation;
 mod terminal;
 #[cfg(test)]
 pub(crate) use terminal::job_status_fixture;
-pub use terminal::{JobStatus, job_status};
+pub use terminal::{JobStatus, job_status, withdraw};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SlotError {
@@ -515,6 +515,13 @@ fn accept_at(store: Store, admission: Accepted) -> Result<AcceptedInstall> {
         record,
         _admission: admission,
     })
+}
+
+/// Read-only, before anything is recorded or stopped; see `support::check_candidate`.
+pub fn check_candidate(root: &Path) -> Result<()> {
+    let rootfs = restore_fs::open_root(Path::new("/"), true)?;
+    let candidate = restore_fs::open_root(root, true)?;
+    support::check_candidate(&rootfs, &candidate).map_err(|_| SlotError::UnsupportedTransition)
 }
 
 /// Issue from actual extracted bytes and an app-only retained handoff. Never
@@ -1303,9 +1310,26 @@ pub fn status() -> Result<Status> {
     let Some(store) = Store::open_recovery(false)? else {
         return Ok(Status::NoTransaction);
     };
+    observed_status(&store)
+}
+
+fn observed_status(store: &Store) -> Result<Status> {
     let record = store.record()?;
     store.layout(&record)?;
     Ok(Status::Transaction(record.phase))
+}
+
+/// `status` of a test's own store, so a broker test gets the same decision.
+#[cfg(test)]
+pub(crate) fn status_fixture(parent: &File) -> Result<Status> {
+    let Some(directory) = open_optional(parent, DIRECTORY)? else {
+        return Ok(Status::NoTransaction);
+    };
+    let uid = nix::unistd::geteuid().as_raw();
+    match Store::at_root_mode(parent.try_clone()?, directory, uid, false, true)? {
+        Some(store) => observed_status(&store),
+        None => Ok(Status::NoTransaction),
+    }
 }
 
 fn recovery_lock_error(error: super::operation_lock::LockError) -> SlotError {

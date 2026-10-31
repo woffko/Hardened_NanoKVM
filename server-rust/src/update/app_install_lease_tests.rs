@@ -606,3 +606,39 @@ fn actual_exec_receiver_retains_three_fixed_root_leases_after_frontend_drop() {
     child.finish();
     assert!(root.path().join("accepted").exists());
 }
+
+#[tokio::test]
+async fn an_offer_hears_taken_refused_or_nothing_from_an_older_installer() {
+    for reply in [Some(true), Some(false), None] {
+        let Fixture {
+            root,
+            owner,
+            handoff,
+        } = fixture().await;
+        let (sender, receiver) = pair().unwrap();
+        let parent = File::open(root.path()).unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let mut incoming = Incoming::fixture(receiver.socket, parent, uid).unwrap();
+        let installer = std::thread::spawn(move || {
+            let accepted = loop {
+                if let Some(accepted) = incoming.poll().unwrap() {
+                    break accepted;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            drop(accepted);
+            if let Some(taken) = reply {
+                incoming.answer(taken);
+            }
+        });
+        let answer = sender.offer(handoff).unwrap();
+        installer.join().unwrap();
+        assert!(matches!(
+            (reply, answer),
+            (Some(true), Answer::Taken)
+                | (Some(false), Answer::Refused(_))
+                | (None, Answer::Unknown)
+        ));
+        drop(owner);
+    }
+}

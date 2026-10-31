@@ -27,9 +27,16 @@ fn fixture_trace(step: &str) {
 }
 
 pub(crate) fn archive() -> Vec<u8> {
+    archive_with(Vec::new())
+}
+
+/// `archive`, with these files replacing or joining the fixture's.
+pub(crate) fn archive_with(replacements: Vec<(String, Vec<u8>)>) -> Vec<u8> {
     let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gzip);
     let mut files = crate::update::helper_family::candidate_files_fixture();
+    files.retain(|(name, _)| !replacements.iter().any(|(other, _)| other == name));
+    files.extend(replacements);
     files.push(("kvmapp/version".into(), b"2.0.43\n".to_vec()));
     files.push((
         "kvmapp/system/init.d/S95nanokvm".into(),
@@ -122,6 +129,14 @@ pub(crate) fn accept_fixture(root: &Path, admission: Accepted) -> Result<Accepte
         read_store(root, true)?.ok_or(SlotError::Invalid)?,
         admission,
     )
+}
+
+pub(crate) fn withdraw_fixture(root: &Path, transaction: [u8; 16]) {
+    read_store(root, true)
+        .unwrap()
+        .unwrap()
+        .withdraw(transaction)
+        .unwrap();
 }
 
 pub(crate) fn received_fixture(root: &Path, prepared: PreparedInstall) -> Accepted {
@@ -871,4 +886,39 @@ fn actual_fixed_root_issuer_and_exec_worker_bind_provenance_and_keep_exclusion()
     child.finish();
     assert!(root.path().join("worker-accepted").exists());
     assert_old(root.path());
+}
+
+#[tokio::test]
+async fn a_record_no_installer_took_is_withdrawn_without_touching_the_live_app() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, prepared) = prepared_fixture(root.path()).await;
+    let id = prepared.transaction();
+    let handoff = prepared.into_handoff();
+    let store = read_store(root.path(), true).unwrap().unwrap();
+    assert!(matches!(store.withdraw([9; 16]), Err(SlotError::Invalid)));
+    store.withdraw(id).unwrap();
+    drop(store);
+    assert!(!root.path().join("application-slot/current").exists());
+    assert_old(root.path());
+    let status = job_status_fixture(root.path(), id).unwrap().unwrap();
+    assert_eq!(status.phase, Phase::RolledBack);
+    assert!(status.archived);
+    drop(handoff);
+    drop(owner);
+    let (_owner, prepared) = prepared_fixture(root.path()).await;
+    assert_ne!(prepared.transaction(), id);
+}
+
+#[tokio::test]
+async fn only_a_prepared_record_can_be_withdrawn() {
+    let root = tempfile::tempdir().unwrap();
+    let (_owner, prepared) = prepared_fixture(root.path()).await;
+    let id = prepared.transaction();
+    let _handoff = prepared.into_handoff();
+    let store = read_store(root.path(), true).unwrap().unwrap();
+    let mut record = store.record().unwrap();
+    record.phase = Phase::Publishing;
+    store.publish(&record).unwrap();
+    assert!(store.withdraw(id).is_err());
+    assert_eq!(store.record().unwrap().phase, Phase::Publishing);
 }
