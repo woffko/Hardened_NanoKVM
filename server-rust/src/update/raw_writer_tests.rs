@@ -43,6 +43,47 @@ fn a_partition_smaller_than_the_image_is_never_written() {
 }
 
 #[test]
+fn a_root_can_mount_only_once_all_of_it_is_on_the_medium() {
+    let bytes: Vec<u8> = (0..CHUNK + 8192).map(|i| (i * 7 % 251) as u8).collect();
+    let device = image(&vec![0xee; bytes.len()]);
+    let alias = device.try_clone().unwrap();
+    let expected = bytes.clone();
+    BEFORE_HEADER.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let held = contents(&alias, expected.len());
+            assert_eq!(held[..ROOT_HEADER], [0; ROOT_HEADER]);
+            assert_eq!(held[ROOT_HEADER..], expected[ROOT_HEADER..]);
+        }))
+    });
+    let result = write_root(&image(&bytes), &device, bytes.len() as u64, &digest(&bytes));
+    BEFORE_HEADER.with(|hook| *hook.borrow_mut() = None);
+    result.unwrap();
+    assert_eq!(contents(&device, bytes.len()), bytes);
+}
+
+#[test]
+fn a_root_cut_short_keeps_a_zero_header() {
+    let bytes = vec![7; 8192];
+    let device = image(&vec![0xee; 16384]);
+    assert!(matches!(
+        write_root(&image(&bytes), &device, 16384, &digest(&[7; 16384])),
+        Err(WriteError::Io(_))
+    ));
+    assert_eq!(contents(&device, ROOT_HEADER), [0; ROOT_HEADER]);
+}
+
+#[test]
+fn a_root_too_small_for_its_image_is_not_touched() {
+    let bytes = vec![7; 8192];
+    let device = image(&vec![0xee; 8191]);
+    assert!(matches!(
+        write_root(&image(&bytes), &device, 8192, &digest(&bytes)),
+        Err(WriteError::TooSmall)
+    ));
+    assert_eq!(contents(&device, 8191), [0xee; 8191]);
+}
+
+#[test]
 fn a_read_back_that_differs_from_the_authenticated_digest_fails() {
     let bytes = vec![7; 4096];
     let device = image(&vec![0; 4096]);
@@ -89,6 +130,7 @@ fn missing_advice_syscall_still_writes_and_verifies_the_whole_partition_range() 
         &device,
         bytes.len() as u64,
         &digest(&bytes),
+        0,
         |_, length| {
             assert_eq!(length.get(), bytes.len() as u64);
             Err(rustix::io::Errno::NOSYS)
@@ -110,6 +152,7 @@ fn missing_advice_syscall_does_not_skip_readback_or_digest_validation() {
         &device,
         bytes.len() as u64,
         &digest(&bytes),
+        0,
         |device, _| {
             // Corrupt the last chunk after sync; the source remains intact.
             device.write_all_at(&[8], CHUNK as u64).unwrap();
@@ -131,6 +174,7 @@ fn other_advice_errors_are_not_hidden() {
             &image(b"zero"),
             4,
             &digest(b"data"),
+            0,
             |_, _| Err(errno),
         );
         assert!(
@@ -287,6 +331,37 @@ mod sequence {
     }
 
     #[test]
+    fn the_root_stays_unmountable_until_all_of_it_is_written() {
+        let (images, ticket) = (images(), ticket());
+        let rootfs = device(0xee);
+        let medium = rootfs.try_clone().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        BEFORE_HEADER.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                record.lock().unwrap().push(contents(&medium, 4096));
+            }))
+        });
+        let mut fake = Fake {
+            partitions: vec![(Partition::Boot, device(0)), (Partition::Rootfs, rootfs)],
+            ..Fake::default()
+        };
+        let outcome = run_writer(
+            &mut fake,
+            &WritePlan {
+                images: [&images.files[0], &images.files[1]],
+                sizes: [4096, 4096],
+                sha256: images.sha256,
+                ticket: &ticket,
+            },
+        );
+        BEFORE_HEADER.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(outcome, Outcome::Written);
+        assert_eq!(seen.lock().unwrap()[0], [0; 4096]);
+        assert_eq!(fake.partition(Partition::Rootfs), [0x5f; 4096]);
+    }
+
+    #[test]
     fn a_failure_before_the_first_partition_write_writes_nothing_and_runs_no_later_step() {
         let (images, ticket) = (images(), ticket());
         for (fail, calls) in [
@@ -296,6 +371,10 @@ mod sequence {
             (
                 "open-rootfs",
                 &["stop", "freeze", "release", "open-rootfs"][..],
+            ),
+            (
+                "open-boot",
+                &["stop", "freeze", "release", "open-rootfs", "open-boot"][..],
             ),
         ] {
             let mut fake = Fake {
@@ -310,6 +389,42 @@ mod sequence {
             assert_eq!(fake.calls, calls, "{fail}");
             assert_eq!(fake.partition(Partition::Rootfs), [0; 4096], "{fail}");
             assert_eq!(fake.partition(Partition::Boot), [0; 4096], "{fail}");
+            assert!(fake.log.iter().any(|line| line.contains("not started")));
+        }
+    }
+
+    #[test]
+    fn a_partition_that_cannot_take_its_image_leaves_both_as_they_were() {
+        let (images, ticket) = (images(), ticket());
+        for small in [Partition::Rootfs, Partition::Boot] {
+            let partitions = [Partition::Boot, Partition::Rootfs].map(|partition| {
+                let file = device(0xee);
+                if partition == small {
+                    file.set_len(4095).unwrap();
+                }
+                (partition, file)
+            });
+            let held = partitions
+                .each_ref()
+                .map(|(_, file)| file.try_clone().unwrap());
+            let mut fake = Fake {
+                partitions: partitions.into(),
+                ..Fake::default()
+            };
+            let outcome = run_writer(
+                &mut fake,
+                &WritePlan {
+                    images: [&images.files[0], &images.files[1]],
+                    sizes: [4096, 4096],
+                    sha256: images.sha256,
+                    ticket: &ticket,
+                },
+            );
+            assert_eq!(outcome, Outcome::NotStarted, "{small:?}");
+            assert!(!fake.calls.contains(&"publish".to_string()));
+            for file in &held {
+                assert_eq!(contents(file, 4095), [0xee; 4095], "{small:?}");
+            }
             assert!(fake.log.iter().any(|line| line.contains("not started")));
         }
     }
@@ -353,13 +468,12 @@ mod sequence {
         );
         AFTER_SYNC.with(|hook| *hook.borrow_mut() = None);
         assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(fake.calls, ["stop", "freeze", "release", "open-rootfs"]);
         assert_eq!(fake.partition(Partition::Rootfs), [0; 4096]);
         assert_eq!(fake.partition(Partition::Boot), [0xbb; 4096]);
     }
 
     #[test]
-    fn a_boot_that_reads_back_wrong_leaves_both_partitions_for_the_operator() {
+    fn a_boot_that_reads_back_wrong_leaves_a_root_that_cannot_mount() {
         let (images, ticket) = (images(), ticket());
         let boot = device(0xee);
         let medium = boot.try_clone().unwrap();
@@ -387,42 +501,36 @@ mod sequence {
         );
         AFTER_SYNC.with(|hook| *hook.borrow_mut() = None);
         assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(fake.partition(Partition::Rootfs), [0x5f; 4096]);
+        assert_eq!(fake.partition(Partition::Rootfs), [0; 4096]);
         assert_ne!(fake.partition(Partition::Boot), [0; 4096]);
     }
 
     #[test]
-    fn a_failure_after_the_first_write_is_manual_recovery_and_never_publishes_the_ticket() {
+    fn a_ticket_that_cannot_be_published_is_manual_recovery_on_a_complete_system() {
         let (images, ticket) = (images(), ticket());
-        for (fail, calls) in [
-            (
+        let mut fake = Fake {
+            fail: Some("publish"),
+            ..Fake::default()
+        };
+        assert_eq!(run(&mut fake, &images, &ticket), Outcome::Failed);
+        assert_eq!(
+            fake.calls,
+            [
+                "stop",
+                "freeze",
+                "release",
+                "open-rootfs",
                 "open-boot",
-                &["stop", "freeze", "release", "open-rootfs", "open-boot"][..],
-            ),
-            (
-                "publish",
-                &[
-                    "stop",
-                    "freeze",
-                    "release",
-                    "open-rootfs",
-                    "open-boot",
-                    "publish",
-                ][..],
-            ),
-        ] {
-            let mut fake = Fake {
-                fail: Some(fail),
-                ..Fake::default()
-            };
-            assert_eq!(run(&mut fake, &images, &ticket), Outcome::Failed, "{fail}");
-            assert_eq!(fake.calls, calls, "{fail}");
-            assert!(
-                fake.log
-                    .iter()
-                    .any(|line| line.contains("raw write failed"))
-            );
-        }
+                "publish"
+            ]
+        );
+        assert_eq!(fake.partition(Partition::Rootfs), [0x5f; 4096]);
+        assert_eq!(fake.partition(Partition::Boot), [0xb0; 4096]);
+        assert!(
+            fake.log
+                .iter()
+                .any(|line| line.contains("raw write failed"))
+        );
     }
 }
 

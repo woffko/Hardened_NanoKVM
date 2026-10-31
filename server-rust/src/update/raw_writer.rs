@@ -27,6 +27,9 @@ thread_local! {
     /// Runs after the sync, before the read-back, to change the medium.
     static AFTER_SYNC: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs when all but the held first bytes are on the medium.
+    static BEFORE_HEADER: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +48,21 @@ type Result<T> = std::result::Result<T, WriteError>;
 /// partition range back; it must hash to the authenticated image digest.
 /// `image` is the immutable verified snapshot; nothing here undoes a write.
 pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
-    write_image_with_advice(image, device, size, sha256, evict_cache)
+    write_image_with_advice(image, device, size, sha256, 0, evict_cache)
+}
+
+/// `write_image` for a root: its first bytes, superblock included, are zero
+/// while the rest goes in and are written last. The kernel mounts the partition
+/// only once all of it is there, however the write ends.
+pub fn write_root(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
+    write_image_with_advice(image, device, size, sha256, ROOT_HEADER, evict_cache)
+}
+
+fn fits(device: &File, size: u64) -> Result<()> {
+    if seek(device, SeekFrom::End(0)).map_err(io::Error::from)? < size {
+        return Err(WriteError::TooSmall);
+    }
+    Ok(())
 }
 
 /// The read-back has to come from the medium. Deployed kernels have no fadvise
@@ -78,19 +95,31 @@ fn write_image_with_advice(
     device: &File,
     size: u64,
     sha256: &[u8; 32],
+    held: usize,
     advise: impl FnOnce(&File, NonZeroU64) -> rustix::io::Result<()>,
 ) -> Result<()> {
-    if seek(device, SeekFrom::End(0)).map_err(io::Error::from)? < size {
-        return Err(WriteError::TooSmall);
-    }
+    fits(device, size)?;
+    let held = held.min(size as usize);
+    device.write_all_at(&vec![0; held], 0)?;
+    device.sync_data()?;
     let mut buffer = vec![0; CHUNK];
-    let mut offset = 0;
+    let mut offset = held as u64;
     while offset < size {
         let chunk = &mut buffer[..CHUNK.min((size - offset) as usize)];
         image.read_exact_at(chunk, offset)?;
         device.write_all_at(chunk, offset)?;
         offset += chunk.len() as u64;
     }
+    device.sync_data()?;
+    #[cfg(test)]
+    BEFORE_HEADER.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook()
+        }
+    });
+    let mut header = vec![0; held];
+    image.read_exact_at(&mut header, 0)?;
+    device.write_all_at(&header, 0)?;
     device.sync_data()?;
     #[cfg(test)]
     AFTER_SYNC.with(|hook| {
@@ -159,7 +188,8 @@ pub enum Outcome {
     Written,
     /// Nothing was written: the old system is intact and a reboot restores it.
     NotStarted,
-    /// A partition write started and did not complete: recovery is manual.
+    /// A partition write started and did not complete. The root is left unable
+    /// to mount and the device needs a reflash, unless only the ticket failed.
     Failed,
 }
 
@@ -167,10 +197,13 @@ pub enum Outcome {
 type Step<S> = fn(&mut S) -> io::Result<()>;
 
 /// Runs the raw write. Every step that can still be undone by a reboot comes
-/// before the first partition write: stopping the system, the read-only root
-/// and releasing the old boot partition. ROOTFS is written before BOOT, and
-/// the ticket is published last, so a failure never leaves a ticket beside a
-/// partly written system. The caller reboots after any outcome.
+/// before the first partition write: stopping the system, the read-only root,
+/// releasing the old boot partition, and finding out that both partitions open
+/// and take their images. ROOTFS is written before BOOT, and the ticket is
+/// published last. The old boot partition still holds this transaction's ticket,
+/// which would bind to the new root on the old kernel, so a failure on either
+/// partition leaves a root that cannot mount. The caller reboots after any
+/// outcome.
 pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outcome {
     let steps: [(&str, Step<S>); 3] = [
         ("stop services", S::stop_others),
@@ -204,40 +237,28 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
             }
         }
     }
-    for (index, partition) in [(1, Partition::Rootfs), (0, Partition::Boot)] {
-        system.log(&format!("raw write: opening {partition:?}"));
-        let device = match system.open_partition(partition) {
-            Ok(device) => device,
-            Err(error) if partition == Partition::Rootfs => {
-                system.log(&format!(
-                    "raw write not started: open {partition:?} failed: {error}"
-                ));
-                return Outcome::NotStarted;
-            }
-            Err(error) => {
-                system.log(&format!(
-                    "raw write failed: open {partition:?} failed: {error}"
-                ));
-                return Outcome::Failed;
-            }
-        };
-        system.log(&format!("raw write: writing and verifying {partition:?}"));
-        if let Err(error) = write_image(
-            plan.images[index],
-            &device,
-            plan.sizes[index],
-            &plan.sha256[index],
-        ) {
-            system.log(&format!("raw write failed: {partition:?}: {error}"));
-            if partition == Partition::Rootfs
-                && let Err(error) = disable_root(&device)
-            {
-                system.log(&format!("raw write: ROOTFS not disabled: {error}"));
-            }
-            return Outcome::Failed;
+    let (rootfs, boot) = match open_partitions(system, plan) {
+        Ok(devices) => devices,
+        Err(error) => {
+            system.log(&format!("raw write not started: {error}"));
+            return Outcome::NotStarted;
         }
-        system.log(&format!("raw write: {partition:?} written and verified"));
+    };
+    system.log("raw write: writing and verifying Rootfs");
+    let written =
+        write_root(plan.images[1], &rootfs, plan.sizes[1], &plan.sha256[1]).and_then(|()| {
+            system.log("raw write: Rootfs written and verified, writing and verifying Boot");
+            write_image(plan.images[0], &boot, plan.sizes[0], &plan.sha256[0])
+        });
+    if let Err(error) = written {
+        system.log(&format!("raw write failed: {error}"));
+        if let Err(error) = disable_root(&rootfs) {
+            system.log(&format!("raw write: ROOTFS not disabled: {error}"));
+        }
+        return Outcome::Failed;
     }
+    system.log("raw write: Boot written and verified");
+    drop((rootfs, boot));
     system.log("raw write: publishing restore ticket");
     if let Err(error) = system.publish_ticket(plan.ticket) {
         system.log(&format!(
@@ -247,6 +268,19 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
     }
     system.log("raw write complete");
     Outcome::Written
+}
+
+fn open_partitions<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Result<(File, File)> {
+    let mut open = |partition, size| -> Result<File> {
+        system.log(&format!("raw write: opening {partition:?}"));
+        let device = system.open_partition(partition)?;
+        fits(&device, size)?;
+        Ok(device)
+    };
+    Ok((
+        open(Partition::Rootfs, plan.sizes[1])?,
+        open(Partition::Boot, plan.sizes[0])?,
+    ))
 }
 
 /// The writer mode's arguments, which the broker passes when it re-executes

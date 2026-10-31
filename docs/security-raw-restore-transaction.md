@@ -1195,12 +1195,16 @@ can keep a restored system off the network.
 
 The bundle's images are hashed as they are unpacked and then sit in spools on the
 data partition, which the writer reads minutes later. So the writer hashes both once
-more after the system is frozen and before the first write: a mismatch writes
-nothing, and a reboot returns to the old system. After a write it evicts the cache
-and hashes the partition. Deployed kernels have no `fadvise`, so it uses
-`drop_caches`, and the read-back comes from the medium. A ROOTFS that still differs
-loses its first 4 KiB, superblock included, before the reboot: the kernel stops at
-the mount instead of running unknown bytes as the system. That device needs a reflash.
+more after the system is frozen and before the first write, and opens both
+partitions and compares their sizes with the images. A mismatch or a partition too
+small writes nothing, and a reboot returns to the old system. After a write it evicts
+the cache and hashes the partition. Deployed kernels have no `fadvise`, so it uses
+`drop_caches`, and the read-back comes from the medium. The first 4 KiB of ROOTFS,
+superblock included, are zero while the rest goes in and are written last, so an
+interrupted write leaves a root the kernel will not mount. A failure on either
+partition leaves ROOTFS that way too: the kernel stops at the mount instead of
+running unknown bytes, or a new root on the old kernel, whose boot partition still
+holds this transaction's ticket. That device needs a reflash.
 
 ## Who may start a raw update
 
@@ -1288,12 +1292,13 @@ reads the overwritten partition. `open_boot` is `open_mounted("/boot",
 `raw_writer::run_writer` orders the whole write over a `WriterSystem` (the
 device implementation belongs to the writer process). Steps that a reboot can
 still undo come first and run one at a time: stop every other process, flush
-and remount the root read-only, release the old boot partition. ROOTFS is then
-written and verified, then BOOT, and the prepared ticket is published on the
-new boot partition last, so a failure never leaves a ticket beside a partly
-written system. The outcome is `NotStarted` (nothing written; a reboot restores
-the old system; also when ROOTFS cannot be opened), `Failed` (a write started:
-manual recovery) or `Written`; the caller reboots after any of them. Host tests
+and remount the root read-only, release the old boot partition, open both
+partitions and check that they take their images. ROOTFS is then written and
+verified, then BOOT, and the prepared ticket is published on the new boot
+partition last. A failed write leaves ROOTFS unable to mount, so a failure never
+leaves a ticket beside a partly written system that boots. The outcome is
+`NotStarted` (nothing written; a reboot restores the old system), `Failed` (a
+write started: reflash) or `Written`; the caller reboots after any of them. Host tests
 drive the sequence with a fake system over temporary files.
 
 `raw_writer::device::DeviceSystem` is the device implementation (not run by
