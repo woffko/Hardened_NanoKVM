@@ -1185,6 +1185,20 @@ can keep a restored system off the network.
 - `S01restore` treats any helper failure as blocked, including a helper that was
   killed or could not start, which cannot write the marker itself.
 
+## What the first boot finishes
+
+The image's init names the system from its own `/etc/hostname` before the early
+helper can restore the device's file, so `S01restore` applies the name once the
+helper has finished. `/etc/localtime` belongs to the image and is not restored:
+the backend applies the zone saved in `time.json` at start, and a saved zone the
+image does not know reads as UTC instead of failing the time API. A request for
+such a zone is still refused. Script uploads come back as inert data, so an
+explicit run goes through `/bin/sh` and needs no execute bit, and autostart files
+stay inert because nothing runs them. The raw writer's last progress record says
+`rebooting`; the backend removes it at start when the boot ticket is Committed for
+the running version, so a finished update does not turn into a failure an hour
+later. These steps run on the device and have host tests up to the calls in `main`.
+
 ## Capsule sealing on the data partition (component; capture not wired)
 
 A raw write replaces p1 and p2, so the capsule must live on p3 in a private

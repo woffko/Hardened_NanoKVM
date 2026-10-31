@@ -106,6 +106,8 @@ async fn run(startup: Option<Startup>) -> Result<(), Box<dyn std::error::Error>>
     media::secure_device_mounts().await?;
     let config = Config::load()?;
     config.log_runtime_warnings();
+    nanokvm_rust_server::api::system_time::apply_saved_timezone();
+    nanokvm_rust_server::api::system_update::settle_raw_progress(&config);
     nanokvm_rust_server::auth::claim::ensure(&config.paths.account_file)?;
     if config.proto == "https" {
         tls::ensure_server_cert(

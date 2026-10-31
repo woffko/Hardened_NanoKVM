@@ -94,7 +94,9 @@ Known exceptions:
   `/kvmapp`, and `/root/.kvmcache`.
 - Image directory: `/data`, with resolved containment and symlink rejection.
 - Script directory: `/etc/kvm/scripts`, with basename inventory and explicit
-  execution only. Scripts run as root, so upload and run pass the terminal's
+  execution only: a run names `/bin/sh` or `python` and the file, so the file's
+  execute bit, which a raw update does not keep, gives it no effect.
+  Scripts run as root, so upload and run pass the terminal's
   gate: terminal access is enabled, and each operation consumes a fresh unlock
   ticket of the same session (header `X-NanoKVM-Terminal-Ticket`), issued after
   its password was entered again. Listing and deleting need only the session.

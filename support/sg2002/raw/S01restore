@@ -16,3 +16,5 @@ if ! /usr/libexec/nanokvm-early-restore; then
     echo "S01restore: raw early restore failed" >&2
     exit 1
 fi
+# Init named the system from the file of the image before this script ran.
+hostname -F /etc/hostname 2>/dev/null || true

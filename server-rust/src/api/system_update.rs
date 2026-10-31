@@ -3191,6 +3191,44 @@ fn read_normalized_update_progress(
     Some(progress)
 }
 
+/// The raw writer's last word is "rebooting", and nothing in the system that
+/// boots next writes over it, so the receipt of that boot closes the record.
+pub fn settle_raw_progress(config: &Config) {
+    let stage_dir = system_stage_dir(&config.paths.update_cache_dir);
+    let version = read_current_system_version().version;
+    if let Err(error) = settle_raw_progress_in(&stage_dir, &version, || {
+        Store::open_boot()
+            .map_err(|error| AppError::Internal(format!("raw ticket store unavailable: {error}")))
+    }) {
+        tracing::warn!(%error, "raw update progress was not settled");
+    }
+}
+
+pub(crate) fn settle_raw_progress_in(
+    stage_dir: &Path,
+    version: &str,
+    open_store: impl FnOnce() -> Result<Store>,
+) -> Result<()> {
+    let Some(progress) = read_update_progress(stage_dir)? else {
+        return Ok(());
+    };
+    if progress.operation != "install"
+        || !progress.is_active()
+        || progress.version.as_deref() != Some(version)
+    {
+        return Ok(());
+    }
+    let ticket = open_store()?
+        .load()
+        .map_err(|error| AppError::Internal(format!("raw ticket unreadable: {error}")))?;
+    if ticket.is_some_and(|ticket| {
+        ticket.phase() == Phase::Committed && ticket.target_version() == version
+    }) {
+        remove_update_progress(stage_dir)?;
+    }
+    Ok(())
+}
+
 fn read_update_progress(stage_dir: &Path) -> Result<Option<SystemUpdateProgress>> {
     let path = stage_dir.join(SYSTEM_PROGRESS_RECORD);
     if !path.exists() {

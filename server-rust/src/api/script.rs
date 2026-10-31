@@ -433,7 +433,11 @@ fn script_command(path: &Path) -> Result<Command> {
         command.arg(path);
         Ok(command)
     } else if extension == "sh" {
-        Ok(Command::new(path))
+        // A raw update keeps uploads as inert data, without the execute bit, so
+        // only this explicit run gives a script any effect.
+        let mut command = Command::new("/bin/sh");
+        command.arg(path);
+        Ok(command)
     } else {
         Err(AppError::BadRequest("invalid script filename".to_string()))
     }
@@ -458,6 +462,17 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.arg(path);
         command
+    }
+
+    #[tokio::test]
+    async fn a_script_without_the_execute_bit_runs_when_asked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restored.sh");
+        fs::write(&path, "exit 7\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let status = script_command(&path).unwrap().status().await.unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 
     /// Running or stopped; a zombie counts as ended.

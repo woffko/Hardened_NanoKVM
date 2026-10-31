@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::system_update::settle_raw_progress_in;
 use crate::update::{
     raw_capture::{self, CaptureError, CaptureRequest, TargetImage},
     restore_accounts,
@@ -217,6 +218,72 @@ fn the_https_of_a_new_installation_never_reaches_a_device_on_http() {
     )
     .unwrap();
     assert_eq!(proto(&applied(source.path(), &config)), "http");
+}
+
+#[test]
+fn the_receipt_of_the_new_boot_closes_the_record_the_raw_writer_left() {
+    let (source, config) = fixture();
+    let capsules = private();
+    let store_root = private();
+    let staging = private();
+    let marker_dir = tempfile::tempdir().unwrap();
+    let root = restored_root(source.path(), true);
+    let ticket = capture_ticket(source.path(), &config, capsules.path());
+    Store::open_fixture(store_root.path())
+        .unwrap()
+        .publish_prepared(&ticket)
+        .unwrap();
+
+    let stage = private();
+    let record = stage.path().join("progress.json");
+    let write = |operation: &str, phase: &str, version: &str| {
+        fs::write(
+            &record,
+            format!(
+                r#"{{"operation":"{operation}","phase":"{phase}","version":"{version}","startedAt":1,"updatedAt":2,"message":null}}"#
+            ),
+        )
+        .unwrap();
+    };
+    let settle = |version: &str| {
+        settle_raw_progress_in(stage.path(), version, || {
+            Ok(Store::open_fixture(store_root.path()).unwrap())
+        })
+        .unwrap();
+    };
+
+    // The ticket is still only prepared: the write may have failed.
+    write("install", "rebooting", VERSION);
+    settle(VERSION);
+    assert!(record.exists());
+
+    let outcome = run_observed(
+        root.path(),
+        &mut Store::open_fixture(store_root.path()).unwrap(),
+        capsules.path(),
+        staging.path(),
+        &marker_dir.path().join("blocked"),
+        &observation(),
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::Applied);
+
+    for (operation, phase, version, running) in [
+        ("install", "rebooting", "0.3.0-raw.99", "0.3.0-raw.99"),
+        ("install", "rebooting", VERSION, "0.3.0-raw.99"),
+        // A later attempt that went wrong, under the receipt of this system.
+        ("install", "rebooting", "0.3.0-raw.99", VERSION),
+        ("install", "failed", VERSION, VERSION),
+        ("rollback", "rebooting", VERSION, VERSION),
+    ] {
+        write(operation, phase, version);
+        settle(running);
+        assert!(record.exists(), "{operation} {phase} {version} {running}");
+    }
+    write("install", "rebooting", VERSION);
+    settle(VERSION);
+    assert!(!record.exists());
+    settle(VERSION);
 }
 
 #[test]

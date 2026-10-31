@@ -103,6 +103,22 @@ pub struct TimeConfigRsp {
     timezone_options: Vec<String>,
 }
 
+/// A raw update keeps time.json but not /etc/localtime, which belongs to the
+/// image, and only an API call writes the link.
+pub fn apply_saved_timezone() {
+    if let Err(error) = apply_saved_timezone_in(&TimePaths::default()) {
+        tracing::warn!(%error, "the saved timezone was not applied");
+    }
+}
+
+fn apply_saved_timezone_in(paths: &TimePaths) -> Result<()> {
+    let config = read_config(paths)?;
+    if current_timezone(paths).as_deref() != Some(config.timezone.as_str()) {
+        set_timezone(&config.timezone, paths)?;
+    }
+    Ok(())
+}
+
 pub async fn get_config() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(
         build_response(TimePaths::default()).await?,
@@ -185,9 +201,15 @@ async fn build_response(paths: TimePaths) -> Result<TimeConfigRsp> {
 fn read_config(paths: &TimePaths) -> Result<TimeConfig> {
     match fs::read_to_string(&paths.config) {
         Ok(content) => {
-            let config: TimeConfig = serde_json::from_str(&content)
+            let mut config: TimeConfig = serde_json::from_str(&content)
                 .map_err(|err| AppError::Config(format!("invalid time config: {err}")))?;
-            validate_config(config, paths)
+            // A zone this image lacks must not take the whole time API down.
+            config.timezone =
+                normalize_timezone(&config.timezone, &paths.zoneinfo).unwrap_or_else(|_| {
+                    tracing::warn!(zone = %config.timezone, "saved timezone is unknown; using UTC");
+                    DEFAULT_TIMEZONE.to_string()
+                });
+            with_usable_servers(config)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(TimeConfig {
             ntp_enabled: true,
@@ -200,6 +222,10 @@ fn read_config(paths: &TimePaths) -> Result<TimeConfig> {
 
 fn validate_config(mut config: TimeConfig, paths: &TimePaths) -> Result<TimeConfig> {
     config.timezone = normalize_timezone(&config.timezone, &paths.zoneinfo)?;
+    with_usable_servers(config)
+}
+
+fn with_usable_servers(mut config: TimeConfig) -> Result<TimeConfig> {
     config.servers = normalize_servers(config.servers.iter().map(String::as_str))?;
     if config.servers.is_empty() {
         config.servers = DEFAULT_NTP_SERVERS
@@ -585,6 +611,108 @@ mod tests {
         for value in ["leapseconds", "Europe", "Europe/Nowhere", "../etc/passwd"] {
             assert!(normalize_timezone(value, dir.path()).is_err(), "{value}");
         }
+    }
+
+    /// The layout Buildroot's tzdata package installs.
+    fn image_paths(dir: &Path) -> TimePaths {
+        let zoneinfo = dir.join("usr/share/zoneinfo");
+        for zone in ["posix/Etc/UTC", "posix/Europe/Berlin"] {
+            let path = zoneinfo.join(zone);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"TZif2 compiled zone").unwrap();
+        }
+        for name in ["Etc", "Europe"] {
+            std::os::unix::fs::symlink(format!("posix/{name}"), zoneinfo.join(name)).unwrap();
+        }
+        fs::write(
+            zoneinfo.join("zone1970.tab"),
+            "# comment\nDE\t+5230+01322\tEurope/Berlin\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("etc/kvm")).unwrap();
+        std::os::unix::fs::symlink("../usr/share/zoneinfo/Etc/UTC", dir.join("etc/localtime"))
+            .unwrap();
+        TimePaths {
+            config: dir.join("etc/kvm/time.json"),
+            ntp_conf: dir.join("etc/ntp.conf"),
+            ntpd_default: dir.join("etc/default/ntpd"),
+            localtime: dir.join("etc/localtime"),
+            zoneinfo,
+        }
+    }
+
+    fn saved(paths: &TimePaths, zone: &str) {
+        let json =
+            format!(r#"{{"ntpEnabled":true,"timezone":"{zone}","servers":["pool.ntp.org"]}}"#);
+        fs::write(&paths.config, json).unwrap();
+    }
+
+    fn link(paths: &TimePaths) -> PathBuf {
+        fs::read_link(&paths.localtime).unwrap()
+    }
+
+    #[test]
+    fn zones_of_the_image_layout_are_listed_and_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        assert_eq!(
+            normalize_timezone("Europe/Berlin", &paths.zoneinfo).unwrap(),
+            "Europe/Berlin"
+        );
+        assert!(timezone_options(&paths.zoneinfo).contains(&"Europe/Berlin".to_string()));
+        assert!(normalize_timezone("posix/Europe/Berlin", &paths.zoneinfo).is_err());
+    }
+
+    #[test]
+    fn a_saved_zone_the_image_lacks_reads_as_utc_and_a_request_for_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        saved(&paths, "Mars/Olympus");
+        let config = read_config(&paths).unwrap();
+        assert_eq!(config.timezone, DEFAULT_TIMEZONE);
+        assert_eq!(config.servers, ["pool.ntp.org"]);
+        assert!(validate_config(config.clone(), &paths).is_ok());
+        let request = TimeConfig {
+            timezone: "Mars/Olympus".to_string(),
+            ..config
+        };
+        assert!(validate_config(request, &paths).is_err());
+    }
+
+    #[test]
+    fn a_saved_zone_without_any_zone_data_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        fs::remove_dir_all(&paths.zoneinfo).unwrap();
+        saved(&paths, "Europe/Berlin");
+        assert_eq!(read_config(&paths).unwrap().timezone, DEFAULT_TIMEZONE);
+    }
+
+    #[test]
+    fn the_zone_a_raw_update_kept_reaches_the_new_image_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        saved(&paths, "Europe/Berlin");
+        apply_saved_timezone_in(&paths).unwrap();
+        assert_eq!(
+            link(&paths),
+            Path::new("../usr/share/zoneinfo/Europe/Berlin")
+        );
+        let linked = fs::symlink_metadata(&paths.localtime).unwrap();
+        apply_saved_timezone_in(&paths).unwrap();
+        let again = fs::symlink_metadata(&paths.localtime).unwrap();
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&linked),
+            std::os::unix::fs::MetadataExt::ino(&again)
+        );
+    }
+
+    #[test]
+    fn without_a_saved_zone_the_link_of_the_image_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        apply_saved_timezone_in(&paths).unwrap();
+        assert_eq!(link(&paths), Path::new("../usr/share/zoneinfo/Etc/UTC"));
     }
 
     #[test]
