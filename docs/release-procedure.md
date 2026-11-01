@@ -30,6 +30,11 @@ install that release first. The application refuses the update before any
 download. The value is `RELEASE_MINIMUM_SYSTEM` in the same library, and
 `scripts/verify-raw-bundle.sh` requires it.
 
+A new application number is a commit: `kvmapp/version`, the default in
+`scripts/build-latest-buildroot-kvmapp.sh` and the pin in the Buildroot package
+`hardened-nanokvm-kvmapp.mk`. The candidate wrapper refuses a number the package
+does not pin, before any build starts.
+
 ## Building the candidate
 
 `scripts/build-kernel-5.10.272-candidate-run.sh` runs the whole system pipeline

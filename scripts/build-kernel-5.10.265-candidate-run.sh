@@ -45,6 +45,7 @@ for name in EXPECTED_SYSTEM_VERSION EXPECTED_KVMAPP_VERSION EXPECTED_KVMAPP_SERV
 	[ -n "${!name:-}" ] || refuse "$name is required (an owner decision, not a default)"
 done
 release_check_versions "$EXPECTED_SYSTEM_VERSION" "$EXPECTED_KVMAPP_VERSION" || exit 1
+release_check_package_pin "$EXPECTED_KVMAPP_VERSION" || exit 1
 [[ "$EXPECTED_KVMAPP_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] || refuse "EXPECTED_KVMAPP_SERVER_SHA256 must be 64 hex digits"
 case "$EXPECTED_SECURITY_PATCH_LEVEL" in
 	*';'*) refuse "EXPECTED_SECURITY_PATCH_LEVEL must not contain ';'" ;;

@@ -17,6 +17,16 @@ release_version_used() {
 	grep -Fxq -- "$1" "$list"
 }
 
+# release_check_package_pin APP: the Buildroot package installs only the number
+# it pins, and it gets there after the kernel and most of the rootfs are built.
+release_check_package_pin() {
+	local package="$ROOT_DIR/buildroot-external/hardened-sg2002/package/hardened-nanokvm-kvmapp/hardened-nanokvm-kvmapp.mk"
+	grep -Fxq "HARDENED_NANOKVM_KVMAPP_VERSION = $1" "$package" || {
+		echo "the Buildroot application package does not pin $1" >&2
+		return 1
+	}
+}
+
 # release_check_versions SYSTEM APP: refuses with a message on stderr.
 release_check_versions() {
 	local system=$1 app=$2 version family

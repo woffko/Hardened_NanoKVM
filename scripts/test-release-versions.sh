@@ -70,15 +70,23 @@ wrapper_refuses() {
 	*) fail "$script gave another refusal for $system with $app: $output" ;;
 	esac
 }
-# The environment can name a tree, but it cannot move the pinned commits.
+# The environment can name a tree, but it cannot move the pinned commits. The
+# number here is the one this tree pins, which the wrapper checks first.
+pinned="$(sed -n 's/^HARDENED_NANOKVM_KVMAPP_VERSION = //p' \
+	"$ROOT_DIR/buildroot-external/hardened-sg2002/package/hardened-nanokvm-kvmapp/hardened-nanokvm-kvmapp.mk")"
+case "$pinned" in
+2.1.*) pinned_system=0.4.0-raw.99 ;;
+*) pinned_system=0.3.0-raw.99 ;;
+esac
 tree="$(mktemp -d)"
 git -C "$tree" init -q
 git -C "$tree" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
-printf '2.1.0\n' > "$stage/version"
+printf '%s\n' "$pinned" > "$stage/version"
 printf 'synthetic\n' > "$stage/server-file"
 mkdir -p "$stage/server"
 cp "$stage/server-file" "$stage/server/NanoKVM-Server"
-if output="$(EXPECTED_SYSTEM_VERSION=0.4.0-raw.1 EXPECTED_KVMAPP_VERSION=2.1.0 \
+if output="$(RELEASE_BURNED_VERSIONS=/dev/null \
+	EXPECTED_SYSTEM_VERSION="$pinned_system" EXPECTED_KVMAPP_VERSION="$pinned" \
 	EXPECTED_KVMAPP_SERVER_SHA256="$(sha256sum "$stage/server-file" | cut -d' ' -f1)" \
 	NANOKVM_KVMAPP_SOURCE_DIR="$stage" KERNEL_5_10_272_REPRO_ROOT="$stage/run" \
 	KERNEL_5_10_272_SOURCE_DIR="$tree" EXPECTED_KERNEL_SOURCE_COMMIT="$(git -C "$tree" rev-parse HEAD)" \
@@ -94,6 +102,8 @@ rm -rf "$tree" "$stage/version" "$stage/server-file" "$stage/server"
 for script in build-kernel-5.10.272-candidate-run.sh build-kernel-5.10.265-candidate-run.sh; do
 	wrapper_refuses "$script" 0.3.0-raw.13 2.0.44 "already used"
 	wrapper_refuses "$script" 0.4.0-raw.1 2.0.45 "debug number"
+	# A number the Buildroot package would refuse an hour later stops here instead.
+	wrapper_refuses "$script" 0.3.0-raw.98 2.0.98 "does not pin 2.0.98"
 done
 
 packager_refuses() {
