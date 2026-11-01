@@ -141,4 +141,35 @@ listening || fail "sshd is not listening after the key was generated"
     fail "an existing key changed"
 run_s50 stop >/dev/null
 
+# 4. A pair of the type OpenSSH 10.5 generated, which 10.6 cannot read, gives way.
+mldsa=/etc/ssh/ssh_host_mldsa44_ed25519_key
+printf 'a key of the old type\n' > "$mldsa"
+chmod 0600 "$mldsa"
+printf 'ssh-mldsa44-ed25519@openssh.com AAAA root@old\n' > "$mldsa.pub"
+printf 'ssh-mldsa44-ed25519-cert-v01@openssh.com AAAA\n' > "$mldsa-cert.pub"
+output="$(run_s50 start 2>&1)" || fail "start with a retired key failed: $output"
+listening || fail "sshd is not listening after the retired key was replaced"
+[ "$(cut -d' ' -f1 "$mldsa.pub")" = ssh-mldsa44-ed25519 ] || fail "the retired key is still there"
+[ ! -e "$mldsa-cert.pub" ] || fail "the certificate of the retired key stayed"
+"$SSH_KEYGEN_BIN" -y -P "" -f "$mldsa" >/dev/null || fail "the new key does not load"
+[ "$(sha256sum /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key)" = "$kept" ] ||
+    fail "replacing the retired key changed another key"
+run_s50 stop >/dev/null
+
+# 5. A key this OpenSSH reads stays, whatever its public file says: an older
+# system runs this script too, and there the old type is a working key.
+sed -i 's/^ssh-mldsa44-ed25519 /ssh-mldsa44-ed25519@openssh.com /' "$mldsa.pub"
+kept="$(sha256sum "$mldsa" "$mldsa.pub")"
+output="$(run_s50 start 2>&1)" || fail "start with a readable key failed: $output"
+[ "$(sha256sum "$mldsa" "$mldsa.pub")" = "$kept" ] || fail "a key this OpenSSH reads was replaced"
+run_s50 stop >/dev/null
+
+# 6. A damaged key of the current type is no retired key: nothing removes it.
+printf 'damaged\n' > "$mldsa"
+printf 'ssh-mldsa44-ed25519 AAAA root@new\n' > "$mldsa.pub"
+kept="$(sha256sum "$mldsa" "$mldsa.pub")"
+output="$(run_s50 start 2>&1)" || fail "start with a damaged key failed: $output"
+[ "$(sha256sum "$mldsa" "$mldsa.pub")" = "$kept" ] || fail "a damaged key was replaced"
+run_s50 stop >/dev/null
+
 echo "S50sshd: PASS"

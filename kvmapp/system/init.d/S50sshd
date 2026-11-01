@@ -22,7 +22,20 @@ SSHD_LIMITS="-o MaxAuthTries=3 -o LoginGraceTime=60 -o PerSourceNetBlockSize=32:
 
 umask 077
 
+# OpenSSH 10.6 renamed this key type and reads no key of the old name, and
+# ssh-keygen -A leaves an existing file alone. An older system still reads and
+# uses that key, so only a key this OpenSSH cannot read gives way.
+replace_retired_key() {
+    key=/etc/ssh/ssh_host_mldsa44_ed25519_key
+    [ -f "$key.pub" ] || return 0
+    read -r type rest < "$key.pub" || return 0
+    [ "$type" = ssh-mldsa44-ed25519@openssh.com ] || return 0
+    /usr/bin/ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1 && return 0
+    rm -f "$key" "$key.pub" "$key-cert.pub"
+}
+
 startssh() {
+    replace_retired_key
     # Generate the key of every type that does not exist. The rest stay.
     /usr/bin/ssh-keygen -A
 

@@ -556,10 +556,13 @@ installs them.
 
 OpenSSH 10.6 renamed that type, and it reads no key of the old name
 `ssh-mldsa44-ed25519@openssh.com`, which `ssh-keygen -A` left on every system up to
-0.3.0-raw.12. Such a pair is carried unchanged: sshd skips it and uses the other keys,
-and `ssh-keygen -A` does not replace a file that exists, so that device offers no
-MLDSA host key. The possession proof leaves out only a key whose public file names
-that old type. Any other key the image cannot read stops capture.
+0.3.0-raw.12. Capture carries such a pair unchanged, and the possession proof leaves
+out only a key whose public file names that old type, because nothing in the image can
+read it. Any other key the image cannot read stops capture. `S50sshd` then replaces the
+pair at the next start: when its own `ssh-keygen` cannot read a key of the old name it
+removes the pair, and `ssh-keygen -A` generates a key of the current type, so the
+device goes on offering an MLDSA host key. The classical keys, which clients pin, do not
+change. An older system, whose OpenSSH reads the key, keeps it.
 
 The snapshot owns the exact checked bytes and records absence of all selected
 fixed SSH files. It also pins both SSH enablement flags. Canonical archive capture
