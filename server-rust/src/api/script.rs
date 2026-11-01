@@ -10,7 +10,7 @@ use nix::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::OpenOptionsExt,
@@ -29,10 +29,14 @@ use tokio::{
 
 use crate::{
     AppError, Result, auth::session::Session, error::ApiResponse, http::middleware::CurrentSession,
-    native_owner::LIBRARY_PATH, state::AppState, system::script_supervisor,
+    state::AppState, system::script_supervisor,
 };
 
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+/// A mode of this static helper. Not of the backend: starting NanoKVM-Server
+/// loads the vendor libraries, which take the video devices from the running
+/// backend and keep the process from ever exiting.
+const SUPERVISOR: &str = "/usr/libexec/nanokvm-native-ctl";
 /// Carries a terminal unlock ticket for exactly one script upload or run.
 pub const UNLOCK_HEADER: &str = "x-nanokvm-terminal-ticket";
 /// Output kept per stream; anything beyond it is read and discarded.
@@ -189,7 +193,7 @@ pub async fn run_script(
     let path = checked_script_path(&req.name)?;
     match req.kind.as_str() {
         "foreground" => {
-            let command = supervised_command(script_command(&path)?, RUN_LIMITS)?;
+            let command = supervised_command(script_command(&path)?, RUN_LIMITS);
             let log = run_script_foreground(command, RUN_LIMITS).await?;
             Ok(Json(ApiResponse::ok(RunScriptRsp { log })))
         }
@@ -274,39 +278,19 @@ async fn run_script_foreground(command: Command, limits: RunLimits) -> Result<St
         .map_err(|_| AppError::Internal("script run ended without a result".to_string()))?
 }
 
-/// A device starts this program through the musl loader with an explicit library
-/// path, so the executable of this process is the loader and only argv[0] names
-/// the program. The loader takes the supervisor's option for its own and refuses.
-fn self_invocation(executable: PathBuf, argv0: Option<OsString>) -> (PathBuf, Vec<OsString>) {
-    let loader = executable
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.starts_with("ld-"));
-    match argv0 {
-        Some(program) if loader => (
-            executable,
-            vec!["--library-path".into(), LIBRARY_PATH.into(), program],
-        ),
-        _ => (executable, Vec::new()),
-    }
-}
-
-fn supervised_command(command: Command, limits: RunLimits) -> Result<Command> {
-    let (executable, prefix) =
-        self_invocation(std::env::current_exe()?, std::env::args_os().next());
+fn supervised_command(command: Command, limits: RunLimits) -> Command {
     let standard = command.as_std();
     let program = standard.get_program().to_os_string();
     let arguments: Vec<_> = standard.get_args().map(|arg| arg.to_os_string()).collect();
-    let mut supervised = Command::new(executable);
+    let mut supervised = Command::new(SUPERVISOR);
     supervised
-        .args(prefix)
         .arg("--script-supervisor")
         .arg(limits.timeout.as_secs().to_string())
         .arg(limits.grace.as_millis().to_string())
         .arg("--")
         .arg(program)
         .args(arguments);
-    Ok(supervised)
+    supervised
 }
 
 async fn run_foreground(mut command: Command, limits: RunLimits) -> Result<String> {
@@ -489,24 +473,23 @@ mod tests {
     }
 
     #[test]
-    fn the_supervisor_reruns_this_program_the_way_the_device_started_it() {
-        let (program, prefix) = self_invocation(
-            "/lib/ld-musl-riscv64xthead.so.1".into(),
-            Some("/kvmapp/server/NanoKVM-Server".into()),
-        );
-        assert_eq!(program, Path::new("/lib/ld-musl-riscv64xthead.so.1"));
+    fn the_supervisor_is_the_static_helper_and_not_the_backend() {
+        let mut script = Command::new("/bin/sh");
+        script.arg("/etc/kvm/scripts/job.sh");
+        let supervised = supervised_command(script, LIMITS);
+        let standard = supervised.as_std();
+        assert_eq!(standard.get_program(), "/usr/libexec/nanokvm-native-ctl");
         assert_eq!(
-            prefix,
+            standard.get_args().collect::<Vec<_>>(),
             [
-                "--library-path",
-                LIBRARY_PATH,
-                "/kvmapp/server/NanoKVM-Server"
+                "--script-supervisor",
+                "1",
+                "300",
+                "--",
+                "/bin/sh",
+                "/etc/kvm/scripts/job.sh"
             ]
-            .map(OsString::from)
         );
-        let (program, prefix) = self_invocation("/opt/server".into(), Some("server".into()));
-        assert_eq!(program, Path::new("/opt/server"));
-        assert!(prefix.is_empty());
     }
 
     #[tokio::test]

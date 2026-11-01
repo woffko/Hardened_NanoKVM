@@ -78,6 +78,13 @@ fn main() -> ExitCode {
         "/support-abi-nanokvm-native-ctl.binding"
     )));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // The backend's script runs. They are here because this program is static:
+    // the backend's own binary would load the vendor libraries.
+    if args.first().is_some_and(|arg| arg == "--script-supervisor") {
+        std::process::exit(nanokvm_rust_server::system::script_supervisor::run(
+            &args[1..],
+        ));
+    }
     if args.len() == 1 && args[0] == "picoclaw-home" {
         return match nanokvm_rust_server::native_owner::picoclaw_home::resolve() {
             Ok(home) => {

@@ -41,7 +41,7 @@ fn dead(pid: i32) -> bool {
 }
 
 fn supervisor() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nanokvm-rust-server"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nanokvm-native-ctl"));
     command.arg("--script-supervisor");
     command
 }
@@ -82,17 +82,10 @@ fn a_setsid_escapee_is_killed_after_a_successful_script_exit() {
     assert!(dead(read_pid(&pids)), "setsid child survived a normal exit");
 }
 
-/// A device runs `loader --library-path ... program`. The host's loader takes the
-/// same form, so this is the shape the option has to survive.
 #[test]
-fn the_supervisor_option_reaches_the_program_through_its_loader() {
-    let loader = Path::new("/lib64/ld-linux-x86-64.so.2");
-    assert!(loader.exists(), "this test needs the host's dynamic loader");
-    let status = Command::new(loader)
-        .args(["--library-path", "/lib/x86_64-linux-gnu"])
-        .arg(env!("CARGO_BIN_EXE_nanokvm-rust-server"))
-        .args(["--script-supervisor", "5", "100", "--"])
-        .args(["/bin/sh", "-c", "exit 7"])
+fn the_code_of_the_script_is_the_code_of_the_supervisor() {
+    let status = supervisor()
+        .args(["5", "100", "--", "/bin/sh", "-c", "exit 7"])
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(7));

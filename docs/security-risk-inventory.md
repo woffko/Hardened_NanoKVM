@@ -100,9 +100,10 @@ Known exceptions:
   gate: terminal access is enabled, and each operation consumes a fresh unlock
   ticket of the same session (header `X-NanoKVM-Terminal-Ticket`), issued after
   its password was entered again. Listing and deleting need only the session.
-  The run's supervisor is this same program, started the way the device started
-  it: through the musl loader with the fixed library path. A run that leaves a
-  process the supervisor cannot stop ends with its own error.
+  The run's supervisor is a mode of the static `nanokvm-native-ctl`. The backend's
+  own binary cannot be it: starting that binary loads the vendor libraries, which
+  open the video devices of the running backend and keep the process from exiting.
+  A run that leaves a process the supervisor cannot stop ends with its own error.
   A foreground run has its own task and process group. A closed browser tab
   does not stop it; after 60 seconds its group gets SIGTERM and, 2 seconds
   later, SIGKILL. Each output stream keeps its first 64 KiB and the rest is
