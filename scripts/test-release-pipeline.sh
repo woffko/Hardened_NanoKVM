@@ -40,8 +40,8 @@ openssl genrsa -out "$T/key.pem" 2048 2>/dev/null
 openssl rsa -in "$T/key.pem" -pubout -out "$T/key.pub.pem" 2>/dev/null
 openssl genrsa -out "$T/other.pem" 2048 2>/dev/null
 
-APP=2.1.0
-SYSTEM=0.4.0-raw.1
+APP=2.1.99
+SYSTEM=0.4.0-raw.99
 mkdir -p "$T/app/kvmapp"
 echo "$APP" > "$T/app/kvmapp/version"
 tar -czf "$T/hardened-nanokvm-kvmapp-$APP.tar.gz" -C "$T/app" kvmapp
