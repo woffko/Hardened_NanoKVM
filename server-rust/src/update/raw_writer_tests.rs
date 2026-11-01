@@ -163,6 +163,43 @@ fn missing_advice_syscall_does_not_skip_readback_or_digest_validation() {
 }
 
 #[test]
+fn the_write_reports_the_eviction_that_ran() {
+    let bytes = vec![0x37; 4096];
+    for eviction in [Eviction::Advised, Eviction::DropCaches, Eviction::Nothing] {
+        let reported = write_image_with_advice(
+            &image(&bytes),
+            &image(&vec![0; bytes.len()]),
+            bytes.len() as u64,
+            &digest(&bytes),
+            0,
+            |_, _| Ok(eviction),
+        );
+        assert_eq!(reported.unwrap(), eviction);
+    }
+    let reported = write_image_with_advice(
+        &image(&bytes),
+        &image(&vec![0; bytes.len()]),
+        bytes.len() as u64,
+        &digest(&bytes),
+        0,
+        |_, _| Err(rustix::io::Errno::NOSYS),
+    );
+    assert_eq!(reported.unwrap(), Eviction::Nothing);
+}
+
+#[test]
+fn drop_caches_says_when_the_knob_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let knob = root.path().join("drop_caches");
+    assert_eq!(drop_caches(&knob), Eviction::DropCaches);
+    assert_eq!(fs::read(&knob).unwrap(), b"1\n");
+    assert_eq!(
+        drop_caches(&root.path().join("missing/drop_caches")),
+        Eviction::Nothing
+    );
+}
+
+#[test]
 fn other_advice_errors_are_not_hidden() {
     for errno in [
         rustix::io::Errno::IO,
@@ -503,6 +540,23 @@ mod sequence {
         assert_eq!(outcome, Outcome::Failed);
         assert_eq!(fake.partition(Partition::Rootfs), [0; 4096]);
         assert_ne!(fake.partition(Partition::Boot), [0; 4096]);
+    }
+
+    #[test]
+    fn the_journal_names_the_eviction_behind_each_read_back() {
+        let (images, ticket) = (images(), ticket());
+        let mut fake = Fake::default();
+        assert_eq!(run(&mut fake, &images, &ticket), Outcome::Written);
+        for expected in [
+            "raw write: Rootfs written and verified after fadvise, writing and verifying Boot",
+            "raw write: Boot written and verified after fadvise",
+        ] {
+            assert!(
+                fake.log.iter().any(|line| line == expected),
+                "{expected}: {:?}",
+                fake.log
+            );
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ use std::{
     io,
     num::NonZeroU64,
     os::{fd::AsRawFd, unix::fs::FileExt},
+    path::Path,
 };
 
 const CHUNK: usize = 1024 * 1024;
@@ -43,18 +44,37 @@ pub enum WriteError {
 }
 type Result<T> = std::result::Result<T, WriteError>;
 
+/// How a partition's cached pages left memory before its read-back. The hash
+/// is what decides; this says how much it proves, so the journal records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Eviction {
+    Advised,
+    DropCaches,
+    Nothing,
+}
+
+impl std::fmt::Display for Eviction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Advised => "fadvise",
+            Self::DropCaches => "drop_caches",
+            Self::Nothing => "no cache eviction",
+        })
+    }
+}
+
 /// Copies `size` bytes of `image` to the start of `device` in 1 MiB chunks,
 /// syncs them, advises cache eviction when supported, and reads the entire
 /// partition range back; it must hash to the authenticated image digest.
 /// `image` is the immutable verified snapshot; nothing here undoes a write.
-pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
+pub fn write_image(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<Eviction> {
     write_image_with_advice(image, device, size, sha256, 0, evict_cache)
 }
 
 /// `write_image` for a root: its first bytes, superblock included, are zero
 /// while the rest goes in and are written last. The kernel mounts the partition
 /// only once all of it is there, however the write ends.
-pub fn write_root(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<()> {
+pub fn write_root(image: &File, device: &File, size: u64, sha256: &[u8; 32]) -> Result<Eviction> {
     write_image_with_advice(image, device, size, sha256, ROOT_HEADER, evict_cache)
 }
 
@@ -67,13 +87,19 @@ fn fits(device: &File, size: u64) -> Result<()> {
 
 /// The read-back has to come from the medium. Deployed kernels have no fadvise
 /// (CONFIG_ADVISE_SYSCALLS=n), and this process is the only one left running.
-fn evict_cache(device: &File, length: NonZeroU64) -> rustix::io::Result<()> {
+fn evict_cache(device: &File, length: NonZeroU64) -> rustix::io::Result<Eviction> {
     match fadvise(device, 0, Some(length), Advice::DontNeed) {
-        Err(rustix::io::Errno::NOSYS) => {
-            let _ = fs::write(DROP_CACHES, "1\n");
-            Ok(())
-        }
-        other => other,
+        Ok(()) => Ok(Eviction::Advised),
+        Err(rustix::io::Errno::NOSYS) => Ok(drop_caches(Path::new(DROP_CACHES))),
+        Err(error) => Err(error),
+    }
+}
+
+/// A refused knob is no reason to fail a good write: the hash still runs.
+fn drop_caches(knob: &Path) -> Eviction {
+    match fs::write(knob, "1\n") {
+        Ok(()) => Eviction::DropCaches,
+        Err(_) => Eviction::Nothing,
     }
 }
 
@@ -96,8 +122,8 @@ fn write_image_with_advice(
     size: u64,
     sha256: &[u8; 32],
     held: usize,
-    advise: impl FnOnce(&File, NonZeroU64) -> rustix::io::Result<()>,
-) -> Result<()> {
+    advise: impl FnOnce(&File, NonZeroU64) -> rustix::io::Result<Eviction>,
+) -> Result<Eviction> {
     fits(device, size)?;
     let held = held.min(size as usize);
     device.write_all_at(&vec![0; held], 0)?;
@@ -127,19 +153,21 @@ fn write_image_with_advice(
             hook()
         }
     });
+    let mut eviction = Eviction::Nothing;
     if let Some(length) = NonZeroU64::new(size) {
         match advise(device, length) {
             // DONTNEED is an advisory hint, not a durability barrier. The
             // completed sync_data above and full hash read-back below remain
             // mandatory even when the kernel has no advisory syscall.
-            Ok(()) | Err(rustix::io::Errno::NOSYS) => {}
+            Ok(done) => eviction = done,
+            Err(rustix::io::Errno::NOSYS) => {}
             Err(error) => return Err(io::Error::from(error).into()),
         }
     }
     if hash_of(device, size)? != *sha256 {
         return Err(WriteError::Mismatch);
     }
-    Ok(())
+    Ok(eviction)
 }
 
 /// A root of unknown bytes must not run as this system: without its superblock
@@ -246,18 +274,25 @@ pub fn run_writer<S: WriterSystem>(system: &mut S, plan: &WritePlan<'_>) -> Outc
     };
     system.log("raw write: writing and verifying Rootfs");
     let written =
-        write_root(plan.images[1], &rootfs, plan.sizes[1], &plan.sha256[1]).and_then(|()| {
-            system.log("raw write: Rootfs written and verified, writing and verifying Boot");
+        write_root(plan.images[1], &rootfs, plan.sizes[1], &plan.sha256[1]).and_then(|eviction| {
+            system.log(&format!(
+                "raw write: Rootfs written and verified after {eviction}, writing and verifying Boot"
+            ));
             write_image(plan.images[0], &boot, plan.sizes[0], &plan.sha256[0])
         });
-    if let Err(error) = written {
-        system.log(&format!("raw write failed: {error}"));
-        if let Err(error) = disable_root(&rootfs) {
-            system.log(&format!("raw write: ROOTFS not disabled: {error}"));
+    let eviction = match written {
+        Ok(eviction) => eviction,
+        Err(error) => {
+            system.log(&format!("raw write failed: {error}"));
+            if let Err(error) = disable_root(&rootfs) {
+                system.log(&format!("raw write: ROOTFS not disabled: {error}"));
+            }
+            return Outcome::Failed;
         }
-        return Outcome::Failed;
-    }
-    system.log("raw write: Boot written and verified");
+    };
+    system.log(&format!(
+        "raw write: Boot written and verified after {eviction}"
+    ));
     drop((rootfs, boot));
     system.log("raw write: publishing restore ticket");
     if let Err(error) = system.publish_ticket(plan.ticket) {

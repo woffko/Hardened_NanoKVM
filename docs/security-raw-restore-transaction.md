@@ -1199,7 +1199,9 @@ more after the system is frozen and before the first write, and opens both
 partitions and compares their sizes with the images. A mismatch or a partition too
 small writes nothing, and a reboot returns to the old system. After a write it evicts
 the cache and hashes the partition. Deployed kernels have no `fadvise`, so it uses
-`drop_caches`, and the read-back comes from the medium. The first 4 KiB of ROOTFS,
+`drop_caches`, and the read-back comes from the medium. The writer's journal names
+which of the two ran for each partition, or says that neither did: the hash decides
+either way, and the journal shows what it was read from. The first 4 KiB of ROOTFS,
 superblock included, are zero while the rest goes in and are written last, so an
 interrupted write leaves a root the kernel will not mount. A failure on either
 partition leaves ROOTFS that way too: the kernel stops at the mount instead of
