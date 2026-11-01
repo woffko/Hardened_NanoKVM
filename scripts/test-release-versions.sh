@@ -20,23 +20,24 @@ refused() {
 	fi
 }
 
-accepted 0.3.0-raw.14 2.0.45
-accepted 0.3.0-raw.99 2.0.60
+# The first numbers of each range; a test build uses them up, the rule stays.
+RELEASE_BURNED_VERSIONS=/dev/null accepted 0.3.0-raw.14 2.0.45
+accepted 0.3.0-raw.99 2.0.99
 accepted 0.4.0-raw.1 2.1.0
 accepted 0.4.0-raw.2 2.1.1
 
 # Published numbers and numbers burned by test builds.
-for system in 0.3.0-raw.10 0.3.0-raw.11 0.3.0-raw.12 0.3.0-raw.13; do refused "$system" 2.0.45; done
-for app in 2.0.40 2.0.41 2.0.42 2.0.43 2.0.44; do refused 0.3.0-raw.14 "$app"; done
+for system in 0.3.0-raw.10 0.3.0-raw.11 0.3.0-raw.12 0.3.0-raw.13; do refused "$system" 2.0.99; done
+for app in 2.0.40 2.0.41 2.0.42 2.0.43 2.0.44; do refused 0.3.0-raw.99 "$app"; done
 # Below the debug range, or not a known family.
-refused 0.3.0-raw.9 2.0.45
-refused 0.3.0-raw.14 2.0.39
+refused 0.3.0-raw.9 2.0.99
+refused 0.3.0-raw.99 2.0.39
 refused 0.5.0-raw.1 2.1.0
 refused 0.4.0-raw.1 2.2.0
 refused 0.4.0-raw.0 2.1.0
 # A debug system never pairs with a release application, or the reverse.
-refused 0.3.0-raw.14 2.1.0
-refused 0.4.0-raw.1 2.0.45
+refused 0.3.0-raw.99 2.1.0
+refused 0.4.0-raw.1 2.0.99
 # Not versions at all.
 refused 0.4.0-raw.1x 2.1.0
 refused 0.4.0-raw.1 2.1.0-rc1
@@ -101,7 +102,7 @@ rm -rf "$tree" "$stage/version" "$stage/server-file" "$stage/server"
 
 for script in build-kernel-5.10.272-candidate-run.sh build-kernel-5.10.265-candidate-run.sh; do
 	wrapper_refuses "$script" 0.3.0-raw.13 2.0.44 "already used"
-	wrapper_refuses "$script" 0.4.0-raw.1 2.0.45 "debug number"
+	wrapper_refuses "$script" 0.4.0-raw.1 2.0.99 "debug number"
 	# A number the Buildroot package would refuse an hour later stops here instead.
 	wrapper_refuses "$script" 0.3.0-raw.98 2.0.98 "does not pin 2.0.98"
 done

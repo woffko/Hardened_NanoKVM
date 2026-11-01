@@ -170,7 +170,7 @@ SD_INPUT="$T/empty.img" SD_INPUT_SHA256="$(sha "$T/empty.img")" refused_prepare 
 printf 'RELEASE_BLOCKED_DEVICE_GATE\n' > "$T/blocked.md"
 NOTES_INPUT="$T/blocked.md" refused_prepare "notes with a release blocker"
 SYSTEM_VERSION=0.3.0-raw.13 APP_VERSION=2.0.44 refused_prepare "a used version number" "already used"
-SYSTEM_VERSION=0.3.0-raw.14 APP_VERSION=2.0.45 refused_prepare "debug numbers" \
+SYSTEM_VERSION=0.3.0-raw.99 APP_VERSION=2.0.99 refused_prepare "debug numbers" \
 	"debug numbers are never released"
 mkdir -p "$T/system-open/stage" "$T/system-open-out"
 cp -r "$T/system/." "$T/system-open/stage/"
