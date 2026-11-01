@@ -469,6 +469,37 @@ fn authenticated_identity_builder_feeds_real_sshd_through_the_image_sandbox() {
     assert!(output.status.success(), "isolated sign/verify: {output:?}");
     assert_eq!(output.stdout, b"keys=3\n");
     assert!(output.stderr.is_empty());
+    // OpenSSH 10.6 reads no key of the type 10.5 generated: such a pair goes
+    // along unproved, and no other unreadable key does.
+    let unreadable = identity.join("etc/ssh/ssh_host_mldsa44_ed25519_key");
+    let unreadable_public = identity.join("etc/ssh/ssh_host_mldsa44_ed25519_key.pub");
+    fs::write(
+        &unreadable,
+        b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &unreadable_public,
+        b"ssh-mldsa44-ed25519@openssh.com AAAAH3NzaC1tbGRzYTQ0 root@old\n",
+    )
+    .unwrap();
+    let output = owned("owned-retired-type", "--owned-keys");
+    assert!(output.status.success(), "retired key type: {output:?}");
+    assert_eq!(output.stdout, b"keys=3\n");
+    fs::write(
+        &unreadable_public,
+        b"ssh-mldsa44-ed25519 AAAAE3NzaC1tbGRzYTQ0 root@new\n",
+    )
+    .unwrap();
+    let output = owned("owned-unreadable-current-type", "--owned-keys");
+    assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
+    fs::remove_file(&unreadable_public).unwrap();
+    let output = owned("owned-unreadable-no-companion", "--owned-keys");
+    assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
+    fs::remove_file(&unreadable).unwrap();
     // Missing optional public companion remains supported, not factory-filled.
     let companion_path = identity.join("etc/ssh/ssh_host_ed25519_key.pub");
     let companion = fs::read(&companion_path).unwrap();

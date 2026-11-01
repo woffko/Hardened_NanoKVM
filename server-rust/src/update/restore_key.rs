@@ -28,6 +28,14 @@ impl HostKey {
             Self::Mldsa44Ed25519 => "/etc/ssh/ssh_host_mldsa44_ed25519_key",
         }
     }
+    /// OpenSSH 10.6 renamed this type and reads no key of the old name, which
+    /// `ssh-keygen -A` left on every system up to 0.3.0-raw.12.
+    fn retired_type(self) -> Option<&'static [u8]> {
+        match self {
+            Self::Mldsa44Ed25519 => Some(b"ssh-mldsa44-ed25519@openssh.com"),
+            Self::Rsa | Self::Ecdsa | Self::Ed25519 => None,
+        }
+    }
     pub(super) fn signature_path(self) -> &'static str {
         match self {
             Self::Rsa => "/run/restore-rsa.sig",
@@ -150,6 +158,24 @@ impl PublicIdentity {
     }
 }
 
+fn key_fields(bytes: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
+    let line = bytes.split(|b| *b == b'\n').find(|line| {
+        let line = line.trim_ascii();
+        !line.is_empty() && !line.starts_with(b"#")
+    })?;
+    Some(
+        line.split(u8::is_ascii_whitespace)
+            .filter(|s| !s.is_empty()),
+    )
+}
+
+/// Whether a public key file names a type no program in the image can load.
+pub(super) fn retired_public(bytes: &[u8], algorithm: HostKey) -> bool {
+    key_fields(bytes)
+        .and_then(|mut fields| fields.next())
+        .is_some_and(|kind| Some(kind) == algorithm.retired_type())
+}
+
 pub(super) fn parse_public(
     bytes: &[u8],
     algorithm: HostKey,
@@ -157,16 +183,7 @@ pub(super) fn parse_public(
     if bytes.is_empty() || bytes.len() > MAX_PUBLIC || bytes.contains(&0) {
         return Err(SshRestoreError::InvalidKey);
     }
-    let line = bytes
-        .split(|b| *b == b'\n')
-        .find(|line| {
-            let line = line.trim_ascii();
-            !line.is_empty() && !line.starts_with(b"#")
-        })
-        .ok_or(SshRestoreError::InvalidKey)?;
-    let mut fields = line
-        .split(u8::is_ascii_whitespace)
-        .filter(|s| !s.is_empty());
+    let mut fields = key_fields(bytes).ok_or(SshRestoreError::InvalidKey)?;
     let kind = fields.next().ok_or(SshRestoreError::InvalidKey)?;
     let encoded = fields.next().ok_or(SshRestoreError::InvalidKey)?;
     let kind = match (algorithm, kind) {

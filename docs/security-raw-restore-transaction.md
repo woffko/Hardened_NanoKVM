@@ -554,6 +554,13 @@ every host key type of the pinned OpenSSH, including `mldsa44_ed25519` with its
 certificate. Public keys and `ssh_config` come back world-readable, as OpenSSH
 installs them.
 
+OpenSSH 10.6 renamed that type, and it reads no key of the old name
+`ssh-mldsa44-ed25519@openssh.com`, which `ssh-keygen -A` left on every system up to
+0.3.0-raw.12. Such a pair is carried unchanged: sshd skips it and uses the other keys,
+and `ssh-keygen -A` does not replace a file that exists, so that device offers no
+MLDSA host key. The possession proof leaves out only a key whose public file names
+that old type. Any other key the image cannot read stops capture.
+
 The snapshot owns the exact checked bytes and records absence of all selected
 fixed SSH files. It also pins both SSH enablement flags. Canonical archive capture
 uses these replacements and the completed `.d` inventory, never a second live

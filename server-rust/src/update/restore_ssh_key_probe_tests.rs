@@ -255,3 +255,21 @@ async fn cancellation_does_not_detach_a_probe_reader_or_leave_the_child_running(
     .unwrap();
     assert_reaped(&pid_file);
 }
+
+#[test]
+fn only_the_type_name_openssh_gave_up_counts_as_retired() {
+    use crate::update::restore_key::retired_public;
+    let old = b"# comment\n\nssh-mldsa44-ed25519@openssh.com AAAA root@old\n";
+    assert!(retired_public(old, Algorithm::Mldsa44Ed25519));
+    for other in [Algorithm::Rsa, Algorithm::Ecdsa, Algorithm::Ed25519] {
+        assert!(!retired_public(old, other));
+    }
+    for public in [
+        &b"ssh-mldsa44-ed25519 AAAA root@new\n"[..],
+        b"ssh-mldsa44-ed25519@openssh.community AAAA\n",
+        b"# ssh-mldsa44-ed25519@openssh.com AAAA\n",
+        b"",
+    ] {
+        assert!(!retired_public(public, Algorithm::Mldsa44Ed25519));
+    }
+}

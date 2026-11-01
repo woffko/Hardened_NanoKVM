@@ -8,7 +8,7 @@ use super::{
     raw_transport::{TransferContext, channel},
     restore_accounts::{self, SignedAccounts},
     restore_effective::{self, RootContext, RootEffectivePolicy},
-    restore_key::{KeyOperation, KeyStage, MAX_PUBLIC, parse_public},
+    restore_key::{KeyOperation, KeyStage, MAX_PUBLIC, parse_public, retired_public},
     restore_preflight::PreparedSshRoot,
 };
 use rand_core::{OsRng, RngCore};
@@ -287,7 +287,19 @@ fn execute(
             identity
                 .stage_challenge(&challenge)
                 .map_err(|_| JobError::Process)?;
+            let mut proved = 0;
             for &key in &keys {
+                let companion = identity
+                    .public_companion(key)
+                    .map_err(|_| JobError::Native)?;
+                // The image cannot read this key, so nothing here can prove it.
+                // It stays the owner's file, and sshd goes on with the others.
+                if companion
+                    .as_deref()
+                    .is_some_and(|public| retired_public(public, key))
+                {
+                    continue;
+                }
                 let public = backend.run(
                     identity,
                     Request::Key(KeyOperation {
@@ -297,10 +309,7 @@ fn execute(
                     cancel,
                 )?;
                 let public = parse_public(&public, key).map_err(|_| JobError::Native)?;
-                if let Some(companion) = identity
-                    .public_companion(key)
-                    .map_err(|_| JobError::Native)?
-                {
+                if let Some(companion) = companion {
                     let companion = parse_public(&companion, key).map_err(|_| JobError::Native)?;
                     if public.kind != companion.kind || public.blob != companion.blob {
                         return Err(JobError::Native);
@@ -325,10 +334,9 @@ fn execute(
                     }),
                     cancel,
                 )?;
+                proved += 1;
             }
-            Ok(Outcome::HostKeys(HostKeyProof {
-                count: keys.len() as u8,
-            }))
+            Ok(Outcome::HostKeys(HostKeyProof { count: proved }))
         }
     }
 }
