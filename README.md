@@ -29,85 +29,75 @@ a drop-in `NanoKVM-Server` and continues to use the existing `kvm_system`,
 runtime libraries used by the Rust backend live under `server-rust/native/`.
 
 The web UI currently brands this fork as **Hardened NanoKVM**. The current
-combined GitHub release is **2.0.42 RC12** with system `0.3.0-raw.12`.
+combined GitHub release is **2.1.0 RC13** with system `0.4.0-raw.1`.
 
 The combined application/raw/SD release is available from the `woffko` fork at
-[`hardened-system-0.3.0-raw.12`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12).
+[`hardened-system-0.4.0-raw.1`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.4.0-raw.1).
 
 > [!NOTE]
-> RC12 was released from [`security/kernel-5.10.265`](https://github.com/woffko/Hardened_NanoKVM/tree/security/kernel-5.10.265),
+> RC13 was released from [`security/2.1.0-fixes`](https://github.com/woffko/Hardened_NanoKVM/tree/security/2.1.0-fixes),
 > not from the older default-branch code baseline. Use the immutable release
-> tag or that maintenance branch when reviewing or rebuilding RC12 source.
+> tag or that maintenance branch when reviewing or rebuilding RC13 source.
 
-Detailed RC12 changes and limitations are in
-[the combined release notes](docs/releases/rc12-2.0.42-raw.12.md). Existing
-installations should also read the
-[manual key-transition notes](docs/releases/2.0.42-key-transition.md) before
-installing raw.12.
+Detailed RC13 changes, what they change for you, and what was not tested are in
+[the combined release notes](docs/releases/rc13-2.1.0-raw.1.md).
 
 The latest preview raw system-update and SD-card artifacts are the
-**0.3.0-raw.12** Buildroot `2026.05.1` / Linux `5.10.265-tag-` builds. Existing
-devices must manually install the app `2.0.42` trust bridge first and only then
-start the raw update. A manually flashed SD image already contains the matching
-app.
+**0.4.0-raw.1** Buildroot `2026.05.1` / Linux `5.10.272-tag-` builds. Existing
+devices install application `2.1.0` first and only then start the raw update. A
+manually flashed SD image already contains the matching application.
 
-## Installing System 0.3.0-raw.12
+## Installing System 0.4.0-raw.1
 
 > [!IMPORTANT]
-> Existing installations cannot receive the new production trust key through
-> the lost legacy signing key. Download app `2.0.42` from the manual
+> A device on an application older than `2.0.42` first takes the manual
 > [`key-transition prerelease`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-rust-2.0.42-key-transition),
-> require SHA-256
-> `aa0cd78c1b2e9951f216826c44b4b7ff2fb211fc1980540366f8f5b1f7e0dd20`,
-> and install it through authenticated **Offline Update** before raw.12. The
-> system stable channel intentionally remains on `0.2.23-raw.1`; raw.12 is on
-> the **system preview** channel.
+> because the legacy signing key was lost: see the
+> [key-transition notes](docs/releases/2.0.42-key-transition.md). A system older
+> than `0.3.0-raw.12` first takes
+> [`0.3.0-raw.12`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12).
+> The update names that as the oldest system it can restore from and refuses
+> older ones before anything is downloaded.
 
 ### Upgrade an existing installation
 
 Keep a working recovery SD card or a full image backup and provide continuous
 power before beginning. Then use this exact order:
 
-1. Download `hardened-nanokvm-kvmapp-2.0.42.tar.gz` from the exact transition
-   prerelease above and verify its SHA-256.
-2. Open **Settings > Update > Offline Update**, upload the complete archive,
-   wait for the backend to restart, log in again, and confirm application
-   `2.0.42`.
-3. At the top of the same page, enable **Preview Updates**. This is one shared
-   preview switch: it controls both application-preview metadata and
-   system-preview metadata.
-4. In the **System Update** section, press **Refresh**. Until it is pressed, the
-   screen can continue to show the stable target `0.2.23-raw.1` even though
-   preview mode is enabled.
-5. Confirm that the offered transition ends at `0.3.0-raw.12` and that the
-   latest target is `sg2002-licheervnano-sd`. Do not install an unexpected
-   version or target.
-6. Enable **Allow raw system updates**. This is separate from Preview Updates:
+1. Open **Settings > Update** and enable **Preview Updates** at the top of the
+   page. This one switch controls both application-preview and system-preview
+   metadata.
+2. Install application `2.1.0`, wait for the backend to restart, log in again
+   and confirm the version. **Offline Update** works too: application `2.0.42`
+   takes the archive alone, and from `2.1.0` on it needs `latest.json` and
+   `latest.json.sig` from the release as well.
+3. In the **System Update** section, press **Refresh**. Until it is pressed, the
+   screen can continue to show an older target even though preview mode is
+   enabled.
+4. Confirm that the offered transition ends at `0.4.0-raw.1` and that the latest
+   target is `sg2002-licheervnano-sd`. Do not install an unexpected version or
+   target.
+5. Enable **Allow raw system updates**. This is separate from Preview Updates:
    Preview selects the channel, while Allow raw system updates authorizes the
    destructive boot/rootfs write.
-7. Select **Download and Verify** and wait for the signed archive to finish
+6. Select **Download and Verify** and wait for the signed archive to finish
    downloading and staging. Do not start installation if verification fails.
-8. Install the staged update. Keep power connected and do not reboot or close
-   the update flow while it writes `/dev/mmcblk0p2` and `/dev/mmcblk0p1`. The
-   device reboots automatically after the raw writes.
-9. Allow the first boot and configuration restore to finish. After the web UI
-   returns, verify app `2.0.42`, system `0.3.0-raw.12`, Buildroot `2026.05.1`,
-   target `sg2002-licheervnano-sd`, and kernel `5.10.265-tag-`.
-10. Disable **Allow raw system updates** again unless another explicitly
-    planned raw update is being staged.
-
-If the System Update card still offers `0.2.23-raw.1`, first confirm that
-**Preview Updates** remains enabled and then press the System Update
-**Refresh** button. Updating app to `2.0.42` alone does not promote the system
-stable channel and therefore does not make raw.12 appear without preview mode.
+7. Install the staged update. Keep power connected and do not reboot or close
+   the update flow. It takes about 15 minutes, and the device reboots by itself
+   after the raw writes.
+8. Allow the first boot and configuration restore to finish. After the web UI
+   returns, verify application `2.1.0`, system `0.4.0-raw.1`, Buildroot
+   `2026.05.1`, target `sg2002-licheervnano-sd`, and kernel `5.10.272-tag-`.
+9. Disable **Allow raw system updates** again unless another explicitly planned
+   raw update is being staged.
 
 ### Flash the complete SD image instead
 
-The RC12 `.img.xz` asset already contains app `2.0.42` and system
-`0.3.0-raw.12`, so a separately installed app update or Preview Updates toggle
+The RC13 `.img.xz` asset already contains application `2.1.0` and system
+`0.4.0-raw.1`, so a separately installed app update or Preview Updates toggle
 is not required for a clean manual flash. Download the image and
 `SHA256SUMS` from the
-[`hardened-system-0.3.0-raw.12`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12)
+[`hardened-system-0.4.0-raw.1`](https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.4.0-raw.1)
 release, verify the checksum, and write it to a recoverable SD card of at least
 16 GiB. Keep the original card unchanged until the new card has booted, obtained
 network configuration, and passed the required hardware checks. See
@@ -115,8 +105,8 @@ network configuration, and passed the required hardware checks. See
 flashing instructions.
 
 Raw partition updates do not provide automatic recovery when the device cannot
-boot. RC12 updates both Buildroot userspace and the reviewed SG2002 port of
-Linux `5.10.265`; it does not claim that every retained vendor delta is free of
+boot. RC13 updates both Buildroot userspace and the reviewed SG2002 port of
+Linux `5.10.272`; it does not claim that every retained vendor delta is free of
 all upstream CVEs.
 
 ## Current Highlights

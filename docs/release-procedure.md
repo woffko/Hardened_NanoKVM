@@ -22,7 +22,9 @@ candidate wrappers, the raw packager and `prepare-release.sh` all use them.
 
 Debug numbers stay below the release, so a test device always accepts it, and
 `prepare-release.sh` refuses them outside `--draft`. A candidate that fails
-acceptance burns its numbers and the next one takes the next numbers.
+acceptance burns its numbers and the next one takes the next numbers. A candidate's
+numbers enter the list after publication or on that failure, because
+`prepare-release.sh` refuses a listed number.
 
 A raw update names the oldest system it can restore from in the signed
 `minimum_system_version` field of its metadata and manifest; older systems
@@ -47,8 +49,9 @@ environment, and refuses to start without, what is decided per candidate:
 `EXPECTED_SYSTEM_VERSION` and `EXPECTED_KVMAPP_VERSION`,
 `EXPECTED_KVMAPP_SERVER_SHA256` of the accepted application stage,
 `NANOKVM_KVMAPP_SOURCE_DIR` (the stage; its version file must match) and a new
-`KERNEL_5_10_272_REPRO_ROOT`. Run it twice with independent run roots for the G5
-comparison. The underlying repro-run script also refuses a dirty worktree and an
+`KERNEL_5_10_272_REPRO_ROOT`. Run it twice with independent run roots of equal path
+length for the G5 comparison: the length of the build path reaches the binaries.
+The underlying repro-run script also refuses a dirty worktree and an
 existing run root. The wrapper signs and publishes nothing.
 
 `scripts/package-latest-buildroot-sg2002-raw-update.sh` then packages the raw
