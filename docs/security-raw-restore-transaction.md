@@ -1237,7 +1237,11 @@ explicit run goes through `/bin/sh` and needs no execute bit, and autostart file
 stay inert because nothing runs them. The raw writer's last progress record says
 `rebooting`; the backend removes it at start when the boot ticket is Committed for
 the running version, so a finished update does not turn into a failure an hour
-later. These steps run on the device and have host tests up to the calls in `main`.
+later. A backend that starts as an application trial writes nothing and removes
+the record only at its next full start. Until then, and for the `preparing` record
+an older raw writer left behind, the status API reads an unfinished install of
+the running version as finished. These steps run on the device and have host
+tests up to the calls in `main`.
 
 ## Capsule sealing on the data partition (component; capture not wired)
 

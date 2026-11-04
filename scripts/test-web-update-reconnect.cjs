@@ -38,6 +38,10 @@ const job = load('web/src/pages/desktop/menu/settings/update/job.ts', {
   '@/lib/localstorage.ts': { getAppUpdateJob() {}, removeAppUpdateJob() {}, setAppUpdateJob() {} },
 });
 const offlinePackage = load('web/src/pages/desktop/menu/settings/update/package.ts', {});
+const semver = require(require.resolve('semver', { paths: [path.join(ROOT, 'web')] }));
+const system = load('web/src/pages/desktop/menu/settings/update/system.ts', {
+  semver: { default: semver }, '@/api/application.ts': {},
+});
 const reconnect = load('web/src/lib/reconnect.ts', { '@/lib/service.ts': { getBaseUrl: () => 'http://test' } });
 const OPTIONS = { interval: 2000, restartGrace: 15000, deadline: 120000 };
 
@@ -151,6 +155,43 @@ async function test(name, work) {
         `${file} reloads when it never got a reply`);
       assert(source.includes('appUpdateMessage('), `${file} decides the reload by itself`);
     }
+  });
+
+  await test('a listed system release that is not newer is never offered for download', () => {
+    // 10.0.87.133 on the stable channel: system 0.3.0-raw.13 runs, the channel
+    // lists 0.2.23-raw.1, and the backend says no update is available.
+    const latest = { version: '0.2.23-raw.1', name: 'hardened-nanokvm-system-0.2.23-raw.1.tar.gz', sha256: 'a' };
+    const staged = { version: '0.3.0-raw.13', archiveName: 'hardened-nanokvm-system-0.3.0-raw.13.tar.gz', sha256: 'b' };
+    const offer = { latest, staged: null, updateAvailable: false, blocked: false, appUpdateRequired: false, downloading: false };
+    assert.equal(system.canOfferSystemDownload(offer), false);
+    assert.equal(system.canOfferSystemDownload({ ...offer, staged }), false);
+    const newer = { version: '0.4.0-raw.1', name: 'hardened-nanokvm-system-0.4.0-raw.1.tar.gz', sha256: 'c' };
+    assert.equal(system.canOfferSystemDownload({ ...offer, latest: newer, updateAvailable: true }), true);
+    assert.equal(system.canOfferSystemDownload({ ...offer, latest: newer, staged, updateAvailable: true }), true);
+    const stagedNewer = { version: '0.4.0-raw.2', archiveName: 'x', sha256: 'd' };
+    assert.equal(system.canOfferSystemDownload({ ...offer, latest: newer, staged: stagedNewer, updateAvailable: true }), false);
+    const stagedSame = { version: newer.version, archiveName: newer.name, sha256: newer.sha256 };
+    assert.equal(system.canOfferSystemDownload({ ...offer, latest: newer, staged: stagedSame, updateAvailable: true }), false);
+    for (const flag of ['blocked', 'appUpdateRequired', 'downloading']) {
+      assert.equal(system.canOfferSystemDownload({ ...offer, latest: newer, updateAvailable: true, [flag]: true }), false, flag);
+    }
+    const source = fs.readFileSync(path.join(ROOT, 'web/src/pages/desktop/menu/settings/update/index.tsx'), 'utf8');
+    assert(source.includes('setSystemUpdateAvailable(!!rsp.data.updateAvailable)'), 'the page ignores the backend verdict');
+  });
+
+  await test('a refused system download or install says why, and an older record does not replace it', () => {
+    const refusal = 'no newer system update available: current 0.3.0-raw.13, release 0.2.23-raw.1';
+    assert.equal(system.refusalMessage({ code: -1, msg: refusal }, 'Download failed'), `Download failed: ${refusal}`);
+    assert.equal(system.refusalMessage({ response: { data: { msg: 'busy' } } }, 'Download failed'), 'Download failed: busy');
+    assert.equal(system.refusalMessage({ code: -1, msg: '  ' }, 'Download failed'), 'Download failed');
+    assert.equal(system.refusalMessage(new Error('timeout'), 'Download failed'), 'Download failed');
+    assert.equal(system.refusalMessage(null, 'Download failed'), 'Download failed');
+    const source = fs.readFileSync(path.join(ROOT, 'web/src/pages/desktop/menu/settings/update/index.tsx'), 'utf8');
+    assert.equal(source.split('refreshSystemUpdateStatus(refused)').length - 1, 2,
+      'download and install must keep their refusal on screen');
+    assert(!source.includes("setSystemErrMsg(t('settings.update.system.downloadFailed'))"), 'a download refusal drops the reason');
+    assert(!source.includes("setSystemErrMsg(t('settings.update.system.installFailed'))"), 'an install refusal drops the reason');
+    assert(source.includes('systemRefusal ||'), 'a newer offer hides the reason for the refusal');
   });
 
   process.stdout.write(`web update reconnect: ${passed} passed, ${failed} failed\n`);

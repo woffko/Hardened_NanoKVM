@@ -3193,6 +3193,18 @@ fn read_normalized_update_progress(
         return None;
     }
 
+    // The running system is the version this record was installing, so the
+    // install finished at whatever phase its record stopped. An older raw
+    // writer left "preparing" behind, and a backend that started as an
+    // application trial does not settle the record until its next full start.
+    if progress.operation == "install"
+        && progress.is_active()
+        && !operation_active
+        && progress.version.as_deref() == Some(current.version.as_str())
+    {
+        return None;
+    }
+
     let now = now_unix_seconds();
     let raw_install_stopped = progress.operation == "install"
         && progress.is_active()
@@ -3898,6 +3910,32 @@ mod tests {
         assert!(
             read_normalized_update_progress(&stage, &read_current_system_version(), None, false)
                 .is_none()
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn status_normalization_hides_an_install_the_running_system_carries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let mut current = read_current_system_version();
+        current.version = "0.3.0-raw.13".to_string();
+        let mut progress =
+            SystemUpdateProgress::new("install", "preparing", Some("0.3.0-raw.13".into()), None);
+        progress.updated_at = 0;
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+
+        assert!(read_normalized_update_progress(&stage, &current, None, false).is_none());
+        let live = read_normalized_update_progress(&stage, &current, None, true).unwrap();
+        assert_eq!(live.phase, "preparing");
+        current.version = "0.3.0-raw.12".to_string();
+        let other = read_normalized_update_progress(&stage, &current, None, false).unwrap();
+        assert_eq!(other.phase, "failed");
+        assert_eq!(
+            other.message.as_deref(),
+            Some("system update operation did not complete")
         );
         assert_eq!(fs::read(path).unwrap(), before);
     }
