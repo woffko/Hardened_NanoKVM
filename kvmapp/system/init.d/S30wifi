@@ -157,7 +157,7 @@ stop() {
         kill $(cat /var/run/udhcpd.wlan0.pid) || true
         rm -f /var/run/udhcpd.wlan0.pid
     fi
-    if [ -e /tmp/dnsmasq.run ]; then
+    if [ -f /tmp/dnsmasq.run ] && [ ! -L /tmp/dnsmasq.run ] && [ -O /tmp/dnsmasq.run ]; then
         kill $(cat /tmp/dnsmasq.run) || true
         rm -f /tmp/dnsmasq.run
     fi

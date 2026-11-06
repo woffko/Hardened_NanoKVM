@@ -44,6 +44,11 @@ verify_prepare_hash() {
 }
 
 require_line 'BR2_REPRODUCIBLE=y' "$DEFCONFIG"
+# Links, files and FIFOs in shared directories are protected from the first boot.
+SYSCTL_FS="$ROOT/buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/sysctl.d/10-hardened-fs.conf"
+for setting in 'fs.protected_symlinks = 1' 'fs.protected_hardlinks = 1' 'fs.protected_regular = 2' 'fs.protected_fifos = 2'; do
+	require_line "$setting" "$SYSCTL_FS"
+done
 require_line 'BR2_ROOTFS_POST_FAKEROOT_SCRIPT="$(BR2_EXTERNAL_HARDENED_SG2002_PATH)/board/sg2002/post-fakeroot.sh"' "$DEFCONFIG"
 require_line 'BR2_TARGET_TZ_INFO=y' "$DEFCONFIG"
 require_line 'BR2_TARGET_LOCALTIME="Etc/UTC"' "$DEFCONFIG"

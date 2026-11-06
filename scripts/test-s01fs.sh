@@ -16,7 +16,7 @@ fail() {
     exit 1
 }
 
-for name in grow_root_partition wait_for_data_device ensure_data_partition; do
+for name in protect_shared_directories grow_root_partition wait_for_data_device ensure_data_partition; do
     awk -v start="$name() {" '$0 == start {p = 1} p {print} p && $0 == "}" {exit}' "$S01" >> "$T/lib.sh"
     grep -qx "$name() {" "$T/lib.sh" || fail "no function $name in S01fs"
 done
@@ -50,7 +50,7 @@ run() {
     env PATH="$T/bin:$PATH" CALLS="$T/calls" PARTED_FAIL="${PARTED_FAIL:-}" MKFS_FAIL="${MKFS_FAIL:-}" \
         ROOT_DISK="$T/disk" ROOT_PARTITION="$T/sys/mmcblk0p2" ROOT_END_SECTOR=16000000 \
         DATA_DEVICE="$T/disk3" DATA_LOG="$T/data.log" DATA_READY="$T/etc/kvm.disk0" \
-        DATA_PENDING="$T/etc/kvm.disk0.creating" \
+        DATA_PENDING="$T/etc/kvm.disk0.creating" SYSCTL_FS="$T/fs" \
         $([ "$1" = busybox ] && echo busybox) sh -c ". '$T/lib.sh'; $2" < /dev/null || status=$?
     return "$status"
 }
@@ -67,6 +67,17 @@ partition() {
 }
 
 for shell in $shells; do
+    # Every link, hard link, file and FIFO protection of shared directories is on.
+    rm -rf "$T/fs" && mkdir -p "$T/fs"
+    for knob in protected_symlinks protected_hardlinks protected_regular protected_fifos; do
+        echo 0 > "$T/fs/$knob"
+    done
+    run "$shell" protect_shared_directories || fail "$shell: protect_shared_directories failed"
+    [ "$(cat "$T/fs/protected_symlinks" "$T/fs/protected_hardlinks" "$T/fs/protected_regular" \
+        "$T/fs/protected_fifos" | tr '\n' ' ')" = "1 1 2 2 " ] || fail "$shell: shared directories are not protected"
+    grep -qx '        protect_shared_directories' "$S01" || fail "S01fs start does not protect shared directories"
+    echo "ok $shell: links, files and FIFOs in shared directories are protected"
+
     reset
     partition 8192 3145728
     run "$shell" grow_root_partition || fail "$shell: grow on a fresh card"

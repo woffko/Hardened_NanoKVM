@@ -2078,7 +2078,7 @@ stop_update_runtime() {{\n\
   done\n\
   /etc/init.d/S95nanokvm stop >> \"$LOG\" 2>&1 || true\n\
   for PID_FILE in /tmp/nanokvm-watchdog.pid /tmp/system-update-watchdog.pid; do\n\
-    if [ -f \"$PID_FILE\" ]; then\n\
+    if [ -f \"$PID_FILE\" ] && [ ! -L \"$PID_FILE\" ] && [ -O \"$PID_FILE\" ]; then\n\
       PID=$($BB cat \"$PID_FILE\" 2>/dev/null || true)\n\
       [ -n \"$PID\" ] && $BB kill \"$PID\" >/dev/null 2>&1 || true\n\
       $BB rm -f \"$PID_FILE\" >/dev/null 2>&1 || true\n\

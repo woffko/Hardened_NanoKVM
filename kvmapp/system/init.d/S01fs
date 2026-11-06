@@ -15,6 +15,23 @@ DATA_PENDING=/etc/kvm.disk0.creating
 # Do not inspect/import old markers, plaintext preserve trees or code.
 # Authenticated raw restore requires a separate protected early helper.
 
+SYSCTL_FS=/proc/sys/fs
+
+# Root writes and reads files in /tmp, where every account can write. The
+# kernel then refuses to follow another account's link there, to hard-link a
+# file one cannot write, and to open another account's file or FIFO there for
+# writing. The image sets the same in /etc/sysctl.d; this also covers older ones.
+protect_shared_directories() {
+        for knob in protected_symlinks protected_hardlinks
+        do
+                echo 1 > "$SYSCTL_FS/$knob" 2>/dev/null || true
+        done
+        for knob in protected_regular protected_fifos
+        do
+                echo 2 > "$SYSCTL_FS/$knob" 2>/dev/null || true
+        done
+}
+
 # Grow p2 to its fixed end on a freshly written card only; a raw update writes
 # a smaller filesystem into the same partition, so resize2fs runs every boot.
 grow_root_partition() {
@@ -96,6 +113,7 @@ ensure_data_partition() {
 
 if [ "$1" = "start" ]
 then
+        protect_shared_directories
         grow_root_partition
         # resize data filesystem
         (resize2fs /dev/mmcblk0p2) &
