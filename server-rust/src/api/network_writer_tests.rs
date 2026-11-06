@@ -727,3 +727,31 @@ async fn ap_marker_failure_does_not_turn_partial_publication_into_success() {
     assert_no_commands(dir.path());
     drop(state.writers.drain(LIMIT).await.unwrap());
 }
+
+#[test]
+fn a_secret_is_written_with_its_final_mode_over_a_readable_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = path(dir.path(), WIFI_PASSWORD_FILE);
+    put(dir.path(), WIFI_PASSWORD_FILE, "old");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    write_file(&target, b"new secret", 0o600).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"new secret");
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    let names: Vec<_> = fs::read_dir(target.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        names,
+        [target.file_name().unwrap()],
+        "a temporary file stayed"
+    );
+}
+
+#[test]
+fn the_setup_access_point_flag_is_only_where_root_writes() {
+    assert!(WIFI_AP_MODE_FILE.starts_with("/run/"));
+}

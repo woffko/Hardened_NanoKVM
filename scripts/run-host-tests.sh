@@ -114,7 +114,7 @@ for f in scripts/test-*.py; do
 		continue
 	fi
 	if [ "$n" = test-sg2002-account-ids ]; then
-		tree="${LATEST_BUILDROOT_SOURCE_DIR:-build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
+		tree="${LATEST_BUILDROOT_SOURCE_DIR:-build/latestbuildroot/buildroot-2026.05.1-raw11-security-r3}"
 		if [ ! -f "$tree/support/scripts/mkusers" ]; then
 			skip "$n" "no Buildroot tree in $tree (set LATEST_BUILDROOT_SOURCE_DIR)"; continue
 		fi

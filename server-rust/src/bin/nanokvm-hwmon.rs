@@ -477,7 +477,7 @@ fn collect_markers() -> MarkerSnapshot {
         watchdog_enabled: Path::new("/etc/kvm/watchdog").exists(),
         watchdog_temp: Path::new("/tmp/watchdog").exists(),
         wifi_exists: Path::new("/etc/kvm/wifi_exist").exists(),
-        wifi_ap_mode: Path::new("/tmp/wifiap").exists(),
+        wifi_ap_mode: Path::new("/run/nanokvm-wifiap").exists(),
         h264_safe_mode: Path::new("/etc/kvm/h264_safe_mode").exists(),
     }
 }

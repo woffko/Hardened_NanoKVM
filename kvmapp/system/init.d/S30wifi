@@ -5,8 +5,19 @@ if [ -e /run/nanokvm-restore-blocked ]; then
 fi
 
 . /etc/profile
+# /etc/profile sets 022. Everything this script writes holds a Wi-Fi secret.
+umask 077
 
-APFLAG_FILE=/tmp/wifiap
+# Opens the Wi-Fi routes that need no login, so only root may create it.
+APFLAG_FILE=/run/nanokvm-wifiap
+rm -f /tmp/wifiap
+
+# Write stdin to $1 through a private temporary file, so that the file is never
+# readable by others, whatever mode an earlier writer left on it.
+write_private() {
+    cat > "$1.new" && chmod 600 "$1.new" && mv -f "$1.new" "$1"
+}
+chmod 600 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass /etc/wpa_supplicant.conf /etc/hostapd.conf 2>/dev/null
 
 gen_hostapd_conf() {
     ssid="${1}"
@@ -65,7 +76,7 @@ start() {
         mv /boot/wifi.pass /etc/kvm/wifi.pass
 
         chown root:root /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
-        chmod 644 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
+        chmod 600 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
     fi
     if [ -e /etc/kvm/wifi.ssid ]; then
         ssid=$(cat /etc/kvm/wifi.ssid)
@@ -73,8 +84,11 @@ start() {
     if [ -e /etc/kvm/wifi.pass ]; then
         pass=$(cat /etc/kvm/wifi.pass)
     fi
-    echo "ctrl_interface=/var/run/wpa_supplicant" >/etc/wpa_supplicant.conf
-    wpa_passphrase "$ssid" "$pass" >>/etc/wpa_supplicant.conf
+    # wpa_passphrase also prints the passphrase itself as a comment.
+    {
+        echo "ctrl_interface=/var/run/wpa_supplicant"
+        wpa_passphrase "$ssid" "$pass" | sed '/^[[:space:]]*#psk=/d'
+    } | write_private /etc/wpa_supplicant.conf
     wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
     if [ ! -e /boot/wifi.nodhcp ]; then
         (udhcpc -i wlan0 -t 10 -T 1 -A 5 -b -p /run/udhcpc.wlan0.pid) &
@@ -103,7 +117,7 @@ ap_start() {
     if [ -e /kvmapp/kvm/ap.pass ]; then
         pass=$(cat /kvmapp/kvm/ap.pass)
     fi
-    gen_hostapd_conf "$ssid" "$pass" >/etc/hostapd.conf
+    gen_hostapd_conf "$ssid" "$pass" | write_private /etc/hostapd.conf
     ipv4_prefix=10.$id3.$id2
     if [ ! -e /etc/udhcpd.wlan0.conf ]; then
         gen_udhcpd_conf wlan0 "${ipv4_prefix}" >/etc/udhcpd.wlan0.conf

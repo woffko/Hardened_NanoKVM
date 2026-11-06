@@ -25,7 +25,10 @@ use crate::{
 
 const WOL_MAC_FILE: &str = "/etc/kvm/cache/wol";
 const WIFI_EXIST_FILE: &str = "/etc/kvm/wifi_exist";
-const WIFI_AP_MODE_FILE: &str = "/tmp/wifiap";
+/// Present while the setup access point runs. It opens the Wi-Fi routes that
+/// need no login, so it lives where only root can create it: in `/tmp`, any
+/// local account could.
+const WIFI_AP_MODE_FILE: &str = "/run/nanokvm-wifiap";
 const WIFI_SSID_FILE: &str = "/etc/kvm/wifi.ssid";
 const WIFI_PASSWORD_FILE: &str = "/etc/kvm/wifi.pass";
 const WIFI_CONNECT_FILE: &str = "/kvmapp/kvm/wifi_try_connect";
@@ -1901,12 +1904,26 @@ fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
+    // The file is created with its final mode, so a secret is never readable by
+    // others, not even between the write and a later chmod.
     let tmp = tmp_path_for(path);
-    fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    let written = (|| -> std::io::Result<()> {
+        use std::{
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&tmp)?;
+        file.write_all(content)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+    })();
+    if let Err(err) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
     }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
