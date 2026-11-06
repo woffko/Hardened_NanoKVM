@@ -6,7 +6,7 @@
 # Pinned here, because the remediation goal fixes them: the accepted RC12
 # kernel fragment (by hash), kernel release 5.10.265-tag- (no kernel upgrade
 # is coupled with the first fixing release), the production update key, and
-# the refreshed Buildroot security source (OpenSSL 3.6.5, OpenSSH 10.6p1,
+# the refreshed Buildroot security source (OpenSSL 3.6.5, OpenSSH 10.6p2,
 # expat 2.9.0, curl 8.23.0, wpa_supplicant 2.12, hostapd 2.12 without 11be).
 # Taken from the environment, and refused when absent, because the owner
 # decides them: the system and application versions, the SHA-256 of the
@@ -33,7 +33,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT_DIR/scripts/lib/release-versions.sh"
 FRAGMENT="$ROOT_DIR/support/sg2002/kernel/5.10.265/configs/phase3-04-init-on-alloc.config"
 FRAGMENT_SHA256=13c9fede1fdc4cfe59d1b6f2f90d4ae28d0b7e32876c9145b9999bb09816f750
-SOURCE_DIR="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
+SOURCE_DIR="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r3}"
 EXPECTED_SECURITY_PATCH_LEVEL="${EXPECTED_SECURITY_PATCH_LEVEL:-Buildroot 2026.05.1 security maintenance Linux 5.10.265 SG2002 vendor port}"
 
 refuse() {
@@ -61,7 +61,7 @@ esac
 	|| refuse "application server hash does not match the accepted artifact"
 MARKER="$SOURCE_DIR/.hardened-security-backports"
 [ -f "$MARKER" ] || refuse "Buildroot security source is not prepared: $SOURCE_DIR (run scripts/prepare-buildroot-2026.05.1-security-source.sh)"
-for pin in buildroot=2026.05.1 openssh=10.6p1 libopenssl=3.6.5 expat=2.9.0 libcurl=8.23.0 wpa_supplicant=2.12 hostapd=2.12-no-11be; do
+for pin in buildroot=2026.05.1 openssh=10.6p2 libopenssl=3.6.5 expat=2.9.0 libcurl=8.23.0 wpa_supplicant=2.12 hostapd=2.12-no-11be; do
 	grep -qx "$pin" "$MARKER" || refuse "Buildroot security source lacks $pin: $SOURCE_DIR"
 done
 

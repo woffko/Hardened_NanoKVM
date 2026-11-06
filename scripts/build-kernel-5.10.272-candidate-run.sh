@@ -16,7 +16,7 @@ SOURCE_DIR="${KERNEL_5_10_272_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/kernel
 EXPECTED_SOURCE_COMMIT=ddef97c3d978b67f7852dca05f0b3505f798c0b2
 EXPECTED_STABLE_PARENT=aca95a35f1bcc0626c4fa4d1252bf2d4c990a1a2
 RUN_ROOT="${KERNEL_5_10_272_REPRO_ROOT:-}"
-SOURCE="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r2}"
+SOURCE="${LATEST_BUILDROOT_SOURCE_DIR:-$ROOT_DIR/build/latestbuildroot/buildroot-2026.05.1-raw11-security-r3}"
 EXPECTED_SECURITY_PATCH_LEVEL="${EXPECTED_SECURITY_PATCH_LEVEL:-Buildroot 2026.05.1 security maintenance Linux 5.10.272 SG2002 vendor port}"
 
 refuse() {
@@ -55,7 +55,7 @@ MERGE="$(git -C "$SOURCE_DIR" rev-list --merges --first-parent -n1 HEAD)"
 	|| refuse "kernel stable parent does not match the signed v5.10.272 commit"
 MARKER="$SOURCE/.hardened-security-backports"
 [ -f "$MARKER" ] || refuse "Buildroot security source is not prepared: $SOURCE"
-for pin in buildroot=2026.05.1 openssh=10.6p1 libopenssl=3.6.5 expat=2.9.0 libcurl=8.23.0 wpa_supplicant=2.12 hostapd=2.12-no-11be; do
+for pin in buildroot=2026.05.1 openssh=10.6p2 libopenssl=3.6.5 expat=2.9.0 libcurl=8.23.0 wpa_supplicant=2.12 hostapd=2.12-no-11be; do
 	grep -qx "$pin" "$MARKER" || refuse "Buildroot security source lacks $pin: $SOURCE"
 done
 

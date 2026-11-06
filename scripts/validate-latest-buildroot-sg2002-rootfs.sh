@@ -181,6 +181,11 @@ debugfs -R "dump /etc/shadow $SHADOW_FILE" "$IMAGE" >/dev/null 2>&1 || \
 	die "could not read /etc/shadow"
 grep -q '^root:\*:' "$SHADOW_FILE" || \
 	die "clean image root account is not locked"
+# CVE-2026-123158: a field shorter than a hash and not locked with "!" is open
+# to any long password under an sshd before 10.6p2. Only root may have one.
+OPEN_ACCOUNTS="$(awk -F: '$1 != "root" && length($2) < 4 && substr($2, 1, 1) != "!" { print $1 }' "$SHADOW_FILE")"
+[ -z "$OPEN_ACCOUNTS" ] || \
+	die "image accounts are not locked: $(echo $OPEN_ACCOUNTS)"
 
 AVAHI_CONFIG="$TMP_DIR/avahi-daemon.conf"
 debugfs -R "dump /etc/avahi/avahi-daemon.conf $AVAHI_CONFIG" "$IMAGE" >/dev/null 2>&1 || \

@@ -116,10 +116,10 @@ try {
 
   // Cached preparation must verify the recipes, not just its historical receipt.
   // The recipes and receipt markers mirror the refreshed pins of
-  // prepare-buildroot-2026.05.1-security-source.sh (backport patches 0004-0008).
+  // prepare-buildroot-2026.05.1-security-source.sh (backport patches 0004-0009).
   const prepared = path.join(work, 'prepared');
   const recipes = {
-    openssh: 'OPENSSH_VERSION_MAJOR = 10.6\n',
+    openssh: 'OPENSSH_VERSION_MAJOR = 10.6\nOPENSSH_VERSION_MINOR = p2\n',
     libopenssl: 'LIBOPENSSL_VERSION = 3.6.5\n',
     expat: 'EXPAT_VERSION = 2.9.0\n',
     libcurl: 'LIBCURL_VERSION = 8.23.0\n',
@@ -133,7 +133,7 @@ try {
   const hostapd = path.join(prepared, 'package/hostapd/hostapd.mk');
   const patchDir = path.join(fixture,
     'buildroot-external/hardened-sg2002/buildroot-patches/2026.05.1');
-  const receipt = ['buildroot=2026.05.1', 'openssh=10.6p1', 'libopenssl=3.6.5', 'expat=2.9.0',
+  const receipt = ['buildroot=2026.05.1', 'openssh=10.6p2', 'libopenssl=3.6.5', 'expat=2.9.0',
     'libcurl=8.23.0', 'wpa_supplicant=2.12', 'hostapd=2.12-no-11be'];
   for (const name of fs.readdirSync(patchDir).filter(name => name.endsWith('.patch')).sort()) {
     const file = path.join(patchDir, name);

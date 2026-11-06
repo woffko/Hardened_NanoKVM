@@ -51,6 +51,9 @@ verify_sha256 "$PATCH_DIR/0007-libcurl-8.23.0.patch" \
 verify_sha256 "$PATCH_DIR/0008-wpa_supplicant-2.12.patch" \
 	f0c224214e34a3018de7a36fd32bbc97b5efefff3d39e1c3980fb6143f47ff4e \
 	"wpa_supplicant 2.12 patch"
+verify_sha256 "$PATCH_DIR/0009-openssh-10.6p2.patch" \
+	f4557fcab91caba4d92dc11e3f9088ae4d94e119815068e7fb5ed55512679ef0 \
+	"OpenSSH 10.6p2 patch"
 
 if [ -e "$OUTPUT_DIR" ]; then
 	[ -f "$OUTPUT_DIR/.hardened-security-backports" ] || {
@@ -58,7 +61,7 @@ if [ -e "$OUTPUT_DIR" ]; then
 		exit 1
 	}
 	grep -qx 'buildroot=2026.05.1' "$OUTPUT_DIR/.hardened-security-backports"
-	grep -qx 'openssh=10.6p1' "$OUTPUT_DIR/.hardened-security-backports"
+	grep -qx 'openssh=10.6p2' "$OUTPUT_DIR/.hardened-security-backports"
 	grep -qx 'libopenssl=3.6.5' "$OUTPUT_DIR/.hardened-security-backports"
 	grep -qx 'expat=2.9.0' "$OUTPUT_DIR/.hardened-security-backports"
 	grep -qx 'libcurl=8.23.0' "$OUTPUT_DIR/.hardened-security-backports"
@@ -130,7 +133,7 @@ ln -s "$SHARED_DL_DIR" "$SOURCE/dl"
 {
 	printf 'buildroot=2026.05.1\n'
 	printf 'archive_sha256=%s\n' "$EXPECTED_ARCHIVE_SHA256"
-	printf 'openssh=10.6p1\n'
+	printf 'openssh=10.6p2\n'
 	printf 'libopenssl=3.6.5\n'
 	printf 'expat=2.9.0\n'
 	printf 'libcurl=8.23.0\n'

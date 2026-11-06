@@ -127,7 +127,8 @@ build_assert_no_private_keys() {
 
 build_verify_security_recipes() {
 	security_source=$1
-	grep -qx 'OPENSSH_VERSION_MAJOR = 10.6' "$security_source/package/openssh/openssh.mk" || {
+	grep -qx 'OPENSSH_VERSION_MAJOR = 10.6' "$security_source/package/openssh/openssh.mk" &&
+		grep -qx 'OPENSSH_VERSION_MINOR = p2' "$security_source/package/openssh/openssh.mk" || {
 		echo "security source has an unexpected OpenSSH version" >&2
 		return 1
 	}

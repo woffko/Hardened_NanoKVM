@@ -99,7 +99,7 @@ build_assert_no_private_keys "$ROOT/kvmapp" || exit 1
 # wpa_supplicant patch any more, the version bumps below replace them.
 test ! -e "$PATCH_ROOT/libopenssl/3.6.3"
 test ! -e "$PATCH_ROOT/wpa_supplicant/2.11"
-for bump in 0004-libopenssl-3.6.5 0005-openssh-10.6p1 0006-expat-2.9.0 0007-libcurl-8.23.0 0008-wpa_supplicant-2.12; do
+for bump in 0004-libopenssl-3.6.5 0005-openssh-10.6p1 0006-expat-2.9.0 0007-libcurl-8.23.0 0008-wpa_supplicant-2.12 0009-openssh-10.6p2; do
 	test -f "$ROOT/buildroot-external/hardened-sg2002/buildroot-patches/2026.05.1/$bump.patch"
 done
 test -f "$PATCH_ROOT/busybox/1.38.0/0012-CVE-2026-38753-fix-awk-sub-use-after-free.patch"

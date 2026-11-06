@@ -43,6 +43,7 @@ Version bumps as Buildroot backport patches 0004–0008 in
 | --- | --- | --- | --- |
 | libopenssl | 3.6.3 + board OCSP patch | 3.6.5 | upstream `openssl-3.6.5.tar.gz.sha256`; Buildroot master |
 | openssh | 10.5p1 | 10.6p1 | release-10.6 notes (base64 SHA256 → hex); Buildroot master; Fedora |
+| openssh | 10.6p1 | 10.6p2 (CVE-2026-123158, patch 0009) | release-10.6p2 notes (base64 SHA256 → hex); PGP signature not yet checked |
 | expat | 2.8.2 | 2.9.0 (2.8.4's fixes plus CVE-2026-102633, 32-bit only) | Buildroot master (SHA-256); Alpine (SHA-512) |
 | libcurl | 8.21.0 | 8.23.0 | PGP signature, key 27EDEAF22F3ABCEB50DB9A125CC908FDB71E12C2; Buildroot master; Fedora |
 | wpa_supplicant | 2.11 + board PMKSA patch | 2.12 | PGP signature, key EC4AA0A991A5F2464582D52D2B6EF432EFC895FA; Buildroot master; Gentoo |

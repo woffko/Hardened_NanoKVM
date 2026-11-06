@@ -1,0 +1,34 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/openssh: update to 10.6p2
+
+OpenSSH 10.6p2 (2026-11-05) refuses a stored password field shorter than
+four characters in sys_auth_passwd. Without PAM, a field of "*" met the
+"*" that musl's crypt(3) returns for a password over 256 bytes, so any
+such password logged in to an account with that field (CVE-2026-123158).
+The release also fixes a sub-second CPU spin with ChannelTimeout and
+enables ssh-mldsa44-ed25519 as a CA signature algorithm. The hash is the
+release notes' base64 SHA256 (muRIcgkM8vBrPPn/FH5/FvMJZxNAdj7S+ZJIOYrinVs=)
+in hex. The LICENCE file is unchanged.
+
+diff --git a/package/openssh/openssh.hash b/package/openssh/openssh.hash
+--- a/package/openssh/openssh.hash
++++ b/package/openssh/openssh.hash
+@@ -1,4 +1,4 @@
+-# From https://www.openssh.com/txt/release-10.6 (base64 encoded)
+-sha256  a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39  openssh-10.6p1.tar.gz
++# From https://www.openssh.com/txt/release-10.6p2 (base64 encoded)
++sha256  9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b  openssh-10.6p2.tar.gz
+ # Locally calculated
+ sha256  5bb5b160726ef5756e4f32fe95b35249c294962419650f48d05134b486d27ccb  LICENCE
+diff --git a/package/openssh/openssh.mk b/package/openssh/openssh.mk
+--- a/package/openssh/openssh.mk
++++ b/package/openssh/openssh.mk
+@@ -5,7 +5,7 @@
+ ################################################################################
+ 
+ OPENSSH_VERSION_MAJOR = 10.6
+-OPENSSH_VERSION_MINOR = p1
++OPENSSH_VERSION_MINOR = p2
+ OPENSSH_VERSION = $(OPENSSH_VERSION_MAJOR)$(OPENSSH_VERSION_MINOR)
+ OPENSSH_CPE_ID_VERSION = $(OPENSSH_VERSION_MAJOR)
+ OPENSSH_CPE_ID_UPDATE = $(OPENSSH_VERSION_MINOR)
