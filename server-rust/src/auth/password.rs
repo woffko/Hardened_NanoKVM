@@ -27,6 +27,7 @@ pub struct Account {
 pub struct AccountStore {
     path: PathBuf,
     shadow: PathBuf,
+    passwd: PathBuf,
     #[cfg(test)]
     root_hasher: Option<PathBuf>,
 }
@@ -36,17 +37,19 @@ impl AccountStore {
         Self {
             path,
             shadow: PathBuf::from(credential_txn::SHADOW_FILE),
+            passwd: PathBuf::from(credential_txn::PASSWD_FILE),
             #[cfg(test)]
             root_hasher: None,
         }
     }
 
-    /// Host fixture: a temporary shadow file and a program standing in for
-    /// `mkpasswd`.
+    /// Host fixture: a temporary shadow file, the `passwd` file beside it, and a
+    /// program standing in for `mkpasswd`.
     #[cfg(test)]
     pub(crate) fn fixture(path: PathBuf, shadow: PathBuf, root_hasher: PathBuf) -> Self {
         Self {
             path,
+            passwd: shadow.with_file_name("passwd"),
             shadow,
             root_hasher: Some(root_hasher),
         }
@@ -114,6 +117,12 @@ impl AccountStore {
     /// Restore the stores of an interrupted change; `Ok(true)` if one was undone.
     pub(crate) fn recover_credentials(&self, _permit: &AccountPermit) -> Result<bool> {
         credential_txn::recover(&self.credentials())
+    }
+
+    /// Lock the service accounts whose shadow field holds no hash; see
+    /// `credential_txn::lock_service_accounts`. Returns their names.
+    pub(crate) fn lock_service_accounts(&self, _permit: &AccountPermit) -> Result<Vec<String>> {
+        credential_txn::lock_service_accounts(&self.credentials(), &self.passwd)
     }
 
     pub(crate) fn seed_legacy_default_account(&self, _permit: &AccountPermit) -> Result<bool> {

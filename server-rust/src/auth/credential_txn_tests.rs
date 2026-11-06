@@ -330,3 +330,94 @@ fn an_account_file_is_replaced_whole() {
     assert_eq!(Fixture::mode(&fixture.files.account), 0o600);
     assert_eq!(fixture.leftovers(), Vec::<PathBuf>::new());
 }
+
+const SERVICE_PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
+daemon:x:1:1:daemon:/usr/sbin:/bin/false\n\
+sync:x:4:100:sync:/bin:/bin/sync\n\
+mail:x:8:8:mail:/var/spool/mail:/bin/false\n\
+nobody:x:65534:65534:nobody:/home:/bin/false\n\
+avahi:x:100:101::/:/bin/false\n\
+sshd:x:101:102:SSH drop priv user:/var/empty:/bin/false\n\
+svc:x:102:102::/:/bin/false\n\
+toor:x:0:0::/root:/bin/sh\n\
+keyonly:x:500:500::/home/keyonly:/bin/sh\n\
+alice:x:1000:1000::/home/alice:/bin/false\n";
+const SERVICE_SHADOW: &[u8] = b"root:$6$Fx1./abcdEFGH234$hash:19000:0:99999:7:::\n\
+daemon:*:10933:0:99999:7:::\n\
+sync:*:10933:0:99999:7:::\n\
+mail:$6$salt$hash:10933:0:99999:7:::\n\
+nobody:*:10933:0:99999:7:::\n\
+avahi:*:::::::\n\
+sshd:!:19000::::::\n\
+svc::::::::\n\
+toor:*:::::::\n\
+keyonly:*:::::::\n\
+alice:*:::::::\n\
+not a shadow line\n";
+
+fn service_fixture(shadow: &[u8]) -> (Fixture, PathBuf) {
+    let fixture = fixture_with(shadow, Some(OLD_ACCOUNT));
+    let passwd = fixture.files.shadow.with_file_name("passwd");
+    fs::write(&passwd, SERVICE_PASSWD).unwrap();
+    (fixture, passwd)
+}
+
+#[test]
+fn service_accounts_without_a_hash_are_locked_and_nothing_else_changes() {
+    let (fixture, passwd) = service_fixture(SERVICE_SHADOW);
+    let locked = lock_service_accounts(&fixture.files, &passwd).unwrap();
+    assert_eq!(locked, ["daemon", "sync", "nobody", "avahi", "svc"]);
+    let expected = String::from_utf8(SERVICE_SHADOW.to_vec())
+        .unwrap()
+        .replace("daemon:*:", "daemon:!*:")
+        .replace("sync:*:", "sync:!*:")
+        .replace("nobody:*:", "nobody:!*:")
+        .replace("avahi:*:", "avahi:!*:")
+        .replace("svc::", "svc:!:");
+    // Root, a second uid 0, accounts with a login shell or in the range of
+    // people, a real hash, an account already locked and a damaged line stay.
+    assert_eq!(String::from_utf8(fixture.shadow()).unwrap(), expected);
+    assert_eq!(Fixture::mode(&fixture.files.shadow), 0o640);
+    assert!(fixture.leftovers().is_empty());
+
+    let again = fixture.shadow();
+    assert!(
+        lock_service_accounts(&fixture.files, &passwd)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.shadow(), again);
+}
+
+#[test]
+fn a_shadow_file_without_a_final_newline_keeps_its_shape() {
+    let (fixture, passwd) = service_fixture(b"root:*:::::::\ndaemon:*:::::::");
+    assert_eq!(
+        lock_service_accounts(&fixture.files, &passwd).unwrap(),
+        ["daemon"]
+    );
+    assert_eq!(fixture.shadow(), b"root:*:::::::\ndaemon:!*:::::::");
+}
+
+#[test]
+fn a_pending_credential_change_is_left_to_its_recovery() {
+    let (fixture, passwd) = service_fixture(SERVICE_SHADOW);
+    fs::write(fixture.files.journal(), b"pending").unwrap();
+    assert!(matches!(
+        lock_service_accounts(&fixture.files, &passwd),
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(fixture.shadow(), SERVICE_SHADOW);
+}
+
+#[test]
+fn without_a_passwd_file_nothing_is_locked() {
+    let fixture = fixture_with(SERVICE_SHADOW, Some(OLD_ACCOUNT));
+    let missing = fixture.files.shadow.with_file_name("passwd");
+    assert!(
+        lock_service_accounts(&fixture.files, &missing)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fixture.shadow(), SERVICE_SHADOW);
+}

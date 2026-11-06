@@ -22,6 +22,50 @@ SSHD_LIMITS="-o MaxAuthTries=3 -o LoginGraceTime=60 -o PerSourceNetBlockSize=32:
 
 umask 077
 
+# CVE-2026-123158: without PAM, OpenSSH before 10.6p2 takes any password over
+# 256 bytes for an account whose shadow field is "*" once another account has a
+# "$" hash, because musl's crypt returns "*" for such a password. The backend
+# locks the service accounts with "!"; until it has, sshd refuses them by name.
+# Root and people whose field holds no hash keep their keys and lose only
+# passwords, and only while some account has a hash to borrow a salt from.
+LOGIN_SHELLS='^/bin/(a|ba)?sh$|^/usr/bin/bash$'
+SSHD_RUN_CONFIG=/run/nanokvm-sshd_config
+
+# The image's accounts: not root, outside the range of people, no login shell.
+service_users() {
+    awk -F: -v login="$LOGIN_SHELLS" '
+        $3 ~ /^[0-9]+$/ && $3 != 0 && ($3 < 1000 || $3 >= 60000) && $7 !~ login &&
+            $1 ~ /^[a-z_][a-z0-9_.-]*$/ { printf " -o DenyUsers=%s", $1 }
+    ' /etc/passwd 2>/dev/null
+}
+
+# Root and people whose shadow field is no hash, when another account has one.
+open_users() {
+    awk -F: -v login="$LOGIN_SHELLS" '
+        NR == FNR {
+            if ($3 ~ /^[0-9]+$/ && ($3 == 0 || ($3 >= 1000 && $3 < 60000) || $7 ~ login))
+                person[$1] = 1
+            next
+        }
+        substr($2, 1, 1) == "$" { hashed = 1 }
+        ($1 in person) && length($2) < 4 && substr($2, 1, 1) != "!" &&
+            $1 ~ /^[a-z_][a-z0-9_.-]*$/ { names = names sep $1; sep = "," }
+        END { if (hashed && names != "") print names }
+    ' /etc/passwd /etc/shadow 2>/dev/null
+}
+
+# The sshd options that close the bypass, on one line.
+bypass_options() {
+    options="$(service_users)"
+    users="$(open_users)"
+    if [ -n "$users" ] && printf 'Include /etc/ssh/sshd_config\nMatch User %s\n\tPasswordAuthentication no\n\tKbdInteractiveAuthentication no\n' "$users" > "$SSHD_RUN_CONFIG"; then
+        options="$options -f $SSHD_RUN_CONFIG"
+    else
+        rm -f "$SSHD_RUN_CONFIG"
+    fi
+    printf '%s' "$options"
+}
+
 # OpenSSH 10.6 renamed this key type and reads no key of the old name, and
 # ssh-keygen -A leaves an existing file alone. An older system still reads and
 # uses that key, so only a key this OpenSSH cannot read gives way.
@@ -40,11 +84,15 @@ startssh() {
     /usr/bin/ssh-keygen -A
 
         printf "Starting sshd: "
-        # An sshd that does not know these options still starts, without them.
-        if /usr/sbin/sshd -t $SSHD_LIMITS 2>/dev/null; then
-            /usr/sbin/sshd $SSHD_LIMITS
-        else
+        SSHD_BYPASS="$(bypass_options)"
+        # An sshd that does not know the limits still starts, without them.
+        if /usr/sbin/sshd -t $SSHD_LIMITS $SSHD_BYPASS 2>/dev/null; then
+            /usr/sbin/sshd $SSHD_LIMITS $SSHD_BYPASS
+        elif /usr/sbin/sshd -t $SSHD_BYPASS 2>/dev/null; then
             printf "without password guessing limits, "
+            /usr/sbin/sshd $SSHD_BYPASS
+        else
+            printf "without password guessing limits or account barriers, "
             /usr/sbin/sshd
         fi
         touch /var/lock/sshd

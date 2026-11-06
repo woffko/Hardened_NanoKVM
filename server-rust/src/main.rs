@@ -356,6 +356,7 @@ async fn run_http(
         None => {
             let state = AppState::new(config).await?;
             roll_back_unconfirmed_firewall(&state).await;
+            state.lock_service_accounts();
             state
         }
     };
@@ -371,8 +372,13 @@ async fn run_http(
 
     let app = routes::build(state.clone()).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(addr).await?;
+    let trial = startup.is_some().then(|| state.clone());
     install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
+    if let Some(state) = trial {
+        // Committed: the trial is now the device's application.
+        state.lock_service_accounts();
+    }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(listener, app, "starting dedicated loopback HTTP listener");
     }
@@ -406,6 +412,7 @@ async fn run_https(
         None => {
             let state = AppState::new(config).await?;
             roll_back_unconfirmed_firewall(&state).await;
+            state.lock_service_accounts();
             state
         }
     };
@@ -425,8 +432,13 @@ async fn run_https(
     let app = routes::build(state.clone()).into_make_service_with_connect_info::<ClientAddr>();
     let listener = TcpListener::bind(https_addr).await?;
     let tls_listener = tls::TlsListener::new(listener, tls_config);
+    let trial = startup.is_some().then(|| state.clone());
     install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
+    if let Some(state) = trial {
+        // Committed: the trial is now the device's application.
+        state.lock_service_accounts();
+    }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(
             listener,

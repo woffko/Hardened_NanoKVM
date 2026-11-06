@@ -11,6 +11,7 @@
 //! this journal.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions, Permissions},
     io::{self, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -25,6 +26,10 @@ use zeroize::Zeroizing;
 use crate::{AppError, Result};
 
 pub(crate) const SHADOW_FILE: &str = "/etc/shadow";
+pub(crate) const PASSWD_FILE: &str = "/etc/passwd";
+/// A stored password field shorter than this is no crypt(3) hash; OpenSSH
+/// 10.6p2 refuses such fields for the same reason.
+const MIN_HASH_CHARS: usize = 4;
 const MAGIC: &[u8; 8] = b"NKCRED01";
 /// Bound for each stored file; the frozen trial reads the account under it too.
 const MAX_STORE_BYTES: usize = 64 * 1024;
@@ -234,6 +239,81 @@ pub(crate) fn recover(files: &CredentialFiles) -> Result<bool> {
         remove_durably(&path)?;
     }
     Ok(restored)
+}
+
+/// Lock every account that no person logs in to and whose shadow field holds no
+/// hash. Without PAM, OpenSSH before 10.6p2 checks a password for a field of
+/// `*` with the salt of another account's hash, and musl's crypt(3) returns `*`
+/// for any password longer than 256 bytes, so the two match: CVE-2026-123158.
+/// A leading `!` makes sshd refuse the account before any method runs. Root and
+/// the accounts of people stay as they are, because `*` there may stand for a
+/// login by key alone. Returns the accounts it locked. A pending credential
+/// change is left to its recovery at the next start.
+pub(crate) fn lock_service_accounts(files: &CredentialFiles, passwd: &Path) -> Result<Vec<String>> {
+    if present(&files.journal())? {
+        return Err(AppError::Conflict(PENDING.into()));
+    }
+    let Some(accounts) = read_store(passwd)? else {
+        return Ok(Vec::new());
+    };
+    let services = service_accounts(&accounts.bytes);
+    let shadow = read_store(&files.shadow)?
+        .ok_or_else(|| AppError::Internal("the root account store is missing".into()))?;
+    let (next, locked) = with_services_locked(&shadow.bytes, &services);
+    if !locked.is_empty() {
+        write_atomic(&files.shadow, &next, &shadow.owner())?;
+    }
+    Ok(locked)
+}
+
+/// Accounts of `/etc/passwd` that are neither root nor a person's, by the rule
+/// a raw update uses to tell the image's accounts from a device's own.
+fn service_accounts(passwd: &[u8]) -> BTreeSet<String> {
+    passwd
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            let service = fields.len() == 7
+                && !fields[0].is_empty()
+                && fields[2].parse::<u32>().is_ok_and(|uid| uid != 0)
+                && !crate::update::restore_native::person(fields[2], fields[6]);
+            service.then(|| fields[0].to_string())
+        })
+        .collect()
+}
+
+/// `shadow` with `!` put in front of each listed account's field that is shorter
+/// than a hash and not locked yet; every other byte stays.
+fn with_services_locked(
+    shadow: &[u8],
+    services: &BTreeSet<String>,
+) -> (Zeroizing<Vec<u8>>, Vec<String>) {
+    let mut out = Zeroizing::new(Vec::with_capacity(shadow.len() + services.len()));
+    let mut locked = Vec::new();
+    for (index, line) in shadow.split(|byte| *byte == b'\n').enumerate() {
+        if index > 0 {
+            out.push(b'\n');
+        }
+        let mut parts = line.splitn(3, |byte| *byte == b':');
+        let (Some(name), Some(field), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+            out.extend_from_slice(line);
+            continue;
+        };
+        let name = std::str::from_utf8(name)
+            .ok()
+            .filter(|name| services.contains(*name));
+        match name {
+            Some(name) if field.len() < MIN_HASH_CHARS && !field.starts_with(b"!") => {
+                out.extend_from_slice(&line[..name.len() + 1]);
+                out.push(b'!');
+                out.extend_from_slice(&line[name.len() + 1..]);
+                locked.push(name.to_string());
+            }
+            _ => out.extend_from_slice(line),
+        }
+    }
+    (out, locked)
 }
 
 /// Write an account file atomically: the old or the new file, never a torn one.

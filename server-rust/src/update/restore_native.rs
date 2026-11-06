@@ -471,7 +471,7 @@ fn person_id(id: u32) -> bool {
 
 /// Whose SSH state a raw update would lose: not root's, which is carried, and not
 /// that of an account the image owns.
-pub(super) fn person(uid: &str, shell: &str) -> bool {
+pub(crate) fn person(uid: &str, shell: &str) -> bool {
     number(uid).is_ok_and(|uid| uid != 0 && (person_id(uid) || login_shell(shell)))
 }
 

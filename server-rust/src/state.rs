@@ -156,6 +156,25 @@ impl AppState {
         self.webrtc.stop_and_join().await
     }
 
+    /// Lock the service accounts whose shadow field holds no hash, and log the
+    /// ones it changed. Every full start runs this, and so does a trial once
+    /// its commit makes it the device's application, so an application update
+    /// closes CVE-2026-123158 without waiting for a reboot. A failure leaves
+    /// the device as it was and the next start tries again.
+    pub fn lock_service_accounts(&self) {
+        match self
+            .writers
+            .account()
+            .and_then(|permit| self.accounts.lock_service_accounts(&permit))
+        {
+            Ok(locked) if !locked.is_empty() => {
+                tracing::warn!(accounts = ?locked, "locked service accounts that had no password hash");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(%error, "service accounts were not locked"),
+        }
+    }
+
     pub fn set_terminal_enabled(&self, enabled: bool) {
         self.terminal_enabled.store(enabled, Ordering::Release);
     }
