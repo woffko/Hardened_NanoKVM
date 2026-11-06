@@ -127,15 +127,15 @@ export const Login = (): ReactElement => {
       return;
     }
 
-    setIsloading(true);
-
-    const username = values.username;
-    const password = encrypt(values.password);
     const claim = String(values.claim ?? '').trim();
     if (!claim) {
       setMsg(t('auth.claimRequired'));
       return;
     }
+
+    setIsloading(true);
+    const username = values.username;
+    const password = encrypt(values.password);
 
     api
       .setupFirstAccount(username, password, claim)
