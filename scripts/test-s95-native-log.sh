@@ -15,9 +15,11 @@ fail() {
     exit 1
 }
 
-awk '$0 == "prepare_native_log() {" {p = 1} p {print} p && $0 == "}" {exit}' "$S95" > "$T/lib.sh"
+for name in prepare_runtime_log prepare_native_log; do
+    awk -v start="$name() {" '$0 == start {p = 1} p {print} p && $0 == "}" {exit}' "$S95" >> "$T/lib.sh"
+done
 grep -qx 'prepare_native_log() {' "$T/lib.sh" || fail "no prepare_native_log in S95nanokvm"
-grep -q '^    prepare_native_log$' "$S95" || fail "start_native_broker does not prepare the log"
+grep -q '^    prepare_native_log || return 1$' "$S95" || fail "start_native_broker does not require safe log preparation"
 
 shells="sh"
 command -v busybox >/dev/null 2>&1 && shells="sh busybox"
@@ -54,5 +56,18 @@ for shell in $shells; do
     [ "$(head -c 1 "$T/native.log.1")" = y ] || fail "$shell: the second rotation did not replace .1"
     [ ! -e "$T/native.log.2" ] || fail "$shell: more than one generation kept"
     echo "ok $shell: a log over the limit becomes .1 and only one generation is kept"
+
+    rm -f "$T/native.log"
+    printf sentinel > "$T/victim"
+    ln -s "$T/victim" "$T/native.log"
+    if run "$shell"; then fail "$shell: accepted a symlink log"; fi
+    [ "$(cat "$T/victim")" = sentinel ] || fail "$shell: touched linked victim"
+    rm "$T/native.log"
+    ln "$T/victim" "$T/native.log"
+    if run "$shell"; then fail "$shell: accepted a hardlink log"; fi
+    rm "$T/native.log"
+    mkfifo "$T/native.log"
+    if run "$shell"; then fail "$shell: accepted a FIFO log"; fi
+    rm "$T/native.log"
 done
 echo "S95 native log test: PASS"

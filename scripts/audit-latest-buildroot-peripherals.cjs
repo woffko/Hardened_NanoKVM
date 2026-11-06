@@ -180,7 +180,7 @@ alive_pid() {
   [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && printf '%s' "$PID"
 }
 HWMON_PID="$(alive_pid /tmp/nanokvm-hwmon.pid || true)"
-WATCHDOG_PID="$(alive_pid /tmp/nanokvm-watchdog.pid || true)"
+WATCHDOG_PID="$(/usr/libexec/nanokvm-native-ctl --watchdog status runtime || true)"
 KVM_PID=''
 for PROC in /proc/[0-9]*; do
   CMD="$(tr '\0' ' ' < "$PROC/cmdline" 2>/dev/null || true)"
@@ -189,16 +189,16 @@ for PROC in /proc/[0-9]*; do
   esac
 done
 NOW="$(date +%s)"
-SNAPSHOT_MS="$(sed -n 's/.*"generated_at_unix_ms":[[:space:]]*\([0-9][0-9]*\).*/\1/p' /tmp/nanokvm-hwmon-state.json 2>/dev/null | head -n 1)"
+SNAPSHOT_MS="$(sed -n 's/.*"generated_at_unix_ms":[[:space:]]*\([0-9][0-9]*\).*/\1/p' /run/nanokvm-hwmon-state.json 2>/dev/null | head -n 1)"
 [ -n "$SNAPSHOT_MS" ] || SNAPSHOT_MS=0
 printf 'HWMON_PID=%s\n' "$HWMON_PID"
 printf 'WATCHDOG_PID=%s\n' "$WATCHDOG_PID"
 printf 'KVM_SYSTEM_PID=%s\n' "$KVM_PID"
-printf 'HWMON_SNAPSHOT=%s\n' "$([ -s /tmp/nanokvm-hwmon-state.json ] && echo present || echo missing)"
+printf 'HWMON_SNAPSHOT=%s\n' "$([ -s /run/nanokvm-hwmon-state.json ] && echo present || echo missing)"
 printf 'HWMON_AGE_SECONDS=%s\n' "$((NOW - SNAPSHOT_MS / 1000))"
-printf 'HWMON_SCHEMA=%s\n' "$(grep -q 'nanokvm-hwmon/v1' /tmp/nanokvm-hwmon-state.json 2>/dev/null && echo ok || echo missing)"
-printf 'HWMON_USB_CONFIGURED=%s\n' "$(grep -q '"udc_state": "configured"' /tmp/nanokvm-hwmon-state.json 2>/dev/null && echo yes || echo no)"
-printf 'HWMON_HDMI_ACTIVE=%s\n' "$(grep -q '"active": true' /tmp/nanokvm-hwmon-state.json 2>/dev/null && echo yes || echo no)"
+printf 'HWMON_SCHEMA=%s\n' "$(grep -q 'nanokvm-hwmon/v1' /run/nanokvm-hwmon-state.json 2>/dev/null && echo ok || echo missing)"
+printf 'HWMON_USB_CONFIGURED=%s\n' "$(grep -q '"udc_state": "configured"' /run/nanokvm-hwmon-state.json 2>/dev/null && echo yes || echo no)"
+printf 'HWMON_HDMI_ACTIVE=%s\n' "$(grep -q '"active": true' /run/nanokvm-hwmon-state.json 2>/dev/null && echo yes || echo no)"
 printf 'RUST_HWMON_FLAG=%s\n' "$([ -f /etc/kvm/rust_hwmon_enabled ] && echo present || echo missing)"
 printf 'OLED_EXIST_FLAG=%s\n' "$([ -f /etc/kvm/oled_exist ] && echo present || echo missing)"
 printf 'OLED_LOG_ACTIVE=%s\n' "$(grep -q 'Rust hwmon passive state active' /tmp/kvm_system.log 2>/dev/null && echo yes || echo no)"
@@ -212,7 +212,7 @@ printf 'WLAN0=%s\n' "$([ -d /sys/class/net/wlan0 ] && echo present || echo missi
 printf 'WIFI_EXIST_FLAG=%s\n' "$([ -f /etc/kvm/wifi_exist ] && echo present || echo missing)"
 printf 'USB0=%s\n' "$([ -d /sys/class/net/usb0 ] && echo present || echo missing)"
 printf 'CRITICAL_MODULES=%s\n' "$(grep -q '^soph_sys ' /proc/modules && grep -q '^soph_vcodec ' /proc/modules && grep -q '^soph_vi ' /proc/modules && echo ok || echo missing)"
-printf 'SYSTEM_UPDATE_WATCHDOG=%s\n' "$([ -f /tmp/system-update-watchdog.pid ] && echo present || echo absent)"
+printf 'SYSTEM_UPDATE_WATCHDOG=%s\n' "$(/usr/libexec/nanokvm-native-ctl --watchdog status update >/dev/null 2>&1 && echo present || echo absent)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg 2>/dev/null | grep -Eic 'oops|panic|segfault|BUG:' || true)"
 printf 'PERIPHERAL_LOG_ALERTS_BEGIN\n'
 { tail -n 160 /tmp/kvm_system.log 2>/dev/null; tail -n 160 /tmp/nanokvm-hwmon.log 2>/dev/null; } | grep -Ei 'segfault|panic|fatal|unsupported relocation|Error loading shared library' || true

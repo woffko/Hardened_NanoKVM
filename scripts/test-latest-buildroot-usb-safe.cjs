@@ -218,7 +218,7 @@ fi
 printf 'RNDIS=%s\n' "$([ -d "$G/functions/rndis.usb0" ] && echo present || echo missing)"
 printf 'NCM=%s\n' "$([ -d "$G/functions/ncm.usb0" ] && echo present || echo missing)"
 printf 'ACM=%s\n' "$([ -d "$G/functions/acm.GS0" ] && echo present || echo missing)"
-printf 'SERVER_LOG_LINES=%s\n' "$(wc -l < /tmp/nanokvm-server.log 2>/dev/null || echo 0)"
+printf 'SERVER_LOG_LINES=%s\n' "$(wc -l < /run/nanokvm-native.log 2>/dev/null || echo 0)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg 2>/dev/null | grep -Eic 'oops|panic|segfault|BUG:' || true)"
 `;
 
@@ -357,7 +357,7 @@ async function main() {
 
   const afterInventory = await ssh(password, `${inventoryCommand}
 printf 'NEW_SERVER_ERRORS_BEGIN\\n'
-sed -n '${logLines + 1},$p' /tmp/nanokvm-server.log 2>/dev/null | grep -E 'HID write failed|failed to recover HID|USB gadget did not reach|kernel oops' || true
+sed -n '${logLines + 1},$p' /run/nanokvm-native.log 2>/dev/null | grep -E 'HID write failed|failed to recover HID|USB gadget did not reach|kernel oops' || true
 printf 'NEW_SERVER_ERRORS_END\\n'
 `);
   fs.writeFileSync(path.join(resultDir, 'after.txt'), afterInventory, { mode: 0o600 });

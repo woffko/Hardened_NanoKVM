@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const OUTPUT_PATH: &str = "/tmp/nanokvm-hwmon-state.json";
+const OUTPUT_PATH: &str = "/run/nanokvm-hwmon-state.json";
 const DEFAULT_INTERVAL_SECS: u64 = 5;
 const KNOWN_INTERFACES: &[&str] = &["eth0", "wlan0", "usb0", "tailscale0", "lo"];
 
@@ -140,8 +140,8 @@ fn write_snapshot(path: &str) -> io::Result<()> {
     write_replacing(Path::new(path), &data)
 }
 
-/// Replace `path` through a fresh temporary file beside it. `/tmp` is
-/// world-writable, so the temporary name is random and the file is created
+/// Replace `path` through a fresh temporary file beside it. The runtime
+/// destination is under protected `/run`; the temporary file is created
 /// exclusively without following links: a planted file or link is never
 /// written through. The rename replaces a link at `path`; it never follows it.
 fn write_replacing(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -158,7 +158,7 @@ fn write_replacing(path: &Path, data: &[u8]) -> io::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o644)
+            .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&temp)?;
         file.write_all(data)?;
@@ -475,7 +475,7 @@ fn collect_markers() -> MarkerSnapshot {
         oled_exists: Path::new("/etc/kvm/oled_exist").exists(),
         frame_detect_marker: Path::new("/etc/kvm/frame_detact").exists(),
         watchdog_enabled: Path::new("/etc/kvm/watchdog").exists(),
-        watchdog_temp: Path::new("/tmp/watchdog").exists(),
+        watchdog_temp: Path::new("/run/nanokvm-vision-watchdog").exists(),
         wifi_exists: Path::new("/etc/kvm/wifi_exist").exists(),
         wifi_ap_mode: Path::new("/run/nanokvm-wifiap").exists(),
         h264_safe_mode: Path::new("/etc/kvm/h264_safe_mode").exists(),
@@ -534,6 +534,11 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated");
         assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let leftovers = std::fs::read_dir(dir.path())
             .unwrap()
             .filter(|entry| {

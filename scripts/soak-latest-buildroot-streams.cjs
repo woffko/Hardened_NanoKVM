@@ -222,7 +222,7 @@ printf 'BACKEND_PID=%s\\n' "$BACKEND_PID"
 printf 'KVM_SYSTEM_COUNT=%s\\n' "$KVM_COUNT"
 printf 'MODULES_OK=%s\\n' "$(grep -q '^soph_vcodec ' /proc/modules && grep -q '^soph_jpeg ' /proc/modules && grep -q '^soph_vc_driver ' /proc/modules && echo yes || echo no)"
 printf 'DMESG_ALERTS=%s\\n' "$(dmesg 2>/dev/null | grep -Eic "$PATTERN" || true)"
-printf 'SYSLOG_ALERTS=%s\\n' "$(grep -Eic "$PATTERN" /tmp/hardened-syslog/messages 2>/dev/null || true)"
+printf 'SYSLOG_ALERTS=%s\\n' "$(grep -Eic "$PATTERN" /run/hardened-syslog/messages 2>/dev/null || true)"
 printf 'REMOTE_SYSLOG=%s\\n' "$(grep -Rqs '10.0.77.177' /etc 2>/dev/null && echo configured || echo not-found)"
 `);
   fs.writeFileSync(path.join(resultDir, `${label}-state.txt`), state, { mode: 0o600 });
@@ -480,7 +480,7 @@ printf 'RESTART_LOG_BEGIN\\n'
 tail -n 80 /tmp/hardened-restart-test.log 2>/dev/null || true
 printf 'RESTART_LOG_END\\n'
 printf 'SERVER_LOG_BEGIN\\n'
-tail -n 80 /tmp/nanokvm-server.log 2>/dev/null || true
+tail -n 80 /run/nanokvm-native.log 2>/dev/null || true
 printf 'SERVER_LOG_END\\n'
 `);
     fs.writeFileSync(path.join(resultDir, 'final-state.txt'), finalState, { mode: 0o600 });

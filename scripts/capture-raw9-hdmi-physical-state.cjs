@@ -211,7 +211,7 @@ for PROC in /proc/[0-9]*; do
   CMD="$(tr '\\0' ' ' < "$PROC/cmdline" 2>/dev/null || true)"
   case "$CMD" in /lib/ld-musl-riscv64v0p7_xthead.so.1*'/tmp/kvm_system/kvm_system'*) KVM_COUNT=$((KVM_COUNT + 1));; esac
 done
-HDMI_BLOCK="$(sed -n '/"hdmi"[[:space:]]*:/,/^[[:space:]]*},/p' /tmp/nanokvm-hwmon-state.json 2>/dev/null || true)"
+HDMI_BLOCK="$(sed -n '/"hdmi"[[:space:]]*:/,/^[[:space:]]*},/p' /run/nanokvm-hwmon-state.json 2>/dev/null || true)"
 printf 'BACKEND_RUNNING=%s\\n' "$([ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null && echo yes || echo no)"
 printf 'KVM_SYSTEM_COUNT=%s\\n' "$KVM_COUNT"
 printf 'HWMON_ACTIVE=%s\\n' "$(printf '%s\\n' "$HDMI_BLOCK" | sed -n 's/.*"active"[[:space:]]*:[[:space:]]*\\([^,]*\\).*/\\1/p' | tr -d ' ')"
@@ -223,7 +223,7 @@ SYSLOG_PID="$(cat /var/run/syslogd.pid 2>/dev/null || true)"
 printf 'REMOTE_SYSLOG=%s\\n' "$(tr '\\0' ' ' < "/proc/$SYSLOG_PID/cmdline" 2>/dev/null | grep -Fq -- '-R 10.0.77.177:514' && echo active || echo missing)"
 PATTERN='oops|panic|segfault|BUG:|module_put|fail to allocate ion|Invalid buffer|already inited|Unknown symbol|disagrees about version|invalid module format|VPSS.*(fail|error)|VENC.*(fail|error)'
 printf 'DMESG_ALERTS=%s\\n' "$(dmesg | grep -Eic "$PATTERN" || true)"
-printf 'SYSLOG_ALERTS=%s\\n' "$(grep -Eic "$PATTERN" /tmp/hardened-syslog/messages 2>/dev/null || true)"
+printf 'SYSLOG_ALERTS=%s\\n' "$(grep -Eic "$PATTERN" /run/hardened-syslog/messages 2>/dev/null || true)"
 printf 'DMESG_ALERT_LINES_BEGIN\\n'
 dmesg | grep -Ei "$PATTERN" | tail -n 120 || true
 printf 'DMESG_ALERT_LINES_END\\n'

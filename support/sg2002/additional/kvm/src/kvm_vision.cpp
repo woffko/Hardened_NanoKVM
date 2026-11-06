@@ -20,6 +20,9 @@
 #include <cerrno>
 #include <cstdarg>
 #include <exception>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "i2c_bus_lock.h"
 
@@ -53,8 +56,8 @@
 #define hdmi_mode_path          "/etc/kvm/hdmi_mode"
 #define hdmi_state_path         "/proc/lt_int"
 #define watchdog_mode_path      "/etc/kvm/watchdog"
-#define watchdog_temp_path      "/tmp/watchdog"
-#define watchdog_file           "/tmp/nanokvm_wd"
+#define watchdog_temp_path      "/run/nanokvm-vision-watchdog"
+#define watchdog_file           "/run/nanokvm-vision-heartbeat"
 
 #define LT6911_ADDR 	0x2B
 #define LT6911_READ 	0xFF
@@ -509,25 +512,31 @@ int get_hdmi_mode(void)
     return 0;
 }
 
+static bool trusted_watchdog_flag(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_uid == 0 && (st.st_mode & 0022) == 0;
+}
+
 uint8_t watchdog_sf_is_open(void)
 {
-	if(access(watchdog_mode_path, F_OK) == 0) return 1;
-    else if(access(watchdog_temp_path, F_OK) == 0) return 1;
-	else return 0;
+    return trusted_watchdog_flag(watchdog_mode_path) ||
+           trusted_watchdog_flag(watchdog_temp_path);
 }
 
 int vision_update_watchdog()
 {
-    FILE *file;
-
-    file = fopen(watchdog_file, "w");
-    if (file == NULL) {
-        debug("[kvmv] watchdog open error\n");
+    const int fd = open(watchdog_file,
+                        O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+    if(fd < 0) return -1;
+    struct stat st;
+    if(fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+       st.st_nlink != 1 || (st.st_mode & 0022) != 0 || ftruncate(fd, 0) != 0){
+        close(fd);
         return -1;
     }
-    // fprintf(file, "%s", 'v');
-    fclose(file);
-    return 1;
+    return close(fd) == 0 ? 1 : -1;
 }
 
 int get_manual_resolution(void)

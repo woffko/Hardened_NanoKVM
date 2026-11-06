@@ -59,6 +59,7 @@ nobody:x:65534:65534:nobody:/nonexistent:/bin/false
 sshd:x:101:102::/var/empty:/bin/false
 alice:x:1000:1000::/home/alice:/bin/sh
 bob:x:1001:1001::/home/bob:/bin/sh
+BuildBot$:x:1002:1002::/home/BuildBot:/bin/sh
 EOF
 cat > /etc/shadow <<'EOF'
 root:$6$saltsalt$hash:19000:0:99999:7:::
@@ -67,6 +68,7 @@ nobody:*:10933:0:99999:7:::
 sshd:!:19000::::::
 alice:*:::::::
 bob:$6$saltsalt$hash:::::::
+BuildBot$:*:::::::
 EOF
 # Host binaries of the same names are replaced inside the overlays only.
 # /usr/sbin/sshd records each call, then runs the real build, named sshd so
@@ -87,7 +89,7 @@ cp "$(command -v "$SSH_KEYGEN_BIN")" /usr/bin/ssh-keygen
 [ -d /var/lock ] || ln -s /run/lock /var/lock
 
 mkdir -p "$TEST_ROOT/busybox"
-for applet in sh printf touch rm killall awk; do
+for applet in sh printf touch rm killall awk pidof sleep; do
     ln -s "$(command -v busybox)" "$TEST_ROOT/busybox/$applet"
 done
 run_s50() {
@@ -195,6 +197,19 @@ run_s50 stop >/dev/null
 
 # 7. CVE-2026-123158: the service accounts are refused by name, and passwords
 # are off for root and people whose field is no hash while another has a hash.
+# Preserved conditional settings must not override the mandatory barrier.
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/keys.conf <<'EOF'
+Match User alice
+    PasswordAuthentication yes
+    KbdInteractiveAuthentication yes
+EOF
+cat >> /etc/ssh/sshd_config <<'EOF'
+Include /etc/ssh/sshd_config.d/*.conf
+Match User alice
+    PasswordAuthentication yes
+    KbdInteractiveAuthentication yes
+EOF
 output="$(run_s50 start 2>&1)" || fail "start with account barriers failed: $output"
 listening || fail "sshd is not listening with account barriers: $output"
 args="$(daemon_args)"
@@ -205,11 +220,15 @@ for unexpected in DenyUsers=root DenyUsers=alice DenyUsers=bob; do
     printf '%s\n' "$args" | grep -qx -e "$unexpected" && fail "sshd got '$unexpected'"
 done
 mapfile -t argv <<< "$args"
-for case in alice:no bob:yes root:yes; do
+for case in alice:no bob:yes root:yes 'BuildBot$:no'; do
     name="${case%%:*}"
-    got="$("$TEST_ROOT/real/sshd" -T "${argv[@]}" -C "user=$name,host=client,addr=192.0.2.1" |
-        grep -i '^passwordauthentication ' | cut -d' ' -f2)"
-    [ "$got" = "${case#*:}" ] || fail "password authentication for $name is '$got', not '${case#*:}'"
+    effective="$("$TEST_ROOT/real/sshd" -T "${argv[@]}" -C "user=$name,host=client,addr=192.0.2.1")"
+    for method in passwordauthentication kbdinteractiveauthentication; do
+        got="$(printf '%s\n' "$effective" | grep -i "^$method " | cut -d' ' -f2)"
+        [ "$got" = "${case#*:}" ] || fail "$method for $name is '$got', not '${case#*:}'"
+    done
+    printf '%s\n' "$effective" | grep -qix 'pubkeyauthentication yes' ||
+        fail "public key authentication for $name was disabled"
 done
 # sshd -T prints one DenyUsers line for each name.
 denied="$("$TEST_ROOT/real/sshd" -T "${argv[@]}" | grep -i '^denyusers ')"
@@ -219,14 +238,105 @@ for name in daemon nobody sshd; do
 done
 run_s50 stop >/dev/null
 
-# 8. Before the first setup no account has a hash to borrow a salt from: sshd
-# runs without the generated configuration, so root's first password works.
+# A failed start must neither launch a daemon nor report success. Keep these
+# checks before the first-setup fixture removes the need for generated config.
+refuses_start() {
+    local label="$1" output
+    : > "$TEST_ROOT/sshd-calls"
+    rm -f /var/lock/sshd
+    if output="$(run_s50 start 2>&1)"; then
+        fail "$label reported success: $output"
+    fi
+    case "$output" in *OK*) fail "$label printed OK: $output" ;; esac
+    [ ! -e /var/lock/sshd ] || fail "$label created the service lock"
+    [ -z "$(ss -ltnH 'sport = :22')" ] || fail "$label left sshd listening"
+    echo "$label: refused"
+}
+
+# Invalid mandatory options must not trigger an unrestricted fallback.
+install_sshd 'case " $* " in *DenyUsers=*) exit 255 ;; esac'
+refuses_start 'rejected account barriers'
+[ -z "$(daemon_args)" ] || fail "rejected barriers still invoked the daemon"
+
+install_sshd ':'
+rm -f /run/nanokvm-sshd-account-barriers.conf
+mkdir /run/nanokvm-sshd-account-barriers.conf
+refuses_start 'unwritable account barrier include'
+[ ! -s "$TEST_ROOT/sshd-calls" ] || fail "sshd ran without the account barrier include"
+rmdir /run/nanokvm-sshd-account-barriers.conf
+
+rm -f /run/nanokvm-sshd_config
+mkdir /run/nanokvm-sshd_config
+refuses_start 'unwritable generated configuration'
+[ ! -s "$TEST_ROOT/sshd-calls" ] || fail "sshd ran without generated configuration"
+rmdir /run/nanokvm-sshd_config
+
+mv /etc/shadow /etc/shadow.saved
+refuses_start 'unreadable account database'
+[ ! -s "$TEST_ROOT/sshd-calls" ] || fail "sshd ran without the account database"
+mv /etc/shadow.saved /etc/shadow
+
+# Configuration validation can succeed and the actual daemon still fail.
+install_sshd 'case " $* " in *" -t "*) ;; *) exit 255 ;; esac'
+refuses_start 'daemon launch failure'
+[ -n "$(daemon_args)" ] || fail "daemon failure case did not attempt launch"
+install_sshd ':'
+
+# 8. Protect key-only users before the first hash exists. Refresh after setup
+# restores root's password method while retaining alice's key-only policy.
 sed -i 's/^root:[^:]*:/root:*:/; s/^bob:[^:]*:/bob:!:/' /etc/shadow
 output="$(run_s50 start 2>&1)" || fail "start before setup failed: $output"
 args="$(daemon_args)"
-printf '%s\n' "$args" | grep -qx -e -f && fail "sshd got the generated configuration without a hash: $(echo $args)"
-[ ! -e /run/nanokvm-sshd_config ] || fail "the generated configuration stayed"
+printf '%s\n' "$args" | grep -qx -e -f || fail "sshd omitted protection before setup"
+mapfile -t argv <<< "$args"
+for name in root alice; do
+    "$TEST_ROOT/real/sshd" -T "${argv[@]}" -C "user=$name,host=client,addr=192.0.2.1" |
+        grep -qix 'passwordauthentication no' || fail "$name accepts passwords before setup"
+done
 printf '%s\n' "$args" | grep -qx -e DenyUsers=daemon || fail "the service accounts are not refused before setup"
+sed -i 's/^root:[^:]*:/root:$6$saltsalt$hash:/' /etc/shadow
+output="$(run_s50 refresh 2>&1)" || fail "refresh after setup failed: $output"
+listening || fail "refresh did not restore the listener"
+args="$(daemon_args)"
+mapfile -t argv <<< "$args"
+for case in root:yes alice:no; do
+    name="${case%%:*}"
+    "$TEST_ROOT/real/sshd" -T "${argv[@]}" -C "user=$name,host=client,addr=192.0.2.1" |
+        grep -qix "passwordauthentication ${case#*:}" || fail "$name has stale policy after setup"
+done
+# A persisted stop request takes precedence even over an existing listener.
+touch /etc/kvm/ssh_stop
+run_s50 refresh >/dev/null || fail "refresh with a stop flag failed"
+[ -z "$(ss -ltnH 'sport = :22')" ] || fail "refresh ignored the stop flag"
+rm -f /etc/kvm/ssh_stop
+: > "$TEST_ROOT/sshd-calls"
+run_s50 refresh >/dev/null || fail "refresh of a stopped service failed"
+[ ! -s "$TEST_ROOT/sshd-calls" ] || fail "refresh started a stopped service"
 run_s50 stop >/dev/null
+
+# App-only activation replaces a master started by the previous init script,
+# whose argv has no generated wrapper. Merely rewriting /run would not do so.
+/usr/sbin/sshd || fail "could not start the pre-update SSH master"
+listening || fail "pre-update master is not listening"
+run_s50 refresh >/dev/null || fail "app-only SSH activation failed"
+listening || fail "app-only activation lost the listener"
+args="$(daemon_args)"
+printf '%s\n' "$args" | grep -qx -e /run/nanokvm-sshd_config ||
+    fail "app-only activation retained the pre-update command line"
+mapfile -t argv <<< "$args"
+"$TEST_ROOT/real/sshd" -T "${argv[@]}" -C 'user=alice,host=client,addr=192.0.2.1' |
+    grep -qix 'passwordauthentication no' || fail "app-only activation did not protect alice"
+run_s50 stop >/dev/null
+
+# BusyBox can dispatch its built-in pidof without PATH lookup. Inject a shell
+# function in a temporary script copy to exercise an inspection failure.
+{
+    printf '#!/bin/sh\npidof() { return 2; }\n'
+    cat "$S50SSHD"
+} > "$TEST_ROOT/failed-pidof"
+S50SSHD="$TEST_ROOT/failed-pidof"
+if run_s50 refresh >/dev/null; then
+    fail "refresh ignored a process-inspection failure"
+fi
 
 echo "S50sshd: PASS"

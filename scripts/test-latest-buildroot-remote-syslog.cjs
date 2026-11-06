@@ -133,7 +133,7 @@ SYSLOG_PID="$(cat /var/run/syslogd.pid 2>/dev/null || true)"
 printf 'SYSLOG_PID=%s\\n' "$SYSLOG_PID"
 printf 'SYSLOG_RUNNING=%s\\n' "$([ -n "$SYSLOG_PID" ] && kill -0 "$SYSLOG_PID" 2>/dev/null && echo yes || echo no)"
 printf 'SYSLOG_CMDLINE=%s\\n' "$(tr '\\0' ' ' < "/proc/$SYSLOG_PID/cmdline" 2>/dev/null || true)"
-printf 'LOCAL_LOG=%s\\n' "$([ -s /tmp/hardened-syslog/messages ] && echo present || echo missing)"
+printf 'LOCAL_LOG=%s\\n' "$([ -s /run/hardened-syslog/messages ] && echo present || echo missing)"
 `,
       ],
       undefined,

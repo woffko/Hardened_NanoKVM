@@ -7,3 +7,4 @@ pub mod process;
 pub mod script_supervisor;
 pub mod service;
 pub mod usb;
+pub mod watchdog_pid;

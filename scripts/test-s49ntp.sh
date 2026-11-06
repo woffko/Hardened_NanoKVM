@@ -60,7 +60,7 @@ cp "$(command -v "$NTPD_BIN")" /usr/sbin/ntpd
 [ ! -e /usr/bin/ntpdate ] || fail "a host ntpdate would step the clock of the test"
 
 mkdir -p "$TEST_ROOT/busybox"
-for applet in sh awk sed head mv sleep kill killall start-stop-daemon; do
+for applet in sh awk sed head mv mktemp rm sleep kill killall start-stop-daemon; do
     ln -s "$(command -v busybox)" "$TEST_ROOT/busybox/$applet"
 done
 run_ntp() {

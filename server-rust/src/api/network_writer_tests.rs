@@ -2,7 +2,50 @@ use super::*;
 
 // The address of one AP client, for direct calls of the unauthenticated handlers.
 fn ap_client() -> ConnectInfo<ClientAddr> {
-    ConnectInfo(ClientAddr("192.168.4.100:40000".parse().unwrap()))
+    ConnectInfo(ClientAddr(
+        "10.2.3.100:40000".parse().unwrap(),
+        Some("10.2.3.1:443".parse().unwrap()),
+    ))
+}
+
+#[test]
+fn ap_context_rejects_other_destinations_sources_and_untrusted_flags() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let paths = NetworkPaths {
+        root: Some(dir.path().to_path_buf()),
+    };
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
+    assert!(ensure_wifi_ap_context(&paths, ap_client().0).is_ok());
+    for (peer, local) in [
+        ("10.2.3.100:1", None),
+        ("10.2.3.100:1", Some("192.0.2.1:443")),
+        ("192.0.2.2:1", Some("10.2.3.1:443")),
+        ("10.2.3.0:1", Some("10.2.3.1:443")),
+        ("10.2.3.1:1", Some("10.2.3.1:443")),
+        ("10.2.3.255:1", Some("10.2.3.1:443")),
+        ("[::ffff:10.2.3.100]:1", Some("10.2.3.1:443")),
+        ("10.2.3.100:1", Some("[::ffff:10.2.3.1]:443")),
+    ] {
+        let addr = ClientAddr(peer.parse().unwrap(), local.map(|s| s.parse().unwrap()));
+        assert!(ensure_wifi_ap_context(&paths, addr).is_err());
+    }
+    for value in ["", "fixture", "10.2.3.1\n10.2.3.2", "192.0.2.1", "10.2.3.2"] {
+        put(dir.path(), WIFI_AP_MODE_FILE, value);
+        assert!(ensure_wifi_ap_context(&paths, ap_client().0).is_err());
+    }
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
+    let flag = paths.path(WIFI_AP_MODE_FILE);
+    fs::set_permissions(&flag, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(ensure_wifi_ap_context(&paths, ap_client().0).is_err());
+    fs::remove_file(&flag).unwrap();
+    let victim = dir.path().join("victim");
+    fs::write(&victim, "10.2.3.1\n").unwrap();
+    symlink(&victim, &flag).unwrap();
+    assert!(ensure_wifi_ap_context(&paths, ap_client().0).is_err());
+    fs::remove_file(&flag).unwrap();
+    nix::unistd::mkfifo(&flag, nix::sys::stat::Mode::S_IRUSR).unwrap();
+    assert!(ensure_wifi_ap_context(&paths, ap_client().0).is_err());
 }
 use crate::{config::Config, update::state_writers::StateWriters};
 use std::{
@@ -297,9 +340,42 @@ async fn disconnect_cancellation_does_not_drop_stop_or_post_stop_file_cleanup() 
 }
 
 #[tokio::test]
+async fn ap_wrong_socket_context_never_publishes_even_with_correct_key() {
+    let (dir, state) = fixture().await;
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
+    put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
+    for addr in [
+        ClientAddr("10.2.3.100:1".parse().unwrap(), None),
+        ClientAddr(
+            "10.2.3.100:1".parse().unwrap(),
+            Some("192.0.2.1:443".parse().unwrap()),
+        ),
+        ClientAddr(
+            "192.0.2.2:1".parse().unwrap(),
+            Some("10.2.3.1:443".parse().unwrap()),
+        ),
+    ] {
+        assert!(
+            connect_wifi_no_auth(
+                State(state.clone()),
+                ConnectInfo(addr),
+                ap_headers(),
+                Json(wifi_request())
+            )
+            .await
+            .is_err()
+        );
+        assert!(!path(dir.path(), WIFI_SSID_FILE).exists());
+        assert!(!path(dir.path(), WIFI_PASSWORD_FILE).exists());
+        assert!(!path(dir.path(), WIFI_CONNECT_FILE).exists());
+    }
+    assert_no_commands(dir.path());
+}
+
+#[tokio::test]
 async fn ap_publication_survives_reply_loss_but_does_not_claim_native_completion() {
     let (dir, state) = fixture().await;
-    put(dir.path(), WIFI_AP_MODE_FILE, "fixture");
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
     let mut request = Box::pin(connect_wifi_no_auth(
         State(state.clone()),
@@ -338,7 +414,7 @@ async fn ap_wrong_key_or_mode_never_publishes_credentials_or_marker() {
         .await,
         Err(AppError::BadRequest(_))
     ));
-    put(dir.path(), WIFI_AP_MODE_FILE, "fixture");
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
     let response = connect_wifi_no_auth(
         State(state.clone()),
@@ -706,7 +782,7 @@ async fn missing_network_fixture_commands_never_fall_back_to_real_services() {
 #[tokio::test]
 async fn ap_marker_failure_does_not_turn_partial_publication_into_success() {
     let (dir, state) = fixture().await;
-    put(dir.path(), WIFI_AP_MODE_FILE, "fixture");
+    put(dir.path(), WIFI_AP_MODE_FILE, "10.2.3.1\n");
     put(dir.path(), WIFI_AP_PASS_FILE, "fixture-only-ap-key\n");
     fs::create_dir_all(path(dir.path(), WIFI_CONNECT_FILE)).unwrap();
     assert!(

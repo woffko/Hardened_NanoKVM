@@ -1,5 +1,6 @@
 #include "config.h"
 #include <errno.h>
+#include <sys/stat.h>
 
 using namespace maix;
 using namespace maix::sys;
@@ -9,6 +10,13 @@ kvm_sys_state_t kvm_sys_state;
 kvm_oled_state_t kvm_oled_state;
 static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t shutdown_requested = 0;
+
+static bool trusted_runtime_flag(const char* path)
+{
+	struct stat st;
+	return lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+	       st.st_uid == 0 && (st.st_mode & 0022) == 0;
+}
 
 static void request_shutdown(int)
 {
@@ -214,7 +222,7 @@ int main(int argc, char* argv[])
 	bool key_thread_started = false;
 
 	// only for production testing
-	if (access("/tmp/S49kvmtest", F_OK) == 0){
+	if (trusted_runtime_flag("/run/nanokvm-production-test")){
 		printf("Production testing patch\n");
 		Production_testing_patch();
 	}

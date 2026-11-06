@@ -463,7 +463,7 @@ fn require_sealed(file: &File) -> io::Result<()> {
 }
 
 /// stdout and stderr may be a log file on the root filesystem that is about
-/// to be overwritten: the broker's own is `/tmp/nanokvm-native.log`.
+/// to be overwritten: the broker's own is `/run/nanokvm-native.log`.
 fn quiet_output() {
     if let Ok(null) = OpenOptions::new().write(true).open("/dev/null") {
         for fd in [1, 2] {

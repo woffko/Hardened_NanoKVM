@@ -159,19 +159,28 @@ impl AppState {
     /// Lock the service accounts whose shadow field holds no hash, and log the
     /// ones it changed. Every full start runs this, and so does a trial once
     /// its commit makes it the device's application, so an application update
-    /// closes CVE-2026-123158 without waiting for a reboot. A failure leaves
-    /// the device as it was and the next start tries again.
-    pub fn lock_service_accounts(&self) {
-        match self
-            .writers
-            .account()
-            .and_then(|permit| self.accounts.lock_service_accounts(&permit))
-        {
+    /// applies the shadow locks and current SSH policy without waiting for a
+    /// reboot. A refresh failure is reported separately; completed shadow
+    /// changes remain valid and are retried idempotently on the next start.
+    pub async fn lock_service_accounts(&self) {
+        let accounts = Arc::clone(&self.accounts);
+        let result = async {
+            self.writers
+                .account()?
+                .run(move |permit| async move {
+                    let locked = accounts.lock_service_accounts(&permit)?;
+                    accounts.refresh_ssh(&permit).await?;
+                    Ok(locked)
+                })
+                .await
+        }
+        .await;
+        match result {
             Ok(locked) if !locked.is_empty() => {
                 tracing::warn!(accounts = ?locked, "locked service accounts that had no password hash");
             }
             Ok(_) => {}
-            Err(error) => tracing::error!(%error, "service accounts were not locked"),
+            Err(error) => tracing::error!(%error, "SSH account protection was not fully applied"),
         }
     }
 

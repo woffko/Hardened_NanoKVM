@@ -352,6 +352,7 @@ async fn account_handlers_reject_paused_writes_before_validation_or_native_comma
     let client = || {
         ConnectInfo(crate::http::tls::ClientAddr(
             "192.0.2.10:40000".parse().unwrap(),
+            None,
         ))
     };
     let temporary = tempfile::tempdir().unwrap();

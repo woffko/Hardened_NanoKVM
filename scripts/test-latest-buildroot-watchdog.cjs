@@ -139,7 +139,7 @@ async function main() {
 
   const before = await ssh(password, String.raw`set -eu
 BACKEND_PID="$(cat /tmp/nanokvm-server.pid)"
-WATCHDOG_PID="$(cat /tmp/nanokvm-watchdog.pid)"
+WATCHDOG_PID="$(/usr/libexec/nanokvm-native-ctl --watchdog status runtime)"
 KVM_PID=''
 for PROC in /proc/[0-9]*; do
   CMD="$(tr '\0' ' ' < "$PROC/cmdline" 2>/dev/null || true)"
@@ -151,7 +151,7 @@ kill -0 "$KVM_PID"
 printf 'BACKEND_PID=%s\n' "$BACKEND_PID"
 printf 'WATCHDOG_PID=%s\n' "$WATCHDOG_PID"
 printf 'KVM_SYSTEM_PID=%s\n' "$KVM_PID"
-printf 'WATCHDOG_LOG_LINES=%s\n' "$(wc -l < /tmp/nanokvm-watchdog.log 2>/dev/null || echo 0)"
+printf 'WATCHDOG_LOG_LINES=%s\n' "$(wc -l < /run/nanokvm-watchdog.log 2>/dev/null || echo 0)"
 printf 'UDC_STATE=%s\n' "$(cat /sys/class/udc/*/state | head -n 1)"
 kill -9 "$BACKEND_PID"
 `);
@@ -181,7 +181,7 @@ kill -9 "$BACKEND_PID"
 
   const after = await ssh(password, String.raw`set -eu
 BACKEND_PID="$(cat /tmp/nanokvm-server.pid)"
-WATCHDOG_PID="$(cat /tmp/nanokvm-watchdog.pid)"
+WATCHDOG_PID="$(/usr/libexec/nanokvm-native-ctl --watchdog status runtime)"
 KVM_PID=''
 for PROC in /proc/[0-9]*; do
   CMD="$(tr '\0' ' ' < "$PROC/cmdline" 2>/dev/null || true)"
@@ -198,7 +198,7 @@ printf 'STREAM_TYPE=%s\n' "$(cat /kvmapp/kvm/type)"
 printf 'UDC_STATE=%s\n' "$(cat /sys/class/udc/*/state | head -n 1)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg 2>/dev/null | grep -Eic 'oops|panic|segfault|BUG:' || true)"
 printf 'WATCHDOG_NEW_LOG_BEGIN\n'
-sed -n '${watchdogLogLines + 1},$p' /tmp/nanokvm-watchdog.log 2>/dev/null || true
+sed -n '${watchdogLogLines + 1},$p' /run/nanokvm-watchdog.log 2>/dev/null || true
 printf 'WATCHDOG_NEW_LOG_END\n'
 `);
   fs.writeFileSync(path.join(resultDir, 'after.txt'), after, { mode: 0o600 });

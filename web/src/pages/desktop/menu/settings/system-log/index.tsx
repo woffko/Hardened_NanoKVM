@@ -34,7 +34,7 @@ export const SystemLog = forwardRef<SystemActionHandle, SystemLogProps>(
 
     const [config, setConfig] = useState<SystemLogConfig>(defaultConfig);
     const [savedConfig, setSavedConfig] = useState<SystemLogConfig>(defaultConfig);
-    const [localLogFile, setLocalLogFile] = useState('/tmp/hardened-syslog/messages');
+    const [localLogFile, setLocalLogFile] = useState('/run/hardened-syslog/messages');
     const [lineCount, setLineCount] = useState(200);
     const [content, setContent] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -372,7 +372,7 @@ export const SystemLog = forwardRef<SystemActionHandle, SystemLogProps>(
 SystemLog.displayName = 'SystemLog';
 
 function defaultConfigPath() {
-  return '/tmp/hardened-syslog/messages';
+  return '/run/hardened-syslog/messages';
 }
 
 function normalizeSystemLogConfig(config: SystemLogConfig): SystemLogConfig {

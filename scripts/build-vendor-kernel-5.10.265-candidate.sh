@@ -202,6 +202,12 @@ if [ "${KERNEL_5_10_265_REQUIRE_PROC_CHILDREN:-0}" = 1 ]; then
 		exit 1
 	fi
 fi
+for required in CONFIG_IP_NF_IPTABLES=y CONFIG_IP_NF_FILTER=y CONFIG_IP_NF_MANGLE=y; do
+	grep -Fqx "$required" "$OUTPUT_DIR/.config" || {
+		echo "kernel lacks required firewall/AP ingress support: $required" >&2
+		exit 1
+	}
+done
 make -j"$JOBS" -C "$KERNEL_SOURCE" O="$OUTPUT_DIR" Image modules dtbs
 
 CVITEK_DTB_DIR="$OUTPUT_DIR/arch/riscv/boot/dts/cvitek"

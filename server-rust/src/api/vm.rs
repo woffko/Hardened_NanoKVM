@@ -893,26 +893,22 @@ pub async fn unlock_terminal(
 
     let password = zeroize::Zeroizing::new(decode_frontend_password(&req.password)?);
     if !crate::api::account::verify_bounded(
-        &state.login_hashing,
-        &state.accounts,
+        &state,
+        source,
+        &limiter_username,
         &session.username,
         password,
     )
     .await?
     {
         let mut limiter = state.login_limiter.write().await;
-        let locked = limiter.record_failure(source, &limiter_username);
+        let locked = limiter.check(source, &limiter_username);
         if locked {
             warn!(source_ip, username = ?session.username, "terminal unlock lockout threshold reached");
         }
         return Err(AppError::InvalidCredentials);
     }
 
-    state
-        .login_limiter
-        .write()
-        .await
-        .record_success(source, &limiter_username);
     let ticket = state
         .terminal_tickets
         .issue(&session, TERMINAL_TICKET_TTL_SECS)

@@ -208,7 +208,7 @@ printf 'INIT_WATCHDOG_DECL=%s\n' "$(grep -q 'kvm_system is not running; restarti
 printf 'INIT_BOOT_HEALTH_DECL=%s\n' "$(grep -q 'kvm_system_is_running || return 1' /kvmapp/system/init.d/S95nanokvm && echo yes || echo no)"
 printf 'INIT_INSTALLED_MATCH=%s\n' "$(cmp -s /kvmapp/system/init.d/S95nanokvm /etc/init.d/S95nanokvm && echo yes || echo no)"
 BACKEND_PID="$(cat /tmp/nanokvm-server.pid 2>/dev/null || true)"
-WATCHDOG_PID="$(cat /tmp/nanokvm-watchdog.pid 2>/dev/null || true)"
+WATCHDOG_PID="$(/usr/libexec/nanokvm-native-ctl --watchdog status runtime 2>/dev/null || true)"
 KVM_PID="$(cat /tmp/kvm-system.pid 2>/dev/null || true)"
 printf 'BACKEND_PID=%s\n' "$BACKEND_PID"
 printf 'WATCHDOG_PID=%s\n' "$WATCHDOG_PID"
@@ -219,7 +219,7 @@ printf 'KVM_SYSTEM_ALIVE=%s\n' "$([ -n "$KVM_PID" ] && kill -0 "$KVM_PID" 2>/dev
 printf 'KVM_SYSTEM_SHA=%s\n' "$(sha256sum /tmp/kvm_system/kvm_system 2>/dev/null | awk '{print $1}')"
 if [ -n "$KVM_PID" ] && [ -d "/proc/$KVM_PID/task" ]; then KVM_THREADS="$(find "/proc/$KVM_PID/task" -mindepth 1 -maxdepth 1 | wc -l)"; else KVM_THREADS=0; fi
 printf 'KVM_SYSTEM_THREADS=%s\n' "$KVM_THREADS"
-printf 'WATCHDOG_LOG_LINES=%s\n' "$(wc -l < /tmp/nanokvm-watchdog.log 2>/dev/null || echo 0)"
+printf 'WATCHDOG_LOG_LINES=%s\n' "$(wc -l < /run/nanokvm-watchdog.log 2>/dev/null || echo 0)"
 printf 'UDC_STATE=%s\n' "$(cat /sys/class/udc/*/state | head -n 1)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg 2>/dev/null | grep -Eic 'oops|panic|segfault|BUG:' || true)"
 `);
@@ -261,7 +261,7 @@ kill -9 '${oldKvmPid}'
 
   const afterRecovery = await ssh(password, String.raw`set -eu
 BACKEND_PID="$(cat /tmp/nanokvm-server.pid)"
-WATCHDOG_PID="$(cat /tmp/nanokvm-watchdog.pid)"
+WATCHDOG_PID="$(/usr/libexec/nanokvm-native-ctl --watchdog status runtime)"
 KVM_PID="$(cat /tmp/kvm-system.pid)"
 kill -0 "$BACKEND_PID"
 kill -0 "$WATCHDOG_PID"
@@ -275,7 +275,7 @@ printf 'KVM_SYSTEM_LOG_ERRORS=%s\n' "$(grep -Eic 'Error loading|Error relocating
 printf 'UDC_STATE=%s\n' "$(cat /sys/class/udc/*/state | head -n 1)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg 2>/dev/null | grep -Eic 'oops|panic|segfault|BUG:' || true)"
 printf 'WATCHDOG_NEW_LOG_BEGIN\n'
-sed -n '${watchdogLogLines + 1},$p' /tmp/nanokvm-watchdog.log 2>/dev/null || true
+sed -n '${watchdogLogLines + 1},$p' /run/nanokvm-watchdog.log 2>/dev/null || true
 printf 'WATCHDOG_NEW_LOG_END\n'
 `);
   fs.writeFileSync(path.join(resultDir, 'after-recovery.txt'), afterRecovery, { mode: 0o600 });

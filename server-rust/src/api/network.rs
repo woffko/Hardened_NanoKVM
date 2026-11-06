@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -566,6 +568,7 @@ pub async fn verify_ap_login(
 ) -> Result<impl IntoResponse> {
     let paths = NetworkPaths::default();
     ensure_wifi_ap_mode(&paths)?;
+    ensure_wifi_ap_context(&paths, addr)?;
     let source = addr.0.ip();
     ap_key_locked(&state, source).await?;
     let accepted = verify_ap_key(&paths, &headers);
@@ -592,6 +595,7 @@ pub async fn connect_wifi_no_auth(
                 .blocking(move |writer| {
                     let paths = NetworkPaths::for_writer(writer);
                     ensure_wifi_ap_mode(&paths)?;
+                    ensure_wifi_ap_context(&paths, addr)?;
                     if !verify_ap_key(&paths, &headers) {
                         return Ok(false);
                     }
@@ -657,6 +661,55 @@ pub async fn disconnect_wifi(State(state): State<AppState>) -> Result<impl IntoR
 fn ensure_wifi_ap_mode(paths: &NetworkPaths) -> Result<()> {
     if !paths.path(WIFI_EXIST_FILE).exists() || !paths.path(WIFI_AP_MODE_FILE).exists() {
         return Err(AppError::BadRequest("invalid mode".to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_wifi_ap_context(paths: &NetworkPaths, addr: ClientAddr) -> Result<()> {
+    let invalid = || AppError::BadRequest("invalid AP connection context".to_string());
+    let flag = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(paths.path(WIFI_AP_MODE_FILE))
+        .map_err(|_| invalid())?;
+    let metadata = flag.metadata().map_err(|_| invalid())?;
+    let owner = 0;
+    #[cfg(test)]
+    let owner = if paths.root.is_some() {
+        nix::unistd::geteuid().as_raw()
+    } else {
+        owner
+    };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > 16
+    {
+        return Err(invalid());
+    }
+    let mut value = String::new();
+    flag.take(17)
+        .read_to_string(&mut value)
+        .map_err(|_| invalid())?;
+    if value.len() > 16 {
+        return Err(invalid());
+    }
+    let ap: Ipv4Addr = value.trim().parse().map_err(|_| invalid())?;
+    let Some(local) = addr.1 else {
+        return Err(invalid());
+    };
+    let (IpAddr::V4(local), IpAddr::V4(peer)) = (local.ip(), addr.0.ip()) else {
+        return Err(invalid());
+    };
+    let ap_bytes = ap.octets();
+    let peer_bytes = peer.octets();
+    if ap_bytes[0] != 10
+        || ap_bytes[3] != 1
+        || local != ap
+        || peer_bytes[..3] != ap_bytes[..3]
+        || matches!(peer_bytes[3], 0 | 1 | 255)
+    {
+        return Err(invalid());
     }
     Ok(())
 }

@@ -6,7 +6,7 @@ ROOT_PARTITION=/sys/class/block/mmcblk0p2
 ROOT_END_SECTOR=16000000
 DATA_DEVICE=/dev/mmcblk0p3
 DATA_MOUNT=/data
-DATA_LOG=/tmp/data-mount.log
+DATA_LOG=/run/data-mount.log
 DATA_READY=/etc/kvm.disk0
 # Present from before p3 is created until its filesystem exists. Only a
 # partition this script created, and never mounted, is ever formatted.
@@ -119,6 +119,7 @@ then
         (resize2fs /dev/mmcblk0p2) &
 
         . /etc/profile
+        umask 077
         printf "mounting filesystem : "
         mkdir -p /boot
         mount -t vfat -o nosuid,nodev,noexec,uid=0,gid=0,fmask=0177,dmask=0077 /dev/mmcblk0p1 /boot || exit 1

@@ -10,6 +10,8 @@ const LEGACY_SECRET_KEY: &[u8] = b"nanokvm-sipeed-2024";
 const OPENSSL_SALTED_PREFIX: &[u8] = b"Salted__";
 /// The longest password the web client can send: 256 bytes, URI-encoded and
 /// then encrypted, stays well below this.
+/// Decoding cannot increase the byte count. Keep the wider login bound for
+/// legacy credentials; new-password policy is enforced separately.
 pub(crate) const MAX_ENCODED_PASSWORD_BYTES: usize = 4096;
 
 pub fn decode_frontend_password(input: &str) -> Result<String> {
@@ -84,5 +86,43 @@ mod tests {
     #[test]
     fn url_decoding_is_applied() {
         assert_eq!(decode_frontend_password("a%20b").unwrap(), "a b");
+    }
+
+    #[test]
+    fn encoded_limit_bounds_plaintext_without_applying_new_password_policy() {
+        let legacy = "p".repeat(MAX_ENCODED_PASSWORD_BYTES);
+        assert_eq!(decode_frontend_password(&legacy).unwrap(), legacy);
+        assert!(decode_frontend_password(&"p".repeat(MAX_ENCODED_PASSWORD_BYTES + 1)).is_err());
+        let encoded = "%41".repeat(MAX_ENCODED_PASSWORD_BYTES / 3);
+        assert_eq!(
+            decode_frontend_password(&encoded).unwrap().len(),
+            encoded.len() / 3
+        );
+        assert!(decode_frontend_password(&(encoded + "%41")).is_err());
+    }
+
+    #[test]
+    fn encrypted_legacy_passwords_stay_bounded_and_compatible() {
+        use cipher::BlockEncryptMut;
+        for length in [300, 1024, 4096] {
+            let plaintext = "p".repeat(length);
+            let salt = b"testonly";
+            let (key, iv) = evp_bytes_to_key(LEGACY_SECRET_KEY, salt);
+            let mut buffer = vec![0; length + 16];
+            buffer[..length].copy_from_slice(plaintext.as_bytes());
+            let ciphertext = cbc::Encryptor::<Aes256>::new_from_slices(&key, &iv)
+                .unwrap()
+                .encrypt_padded_mut::<Pkcs7>(&mut buffer, length)
+                .unwrap();
+            let mut envelope = Vec::from(OPENSSL_SALTED_PREFIX);
+            envelope.extend_from_slice(salt);
+            envelope.extend_from_slice(ciphertext);
+            let encoded = STANDARD.encode(envelope);
+            if encoded.len() <= MAX_ENCODED_PASSWORD_BYTES {
+                assert_eq!(decode_frontend_password(&encoded).unwrap(), plaintext);
+            } else {
+                assert!(decode_frontend_password(&encoded).is_err());
+            }
+        }
     }
 }

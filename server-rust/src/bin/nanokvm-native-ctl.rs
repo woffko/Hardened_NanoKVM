@@ -78,6 +78,9 @@ fn main() -> ExitCode {
         "/support-abi-nanokvm-native-ctl.binding"
     )));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--watchdog") {
+        std::process::exit(nanokvm_rust_server::system::watchdog_pid::run(&args[1..]));
+    }
     // The backend's script runs. They are here because this program is static:
     // the backend's own binary would load the vendor libraries.
     if args.first().is_some_and(|arg| arg == "--script-supervisor") {

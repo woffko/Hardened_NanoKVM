@@ -356,7 +356,7 @@ async fn run_http(
         None => {
             let state = AppState::new(config).await?;
             roll_back_unconfirmed_firewall(&state).await;
-            state.lock_service_accounts();
+            state.lock_service_accounts().await;
             state
         }
     };
@@ -377,7 +377,7 @@ async fn run_http(
     let _trial_video = authorize_trial(startup).await?;
     if let Some(state) = trial {
         // Committed: the trial is now the device's application.
-        state.lock_service_accounts();
+        state.lock_service_accounts().await;
     }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(listener, app, "starting dedicated loopback HTTP listener");
@@ -412,7 +412,7 @@ async fn run_https(
         None => {
             let state = AppState::new(config).await?;
             roll_back_unconfirmed_firewall(&state).await;
-            state.lock_service_accounts();
+            state.lock_service_accounts().await;
             state
         }
     };
@@ -437,7 +437,7 @@ async fn run_https(
     let _trial_video = authorize_trial(startup).await?;
     if let Some(state) = trial {
         // Committed: the trial is now the device's application.
-        state.lock_service_accounts();
+        state.lock_service_accounts().await;
     }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(

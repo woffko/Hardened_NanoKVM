@@ -71,6 +71,27 @@ impl AccountStore {
         AllowedCommand::Mkpasswd
     }
 
+    /// Use the committed application's script, not the previous boot's copy.
+    /// The script preserves stopped/disabled SSH; failures block publication
+    /// of a new password hash when this runs before the credential transaction.
+    pub(crate) async fn refresh_ssh(&self, permit: &AccountPermit) -> Result<()> {
+        let command = AllowedCommand::ServiceSshdKvmapp;
+        #[cfg(test)]
+        let command = match &self.root_hasher {
+            Some(path) => AllowedCommand::CustomForTest(path.with_file_name("ssh-service")),
+            None => command,
+        };
+        let output = permit
+            .command(command, ["refresh"], std::time::Duration::from_secs(10))
+            .await?;
+        if output.status != 0 {
+            return Err(AppError::Internal(
+                "SSH account protection refresh failed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn exists(&self) -> bool {
         self.path.exists()
     }

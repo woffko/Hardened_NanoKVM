@@ -6,7 +6,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, sync::Arc, time::Duration};
-use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 /// Above any name an account can have.
@@ -36,21 +35,40 @@ const VERIFY_WAIT: Duration = Duration::from_secs(2);
 /// single-core SoC stalls HID, video and every other request; concurrent
 /// attempts wait briefly for the one slot, then are refused rather than queued.
 pub(crate) async fn verify_bounded(
-    hashing: &Arc<Semaphore>,
-    accounts: &Arc<AccountStore>,
+    state: &AppState,
+    source: IpAddr,
+    limiter_username: &str,
     username: &str,
     password: Zeroizing<String>,
 ) -> Result<bool> {
-    let permit = tokio::time::timeout(VERIFY_WAIT, Arc::clone(hashing).acquire_owned())
-        .await
-        .map_err(|_| AppError::RateLimited("login is busy; retry shortly".to_string()))?
-        .map_err(|_| AppError::Internal("password verification unavailable".to_string()))?;
-    let accounts = Arc::clone(accounts);
+    let permit = tokio::time::timeout(
+        VERIFY_WAIT,
+        Arc::clone(&state.login_hashing).acquire_owned(),
+    )
+    .await
+    .map_err(|_| AppError::RateLimited("login is busy; retry shortly".to_string()))?
+    .map_err(|_| AppError::Internal("password verification unavailable".to_string()))?;
+    let accounts = Arc::clone(&state.accounts);
+    let limiter = Arc::clone(&state.login_limiter);
     let username = username.to_string();
+    let limiter_username = limiter_username.to_string();
     tokio::task::spawn_blocking(move || {
-        // Held until the hash finishes, even if the request is dropped.
+        // Keep check, hash and result accounting inside the same slot. The
+        // blocking task completes accounting even if its HTTP request is dropped.
         let _permit = permit;
-        accounts.verify(&username, &password)
+        if limiter.blocking_write().check(source, &limiter_username) {
+            return Err(AppError::RateLimited(
+                "account locked due to too many failed attempts".into(),
+            ));
+        }
+        let valid = accounts.verify(&username, &password)?;
+        let mut limiter = limiter.blocking_write();
+        if valid {
+            limiter.record_success(source, &limiter_username);
+        } else {
+            limiter.record_failure(source, &limiter_username);
+        }
+        Ok(valid)
     })
     .await
     .map_err(|_| AppError::Internal("password verification failed".to_string()))?
@@ -132,16 +150,9 @@ pub async fn login(
     }
 
     let password = Zeroizing::new(decode_frontend_password(&req.password)?);
-    if !verify_bounded(
-        &state.login_hashing,
-        &state.accounts,
-        &req.username,
-        password,
-    )
-    .await?
-    {
+    if !verify_bounded(&state, source, &req.username, &req.username, password).await? {
         let mut limiter = state.login_limiter.write().await;
-        let locked = limiter.record_failure(source, &req.username);
+        let locked = limiter.check(source, &req.username);
         if locked {
             tracing::warn!(source_ip, username = ?req.username, "login lockout threshold reached");
             audit::login_failure(&req.username, &source_ip, "lockout");
@@ -152,11 +163,6 @@ pub async fn login(
     }
 
     audit::login_success(&req.username, &source_ip);
-    state
-        .login_limiter
-        .write()
-        .await
-        .record_success(source, &req.username);
     let session_lock_duration = state.session_lock_duration();
     let session = state
         .sessions
@@ -213,7 +219,10 @@ pub async fn setup_first_account(
             crate::auth::claim::check(&state.config.paths.account_file, claim.as_str())?;
             replace_credentials(&state.accounts, &writer, Change::Setup, username, password)
                 .await?;
-            crate::auth::claim::consume(&state.config.paths.account_file)
+            crate::auth::claim::consume(&state.config.paths.account_file)?;
+            state.accounts.refresh_ssh(&writer).await.map_err(|_| {
+                AppError::Internal("credentials changed, but SSH protection refresh failed".into())
+            })
         })
         .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -299,7 +308,9 @@ pub async fn change_password(
             if state.config.security.revoke_tokens_on_password_change {
                 state.sessions.revoke_user(&revoke_user).await;
             }
-            Ok(())
+            state.accounts.refresh_ssh(&writer).await.map_err(|_| {
+                AppError::Internal("credentials changed, but SSH protection refresh failed".into())
+            })
         })
         .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -324,19 +335,9 @@ async fn reauthenticate(
         ));
     }
     let current = Zeroizing::new(decode_frontend_password(encoded)?);
-    if verify_bounded(&state.login_hashing, &state.accounts, username, current).await? {
-        state
-            .login_limiter
-            .write()
-            .await
-            .record_success(source, username);
+    if verify_bounded(state, source, username, username, current).await? {
         return Ok(());
     }
-    state
-        .login_limiter
-        .write()
-        .await
-        .record_failure(source, username);
     audit::login_failure(username, &source.to_string(), "password_change_reauth");
     Err(AppError::InvalidCredentials)
 }
@@ -351,10 +352,13 @@ async fn replace_credentials(
     password: Zeroizing<String>,
 ) -> Result<()> {
     let root_hash = root_password_hash(accounts, &password, writer).await?;
-    let accounts = Arc::clone(accounts);
+    // Install key-only barriers before the first hash can make crypt()'s error
+    // marker exploitable. Refresh again after commit to enable root's new hash.
+    accounts.refresh_ssh(writer).await?;
+    let changed_accounts = Arc::clone(accounts);
     writer
         .blocking(move |permit| {
-            accounts.replace_credentials(permit, change, &username, &password, &root_hash)
+            changed_accounts.replace_credentials(permit, change, &username, &password, &root_hash)
         })
         .await
 }
@@ -391,37 +395,132 @@ mod tests {
 
     const PASSWORD: &str = "synthetic right password";
 
-    fn store(dir: &tempfile::TempDir) -> Arc<AccountStore> {
-        let path = dir.path().join("pwd");
-        let hash = crate::auth::password::hash_password(PASSWORD).unwrap();
-        let account = serde_json::json!({"username": "operator", "password": hash});
-        std::fs::write(&path, account.to_string()).unwrap();
-        Arc::new(AccountStore::new(path))
-    }
-
     fn password() -> Zeroizing<String> {
         Zeroizing::new(PASSWORD.to_string())
+    }
+
+    #[tokio::test]
+    async fn queued_verification_rechecks_name_and_source_lockouts() {
+        use std::{future::Future, task::Poll};
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, _) = change_fixture(&dir).await;
+        let source = "192.0.2.10".parse().unwrap();
+        for key in ["operator", "terminal:operator"] {
+            let held = Arc::clone(&state.login_hashing)
+                .acquire_owned()
+                .await
+                .unwrap();
+            let mut queued = Box::pin(verify_bounded(&state, source, key, "operator", password()));
+            std::future::poll_fn(|cx| {
+                assert!(queued.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            {
+                let mut limiter = state.login_limiter.write().await;
+                limiter.record_failure(source, key);
+                limiter.record_failure(source, key);
+            }
+            drop(held);
+            assert!(
+                matches!(queued.await, Err(AppError::RateLimited(message)) if message.contains("account locked"))
+            );
+            assert!(state.login_limiter.write().await.check(source, key));
+            state
+                .login_limiter
+                .write()
+                .await
+                .record_success(source, key);
+        }
+        let held = Arc::clone(&state.login_hashing)
+            .acquire_owned()
+            .await
+            .unwrap();
+        let mut queued = Box::pin(verify_bounded(
+            &state,
+            source,
+            "operator",
+            "operator",
+            password(),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        for n in 0..8 {
+            state
+                .login_limiter
+                .write()
+                .await
+                .record_failure(source, &format!("guess{n}"));
+        }
+        drop(held);
+        assert!(
+            matches!(queued.await, Err(AppError::RateLimited(message)) if message.contains("account locked"))
+        );
+        assert!(state.login_limiter.write().await.check(source, "operator"));
+        assert!(
+            !state
+                .login_limiter
+                .write()
+                .await
+                .check("192.0.2.11".parse().unwrap(), "operator")
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_request_records_failure_before_releasing_hash_slot() {
+        use std::{future::Future, task::Poll};
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, _) = change_fixture(&dir).await;
+        let source = "192.0.2.10".parse().unwrap();
+        let mut limiter = state.login_limiter.write().await;
+        // One more failure locks this name. Hold the limiter so the detached
+        // blocking task cannot finish before its request future is dropped.
+        limiter.record_failure(source, "operator");
+        let mut cancelled = Box::pin(verify_bounded(
+            &state,
+            source,
+            "operator",
+            "nonexistent",
+            password(),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(cancelled.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(state.login_hashing.available_permits(), 0);
+        drop(cancelled);
+        drop(limiter);
+        let next = verify_bounded(&state, source, "operator", "operator", password()).await;
+        assert!(
+            matches!(next, Err(AppError::RateLimited(message)) if message.contains("account locked"))
+        );
+        assert!(state.login_limiter.write().await.check(source, "operator"));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn verification_runs_off_the_runtime_one_at_a_time_and_refuses_after_its_wait() {
         let dir = tempfile::tempdir().unwrap();
-        let accounts = store(&dir);
-        let hashing = Arc::new(Semaphore::new(1));
+        let (state, _, _) = change_fixture(&dir).await;
+        let source = "192.0.2.10".parse().unwrap();
+        let hashing = Arc::clone(&state.login_hashing);
         assert!(
-            verify_bounded(&hashing, &accounts, "operator", password())
+            verify_bounded(&state, source, "operator", "operator", password())
                 .await
                 .unwrap()
         );
         assert!(
-            !verify_bounded(&hashing, &accounts, "intruder", password())
+            !verify_bounded(&state, source, "intruder", "intruder", password())
                 .await
                 .unwrap()
         );
         // The only thread of this runtime keeps serving while a hash runs.
         let verification = tokio::spawn({
-            let (hashing, accounts) = (Arc::clone(&hashing), Arc::clone(&accounts));
-            async move { verify_bounded(&hashing, &accounts, "operator", password()).await }
+            let state = state.clone();
+            async move { verify_bounded(&state, source, "operator", "operator", password()).await }
         });
         let mut ticks = 0;
         while !verification.is_finished() {
@@ -437,12 +536,12 @@ mod tests {
         // then refused, instead of queueing more hashing.
         let held = Arc::clone(&hashing).acquire_owned().await.unwrap();
         let started = std::time::Instant::now();
-        let refused = verify_bounded(&hashing, &accounts, "operator", password()).await;
+        let refused = verify_bounded(&state, source, "operator", "operator", password()).await;
         assert!(matches!(refused, Err(AppError::RateLimited(_))));
         assert!(started.elapsed() >= VERIFY_WAIT);
         drop(held);
         assert!(
-            verify_bounded(&hashing, &accounts, "operator", password())
+            verify_bounded(&state, source, "operator", "operator", password())
                 .await
                 .unwrap()
         );
@@ -474,6 +573,9 @@ mod tests {
         );
         std::fs::write(&hasher, script).unwrap();
         std::fs::set_permissions(&hasher, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ssh_service = dir.path().join("ssh-service");
+        std::fs::write(&ssh_service, "#!/bin/sh\n[ \"$1\" = refresh ] || exit 2\ncat \"${0%/*}/shadow\" >> \"${0%/*}/ssh-refresh.snapshots\"\n").unwrap();
+        std::fs::set_permissions(&ssh_service, std::fs::Permissions::from_mode(0o700)).unwrap();
         let accounts = AccountStore::fixture(dir.path().join("pwd"), shadow.clone(), hasher);
         let hash = crate::auth::password::hash_password(PASSWORD).unwrap();
         let account = serde_json::json!({"username": "operator", "password": hash});
@@ -496,7 +598,7 @@ mod tests {
     }
 
     fn client() -> ConnectInfo<ClientAddr> {
-        ConnectInfo(ClientAddr("192.0.2.10:40000".parse().unwrap()))
+        ConnectInfo(ClientAddr("192.0.2.10:40000".parse().unwrap(), None))
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -606,5 +708,123 @@ mod tests {
         assert!(!state.accounts.credential_recovery_pending());
         // Revocation ends the session that made the change.
         assert!(state.sessions.validate(&session.token).await.is_none());
+        let snapshots = std::fs::read_to_string(dir.path().join("ssh-refresh.snapshots")).unwrap();
+        let snapshots: Vec<_> = snapshots.lines().collect();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots[0].starts_with("root:$5$"));
+        assert!(snapshots[1].starts_with("root:$6$"));
+    }
+
+    #[tokio::test]
+    async fn first_setup_refreshes_before_and_after_the_first_hash() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, shadow) = change_fixture(&dir).await;
+        std::fs::remove_file(dir.path().join("pwd")).unwrap();
+        std::fs::write(&shadow, "root:*:19000:0:99999:7:::\n").unwrap();
+        // A private fixture record in the real claim format; no console or
+        // production claim state is touched.
+        let claim = "synthetic-setup-claim";
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        let uptime = std::fs::read_to_string("/proc/uptime").unwrap();
+        let seconds = uptime.split('.').next().unwrap();
+        let claim_path = dir.path().join("first-boot-claim");
+        std::fs::write(&claim_path, format!("{claim}\n{} {seconds}\n", boot.trim())).unwrap();
+        std::fs::set_permissions(&claim_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        setup_first_account(
+            State(state.clone()),
+            Json(ChangePasswordReq {
+                username: "operator".into(),
+                password: NEW_PASSWORD.into(),
+                current_password: None,
+                claim: Some(claim.into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(state.accounts.verify("operator", NEW_PASSWORD).unwrap());
+        assert!(!claim_path.exists());
+        let snapshots = std::fs::read_to_string(dir.path().join("ssh-refresh.snapshots")).unwrap();
+        let snapshots: Vec<_> = snapshots.lines().collect();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots[0].starts_with("root:*:"));
+        assert!(snapshots[1].starts_with("root:$6$"));
+        assert!(!state.accounts.credential_recovery_pending());
+    }
+
+    #[tokio::test]
+    async fn startup_applies_service_locks_before_refreshing_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, shadow) = change_fixture(&dir).await;
+        std::fs::write(
+            dir.path().join("passwd"),
+            "root:x:0:0::/root:/bin/sh\ndaemon:x:1:1::/:/bin/false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &shadow,
+            "root:*:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::\n",
+        )
+        .unwrap();
+        state.lock_service_accounts().await;
+        let snapshots = std::fs::read_to_string(dir.path().join("ssh-refresh.snapshots")).unwrap();
+        assert!(snapshots.starts_with("root:*:"));
+        assert!(snapshots.contains("\ndaemon:!*:"));
+        assert_eq!(snapshots.lines().count(), 2);
+        assert_eq!(std::fs::read_to_string(shadow).unwrap(), snapshots);
+    }
+
+    #[tokio::test]
+    async fn failed_ssh_preparation_leaves_credentials_and_session_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session, shadow) = change_fixture(&dir).await;
+        let before = std::fs::read(&shadow).unwrap();
+        std::fs::write(dir.path().join("ssh-service"), "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(
+            change_password(
+                State(state.clone()),
+                client(),
+                Extension(CurrentSession(session.clone())),
+                change(Some(PASSWORD))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(shadow).unwrap(), before);
+        assert!(state.accounts.verify("operator", PASSWORD).unwrap());
+        assert!(state.sessions.validate(&session.token).await.is_some());
+        assert!(!state.accounts.credential_recovery_pending());
+    }
+
+    #[tokio::test]
+    async fn failed_ssh_refresh_after_commit_still_revokes_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session, shadow) = change_fixture(&dir).await;
+        std::fs::write(
+            dir.path().join("ssh-service"),
+            r#"#!/bin/sh
+case "$(cat "${0%/*}/shadow")" in 'root:$6$'*) exit 1 ;; esac
+exit 0
+"#,
+        )
+        .unwrap();
+        let result = change_password(
+            State(state.clone()),
+            client(),
+            Extension(CurrentSession(session.clone())),
+            change(Some(PASSWORD)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::Internal(message)) if message.contains("credentials changed"))
+        );
+        assert!(
+            std::fs::read_to_string(shadow)
+                .unwrap()
+                .starts_with("root:$6$")
+        );
+        assert!(state.accounts.verify("operator", NEW_PASSWORD).unwrap());
+        assert!(state.sessions.validate(&session.token).await.is_none());
+        assert!(!state.accounts.credential_recovery_pending());
     }
 }

@@ -1,6 +1,7 @@
 use std::{
-    fs::{self, File},
+    fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -27,10 +28,10 @@ use crate::{
 const CONFIG_FILE: &str = "/etc/kvm/syslog.json";
 const SYSLOGD_DEFAULT_FILE: &str = "/etc/default/syslogd";
 const KLOGD_DEFAULT_FILE: &str = "/etc/default/klogd";
-const LOG_DIR: &str = "/tmp/hardened-syslog";
-const LOG_FILE: &str = "/tmp/hardened-syslog/messages";
-const FALLBACK_LOG_FILES: &[&str] = &["/var/log/messages", "/tmp/messages"];
-const BACKEND_LOG_FILE: &str = "/tmp/nanokvm-server.log";
+const LOG_DIR: &str = "/run/hardened-syslog";
+const LOG_FILE: &str = "/run/hardened-syslog/messages";
+const FALLBACK_LOG_FILES: &[&str] = &["/var/log/messages"];
+const BACKEND_LOG_FILE: &str = "/run/nanokvm-native.log";
 const MAX_LOG_VIEW_BYTES: usize = 256 * 1024;
 const DEFAULT_LINES: usize = 200;
 const MAX_LINES: usize = 1000;
@@ -374,8 +375,23 @@ async fn read_kernel_log(lines: usize) -> Result<(String, bool)> {
 }
 
 fn tail_file(path: &str, lines: usize) -> Result<(String, bool)> {
-    let mut file = File::open(path)?;
-    let len = file.metadata()?.len();
+    tail_file_owned(path, lines, 0)
+}
+
+fn tail_file_owned(path: &str, lines: usize, owner: u32) -> Result<(String, bool)> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o022 != 0
+        || metadata.nlink() != 1
+    {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsafe log file").into());
+    }
+    let len = metadata.len();
     let read_len = len.min(MAX_LOG_VIEW_BYTES as u64) as usize;
     let start = len.saturating_sub(read_len as u64);
     let mut buf = vec![0_u8; read_len];
@@ -432,7 +448,7 @@ mod tests {
     fn renders_local_syslogd_args_in_tmpfs() {
         let args = build_syslogd_args(&SystemLogConfig::default());
 
-        assert!(args.contains("-O /tmp/hardened-syslog/messages"));
+        assert!(args.contains("-O /run/hardened-syslog/messages"));
         assert!(args.contains("-s 200"));
         assert!(!args.contains("-R"));
     }
@@ -460,6 +476,35 @@ mod tests {
         };
 
         assert!(validate_config(config).is_err());
+    }
+
+    #[test]
+    fn log_reader_refuses_links_fifo_writable_and_foreign_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("messages");
+        let name = path.to_str().unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        fs::write(&path, b"one\ntwo\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            tail_file_owned(name, 1, owner).unwrap(),
+            ("two\n".into(), false)
+        );
+        assert!(tail_file_owned(name, 1, owner.wrapping_add(1)).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(tail_file_owned(name, 1, owner).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = temp.path().join("alias");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(tail_file_owned(name, 1, owner).is_err());
+        fs::remove_file(&alias).unwrap();
+        symlink(&path, &alias).unwrap();
+        assert!(tail_file_owned(alias.to_str().unwrap(), 1, owner).is_err());
+        fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        assert!(tail_file_owned(name, 1, owner).is_err());
+        assert!(tail_file_owned(temp.path().to_str().unwrap(), 1, owner).is_err());
     }
 
     #[test]

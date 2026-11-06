@@ -1,48 +1,55 @@
 #!/usr/bin/env bash
-# stop_pid_file, taken from S95nanokvm and run under the host's sh and, when
-# present, BusyBox sh. Any account can create a file in /tmp, and the PID that a
-# PID file names is killed. So only a regular file owned by the caller (root on
-# the device) counts: not a link, and not another account's file.
+# Check the actual S95/helper boundary; identity and signal safety are tested in Rust.
 set -euo pipefail
-
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-S95="$ROOT_DIR/kvmapp/system/init.d/S95nanokvm"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
-fail() {
-    echo "S95 PID file test: $*" >&2
-    exit 1
+for name in await_watchdog_registration register_watchdog stop_watchdog stop_system_update_watchdog; do
+    awk -v start="$name() {" '$0 == start {p=1} p {print} p && $0 == "}" {exit}' "$ROOT_DIR/kvmapp/system/init.d/S95nanokvm" >> "$T/lib.sh"
+done
+cat > "$T/check.sh" <<'CHECK'
+set -eu
+. "$TEST_DIR/lib.sh"
+NATIVE_CTL=helper
+helper() {
+    printf '%s\n' "$*" >> "$TEST_DIR/calls"
+    case "$2" in
+        record) return "$RECORD_RESULT" ;;
+        discard) return 0 ;;
+        stop) return "$STOP_RESULT" ;;
+        owned) return "$OWNED_RESULT" ;;
+        *) return 99 ;;
+    esac
 }
-
-awk '$0 == "stop_pid_file() {" {p = 1} p {print} p && $0 == "}" {exit}' "$S95" > "$T/lib.sh"
-grep -qx 'stop_pid_file() {' "$T/lib.sh" || fail "no stop_pid_file in S95nanokvm"
-# A function named kill stands in for the builtin and records the calls.
-printf 'kill() { echo "kill $*" >> "%s/calls"; }\n' "$T" >> "$T/lib.sh"
-foreign=""
-for candidate in /etc/passwd /etc/hostname /etc/hosts; do
-    if [ -f "$candidate" ] && [ ! -O "$candidate" ]; then foreign="$candidate"; break; fi
-done
-[ -n "$foreign" ] || fail "no file of another account to test with"
-
-shells="sh"
-command -v busybox >/dev/null 2>&1 && shells="sh busybox"
-for shell in $shells; do
-    run() {
-        : > "$T/calls"
-        $([ "$shell" = busybox ] && echo busybox) sh -c ". '$T/lib.sh'; stop_pid_file '$1'"
-    }
-    echo 4242 > "$T/own.pid"
-    run "$T/own.pid"
-    [ "$(cat "$T/calls")" = "kill 4242" ] || fail "$shell: an own PID file was not used: $(cat "$T/calls")"
-    [ ! -e "$T/own.pid" ] || fail "$shell: an own PID file stayed"
-
-    echo 1 > "$T/target"
-    ln -sf "$T/target" "$T/link.pid"
-    run "$T/link.pid"
-    [ ! -s "$T/calls" ] || fail "$shell: a linked PID file was used: $(cat "$T/calls")"
-
-    run "$foreign"
-    [ ! -s "$T/calls" ] || fail "$shell: another account's file was used: $(cat "$T/calls")"
-    echo "ok $shell: only an own regular PID file is used"
-done
-echo "S95 PID files: PASS"
+sleep() { :; }
+RECORD_RESULT=0 STOP_RESULT=0 OWNED_RESULT=0
+: > "$TEST_DIR/calls"
+register_watchdog runtime 999999
+[ "$(cat "$TEST_DIR/calls")" = '--watchdog record runtime 999999' ]
+RECORD_RESULT=70
+: > "$TEST_DIR/calls"
+if register_watchdog update 999999; then exit 1; fi
+[ "$(cat "$TEST_DIR/calls")" = "--watchdog record update 999999
+--watchdog discard update 999999" ]
+stop_watchdog
+stop_system_update_watchdog
+STOP_RESULT=70
+if stop_watchdog; then exit 1; fi
+if stop_system_update_watchdog; then exit 1; fi
+await_watchdog_registration runtime
+OWNED_RESULT=3
+: > "$TEST_DIR/calls"
+if await_watchdog_registration runtime; then exit 1; fi
+[ "$(wc -l < "$TEST_DIR/calls")" -eq 10 ]
+OWNED_RESULT=70
+if await_watchdog_registration update; then exit 1; fi
+CHECK
+TEST_DIR="$T" sh "$T/check.sh"
+if command -v busybox >/dev/null 2>&1; then
+    TEST_DIR="$T" busybox sh "$T/check.sh"
+fi
+if rg -n 'kill .*\$.*pid|read_pid_file|stop_pid_file|/tmp/.*watchdog.pid' "$ROOT_DIR/kvmapp/system/init.d/S95nanokvm"; then
+    echo 'unsafe legacy PID operation remains' >&2
+    exit 1
+fi
+echo 'S95 watchdog helper boundary: PASS (sh and available BusyBox)'

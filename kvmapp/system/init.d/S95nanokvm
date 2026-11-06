@@ -12,16 +12,14 @@ disable_stale_autostarts() {
     done
 }
 
-WATCHDOG_PID_FILE=/tmp/nanokvm-watchdog.pid
 NATIVE_CTL=/usr/libexec/nanokvm-native-ctl
 NATIVE_BROKER=/usr/libexec/nanokvm-native-broker
-NATIVE_LOG=/tmp/nanokvm-native.log
+NATIVE_LOG=/run/nanokvm-native.log
 NATIVE_LOG_LIMIT=1048576
 HWMON_SOURCE=/kvmapp/hwmon/nanokvm-hwmon
 HWMON_START_DELAY_SECS=20
 RUST_HWMON_FLAG=/etc/kvm/rust_hwmon_enabled
-SYSTEM_UPDATE_WATCHDOG_PID_FILE=/tmp/system-update-watchdog.pid
-SYSTEM_UPDATE_LOG=/tmp/system-update-watchdog.log
+SYSTEM_UPDATE_LOG=/run/system-update-watchdog.log
 SYSTEM_VERSION_FILE=/etc/kvm/system-version.json
 SYSTEM_PENDING_FILE=/etc/kvm/system-update-pending.json
 SYSTEM_BOOT_GOOD_FILE=/etc/kvm/system-update-boot-good.json
@@ -41,7 +39,8 @@ OPTIONAL_BOOT_INIT_SCRIPTS="S98tailscaled"
 runtime_log() {
     message="$*"
     command -v logger >/dev/null 2>&1 && logger -t nanokvm-runtime "$message" 2>/dev/null || true
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $message" >> /tmp/nanokvm-watchdog.log 2>/dev/null || true
+    prepare_runtime_log /run/nanokvm-watchdog.log "$NATIVE_LOG_LIMIT" || return 1
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $message" >> /run/nanokvm-watchdog.log 2>/dev/null || true
 }
 
 cleanup_legacy_app_artifacts() {
@@ -144,12 +143,23 @@ kvm_system_is_running() {
 # The broker, the native owners and the Pico gateway all append to the native
 # log on tmpfs. Keep it root-only, and keep one previous generation instead of
 # letting it grow without bound.
-prepare_native_log() {
-    if [ -f "$NATIVE_LOG" ] && [ "$(wc -c < "$NATIVE_LOG")" -gt "$NATIVE_LOG_LIMIT" ]; then
-        mv -f "$NATIVE_LOG" "$NATIVE_LOG.1"
+prepare_runtime_log() {
+    [ ! -L "$1" ] || return 1
+    if [ -e "$1" ]; then
+        [ -f "$1" ] && [ -O "$1" ] || return 1
+        [ "$(stat -c %h "$1")" = 1 ] || return 1
+        chmod 0600 "$1" || return 1
+        if [ "$(wc -c < "$1")" -gt "$2" ]; then
+            [ ! -d "$1.1" ] || return 1
+            mv -f "$1" "$1.1" || return 1
+        fi
     fi
-    ( umask 077; : >> "$NATIVE_LOG" )
-    chmod 0600 "$NATIVE_LOG" 2>/dev/null || true
+    ( umask 077; : >> "$1" ) || return 1
+    chmod 0600 "$1"
+}
+
+prepare_native_log() {
+    prepare_runtime_log "$NATIVE_LOG" "$NATIVE_LOG_LIMIT"
 }
 
 start_native_broker() {
@@ -163,7 +173,7 @@ start_native_broker() {
     fi
     # The daemon's protected singleton/journal decides admission. No PID-file,
     # socket deletion, legacy scan, or kill/relaunch fallback grants ownership.
-    prepare_native_log
+    prepare_native_log || return 1
     nohup "$NATIVE_BROKER" --serve >>"$NATIVE_LOG" 2>&1 </dev/null &
     for _ in 1 2 3 4 5; do
         "$NATIVE_CTL" running >/dev/null 2>&1 && return 0
@@ -178,19 +188,29 @@ start_kvm_system_runtime() {
     "$NATIVE_CTL" ensure-kvm >/dev/null
 }
 
-# A PID file in /tmp counts only if root wrote it: any account can create one
-# there, and the PID it names would be killed.
-stop_pid_file() {
-    pid_file="$1"
-    if [ -f "$pid_file" ] && [ ! -L "$pid_file" ] && [ -O "$pid_file" ]; then
-        pid="$(cat "$pid_file" 2>/dev/null)"
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null
-        rm -f "$pid_file"
+# Only the static helper may interpret process records or send signals.
+# A child does no work until its parent has published the pinned identity.
+await_watchdog_registration() {
+    registration_attempt=0
+    while [ "$registration_attempt" -lt 10 ]; do
+        "$NATIVE_CTL" --watchdog owned "$1" >/dev/null 2>&1 && return 0
+        registration_attempt=$((registration_attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+
+register_watchdog() {
+    if "$NATIVE_CTL" --watchdog record "$1" "$2"; then
+        return 0
     fi
+    "$NATIVE_CTL" --watchdog discard "$1" "$2" || return 1
+    wait "$2" 2>/dev/null || true
+    return 1
 }
 
 stop_watchdog() {
-    stop_pid_file "$WATCHDOG_PID_FILE"
+    "$NATIVE_CTL" --watchdog stop runtime
 }
 
 start_hwmon_shadow() {
@@ -212,7 +232,7 @@ enable_rust_hwmon_state() {
 }
 
 stop_system_update_watchdog() {
-    stop_pid_file "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
+    "$NATIVE_CTL" --watchdog stop update
 }
 
 cleanup_server_backups() {
@@ -317,9 +337,13 @@ restart_server_safe() {
 }
 
 start_watchdog() {
-    [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+    "$NATIVE_CTL" --watchdog status runtime >/dev/null 2>&1
+    watchdog_status=$?
+    [ "$watchdog_status" -eq 0 ] && return 0
+    [ "$watchdog_status" -eq 3 ] || return 1
 
     (
+        await_watchdog_registration runtime || exit 1
         failures=0
         sleep 20
         while true; do
@@ -360,7 +384,7 @@ start_watchdog() {
             sleep 10
         done
     ) &
-    echo $! > "$WATCHDOG_PID_FILE"
+    register_watchdog runtime "$!"
 }
 
 json_string_value() {
@@ -464,11 +488,16 @@ run_system_update_rollback() {
 }
 
 start_system_update_watchdog() {
-    pending_update_exists || return
-    [ -f "$SYSTEM_BOOT_GOOD_FILE" ] && return
-    [ -f "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$SYSTEM_UPDATE_WATCHDOG_PID_FILE" 2>/dev/null)" 2>/dev/null && return
+    pending_update_exists || return 0
+    [ -f "$SYSTEM_BOOT_GOOD_FILE" ] && return 0
+    "$NATIVE_CTL" --watchdog status update >/dev/null 2>&1
+    watchdog_status=$?
+    [ "$watchdog_status" -eq 0 ] && return 0
+    [ "$watchdog_status" -eq 3 ] || return 1
+    prepare_runtime_log "$SYSTEM_UPDATE_LOG" "$NATIVE_LOG_LIMIT" || return 1
 
     (
+        await_watchdog_registration update || exit 1
         echo "$(date '+%Y-%m-%d %H:%M:%S') pending system update detected; waiting for boot health" >> "$SYSTEM_UPDATE_LOG"
 
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -491,7 +520,7 @@ start_system_update_watchdog() {
 
         run_system_update_rollback
     ) &
-    echo $! > "$SYSTEM_UPDATE_WATCHDOG_PID_FILE"
+    register_watchdog update "$!"
 }
 
 stop_runtime() {
@@ -500,7 +529,7 @@ stop_runtime() {
         runtime_log "runtime closure denied or unproven; preserving watchdogs and runtime files"
         return 1
     }
-    stop_system_update_watchdog
+    stop_system_update_watchdog || return 1
     stop_watchdog
 }
 
@@ -520,8 +549,8 @@ start_runtime() {
     start_kvm_system_runtime || runtime_log "continuing without kvm_system; watchdog will retry"
 
     start_server_runtime || return 1
-    start_watchdog
-    start_system_update_watchdog
+    start_watchdog || return 1
+    start_system_update_watchdog || return 1
     start_hwmon_shadow
 }
 

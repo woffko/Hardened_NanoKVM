@@ -126,7 +126,7 @@ fi
 if grep -q '/kvmapp/server/dl_lib/libz.so' "/proc/$BACKEND_PID/maps"; then
   printf 'PRIVATE_ZLIB_MAP=present\n'
 fi
-if grep -Eiq 'not found|Error loading shared library' /tmp/nanokvm-server.log; then
+if grep -Eiq 'not found|Error loading shared library' /run/nanokvm-native.log; then
   printf 'SERVER_LOADER_ERRORS=present\\n'
 else
   printf 'SERVER_LOADER_ERRORS=none\\n'

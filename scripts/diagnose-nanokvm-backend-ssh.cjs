@@ -86,10 +86,10 @@ for PROC in /proc/[0-9]*; do
 done
 printf 'PROCESS_CMDLINES_END\\n'
 printf 'WATCHDOG_LOG_BEGIN\\n'
-tail -n 80 /tmp/nanokvm-watchdog.log 2>/dev/null || true
+tail -n 80 /run/nanokvm-watchdog.log 2>/dev/null || true
 printf 'WATCHDOG_LOG_END\\n'
 printf 'SERVER_LOG_BEGIN\\n'
-tail -n 120 /tmp/nanokvm-server.log 2>/dev/null || true
+tail -n 120 /run/nanokvm-native.log 2>/dev/null || true
 printf 'SERVER_LOG_END\\n'
 `;
   const output = await run(

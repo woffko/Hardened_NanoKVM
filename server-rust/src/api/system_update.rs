@@ -3564,7 +3564,14 @@ fn rollback_script_for_record(stage_dir: &Path, record: &SystemInstallRecord) ->
     let mut script = String::from(
         "#!/bin/sh\n\
 set -eu\n\
-LOG=/tmp/system-update-watchdog.log\n\
+LOG=/run/system-update-watchdog.log\n\
+umask 077\n\
+[ ! -L \"$LOG\" ] || exit 1\n\
+if [ -e \"$LOG\" ]; then\n\
+  [ -f \"$LOG\" ] && [ -O \"$LOG\" ] && [ \"$(stat -c %h \"$LOG\")\" = 1 ] || exit 1\n\
+fi\n\
+: >> \"$LOG\"\n\
+chmod 0600 \"$LOG\"\n\
 echo \"$(date '+%Y-%m-%d %H:%M:%S') automatic system-update rollback started\" >> \"$LOG\"\n",
     );
 
@@ -5066,6 +5073,53 @@ mod tests {
         assert!(remove_new < restore_config);
         assert!(script.contains("'/etc/kvm/system-update-pending.json'"));
         assert!(script.contains("'/etc/kvm/system-update-rollback.sh'"));
+
+        // Execute only the generated log admission prefix, never restoration
+        // commands or host /etc cleanup. A marker stands for admitted work.
+        let prefix = script.split_once("mkdir -p ").unwrap().0;
+        let log = temp.path().join("rollback.log");
+        let admitted = temp.path().join("admitted");
+        let prefix = prefix.replace(
+            "LOG=/run/system-update-watchdog.log",
+            &format!("LOG={}", shell_quote_path(&log).unwrap()),
+        );
+        let probe = format!(
+            "{prefix}\nprintf admitted > {}\n",
+            shell_quote_path(&admitted).unwrap()
+        );
+        let run = || {
+            std::process::Command::new("timeout")
+                .args(["3", "sh", "-c", &probe])
+                .status()
+                .unwrap()
+        };
+        let victim = temp.path().join("victim");
+        fs::write(&victim, b"sentinel").unwrap();
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        assert!(!run().success());
+        assert!(!admitted.exists());
+        assert_eq!(fs::read(&victim).unwrap(), b"sentinel");
+        fs::remove_file(&log).unwrap();
+        fs::hard_link(&victim, &log).unwrap();
+        assert!(!run().success());
+        assert!(!admitted.exists());
+        fs::remove_file(&log).unwrap();
+        nix::unistd::mkfifo(&log, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let status = run();
+        assert!(!status.success());
+        assert_ne!(
+            status.code(),
+            Some(124),
+            "log FIFO blocked rollback admission"
+        );
+        fs::remove_file(&log).unwrap();
+        assert!(run().success());
+        assert!(admitted.is_file());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

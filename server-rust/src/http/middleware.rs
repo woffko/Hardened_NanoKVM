@@ -100,7 +100,7 @@ pub async fn picoclaw_internal(req: Request<Body>, next: Next) -> Response {
     let remote = req
         .extensions()
         .get::<ConnectInfo<ClientAddr>>()
-        .map(|ConnectInfo(ClientAddr(addr))| *addr);
+        .map(|ConnectInfo(ClientAddr(addr, _))| *addr);
     if crate::api::picoclaw::has_valid_loopback_internal_token(req.headers(), remote) {
         return next.run(req).await;
     }

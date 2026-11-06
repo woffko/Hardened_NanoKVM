@@ -29,7 +29,8 @@ const MAX_PENDING_TLS_HANDSHAKES: usize = 8;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
-pub struct ClientAddr(pub SocketAddr);
+/// Kernel socket peer and local destination; never derived from HTTP headers.
+pub struct ClientAddr(pub SocketAddr, pub Option<SocketAddr>);
 
 pub struct TlsListener {
     listener: TcpListener,
@@ -41,7 +42,7 @@ pub struct TlsListener {
 
 impl Connected<IncomingStream<'_, TcpListener>> for ClientAddr {
     fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
-        Self(*stream.remote_addr())
+        Self(*stream.remote_addr(), stream.io().local_addr().ok())
     }
 }
 
@@ -113,7 +114,10 @@ impl Listener for TlsListener {
 
 impl Connected<IncomingStream<'_, TlsListener>> for ClientAddr {
     fn connect_info(stream: IncomingStream<'_, TlsListener>) -> Self {
-        Self(*stream.remote_addr())
+        Self(
+            *stream.remote_addr(),
+            stream.io().get_ref().0.local_addr().ok(),
+        )
     }
 }
 
@@ -243,6 +247,68 @@ mod tests {
         TlsConnector,
         rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
     };
+
+    #[tokio::test]
+    async fn connection_context_uses_accepted_socket_addresses_for_http_and_tls() {
+        use axum::{Router, extract::ConnectInfo, routing::get};
+        use tokio::io::AsyncWriteExt;
+
+        async fn addresses(ConnectInfo(addr): ConnectInfo<ClientAddr>) -> String {
+            format!("{}|{}", addr.0, addr.1.unwrap())
+        }
+        async fn probe<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+            mut stream: S,
+            expected: &str,
+        ) {
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: attacker.invalid\r\nX-Forwarded-For: 10.1.2.3\r\nConnection: close\r\n\r\n").await.unwrap();
+            let mut response = String::new();
+            time::timeout(Duration::from_secs(3), stream.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.ends_with(expected), "{response}");
+        }
+
+        for encrypted in [false, true] {
+            let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+            let destination: SocketAddr =
+                format!("127.0.0.1:{}", listener.local_addr().unwrap().port())
+                    .parse()
+                    .unwrap();
+            let router = Router::new().route("/", get(addresses));
+            let (server, client) = test_configs();
+            let task = tokio::spawn(async move {
+                if encrypted {
+                    axum::serve(
+                        TlsListener::new(listener, server),
+                        router.into_make_service_with_connect_info::<ClientAddr>(),
+                    )
+                    .await
+                    .unwrap();
+                } else {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<ClientAddr>(),
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            let stream = TcpStream::connect(destination).await.unwrap();
+            let expected = format!("{}|{}", stream.local_addr().unwrap(), destination);
+            if encrypted {
+                let stream = TlsConnector::from(Arc::new(client))
+                    .connect(ServerName::try_from("localhost").unwrap(), stream)
+                    .await
+                    .unwrap();
+                probe(stream, &expected).await;
+            } else {
+                probe(stream, &expected).await;
+            }
+            task.abort();
+            let _ = task.await;
+        }
+    }
 
     fn test_configs() -> (ServerConfig, ClientConfig) {
         install_crypto_provider();

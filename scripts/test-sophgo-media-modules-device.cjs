@@ -423,7 +423,7 @@ printf 'SCREEN_TYPE=%s\n' "$(cat /kvmapp/kvm/type 2>/dev/null || true)"
 printf 'SCREEN_STATE=%s\n' "$(cat /kvmapp/kvm/state 2>/dev/null || true)"
 printf 'DMESG_ALERTS=%s\n' "$(dmesg | grep -Eic 'oops|panic|segfault|BUG:|Unknown symbol|disagrees about version|invalid module format' || true)"
 printf 'SERVER_LOG_BEGIN\n'
-tail -n 160 /tmp/nanokvm-server.log 2>/dev/null || true
+tail -n 160 /run/nanokvm-native.log 2>/dev/null || true
 printf 'SERVER_LOG_END\n'
 printf 'KVM_SYSTEM_LOG_BEGIN\n'
 tail -n 160 /tmp/kvm_system.log 2>/dev/null || true
