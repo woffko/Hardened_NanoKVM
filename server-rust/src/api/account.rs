@@ -9,6 +9,9 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
+/// Above any name an account can have.
+const MAX_LOGIN_USERNAME_BYTES: usize = 256;
+
 use crate::{
     AppError, Result,
     auth::credential_txn::{self, Change},
@@ -110,6 +113,12 @@ pub async fn login(
         ));
     }
 
+    // An oversized name costs neither a hash nor a lockout entry, which keeps
+    // its name for the lockout period. Only the size is checked: an account an
+    // older version created may have a name today's rules refuse.
+    if req.username.is_empty() || req.username.len() > MAX_LOGIN_USERNAME_BYTES {
+        return Err(AppError::BadRequest("invalid username".to_string()));
+    }
     let source = addr.0.ip();
     let source_ip = source.to_string();
     {
@@ -488,6 +497,47 @@ mod tests {
 
     fn client() -> ConnectInfo<ClientAddr> {
         ConnectInfo(ClientAddr("192.0.2.10:40000".parse().unwrap()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversized_logins_cost_neither_a_hash_nor_a_lockout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _session, _shadow) = change_fixture(&dir).await;
+        let login_as = |username: String, password: String| {
+            let state = state.clone();
+            async move {
+                login(
+                    State(state),
+                    client(),
+                    Json(LoginReq { username, password }),
+                )
+                .await
+                .map(|_| ())
+            }
+        };
+        // With the only hashing slot taken, a request that reached Argon2
+        // would wait and then be refused as busy, not as malformed.
+        let held = Arc::clone(&state.login_hashing)
+            .acquire_owned()
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(matches!(
+                login_as("x".repeat(100 * 1024), PASSWORD.into()).await,
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                login_as(String::new(), PASSWORD.into()).await,
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                login_as("operator".into(), "p".repeat(5000)).await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        drop(held);
+        // The limiter (two failures lock) counted none of them.
+        login_as("operator".into(), PASSWORD.into()).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

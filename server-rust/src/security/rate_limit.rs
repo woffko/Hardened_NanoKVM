@@ -11,11 +11,19 @@ struct Attempt {
     last_failure: Instant,
 }
 
+/// A source may fail this many times the per-name limit across all names before
+/// it is locked out for every name, so rotating names gets around nothing.
+const SOURCE_BUDGET_FACTOR: u32 = 4;
+/// Entries kept in each map at most. Past this the oldest leave first, and an
+/// entry that still locks someone out leaves last.
+const MAX_ENTRIES: usize = 1024;
+
 #[derive(Debug)]
 pub struct LoginRateLimiter {
     max_failures: u32,
     lockout_duration: Duration,
     attempts: HashMap<String, Attempt>,
+    sources: HashMap<String, Attempt>,
 }
 
 impl LoginRateLimiter {
@@ -24,57 +32,95 @@ impl LoginRateLimiter {
             max_failures: max_failures.max(1),
             lockout_duration: Duration::from_secs(lockout_duration_secs.max(1)),
             attempts: HashMap::new(),
+            sources: HashMap::new(),
         }
     }
 
     pub fn check(&mut self, source: IpAddr, username: &str) -> bool {
         self.prune();
         let now = Instant::now();
-        let key = key(source, username);
-        self.attempts
-            .get(&key)
-            .and_then(|attempt| attempt.lockout_until)
-            .is_some_and(|until| now < until)
+        let locked = |attempt: Option<&Attempt>| {
+            attempt
+                .and_then(|attempt| attempt.lockout_until)
+                .is_some_and(|until| now < until)
+        };
+        locked(self.attempts.get(&key(source, username)))
+            || locked(self.sources.get(&source_key(source)))
     }
 
     pub fn record_failure(&mut self, source: IpAddr, username: &str) -> bool {
         self.prune();
         let now = Instant::now();
-        let key = key(source, username);
-        let attempt = self.attempts.entry(key).or_insert(Attempt {
-            failures: 0,
-            lockout_until: None,
-            last_failure: now,
-        });
-
-        if now.duration_since(attempt.last_failure) > self.lockout_duration {
-            attempt.failures = 0;
-            attempt.lockout_until = None;
-        }
-
-        attempt.failures += 1;
-        attempt.last_failure = now;
-        if attempt.failures >= self.max_failures {
-            attempt.lockout_until = Some(now + self.lockout_duration);
-            return true;
-        }
-        false
+        let name = bump(
+            &mut self.attempts,
+            key(source, username),
+            self.max_failures,
+            self.lockout_duration,
+            now,
+        );
+        let all = bump(
+            &mut self.sources,
+            source_key(source),
+            self.max_failures.saturating_mul(SOURCE_BUDGET_FACTOR),
+            self.lockout_duration,
+            now,
+        );
+        name || all
     }
 
     pub fn record_success(&mut self, source: IpAddr, username: &str) {
         self.attempts.remove(&key(source, username));
+        self.sources.remove(&source_key(source));
     }
 
     fn prune(&mut self) {
         let now = Instant::now();
-        self.attempts.retain(|_, attempt| {
+        let lockout = self.lockout_duration;
+        let current = |attempt: &Attempt| {
             if let Some(until) = attempt.lockout_until {
                 now < until
             } else {
-                now.duration_since(attempt.last_failure) <= self.lockout_duration
+                now.duration_since(attempt.last_failure) <= lockout
             }
-        });
+        };
+        self.attempts.retain(|_, attempt| current(attempt));
+        self.sources.retain(|_, attempt| current(attempt));
     }
+}
+
+/// Count one failure against `key`; true when it now locks.
+fn bump(
+    map: &mut HashMap<String, Attempt>,
+    key: String,
+    limit: u32,
+    lockout: Duration,
+    now: Instant,
+) -> bool {
+    if !map.contains_key(&key) && map.len() >= MAX_ENTRIES {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, attempt)| (attempt.lockout_until.is_some(), attempt.last_failure))
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            map.remove(&oldest);
+        }
+    }
+    let attempt = map.entry(key).or_insert(Attempt {
+        failures: 0,
+        lockout_until: None,
+        last_failure: now,
+    });
+    if now.duration_since(attempt.last_failure) > lockout {
+        attempt.failures = 0;
+        attempt.lockout_until = None;
+    }
+    attempt.failures += 1;
+    attempt.last_failure = now;
+    if attempt.failures >= limit {
+        attempt.lockout_until = Some(now + lockout);
+        return true;
+    }
+    false
 }
 
 /// Attempts at the Wi-Fi AP provisioning key, which has few possible values:
@@ -141,6 +187,50 @@ mod tests {
 
     fn ip(text: &str) -> IpAddr {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn rotating_names_locks_the_source_for_every_name() {
+        let mut limiter = LoginRateLimiter::new(5, 60);
+        for name in 0..19 {
+            assert!(!limiter.record_failure(ip("192.0.2.7"), &format!("guess{name}")));
+        }
+        assert!(!limiter.check(ip("192.0.2.7"), "admin"));
+        assert!(limiter.record_failure(ip("192.0.2.7"), "guess19"));
+        for name in ["admin", "terminal:admin", "never-tried"] {
+            assert!(limiter.check(ip("192.0.2.7"), name), "{name}");
+        }
+        assert!(!limiter.check(ip("192.0.2.8"), "admin"));
+        limiter.record_success(ip("192.0.2.7"), "admin");
+        assert!(!limiter.check(ip("192.0.2.7"), "never-tried"));
+    }
+
+    #[test]
+    fn the_maps_stay_bounded_and_keep_a_lockout_longest() {
+        let mut limiter = LoginRateLimiter::new(1, 60);
+        assert!(limiter.record_failure(ip("198.51.100.1"), "admin"));
+        let mut limiter_unlocked = LoginRateLimiter::new(5, 60);
+        for n in 0..3000u32 {
+            let source = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + n));
+            limiter.record_failure(source, &format!("name{n}"));
+            limiter_unlocked.record_failure(source, &format!("name{n}"));
+        }
+        assert!(limiter.attempts.len() <= MAX_ENTRIES);
+        assert!(limiter.sources.len() <= MAX_ENTRIES);
+        assert!(limiter_unlocked.attempts.len() <= MAX_ENTRIES);
+        // With a limit of one every entry locks, so the oldest lockout leaves.
+        assert!(!limiter.check(ip("198.51.100.1"), "admin"));
+        let mut kept = LoginRateLimiter::new(2, 60);
+        assert!(!kept.record_failure(ip("198.51.100.1"), "admin"));
+        assert!(kept.record_failure(ip("198.51.100.1"), "admin"));
+        for n in 0..3000u32 {
+            let source = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + n));
+            kept.record_failure(source, "admin");
+        }
+        assert!(
+            kept.check(ip("198.51.100.1"), "admin"),
+            "a lockout left before entries that lock nothing"
+        );
     }
 
     #[test]
