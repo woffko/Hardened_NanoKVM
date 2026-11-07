@@ -66,4 +66,14 @@ printf 'nameserver 2001:db8::1\n' > "$BOOT_RESOLV_FILE"
 render_static_dns 192.168.1.1 || fail "render_static_dns failed for IPv6"
 grep -qx 'nameserver 2001:db8::1' "$ETC_RESOLV_FILE" || fail "IPv6 nameserver dropped"
 
+printf '%s\n' \
+    'nameserver 1.1.1.1' \
+    'nameserver 1.1.1.1' \
+    'nameserver 8.8.8.8' \
+    > "$BOOT_RESOLV_FILE"
+render_static_dns 192.168.1.1 || fail "render_static_dns failed on duplicate nameservers"
+[ "$(grep -c '^nameserver ' "$ETC_RESOLV_FILE")" -eq 2 ] || fail "nameservers were not de-duplicated"
+grep -qx 'nameserver 1.1.1.1' "$ETC_RESOLV_FILE" || fail "first nameserver lost"
+grep -qx 'nameserver 8.8.8.8' "$ETC_RESOLV_FILE" || fail "second distinct nameserver lost"
+
 echo "test-s30eth: PASS"

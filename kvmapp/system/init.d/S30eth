@@ -347,6 +347,18 @@ render_static_dns() {
         done < "$BOOT_RESOLV_FILE"
     fi
 
+    if [ -s "$tmp" ]; then
+        dedup="${tmp}.dedup"
+        awk '
+            $1 == "nameserver" {
+                if (!seen[$2]++) print "nameserver " $2
+                next
+            }
+            { print }
+        ' "$tmp" >"$dedup" || { rm -f "$dedup" "$tmp"; return 1; }
+        mv "$dedup" "$tmp" || { rm -f "$dedup" "$tmp"; return 1; }
+    fi
+
     if ! grep -q '^nameserver ' "$tmp" 2>/dev/null; then
         printf 'nameserver %s\n' "$fallback_server" >>"$tmp" || { rm -f "$tmp"; return 1; }
     fi
