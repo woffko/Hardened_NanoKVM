@@ -574,11 +574,12 @@ pub async fn get_mdns_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_mdns() -> Result<impl IntoResponse> {
+pub async fn enable_mdns(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if avahi_daemon_pid().is_some() {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
+    let _writer = state.writers.configuration()?;
     if Path::new(AVAHI_DAEMON_BACKUP_SCRIPT).exists() {
         fs::copy(AVAHI_DAEMON_BACKUP_SCRIPT, AVAHI_DAEMON_SCRIPT)?;
     }
@@ -592,7 +593,7 @@ pub async fn enable_mdns() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn disable_mdns() -> Result<impl IntoResponse> {
+pub async fn disable_mdns(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let Some(pid) = avahi_daemon_pid() else {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     };
@@ -600,6 +601,7 @@ pub async fn disable_mdns() -> Result<impl IntoResponse> {
         return Err(AppError::Internal("invalid avahi pid".to_string()));
     }
 
+    let _writer = state.writers.configuration()?;
     run_checked(
         AllowedCommand::Kill,
         ["-9", pid.as_str()],
@@ -607,8 +609,8 @@ pub async fn disable_mdns() -> Result<impl IntoResponse> {
         "disable mdns failed",
     )
     .await?;
-    remove_file_if_exists(AVAHI_DAEMON_PID)?;
-    remove_file_if_exists(AVAHI_DAEMON_SCRIPT)?;
+    files::remove_file(Path::new(AVAHI_DAEMON_PID))?;
+    files::remove_file(Path::new(AVAHI_DAEMON_SCRIPT))?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -1156,12 +1158,20 @@ pub async fn get_memory_limit() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_memory_limit(Json(req): Json<SetMemoryLimitReq>) -> Result<impl IntoResponse> {
+pub async fn set_memory_limit(
+    State(state): State<AppState>,
+    Json(req): Json<SetMemoryLimitReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     if req.enabled {
         let limit = normalize_memory_limit(req.limit)?;
-        fs::write(GO_MEM_LIMIT_FILE, limit.to_string().as_bytes())?;
+        files::write_atomic(
+            Path::new(GO_MEM_LIMIT_FILE),
+            limit.to_string().as_bytes(),
+            0o644,
+        )?;
     } else {
-        remove_file_if_exists(GO_MEM_LIMIT_FILE)?;
+        files::remove_file(Path::new(GO_MEM_LIMIT_FILE))?;
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -1173,13 +1183,17 @@ pub async fn get_swap() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_swap(Json(req): Json<SetSwapReq>) -> Result<impl IntoResponse> {
+pub async fn set_swap(
+    State(state): State<AppState>,
+    Json(req): Json<SetSwapReq>,
+) -> Result<impl IntoResponse> {
     validate_swap_size(req.size)?;
     let current = get_swap_size();
     if req.size == current {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
+    let _writer = state.writers.configuration()?;
     if req.size == 0 {
         disable_swap().await?;
         disable_swap_inittab()?;
@@ -1196,7 +1210,11 @@ pub async fn get_mouse_jiggler() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(MouseJigglerRsp { enabled, mode })))
 }
 
-pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<impl IntoResponse> {
+pub async fn set_mouse_jiggler(
+    State(state): State<AppState>,
+    Json(req): Json<SetMouseJigglerReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     hid_ws::set_mouse_jiggler(req.enabled, &req.mode)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -1479,7 +1497,7 @@ async fn disable_swap() -> Result<()> {
         )
         .await?;
     }
-    remove_file_if_exists(SWAP_FILE)
+    files::remove_file(Path::new(SWAP_FILE))
 }
 
 fn is_swap_active() -> bool {

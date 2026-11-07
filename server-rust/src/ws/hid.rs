@@ -779,7 +779,11 @@ pub fn mouse_jiggler_snapshot() -> Result<(bool, String)> {
 pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
     if enabled {
         let mode = validate_jiggler_mode(mode)?;
-        fs::write(MOUSE_JIGGLER_CONFIG, mode.as_bytes())?;
+        crate::system::files::write_atomic(
+            Path::new(MOUSE_JIGGLER_CONFIG),
+            mode.as_bytes(),
+            0o644,
+        )?;
 
         let should_spawn = {
             let mut state = MOUSE_JIGGLER
@@ -795,7 +799,7 @@ pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
             tokio::spawn(mouse_jiggler_loop());
         }
     } else {
-        remove_file_if_exists(MOUSE_JIGGLER_CONFIG)?;
+        crate::system::files::remove_file(Path::new(MOUSE_JIGGLER_CONFIG))?;
         let mut state = MOUSE_JIGGLER
             .lock()
             .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
@@ -886,14 +890,6 @@ fn normalize_jiggler_mode(mode: &str) -> String {
         JIGGLER_MODE_ABSOLUTE => JIGGLER_MODE_ABSOLUTE.to_string(),
         JIGGLER_MODE_RELATIVE | "" => JIGGLER_MODE_RELATIVE.to_string(),
         other => other.to_string(),
-    }
-}
-
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
     }
 }
 

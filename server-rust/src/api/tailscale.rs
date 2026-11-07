@@ -1,4 +1,4 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -12,6 +12,7 @@ use tokio::task;
 use crate::{
     AppError, Result,
     error::ApiResponse,
+    state::AppState,
     system::{
         command::{self, AllowedCommand},
         package_download::{self, Pinned},
@@ -151,7 +152,8 @@ pub async fn start() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn restart() -> Result<impl IntoResponse> {
+pub async fn restart(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match restart_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -161,7 +163,8 @@ pub async fn restart() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn stop() -> Result<impl IntoResponse> {
+pub async fn stop(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match stop_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -171,7 +174,8 @@ pub async fn stop() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn up() -> Result<impl IntoResponse> {
+pub async fn up(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match up_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -181,7 +185,8 @@ pub async fn up() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn down() -> Result<impl IntoResponse> {
+pub async fn down(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match down_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -191,7 +196,8 @@ pub async fn down() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn login() -> Result<axum::response::Response> {
+pub async fn login(State(state): State<AppState>) -> Result<axum::response::Response> {
+    let _writer = state.writers.configuration()?;
     let mut status = raw_status().await;
     if status.is_err() {
         let _ = start_service().await;
@@ -221,7 +227,8 @@ pub async fn login() -> Result<axum::response::Response> {
     }
 }
 
-pub async fn logout() -> Result<impl IntoResponse> {
+pub async fn logout(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match logout_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
