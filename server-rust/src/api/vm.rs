@@ -320,7 +320,7 @@ pub async fn set_hostname(
                     {
                         files::write_atomic(Path::new(ETC_HOSTS_FILE), hosts.as_bytes(), 0o644)?;
                     }
-                    fs::write(BOOT_HOSTNAME_FILE, hostname.as_bytes())?;
+                    files::write_atomic(Path::new(BOOT_HOSTNAME_FILE), hostname.as_bytes(), 0o644)?;
                     files::write_atomic(Path::new(ETC_HOSTNAME_FILE), hostname.as_bytes(), 0o644)
                 })
                 .await?;
@@ -391,18 +391,19 @@ pub async fn get_web_title() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_web_title(Json(req): Json<SetWebTitleReq>) -> Result<impl IntoResponse> {
+pub async fn set_web_title(
+    State(state): State<AppState>,
+    Json(req): Json<SetWebTitleReq>,
+) -> Result<impl IntoResponse> {
     if req.title.is_empty() || req.title == "NanoKVM" {
-        match fs::remove_file(WEB_TITLE_FILE) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
+        let _writer = state.writers.configuration()?;
+        files::remove_file(Path::new(WEB_TITLE_FILE))?;
     } else {
         if req.title.len() > 128 || req.title.contains(['\n', '\r']) {
             return Err(AppError::BadRequest("invalid web title".to_string()));
         }
-        fs::write(WEB_TITLE_FILE, req.title.as_bytes())?;
+        let _writer = state.writers.configuration()?;
+        files::write_atomic(Path::new(WEB_TITLE_FILE), req.title.as_bytes(), 0o644)?;
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -484,11 +485,12 @@ pub async fn get_ssh_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_ssh() -> Result<impl IntoResponse> {
+pub async fn enable_ssh(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if ssh_enabled().await {
         return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: true })));
     }
 
+    let _writer = state.writers.configuration()?;
     let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_on"],
@@ -506,11 +508,12 @@ pub async fn enable_ssh() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(EnabledRsp { enabled })))
 }
 
-pub async fn disable_ssh() -> Result<impl IntoResponse> {
+pub async fn disable_ssh(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if ssh_stop_requested() && !sshd_is_running().await {
         return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: false })));
     }
 
+    let _writer = state.writers.configuration()?;
     let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_off"],
@@ -623,11 +626,19 @@ pub async fn get_oled() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(OledRsp { exist: true, sleep })))
 }
 
-pub async fn set_oled(Json(req): Json<SetOledReq>) -> Result<impl IntoResponse> {
+pub async fn set_oled(
+    State(state): State<AppState>,
+    Json(req): Json<SetOledReq>,
+) -> Result<impl IntoResponse> {
     if req.sleep < 0 || req.sleep > 24 * 60 * 60 {
         return Err(AppError::BadRequest("invalid OLED sleep".to_string()));
     }
-    fs::write(OLED_SLEEP_FILE, req.sleep.to_string().as_bytes())?;
+    let _writer = state.writers.configuration()?;
+    files::write_atomic(
+        Path::new(OLED_SLEEP_FILE),
+        req.sleep.to_string().as_bytes(),
+        0o644,
+    )?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 

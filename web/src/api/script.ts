@@ -23,9 +23,11 @@ export function getScripts() {
   return http.get('/api/vm/script');
 }
 
-export function deleteScript(name: string) {
-  const data = {
-    name
-  };
-  return http.delete('/api/vm/script', data);
+export function deleteScript(name: string, ticket: string) {
+  return http.request({
+    url: '/api/vm/script',
+    method: 'delete',
+    data: { name },
+    headers: { [UNLOCK_HEADER]: ticket }
+  });
 }

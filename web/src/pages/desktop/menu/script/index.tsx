@@ -12,7 +12,10 @@ import { Run } from './run';
 import { Unlock } from './unlock';
 
 // What waits for a fresh terminal unlock: scripts run as root.
-type Pending = { kind: 'upload'; file: File } | { kind: 'run'; type: string };
+type Pending =
+  | { kind: 'upload'; file: File }
+  | { kind: 'run'; type: string }
+  | { kind: 'delete' };
 
 export const Script = () => {
   const { t } = useTranslation();
@@ -87,17 +90,34 @@ export const Script = () => {
 
     if (action.kind === 'upload') {
       upload(action.file, ticket);
-    } else if (action.type === 'foreground') {
-      setRunTicket(ticket);
-      setIsRunning(true);
+    } else if (action.kind === 'run') {
+      if (action.type === 'foreground') {
+        setRunTicket(ticket);
+        setIsRunning(true);
+      } else {
+        api
+          .runScript(currentScript, action.type, ticket)
+          .then((rsp) => {
+            if (rsp.code !== 0) message.error(rsp.msg);
+          })
+          .catch((err) => {
+            message.error(err?.response?.data?.msg || t('script.runFailed'));
+          });
+      }
     } else {
       api
-        .runScript(currentScript, action.type, ticket)
+        .deleteScript(currentScript, ticket)
         .then((rsp) => {
-          if (rsp.code !== 0) message.error(rsp.msg);
+          if (rsp.code !== 0) {
+            message.error(rsp.msg);
+            return;
+          }
+
+          setScripts(scripts.filter((script) => script !== currentScript));
+          setCurrentScript('');
         })
         .catch((err) => {
-          message.error(err?.response?.data?.msg || t('script.runFailed'));
+          message.error(err?.response?.data?.msg || t('script.terminalRequired'));
         });
     }
   }
@@ -117,15 +137,7 @@ export const Script = () => {
 
   function deleteScript() {
     if (!currentScript) return;
-
-    api.deleteScript(currentScript).then((rsp) => {
-      if (rsp.code !== 0) {
-        console.log(rsp.msg);
-        return;
-      }
-
-      setScripts(scripts.filter((script) => script !== currentScript));
-    });
+    setPending({ kind: 'delete' });
   }
 
   function activate(script: string) {

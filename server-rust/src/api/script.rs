@@ -11,9 +11,7 @@ use nix::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
+    fs::{self, File},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -167,7 +165,16 @@ pub async fn upload_script(
             return Err(AppError::BadRequest("script file is empty".to_string()));
         }
 
-        write_script_file(&filename, &data)?;
+        let writer = state.writers.configuration()?;
+        let write_name = filename.clone();
+        let write_data = data.to_vec();
+        writer
+            .run(move |writer| async move {
+                writer
+                    .blocking(move |_permit| write_script_file(&write_name, &write_data))
+                    .await
+            })
+            .await?;
         uploaded = Some(filename);
         break;
     }
@@ -176,9 +183,23 @@ pub async fn upload_script(
     Ok(Json(ApiResponse::ok(UploadScriptRsp { file })))
 }
 
-pub async fn delete_script(Json(req): Json<DeleteScriptReq>) -> Result<impl IntoResponse> {
+pub async fn delete_script(
+    State(state): State<AppState>,
+    session: Option<Extension<CurrentSession>>,
+    headers: HeaderMap,
+    Json(req): Json<DeleteScriptReq>,
+) -> Result<impl IntoResponse> {
+    let session = session.map(|Extension(CurrentSession(session))| session);
+    require_terminal_unlock(&state, session.as_ref(), &headers).await?;
+    let writer = state.writers.configuration()?;
     let path = checked_script_path(&req.name)?;
-    remove_script_file(&path)?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |_permit| remove_script_file(&path))
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -241,7 +262,6 @@ fn checked_script_path(name: &str) -> Result<PathBuf> {
 }
 
 fn write_script_file(name: &str, data: &[u8]) -> Result<()> {
-    fs::create_dir_all(SCRIPT_DIRECTORY)?;
     let path = script_path(name)?;
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if metadata.file_type().is_symlink() {
@@ -249,20 +269,14 @@ fn write_script_file(name: &str, data: &[u8]) -> Result<()> {
         }
     }
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o755)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&path)?;
-    file.write_all(data)?;
-    file.flush()?;
-    Ok(())
+    crate::system::files::write_atomic(&path, data, 0o755)
 }
 
 fn remove_script_file(path: &Path) -> Result<()> {
     fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -683,5 +697,20 @@ mod tests {
         assert!(refused(
             require_terminal_unlock(&state, Some(&session), &header(&ticket.token)).await
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_script_requires_a_fresh_terminal_unlock() {
+        let mut config = crate::config::Config {
+            stun: "disable".into(),
+            ..crate::config::Config::default()
+        };
+        config.security.allow_terminal = true;
+        let state = AppState::new(config).await.unwrap();
+        let request = Json(DeleteScriptReq {
+            name: "job.sh".to_string(),
+        });
+        let result = delete_script(State(state), None, HeaderMap::new(), request).await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
     }
 }

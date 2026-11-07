@@ -6,7 +6,6 @@ import { Swap } from './swap.tsx';
 const children = (
   <div className="space-y-6 py-3">
     <Swap />
-    {/*<Autostart />*/}
   </div>
 );
 

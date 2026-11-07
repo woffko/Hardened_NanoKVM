@@ -183,10 +183,12 @@ case "$1" in
         ;;
     permanent_on)
         rm -f /etc/kvm/ssh_stop
+        sync
         start
         ;;
     permanent_off)
         touch /etc/kvm/ssh_stop
+        sync
         stop
         ;;
     *)

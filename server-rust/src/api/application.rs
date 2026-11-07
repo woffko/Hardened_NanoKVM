@@ -171,20 +171,20 @@ pub async fn get_preview() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_preview(Json(req): Json<SetPreviewReq>) -> Result<impl IntoResponse> {
+pub async fn set_preview(
+    State(state): State<AppState>,
+    Json(req): Json<SetPreviewReq>,
+) -> Result<impl IntoResponse> {
     let is_enabled = is_preview_enabled();
     if req.enable == is_enabled {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
+    let _writer = state.writers.configuration()?;
     if req.enable {
-        fs::write(PREVIEW_UPDATES_FLAG, b"1")?;
+        crate::system::files::write_atomic(Path::new(PREVIEW_UPDATES_FLAG), b"1", 0o644)?;
     } else {
-        match fs::remove_file(PREVIEW_UPDATES_FLAG) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
+        crate::system::files::remove_file(Path::new(PREVIEW_UPDATES_FLAG))?;
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{LazyLock, RwLock},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time;
 
@@ -757,34 +757,7 @@ fn is_resource_busy(err: &AppError) -> bool {
 }
 
 fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let tmp = tmp_path_for(path);
-    fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
-    Ok(())
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    path.with_file_name(format!(".{filename}.{}.{}.tmp", std::process::id(), stamp))
+    crate::system::files::write_atomic(path, content, mode)
 }
 
 fn remove_file_if_exists(path: &str) -> Result<()> {

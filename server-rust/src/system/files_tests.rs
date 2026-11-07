@@ -75,3 +75,14 @@ fn a_symlink_is_repointed_in_one_rename() {
     );
     assert_eq!(names(dir.path()), [".localtime.tmp", "localtime"]);
 }
+
+#[test]
+fn removing_a_file_is_durable_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings");
+    fs::write(&path, b"old").unwrap();
+    remove_file(&path).unwrap();
+    assert!(!path.exists());
+    remove_file(&path).unwrap();
+    assert_eq!(names(dir.path()), Vec::<String>::new());
+}

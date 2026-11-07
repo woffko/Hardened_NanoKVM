@@ -38,6 +38,19 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()>
     Ok(())
 }
 
+/// Remove `path` and fsync its directory so a completed deletion is durable.
+pub(crate) fn remove_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Point the symlink `link` at `target` through a uniquely named temporary link.
 pub(crate) fn replace_symlink(target: &Path, link: &Path) -> Result<()> {
     let parent = parent(link)?;
