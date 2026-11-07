@@ -83,7 +83,10 @@ pub async fn protected(
             .headers()
             .get("x-csrf-token")
             .and_then(|value| value.to_str().ok());
-        if csrf_header != Some(session.csrf_token.as_str()) {
+        let csrf_ok = csrf_header
+            .map(|value| crate::api::network::constant_time_eq(value, session.csrf_token.as_str()))
+            .unwrap_or(false);
+        if !csrf_ok {
             return AppError::Forbidden("missing or invalid CSRF token".to_string())
                 .into_response();
         }
@@ -133,17 +136,17 @@ fn is_state_changing(method: &Method) -> bool {
 }
 
 fn validate_http_origin(headers: &HeaderMap, config: &Config) -> bool {
-    if let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    {
+    if let Some(value) = headers.get(header::ORIGIN) {
+        let Ok(origin) = value.to_str() else {
+            return false;
+        };
         return is_allowed_origin(origin, headers, config);
     }
 
-    if let Some(referer) = headers
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-    {
+    if let Some(value) = headers.get(header::REFERER) {
+        let Ok(referer) = value.to_str() else {
+            return false;
+        };
         let Some(origin) = normalize_origin(referer) else {
             return false;
         };
