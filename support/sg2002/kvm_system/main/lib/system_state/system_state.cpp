@@ -398,7 +398,7 @@ int get_nic_state(const char* interface_name)
 	int sock;
 	struct ifreq ifr;
 	int ret = NIC_STATE_NO_EXIST;
-	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+	if ((sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
 		return ret;
 	}
 	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface_name);

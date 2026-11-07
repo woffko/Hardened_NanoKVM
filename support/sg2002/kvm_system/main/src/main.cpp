@@ -85,7 +85,7 @@ void* thread_key_handle(void * arg)
 	uint64_t press_time = 0;
 	bool press_active = false;
 	uint32_t press_cycle;
-	int fd = open ("/dev/input/event0", O_RDONLY);
+	int fd = open("/dev/input/event0", O_RDONLY | O_CLOEXEC);
 	if (fd == -1) {
 		kvm_sys_state.key_thread_running = 0;
 		return NULL;

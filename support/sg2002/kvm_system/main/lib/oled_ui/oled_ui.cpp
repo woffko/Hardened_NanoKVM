@@ -95,12 +95,16 @@ int qrencode(char *string)
 {
 	// test: qrencode("WIFI:T:WPA2;S:NanoKVM;P:12345678;;");
 	int errcode = QR_ERR_NONE;
+	if (string == NULL) return -1;
 	QRCode* p = qrInit(3, QR_EM_8BIT, 1, 4, &errcode);
 	if (p == NULL) {
 		printf("error\n");
 		return -1;
 	}
-	qrAddData(p, (const qr_byte_t*)string, strlen(string));
+	if (!qrAddData(p, (const qr_byte_t*)string, strlen(string))) {
+		qrDestroy(p);
+		return -1;
+	}
 	if (!qrFinalize(p)) {
 		printf("finalize error\n");
 		qrDestroy(p);
