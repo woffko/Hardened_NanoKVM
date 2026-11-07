@@ -56,6 +56,42 @@ die() {
   exit 1
 }
 
+require_integer_range() {
+  name="$1"
+  value="$2"
+  min="$3"
+  max="$4"
+  case "$value" in
+    ''|*[!0-9]*) die "INVALID_ARGUMENT" "invalid $name" ;;
+  esac
+  case "$value" in
+    0) ;;
+    0*) die "INVALID_ARGUMENT" "invalid $name" ;;
+  esac
+  [ "${#value}" -le 6 ] || die "INVALID_ARGUMENT" "invalid $name"
+  [ "$value" -ge "$min" ] 2>/dev/null && [ "$value" -le "$max" ] 2>/dev/null ||
+    die "INVALID_ARGUMENT" "invalid $name"
+}
+
+require_number() {
+  name="$1"
+  value="$2"
+  case "$value" in
+    -*) digits="${value#-}" ;;
+    *) digits="$value" ;;
+  esac
+  case "$digits" in
+    ''|*[!0-9]*) die "INVALID_ARGUMENT" "invalid numeric $name" ;;
+  esac
+  case "$digits" in
+    0) ;;
+    0*) die "INVALID_ARGUMENT" "invalid numeric $name" ;;
+  esac
+  [ "${#digits}" -le 7 ] || die "INVALID_ARGUMENT" "invalid numeric $name"
+  [ "$value" -ge -1000000 ] 2>/dev/null && [ "$value" -le 1000000 ] 2>/dev/null ||
+    die "INVALID_ARGUMENT" "invalid numeric $name"
+}
+
 mktemp_file() {
   mktemp "/tmp/nanokvm-bridge.XXXXXX" 2>/dev/null || mktemp -t nanokvm-bridge
 }
@@ -253,6 +289,7 @@ consume_global_option() {
     --timeout-seconds)
       [ -n "$value" ] || die "INVALID_ARGUMENT" "missing value for --timeout-seconds"
       TIMEOUT_SECONDS="$value"
+      require_integer_range "timeout seconds" "$TIMEOUT_SECONDS" 1 3600
       return 0
       ;;
     *)
@@ -553,6 +590,7 @@ build_action_body() {
         printf ',"%s":"%s"' "$key" "$(json_escape "$value")"
         ;;
       number)
+        require_number "$key" "$value"
         printf ',"%s":%s' "$key" "$value"
         ;;
       raw)
@@ -586,6 +624,9 @@ build_macro_double_click_body() {
   y="$2"
   button="$3"
   wait_ms="$4"
+  require_number "x" "$x"
+  require_number "y" "$y"
+  require_number "wait_ms" "$wait_ms"
   printf '{"actions":[{"action":"move","x":%s,"y":%s},{"action":"click","x":%s,"y":%s,"button":"%s"},{"action":"wait","duration_ms":%s},{"action":"click","x":%s,"y":%s,"button":"%s"}]}' \
     "$x" "$y" "$x" "$y" "$(json_escape "$button")" "$wait_ms" "$x" "$y" "$(json_escape "$button")"
 }
@@ -593,6 +634,7 @@ build_macro_double_click_body() {
 build_macro_type_enter_body() {
   text="$1"
   wait_ms="$2"
+  require_number "wait_ms" "$wait_ms"
   printf '{"actions":[{"action":"type","text":"%s"},{"action":"wait","duration_ms":%s},{"action":"hotkey","keys":["ENTER"]}]}' \
     "$(json_escape "$text")" "$wait_ms"
 }
@@ -602,6 +644,8 @@ build_macro_launch_app_body() {
   launcher_keys="$2"
   launcher_wait_ms="$3"
   submit_wait_ms="$4"
+  require_number "launcher_wait_ms" "$launcher_wait_ms"
+  require_number "submit_wait_ms" "$submit_wait_ms"
   printf '{"actions":[{"action":"hotkey","keys":%s},{"action":"wait","duration_ms":%s},{"action":"type","text":"%s"},{"action":"wait","duration_ms":200},{"action":"hotkey","keys":["ENTER"]},{"action":"wait","duration_ms":%s}]}' \
     "$(csv_to_json_array "$launcher_keys")" "$launcher_wait_ms" "$(json_escape "$text")" "$submit_wait_ms"
 }
@@ -611,6 +655,8 @@ build_macro_open_url_body() {
   focus_keys="$2"
   focus_wait_ms="$3"
   submit_wait_ms="$4"
+  require_number "focus_wait_ms" "$focus_wait_ms"
+  require_number "submit_wait_ms" "$submit_wait_ms"
   printf '{"actions":[{"action":"hotkey","keys":%s},{"action":"wait","duration_ms":%s},{"action":"type","text":"%s"},{"action":"wait","duration_ms":200},{"action":"hotkey","keys":["ENTER"]},{"action":"wait","duration_ms":%s}]}' \
     "$(csv_to_json_array "$focus_keys")" "$focus_wait_ms" "$(json_escape "$url")" "$submit_wait_ms"
 }
@@ -652,6 +698,7 @@ while [ "$#" -gt 0 ]; do
     --timeout-seconds)
       [ "$#" -ge 2 ] || die "INVALID_ARGUMENT" "missing value for --timeout-seconds"
       TIMEOUT_SECONDS="$2"
+      require_integer_range "timeout seconds" "$TIMEOUT_SECONDS" 1 3600
       shift 2
       ;;
     --help|-h)
@@ -677,6 +724,9 @@ command="$1"
 shift
 
 scan_global_options "$@"
+
+require_integer_range "timeout seconds" "$TIMEOUT_SECONDS" 1 3600
+require_integer_range "connect timeout seconds" "$CONNECT_TIMEOUT_SECONDS" 1 300
 
 require_session
 
@@ -716,6 +766,9 @@ case "$command" in
           ;;
       esac
     done
+
+    require_integer_range "screenshot width" "$width" 1 8192
+    require_integer_range "screenshot quality" "$quality" 1 100
 
     case "$format" in
       base64)
