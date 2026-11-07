@@ -139,7 +139,6 @@ baseline_ipv4_rules() {
     output_rule -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT
     input_rule -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
     output_rule -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT
-    output_rule -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP
 }
 
 baseline_ipv6_rules() {
@@ -159,7 +158,6 @@ moderate_ipv4_rules() {
     input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv4_new
     input_rule -p udp --sport 67 --dport 68 -j ACCEPT
-    output_rule -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP
 }
 
 moderate_ipv6_rules() {

@@ -120,7 +120,6 @@ expected_iptables() {
 -A NKVM-OUTPUT -o eth0 -p tcp -m tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT
 -A NKVM-OUTPUT -o eth0 -p tcp -m tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT
 -A NKVM-OUTPUT -o eth0 -p tcp -m tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT
--A NKVM-OUTPUT -o eth0 -p tcp -m tcp --sport 8000 -m state --state ESTABLISHED -j DROP
 EOF
             ;;
         moderate)
@@ -134,7 +133,6 @@ EOF
 -A NKVM-INPUT -s 169.254.0.0/16 -m state --state NEW -j ACCEPT
 -A NKVM-INPUT -p udp -m udp --sport 67 --dport 68 -j ACCEPT
 -A NKVM-OUTPUT -o lo -j ACCEPT
--A NKVM-OUTPUT -o eth0 -p tcp -m tcp --sport 8000 -m state --state ESTABLISHED -j DROP
 EOF
             ;;
         restricted)
