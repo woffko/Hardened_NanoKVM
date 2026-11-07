@@ -378,7 +378,11 @@ fn rename_host_entries(hosts: &str, old: &str, new: &str) -> Option<String> {
     changed.then_some(out)
 }
 
-pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
+pub async fn set_screen(
+    State(state): State<AppState>,
+    Json(req): Json<SetScreenReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     let (kind, value) = (req.kind.clone(), req.value);
     stream::libkvm(move || stream::set_screen_value(&kind, value)).await?;
     info!(kind = %req.kind, value = req.value, "updated screen setting");
@@ -445,13 +449,15 @@ pub async fn get_hdmi_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_hdmi() -> Result<impl IntoResponse> {
+pub async fn enable_hdmi(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     stream::libkvm(|| kvm::set_hdmi(true)).await?;
     persist_hdmi_enabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn disable_hdmi() -> Result<impl IntoResponse> {
+pub async fn disable_hdmi(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     stream::libkvm(|| kvm::set_hdmi(false)).await?;
     persist_hdmi_disabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -653,8 +659,10 @@ pub async fn get_virtual_device() -> Result<impl IntoResponse> {
 }
 
 pub async fn update_virtual_device(
+    State(state): State<AppState>,
     Json(req): Json<UpdateVirtualDeviceReq>,
 ) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     let on = usb::run_exclusive(update_virtual_device_locked(req)).await?;
     Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp { on })))
 }
@@ -681,10 +689,10 @@ async fn update_virtual_device_locked(req: UpdateVirtualDeviceReq) -> Result<boo
     let change = (|| -> Result<()> {
         if old_flag.is_some() {
             // A configfs function link is a symlink, not a directory tree.
-            remove_file_if_exists(config_dir)?;
-            remove_file_if_exists(flag)?;
+            files::remove_file(Path::new(config_dir))?;
+            files::remove_file(Path::new(flag))?;
         } else {
-            fs::write(flag, b"")?;
+            files::write_atomic(Path::new(flag), b"", 0o644)?;
         }
         Ok(())
     })();
@@ -696,8 +704,11 @@ async fn update_virtual_device_locked(req: UpdateVirtualDeviceReq) -> Result<boo
         // live composite gadget.
         let restop = run_usbdev("stop").await;
         let restore = match old_flag {
-            Some(contents) => fs::write(flag, contents).map_err(AppError::from),
-            None => remove_file_if_exists(flag).and_then(|()| remove_file_if_exists(config_dir)),
+            Some(contents) => files::write_atomic(Path::new(flag), &contents, 0o644),
+            None => {
+                files::remove_file(Path::new(flag))?;
+                files::remove_file(Path::new(config_dir))
+            }
         };
         let recovery = run_usbdev("start").await;
         restore?;
@@ -1665,12 +1676,11 @@ fn release(path: &str) -> Result<()> {
 }
 
 fn persist_hdmi_enabled() -> Result<()> {
-    remove_file_if_exists(HDMI_DISABLE_FILE)
+    files::remove_file(Path::new(HDMI_DISABLE_FILE))
 }
 
 fn persist_hdmi_disabled() -> Result<()> {
-    fs::write(HDMI_DISABLE_FILE, b"")?;
-    Ok(())
+    files::write_atomic(Path::new(HDMI_DISABLE_FILE), b"", 0o644)
 }
 
 fn avahi_daemon_pid() -> Option<String> {
@@ -1709,14 +1719,6 @@ where
         )));
     }
     Ok(())
-}
-
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
 }
 
 #[cfg(test)]

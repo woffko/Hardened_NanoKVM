@@ -1015,10 +1015,7 @@ pub fn set_screen_value(kind: &str, value: i32) -> Result<()> {
 }
 
 fn write_screen_file(path: &str, value: &str) -> Result<()> {
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, value.as_bytes()).map_err(AppError::from)
+    crate::system::files::write_atomic(std::path::Path::new(path), value.as_bytes(), 0o644)
 }
 
 fn read_trimmed(path: &str) -> Option<String> {
