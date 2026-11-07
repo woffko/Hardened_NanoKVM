@@ -1,4 +1,4 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +15,7 @@ use crate::ws::hid::HidReports;
 use crate::{
     AppError, Result,
     error::ApiResponse,
+    state::AppState,
     system::{
         command::{AllowedCommand, run_allowed},
         usb,
@@ -122,8 +123,12 @@ pub async fn get_shortcuts() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn add_shortcut(Json(req): Json<AddShortcutReq>) -> Result<impl IntoResponse> {
+pub async fn add_shortcut(
+    State(state): State<AppState>,
+    Json(req): Json<AddShortcutReq>,
+) -> Result<impl IntoResponse> {
     validate_shortcut_keys(&req.keys)?;
+    let _writer = state.writers.configuration()?;
 
     let _guard = SHORTCUT_LOCK
         .write()
@@ -138,10 +143,14 @@ pub async fn add_shortcut(Json(req): Json<AddShortcutReq>) -> Result<impl IntoRe
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn delete_shortcut(Json(req): Json<DeleteShortcutReq>) -> Result<impl IntoResponse> {
+pub async fn delete_shortcut(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteShortcutReq>,
+) -> Result<impl IntoResponse> {
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(AppError::BadRequest("invalid arguments".to_string()));
     }
+    let _writer = state.writers.configuration()?;
 
     let _guard = SHORTCUT_LOCK
         .write()
@@ -170,10 +179,14 @@ pub async fn get_leader_key() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetLeaderKeyRsp { key })))
 }
 
-pub async fn set_leader_key(Json(req): Json<SetLeaderKeyReq>) -> Result<impl IntoResponse> {
+pub async fn set_leader_key(
+    State(state): State<AppState>,
+    Json(req): Json<SetLeaderKeyReq>,
+) -> Result<impl IntoResponse> {
     let key = req.key.trim();
+    let _writer = state.writers.configuration()?;
     if key.is_empty() {
-        remove_file_if_exists(LEADER_KEY_FILE)?;
+        crate::system::files::remove_file(Path::new(LEADER_KEY_FILE))?;
     } else {
         validate_key_code(key)?;
         write_file(Path::new(LEADER_KEY_FILE), key.as_bytes(), 0o644)?;
@@ -187,7 +200,11 @@ pub async fn get_mode() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetHidModeRsp { mode })))
 }
 
-pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoResponse> {
+pub async fn set_mode(
+    State(state): State<AppState>,
+    Json(req): Json<SetHidModeReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     usb::run_exclusive(set_mode_locked(req)).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -221,7 +238,11 @@ pub async fn get_usb_wakeup() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_usb_wakeup(Json(req): Json<SetUsbWakeupReq>) -> Result<impl IntoResponse> {
+pub async fn set_usb_wakeup(
+    State(state): State<AppState>,
+    Json(req): Json<SetUsbWakeupReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     usb::run_exclusive(async move {
         write_usb_wakeup_config(req.enabled)?;
         apply_usb_wakeup_live(req.enabled)?;
@@ -689,10 +710,10 @@ fn live_usb_wakeup_enabled() -> Result<bool> {
 
 fn write_usb_wakeup_config(enabled: bool) -> Result<()> {
     if enabled {
-        remove_file_if_exists(USB_WAKEUP_DISABLE_FILE)?;
+        crate::system::files::remove_file(Path::new(USB_WAKEUP_DISABLE_FILE))?;
         write_file(Path::new(USB_WAKEUP_ENABLE_FILE), b"", 0o644)
     } else {
-        remove_file_if_exists(USB_WAKEUP_ENABLE_FILE)?;
+        crate::system::files::remove_file(Path::new(USB_WAKEUP_ENABLE_FILE))?;
         write_file(Path::new(USB_WAKEUP_DISABLE_FILE), b"", 0o644)
     }
 }
@@ -758,18 +779,6 @@ fn is_resource_busy(err: &AppError) -> bool {
 
 fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     crate::system::files::write_atomic(path, content, mode)
-}
-
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    remove_file_if_exists_path(Path::new(path))
-}
-
-fn remove_file_if_exists_path(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
 }
 
 fn command_error(message: &str, output: crate::system::command::CommandOutput) -> String {
