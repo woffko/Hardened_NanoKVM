@@ -1,4 +1,4 @@
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 type MarkdownContentProps = {
@@ -15,6 +15,17 @@ export const MarkdownContent = ({ content, className }: MarkdownContentProps) =>
     <div className={className}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        disallowedElements={['img']}
+        unwrapDisallowed
+        urlTransform={(url) => {
+          try {
+            const parsed = new URL(url, window.location.origin);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+            return defaultUrlTransform(url);
+          } catch {
+            return '';
+          }
+        }}
         components={{
           p: ({ children }) => (
             <p className="my-2 whitespace-pre-wrap break-words leading-6 first:mt-0 last:mb-0">

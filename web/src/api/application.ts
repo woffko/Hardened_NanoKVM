@@ -169,6 +169,7 @@ export function offlineUpdate(data: FormData) {
   const csrfToken = getCsrfToken();
   return fetch(url, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
     body: data
   });
