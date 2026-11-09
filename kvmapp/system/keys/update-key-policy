@@ -1,2 +1,2 @@
-# RC15 candidate: remove dev/test after the signed transition is authorized.
+# RC15 trust policy: legacy dev/test IDs retired after the signed transition.
 hardened-system-prod-2026q3
