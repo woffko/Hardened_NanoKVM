@@ -1,4 +1,2 @@
-# RC12 bridge trust set. Retire legacy IDs only in a later release.
-hardened-system-dev
-hardened-system-test
+# RC15 candidate: remove dev/test after the signed transition is authorized.
 hardened-system-prod-2026q3
