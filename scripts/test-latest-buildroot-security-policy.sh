@@ -96,9 +96,10 @@ test "$(openssl pkey -pubin \
 	-in "$ROOT/kvmapp/system/keys/update-keys/hardened-system-prod-2026q3.pub.pem" \
 	-outform DER | sha256sum | awk '{print $1}')" = \
 	97ddb5600accf0e431c74f82b03acf249668bf75fe0de2e41724c91720516f75
-for key_id in hardened-system-dev hardened-system-test hardened-system-prod-2026q3; do
-	grep -qx "$key_id" "$ROOT/kvmapp/system/keys/update-key-policy"
-done
+# The bundled policy trusts the release key alone: the legacy dev and test key
+# IDs are retired, and nothing else may be listed.
+test "$(sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+	"$ROOT/kvmapp/system/keys/update-key-policy")" = hardened-system-prod-2026q3
 build_assert_no_private_keys "$ROOT/kvmapp" || exit 1
 # Fixed upstream in the refreshed versions: the board carries no libopenssl or
 # wpa_supplicant patch any more, the version bumps below replace them.

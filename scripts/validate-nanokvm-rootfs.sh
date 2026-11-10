@@ -9,6 +9,9 @@ usage() {
   echo "environment:" >&2
   echo "  EXPECTED_BACKEND=rust|any      default: rust" >&2
   echo "  EXPECTED_KVMAPP_VERSION=<version> optional" >&2
+  echo "  EXPECTED_UPDATE_KEY_ID=<id>    optional; needs EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256" >&2
+  echo "  EXPECTED_UPDATE_KEY_POLICY=<ids> key IDs the policy must hold, exactly;" >&2
+  echo "                                 default: EXPECTED_UPDATE_KEY_ID alone" >&2
   exit 1
 }
 
@@ -26,6 +29,10 @@ EXPECTED_BACKEND="${EXPECTED_BACKEND:-rust}"
 EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-}"
 EXPECTED_UPDATE_KEY_ID="${EXPECTED_UPDATE_KEY_ID:-}"
 EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256="${EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256:-}"
+# The legacy dev and test key IDs were retired after the 2026q3 key transition:
+# a current image trusts the release key alone. Only a build of a historical
+# release names its wider trust set here.
+EXPECTED_UPDATE_KEY_POLICY="${EXPECTED_UPDATE_KEY_POLICY:-$EXPECTED_UPDATE_KEY_ID}"
 BOOT_INIT_SCRIPTS="S00kmod S01fs S02apprecover S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S95nanokvm"
 
 [ -f "$IMAGE" ] || die "rootfs image does not exist: $IMAGE"
@@ -203,13 +210,10 @@ if [ -n "$EXPECTED_UPDATE_KEY_ID" ]; then
   normalized_policy="$TMP_DIR/update-key-policy.normalized"
   sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
     "$update_key_policy" | LC_ALL=C sort > "$normalized_policy"
-  cat > "$TMP_DIR/update-key-policy.expected" <<EOF
-hardened-system-dev
-hardened-system-prod-2026q3
-hardened-system-test
-EOF
+  # shellcheck disable=SC2086 # the list is split on purpose
+  printf '%s\n' $EXPECTED_UPDATE_KEY_POLICY | LC_ALL=C sort > "$TMP_DIR/update-key-policy.expected"
   cmp -s "$normalized_policy" "$TMP_DIR/update-key-policy.expected" || \
-    die "unexpected RC12 update key policy"
+    die "unexpected update key policy: $(tr '\n' ' ' < "$normalized_policy")"
 fi
 
 backend_file=$(dump_file /etc/kvm/backend backend)

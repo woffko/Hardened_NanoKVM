@@ -52,6 +52,8 @@ export EXPECTED_KERNEL_RELEASE
 export EXPECTED_SECURITY_PATCH_LEVEL
 export KERNEL_5_10_265_CONFIG_FRAGMENT
 export EXPECTED_UPDATE_KEY_ID=hardened-system-prod-2026q3
+# RC12 shipped the bridge trust set; later releases trust the release key alone.
+export EXPECTED_UPDATE_KEY_POLICY='hardened-system-dev hardened-system-test hardened-system-prod-2026q3'
 export EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256=97ddb5600accf0e431c74f82b03acf249668bf75fe0de2e41724c91720516f75
 export NANOKVM_KVMAPP_SOURCE_DIR
 exec "$ROOT_DIR/scripts/build-kernel-5.10.265-repro-run.sh"

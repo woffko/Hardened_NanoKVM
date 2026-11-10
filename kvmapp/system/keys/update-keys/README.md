@@ -14,5 +14,9 @@ Rotation sequence:
    later policy containing only the production key ID;
 5. verify app and system update checks after reboot and after rollback.
 
-The RC12 bridge policy deliberately permits both historical key IDs and
-`hardened-system-prod-2026q3`. It must not retire legacy IDs during RC12.
+The RC12 bridge policy permitted both historical key IDs and
+`hardened-system-prod-2026q3`. Step 4 is done: the policy now lists the
+production key ID alone, so metadata signed with a legacy ID is refused. The
+legacy public key file still ships, because the trust installer reads it at
+every start. An application older than this policy brings the bridge policy back
+if it is installed again.
