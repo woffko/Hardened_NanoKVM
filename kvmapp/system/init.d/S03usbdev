@@ -72,6 +72,20 @@ configure_empty_storage() {
     [ -L configs/c.1/mass_storage.disk0 ] || ln -s functions/mass_storage.disk0 configs/c.1/ || return 1
 }
 
+# A vendor or product ID from /boot, or the default when the file does not hold
+# exactly one 16-bit hexadecimal number, with or without a DOS line ending.
+usb_id() {
+    value=""
+    if [ -f "$1" ]; then
+        IFS= read -r value < "$1" || true
+        value="${value%"$(printf '\r')"}"
+    fi
+    case "$value" in
+        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) printf '%s\n' "$value" ;;
+        *) printf '%s\n' "$2" ;;
+    esac
+}
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -82,18 +96,8 @@ start_usb_dev(){
 
     # echo 0x3346 > idVendor
     # echo 0x1009 > idProduct
-    if [ -e /boot/usb.vid ]
-    then
-        cat /boot/usb.vid > idVendor
-    else
-        echo 0x3346 > idVendor
-    fi
-    if [ -e /boot/usb.pid ]
-    then
-        cat /boot/usb.pid > idProduct
-    else
-        echo 0x1009 > idProduct
-    fi
+    usb_id /boot/usb.vid 0x3346 > idVendor
+    usb_id /boot/usb.pid 0x1009 > idProduct
 
     echo 0xEF > bDeviceClass
     echo 0x02 > bDeviceSubClass
