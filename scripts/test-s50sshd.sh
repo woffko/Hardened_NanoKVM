@@ -295,8 +295,10 @@ for name in root alice; do
 done
 printf '%s\n' "$args" | grep -qx -e DenyUsers=daemon || fail "the service accounts are not refused before setup"
 sed -i 's/^root:[^:]*:/root:$6$saltsalt$hash:/' /etc/shadow
+pid_before="$(pidof sshd)"
 output="$(run_s50 refresh 2>&1)" || fail "refresh after setup failed: $output"
 listening || fail "refresh did not restore the listener"
+[ "$(pidof sshd)" = "$pid_before" ] || fail "refresh replaced the running master"
 args="$(daemon_args)"
 mapfile -t argv <<< "$args"
 for case in root:yes alice:no; do

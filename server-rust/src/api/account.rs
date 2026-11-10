@@ -753,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_applies_service_locks_before_refreshing_ssh() {
+    async fn startup_applies_service_locks_without_restarting_ssh() {
         let dir = tempfile::tempdir().unwrap();
         let (state, _, shadow) = change_fixture(&dir).await;
         std::fs::write(
@@ -767,11 +767,11 @@ mod tests {
         )
         .unwrap();
         state.lock_service_accounts().await;
-        let snapshots = std::fs::read_to_string(dir.path().join("ssh-refresh.snapshots")).unwrap();
-        assert!(snapshots.starts_with("root:*:"));
-        assert!(snapshots.contains("\ndaemon:!*:"));
-        assert_eq!(snapshots.lines().count(), 2);
-        assert_eq!(std::fs::read_to_string(shadow).unwrap(), snapshots);
+        assert!(!dir.path().join("ssh-refresh.snapshots").exists());
+        let locked = std::fs::read_to_string(shadow).unwrap();
+        assert!(locked.starts_with("root:*:"));
+        assert!(locked.contains("\ndaemon:!*:"));
+        assert_eq!(locked.lines().count(), 2);
     }
 
     #[tokio::test]

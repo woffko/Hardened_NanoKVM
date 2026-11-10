@@ -70,11 +70,11 @@ bypass_options() {
         # placing the original global directives inside a Match block.
         printf 'Match User %s\n\tPasswordAuthentication no\n\tKbdInteractiveAuthentication no\n' "$users" > "$SSHD_ACCOUNT_CONFIG" || return 1
         printf 'Include %s\nInclude /etc/ssh/sshd_config\n' "$SSHD_ACCOUNT_CONFIG" > "$SSHD_RUN_CONFIG" || return 1
-        options="$options -f $SSHD_RUN_CONFIG"
     else
-        rm -f "$SSHD_RUN_CONFIG" "$SSHD_ACCOUNT_CONFIG" || return 1
+        rm -f "$SSHD_ACCOUNT_CONFIG" || return 1
+        printf 'Include /etc/ssh/sshd_config\n' > "$SSHD_RUN_CONFIG" || return 1
     fi
-    printf '%s' "$options"
+    printf '%s -f %s' "$options" "$SSHD_RUN_CONFIG"
 }
 
 # OpenSSH 10.6 renamed this key type and reads no key of the old name, and
@@ -140,32 +140,62 @@ restart() {
 }
 
 # Apply the current application's barriers without enabling a stopped service.
-# Used before/after credential publication and after application commit. Old
-# masters may have no wrapper in their argv, so SIGHUP alone is insufficient.
+# A master outside the backend's process scope is reloaded, not killed; the
+# backend's subreaper would otherwise reap a replacement when the app switches.
 refresh() {
         command -v pidof >/dev/null || return 1
-        if pidof sshd >/dev/null; then
-            :
-        else
-            [ "$?" -eq 1 ] && return 0
-            return 1
+        SSHD_BYPASS="$(bypass_options)" || return 1
+        if [ -e /etc/kvm/ssh_stop ]; then
+            killall sshd 2>/dev/null
+            rm -f /var/lock/sshd
+            return 0
         fi
-        killall sshd || return 1
-        attempts=0
-        while :; do
-            if pidof sshd >/dev/null; then
-                :
-            else
-                [ "$?" -eq 1 ] || return 1
-                break
-            fi
-            [ "$attempts" -lt 30 ] || return 1
-            sleep 0.1
-            attempts=$((attempts + 1))
+        pids="$(pidof sshd)"
+        pidof_status=$?
+        [ "$pidof_status" -eq 1 ] && return 0
+        [ "$pidof_status" -eq 0 ] || return 1
+        old_master=0
+        for pid in $pids; do
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+            case "$cmdline" in
+                *"[listener]"*)
+                    case "$cmdline" in
+                        *" -f $SSHD_RUN_CONFIG"*) ;;
+                        *) old_master=1 ;;
+                    esac
+                    ;;
+            esac
         done
-        rm -f /var/lock/sshd
-        [ ! -e /etc/kvm/ssh_stop ] || return 0
-        startssh
+        if [ "$old_master" -ne 0 ]; then
+            killall sshd || return 1
+            attempts=0
+            while :; do
+                if pidof sshd >/dev/null; then
+                    :
+                else
+                    [ "$?" -eq 1 ] || return 1
+                    break
+                fi
+                [ "$attempts" -lt 30 ] || return 1
+                sleep 0.1
+                attempts=$((attempts + 1))
+            done
+            rm -f /var/lock/sshd
+            startssh
+            return $?
+        fi
+        /usr/sbin/sshd -t $SSHD_LIMITS $SSHD_BYPASS 2>/dev/null || return 1
+        for pid in $pids; do
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+            case "$cmdline" in
+                *"[listener]"*)
+                    case "$cmdline" in
+                        *"-f $SSHD_RUN_CONFIG"*) kill -HUP "$pid" || return 1 ;;
+                    esac
+                    ;;
+            esac
+        done
+        return 0
 }
 
 case "$1" in

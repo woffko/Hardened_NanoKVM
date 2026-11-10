@@ -158,10 +158,10 @@ impl AppState {
 
     /// Lock the service accounts whose shadow field holds no hash, and log the
     /// ones it changed. Every full start runs this, and so does a trial once
-    /// its commit makes it the device's application, so an application update
-    /// applies the shadow locks and current SSH policy without waiting for a
-    /// reboot. A refresh failure is reported separately; completed shadow
-    /// changes remain valid and are retried idempotently on the next start.
+    /// its commit makes it the device's application. A running sshd is not
+    /// restarted here: a replacement started from the backend is reaped with
+    /// the backend scope on the next application switch. The start script
+    /// applies the current SSH barriers at the next boot.
     pub async fn lock_service_accounts(&self) {
         let accounts = Arc::clone(&self.accounts);
         let result = async {
@@ -169,7 +169,6 @@ impl AppState {
                 .account()?
                 .run(move |permit| async move {
                     let locked = accounts.lock_service_accounts(&permit)?;
-                    accounts.refresh_ssh(&permit).await?;
                     Ok(locked)
                 })
                 .await
