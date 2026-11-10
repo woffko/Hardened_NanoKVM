@@ -8,9 +8,11 @@ S30ETH="$ROOT_DIR/kvmapp/system/init.d/S30eth"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-BOOT_RESOLV_FILE="$tmp/boot-resolv" \
-ETC_RESOLV_FILE="$tmp/etc-resolv" \
-S30ETH_TEST_ONLY=1 \
+# Plain assignments: bash, unlike sh, drops assignments that prefix ".".
+BOOT_RESOLV_FILE="$tmp/boot-resolv"
+ETC_RESOLV_FILE="$tmp/etc-resolv"
+S30ETH_TEST_ONLY=1
+export BOOT_RESOLV_FILE ETC_RESOLV_FILE S30ETH_TEST_ONLY
 . "$S30ETH"
 
 fail() {
