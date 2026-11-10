@@ -21,6 +21,10 @@ for name in protect_shared_directories grow_root_partition wait_for_data_device 
     grep -qx "$name() {" "$T/lib.sh" || fail "no function $name in S01fs"
 done
 
+# A function, not a file in PATH: BusyBox sh runs its own mount applet first,
+# and the real mount must never run from this test.
+printf 'mount() { echo "mount $*" >> "$CALLS"; }\n' >> "$T/lib.sh"
+
 mkdir -p "$T/bin"
 cat > "$T/bin/parted" <<'EOF'
 #!/bin/sh
@@ -76,6 +80,9 @@ for shell in $shells; do
     [ "$(cat "$T/fs/protected_symlinks" "$T/fs/protected_hardlinks" "$T/fs/protected_regular" \
         "$T/fs/protected_fifos" | tr '\n' ' ')" = "1 1 2 2 " ] || fail "$shell: shared directories are not protected"
     grep -qx '        protect_shared_directories' "$S01" || fail "S01fs start does not protect shared directories"
+    # An older image mounts /tmp and /dev/shm with defaults; both are restricted.
+    [ "$(calls)" = "mount -o remount,nosuid,nodev,noexec /tmp
+mount -o remount,nosuid,nodev,noexec /dev/shm" ] || fail "$shell: shared mounts are not restricted: $(calls)"
     echo "ok $shell: links, files and FIFOs in shared directories are protected"
 
     reset

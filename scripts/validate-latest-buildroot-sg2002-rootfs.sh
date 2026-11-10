@@ -187,6 +187,21 @@ OPEN_ACCOUNTS="$(awk -F: '$1 != "root" && length($2) < 4 && substr($2, 1, 1) != 
 [ -z "$OPEN_ACCOUNTS" ] || \
 	die "image accounts are not locked: $(echo $OPEN_ACCOUNTS)"
 
+# Every account can write in /tmp and /dev/shm; neither may hold device files,
+# setuid programs or anything that runs.
+FSTAB_FILE="$TMP_DIR/fstab"
+debugfs -R "dump /etc/fstab $FSTAB_FILE" "$IMAGE" >/dev/null 2>&1 || \
+	die "could not read /etc/fstab"
+for mount_point in /tmp /dev/shm; do
+	awk -v point="$mount_point" '
+		$1 !~ /^#/ && $2 == point && $3 == "tmpfs" {
+			options = "," $4 ","
+			if (options ~ /,nosuid,/ && options ~ /,nodev,/ && options ~ /,noexec,/) ok = 1
+		}
+		END { exit !ok }' "$FSTAB_FILE" || \
+		die "$mount_point is not mounted nosuid,nodev,noexec"
+done
+
 AVAHI_CONFIG="$TMP_DIR/avahi-daemon.conf"
 debugfs -R "dump /etc/avahi/avahi-daemon.conf $AVAHI_CONFIG" "$IMAGE" >/dev/null 2>&1 || \
 	die "could not read Avahi configuration"

@@ -30,6 +30,13 @@ protect_shared_directories() {
         do
                 echo 2 > "$SYSCTL_FS/$knob" 2>/dev/null || true
         done
+        # Nothing on this system runs a program from /tmp or /dev/shm. The
+        # image mounts both without device files, setuid bits or execution;
+        # an older image does not, so the same is applied here.
+        for mount_point in /tmp /dev/shm
+        do
+                mount -o remount,nosuid,nodev,noexec "$mount_point" 2>/dev/null || true
+        done
 }
 
 # Grow p2 to its fixed end on a freshly written card only; a raw update writes
