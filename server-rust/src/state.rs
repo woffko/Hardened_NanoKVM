@@ -1,6 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use tokio::sync::{RwLock, Semaphore};
@@ -11,6 +15,7 @@ use crate::{
     auth::{password::AccountStore, session::SessionStore, terminal_ticket::TerminalTicketStore},
     config::Config,
     security::rate_limit::LoginRateLimiter,
+    system::command::{AllowedCommand, run_allowed},
     update::operation::UpdateCoordinator,
     update::state_writers::{StateWriters, WriterDrain},
 };
@@ -180,6 +185,27 @@ impl AppState {
             }
             Ok(_) => {}
             Err(error) => tracing::error!(%error, "SSH account protection was not fully applied"),
+        }
+    }
+
+    /// The application switch removes the backend scope, and a daemon started
+    /// from that scope with it. Restore a service that the init lock says was
+    /// running, without turning on one the owner stopped.
+    pub async fn restore_ssh_after_switch(&self) {
+        let lock = Path::new("/var/lock/sshd");
+        let stop = Path::new("/etc/kvm/ssh_stop");
+        if !lock.exists() || stop.exists() {
+            return;
+        }
+        let running = run_allowed(AllowedCommand::Pidof, ["sshd"], Duration::from_secs(5))
+            .await
+            .map(|output| output.status == 0)
+            .unwrap_or(false);
+        if running {
+            return;
+        }
+        if let Err(error) = run_allowed(AllowedCommand::ServiceSshdKvmapp, ["start"], Duration::from_secs(20)).await {
+            tracing::error!(%error, "SSH was not restored after the application switch");
         }
     }
 

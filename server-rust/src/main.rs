@@ -438,6 +438,7 @@ async fn run_https(
     if let Some(state) = trial {
         // Committed: the trial is now the device's application.
         state.lock_service_accounts().await;
+        state.restore_ssh_after_switch().await;
     }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(
