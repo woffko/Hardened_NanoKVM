@@ -43,6 +43,10 @@ impl SigningFixture {
             "synthetic public fixture extraction failed"
         );
         fs::set_permissions(&public, fs::Permissions::from_mode(0o644)).unwrap();
+        // The bridge trust set; a test that needs another policy replaces it.
+        let policy = directory.path().join("update-key-policy");
+        fs::write(&policy, "hardened-system-dev\nhardened-system-test\n").unwrap();
+        fs::set_permissions(&policy, fs::Permissions::from_mode(0o644)).unwrap();
         let mut config = Config::default();
         config.paths.system_update_public_key = public.clone();
         Self {

@@ -71,16 +71,22 @@ impl SignatureInputs {
             .and_then(|name| name.to_str())
             .ok_or_else(unsafe_trust)?;
         let root = open_trust_root(parent)?;
+        // Every full start installs the policy before a request is served, so
+        // a missing one is damage, not a device that predates policies. Without
+        // it every key ID would be allowed, the retired ones included.
         let policy =
-            PinnedTrustFile::open(&root, UPDATE_KEY_POLICY_FILE, MAX_UPDATE_KEY_POLICY_BYTES)?;
-        if let Some(policy) = &policy {
-            let bytes = policy.read(&root, UPDATE_KEY_POLICY_FILE)?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| unsafe_trust())?;
-            if !parse_update_key_policy(text)?.contains(key_id) {
-                return Err(AppError::BadRequest(
-                    "update signature key id is not allowed by policy".into(),
-                ));
-            }
+            PinnedTrustFile::open(&root, UPDATE_KEY_POLICY_FILE, MAX_UPDATE_KEY_POLICY_BYTES)?
+                .ok_or_else(|| {
+                    AppError::Config(
+                        "the update key policy is missing; restart the device to restore it".into(),
+                    )
+                })?;
+        let bytes = policy.read(&root, UPDATE_KEY_POLICY_FILE)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| unsafe_trust())?;
+        if !parse_update_key_policy(text)?.contains(key_id) {
+            return Err(AppError::BadRequest(
+                "update signature key id is not allowed by policy".into(),
+            ));
         }
         let (key_root, key_name) =
             if matches!(key_id, LEGACY_UPDATE_KEY_ID | LEGACY_TEST_UPDATE_KEY_ID) {
@@ -99,20 +105,7 @@ impl SignatureInputs {
         let key = pinned.read(&key_root, &key_name)?;
         // Detect a cooperating policy publication/replacement during capture.
         // Final installation still requires the separately held writer freeze.
-        match policy {
-            Some(policy) => policy.check_named(&root, UPDATE_KEY_POLICY_FILE)?,
-            None => {
-                if PinnedTrustFile::open(
-                    &root,
-                    UPDATE_KEY_POLICY_FILE,
-                    MAX_UPDATE_KEY_POLICY_BYTES,
-                )?
-                .is_some()
-                {
-                    return Err(unsafe_trust());
-                }
-            }
-        }
+        policy.check_named(&root, UPDATE_KEY_POLICY_FILE)?;
         Ok(Self {
             key: anonymous_readonly(&root, &key)?,
             metadata: anonymous_readonly(&root, metadata)?,

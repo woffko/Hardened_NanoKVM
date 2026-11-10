@@ -20,3 +20,7 @@ production key ID alone, so metadata signed with a legacy ID is refused. The
 legacy public key file still ships, because the trust installer reads it at
 every start. An application older than this policy brings the bridge policy back
 if it is installed again.
+
+The application installs the policy at every full start, before it serves a
+request. Verification refuses every key ID while the installed policy file is
+missing, so a lost policy never widens the trust set.

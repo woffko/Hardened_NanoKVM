@@ -62,6 +62,11 @@ impl SignedFixture {
             );
         }
         let signature = fs::read(signature).unwrap();
+        fs::write(
+            root.path().join(UPDATE_KEY_POLICY_FILE),
+            format!("{LEGACY_UPDATE_KEY_ID}\n"),
+        )
+        .unwrap();
         Self {
             root,
             key,
@@ -238,6 +243,10 @@ fn protected_root_and_keyring_refuse_parent_aliases_writable_and_mount_paths() {
     fs::create_dir(&directory).unwrap();
     let key = directory.join("key.pub.pem");
     fs::write(&key, b"key").unwrap();
+    // With a policy that allows both IDs, only the paths can be the reason.
+    let policy = format!("{LEGACY_UPDATE_KEY_ID}\nproduction\n");
+    fs::write(directory.join(UPDATE_KEY_POLICY_FILE), &policy).unwrap();
+    SignatureInputs::capture(b"m", b"s", &key, LEGACY_UPDATE_KEY_ID).unwrap();
     let alias = root.path().join("alias");
     symlink(&directory, &alias).unwrap();
     assert!(
@@ -251,6 +260,7 @@ fn protected_root_and_keyring_refuse_parent_aliases_writable_and_mount_paths() {
     let child = directory.join("child");
     fs::create_dir(&child).unwrap();
     fs::write(child.join("key"), b"key").unwrap();
+    fs::write(child.join(UPDATE_KEY_POLICY_FILE), &policy).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(
         SignatureInputs::capture(b"m", b"s", &child.join("key"), LEGACY_UPDATE_KEY_ID).is_err()
@@ -288,13 +298,10 @@ fn pinned_source_replacement_and_inplace_change_are_detected_before_read() {
 }
 
 #[test]
-fn production_keyring_policy_and_historical_optional_policy_semantics_are_preserved() {
+fn a_missing_policy_allows_no_key_and_a_policy_allows_only_what_it_lists() {
     let root = tempfile::tempdir().unwrap();
     let key = root.path().join("legacy.pem");
     fs::write(&key, b"legacy").unwrap();
-    for id in [LEGACY_UPDATE_KEY_ID, LEGACY_TEST_UPDATE_KEY_ID] {
-        SignatureInputs::capture(b"m", b"s", &key, id).unwrap();
-    }
     fs::create_dir(root.path().join(UPDATE_KEYRING_DIR)).unwrap();
     fs::write(
         root.path()
@@ -303,13 +310,40 @@ fn production_keyring_policy_and_historical_optional_policy_semantics_are_preser
         b"production",
     )
     .unwrap();
+    // Without a policy nothing verifies: not the retired IDs, whose key file
+    // is still installed, and not the production ID either.
+    for id in [
+        LEGACY_UPDATE_KEY_ID,
+        LEGACY_TEST_UPDATE_KEY_ID,
+        "hardened-system-prod-2026q3",
+    ] {
+        match SignatureInputs::capture(b"m", b"s", &key, id) {
+            Err(AppError::Config(message)) => assert!(message.contains("policy is missing")),
+            _ => panic!("{id} was not refused for the missing policy"),
+        }
+    }
+    // The bridge policy of the key transition allowed the retired IDs.
+    fs::write(
+        root.path().join(UPDATE_KEY_POLICY_FILE),
+        format!("{LEGACY_UPDATE_KEY_ID}\n{LEGACY_TEST_UPDATE_KEY_ID}\n"),
+    )
+    .unwrap();
+    for id in [LEGACY_UPDATE_KEY_ID, LEGACY_TEST_UPDATE_KEY_ID] {
+        SignatureInputs::capture(b"m", b"s", &key, id).unwrap();
+    }
+    // The policy since the retirement lists the production ID alone.
     fs::write(
         root.path().join(UPDATE_KEY_POLICY_FILE),
         b"hardened-system-prod-2026q3\n",
     )
     .unwrap();
     SignatureInputs::capture(b"m", b"s", &key, "hardened-system-prod-2026q3").unwrap();
-    assert!(SignatureInputs::capture(b"m", b"s", &key, LEGACY_UPDATE_KEY_ID).is_err());
+    for id in [LEGACY_UPDATE_KEY_ID, LEGACY_TEST_UPDATE_KEY_ID] {
+        match SignatureInputs::capture(b"m", b"s", &key, id) {
+            Err(AppError::BadRequest(message)) => assert!(message.contains("not allowed")),
+            _ => panic!("{id} passed the production-only policy"),
+        }
+    }
 }
 
 #[tokio::test]
