@@ -987,9 +987,9 @@ const MAX_SESSION_ID_BYTES: usize = 128;
 fn valid_session_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_SESSION_ID_BYTES
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, PicoclawErrorData> {
