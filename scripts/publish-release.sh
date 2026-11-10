@@ -6,6 +6,9 @@
 #   4. publish it, not yet marked latest;
 #   5. switch the app channel, then the system channel, checking each;
 #   6. mark the release latest and check the latest download URL.
+# With STABLE_SYSTEM_CHANNEL set, the system metadata also replaces that
+# channel's, after the system channel and before the release is marked latest.
+# Its previous files are saved first, in a backup of their own.
 # Each step is written to a receipt before and after it runs. A rerun reads
 # the receipt and the remote state first: a step whose outcome is unknown is
 # checked, and repeated only when its check shows it did not happen. Only the
@@ -16,7 +19,9 @@
 # Required: PUBLISH_RELEASE=1, RELEASE_DIR, RELEASE_TITLE. Optional:
 # GITHUB_REPOSITORY (woffko/Hardened_NanoKVM), PUBLIC_KEY (the production
 # key), APP_CHANNEL (hardened-rust-preview), SYSTEM_CHANNEL
-# (hardened-system-preview).
+# (hardened-system-preview), STABLE_SYSTEM_CHANNEL (unset: that channel stays
+# as it is; hardened-system-stable is what a device without preview updates
+# reads).
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -24,6 +29,7 @@ REPO="${GITHUB_REPOSITORY:-woffko/Hardened_NanoKVM}"
 PUBLIC_KEY="${PUBLIC_KEY:-$ROOT_DIR/kvmapp/system/keys/update-keys/hardened-system-prod-2026q3.pub.pem}"
 APP_CHANNEL="${APP_CHANNEL:-hardened-rust-preview}"
 SYSTEM_CHANNEL="${SYSTEM_CHANNEL:-hardened-system-preview}"
+STABLE_SYSTEM_CHANNEL="${STABLE_SYSTEM_CHANNEL:-}"
 APP_FILES=(latest.json latest.json.sha256 latest.json.sig latest.json.sig.base64)
 SYSTEM_FILES=(system-latest.json system-latest.json.sha256 system-latest.json.sig system-latest.json.sig.base64)
 
@@ -47,6 +53,11 @@ manifest() {
 }
 manifest check "$RELEASE_DIR" || fail "$RELEASE_DIR does not match its manifest"
 TAG="$(manifest field "$RELEASE_DIR" tag)"
+case "$STABLE_SYSTEM_CHANNEL" in
+	"") ;;
+	"$TAG" | "$APP_CHANNEL" | "$SYSTEM_CHANNEL") fail "STABLE_SYSTEM_CHANNEL names another release of this run" ;;
+	*[!A-Za-z0-9._-]*) fail "invalid STABLE_SYSTEM_CHANNEL: $STABLE_SYSTEM_CHANNEL" ;;
+esac
 SOURCE_COMMIT="$(manifest field "$RELEASE_DIR" source_commit)"
 BUILD_COMMIT="$(manifest field "$RELEASE_DIR" build_commit)"
 MANIFEST_SHA="$(sha256sum "$RELEASE_DIR/RELEASE_MANIFEST.json" | awk '{print $1}')"
@@ -155,6 +166,23 @@ system_switched() {
 switch_system() {
 	gh release upload "$SYSTEM_CHANNEL" --repo "$REPO" --clobber "${SYSTEM_FILES[@]/#/$RELEASE_DIR/}"
 }
+stable_system_switched() {
+	download "$STABLE_SYSTEM_CHANNEL" "$WORK/stable-system" "${SYSTEM_FILES[@]}" &&
+		same "$WORK/stable-system" "${SYSTEM_FILES[@]}" &&
+		"$ROOT_DIR/scripts/verify-system-update-metadata.sh" "$WORK/stable-system/system-latest.json" \
+			"$WORK/stable-system/system-latest.json.sig" "$PUBLIC_KEY" >/dev/null
+}
+switch_stable_system() {
+	gh release upload "$STABLE_SYSTEM_CHANNEL" --repo "$REPO" --clobber "${SYSTEM_FILES[@]/#/$RELEASE_DIR/}"
+}
+stable_system_backed_up() {
+	[ -s "$RECEIPT_DIR/backup-stable-system/system-latest.json.sig" ]
+}
+back_up_stable_system() {
+	[ ! -e "$RECEIPT_DIR/backup-stable-system" ] || return 1
+	download "$STABLE_SYSTEM_CHANNEL" "$WORK/backup-stable-system" "${SYSTEM_FILES[@]}" &&
+		mv "$WORK/backup-stable-system" "$RECEIPT_DIR/backup-stable-system"
+}
 is_latest() {
 	local json
 	json="$(gh release list --repo "$REPO" --json tagName,isLatest 2>/dev/null)" || return 1
@@ -209,11 +237,18 @@ else
 fi
 
 step backup backed_up back_up
+if [ -n "$STABLE_SYSTEM_CHANNEL" ]; then
+	step stable-system-backup stable_system_backed_up back_up_stable_system
+fi
 step draft draft_matches create_draft
 step publish published publish
 HINT="; the previous channel files are in $RECEIPT_DIR/backup"
 step app-channel app_switched switch_app
 step system-channel system_switched switch_system
+if [ -n "$STABLE_SYSTEM_CHANNEL" ]; then
+	HINT="; the previous channel files are in $RECEIPT_DIR/backup-stable-system"
+	step stable-system-channel stable_system_switched switch_stable_system
+fi
 HINT=
 step latest is_latest mark_latest
 printf 'release published: %s (receipt %s)\n' "$TAG" "$RECEIPT"

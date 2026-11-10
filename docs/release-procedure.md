@@ -109,6 +109,18 @@ It then runs these steps, writing each to the receipt
    and verify each signature.
 6. `latest`: mark the release latest and compare the latest download URL.
 
+With `STABLE_SYSTEM_CHANNEL=hardened-system-stable` two more steps run. A device
+with preview updates off reads that channel for the system, and the release
+marked latest for the application. `stable-system-backup` saves the channel's
+four metadata files into `<RELEASE_DIR>.publish/backup-stable-system/` before
+the draft is created. `stable-system-channel` replaces them with the release's
+system metadata after `system-channel` and before `latest`, downloads them again
+and verifies the signature. The same signed metadata serves both channels, so
+its `channel` field says `preview` in either; a device does not compare that
+field with the channel it read. Since the dev and test key IDs were retired, a
+device refuses stable metadata that is signed with them, so the stable channel
+has to carry metadata signed with the release key.
+
 A rerun reads the receipt (bound to the tag and the manifest hash) and skips
 the steps that are done. A step that began but has no recorded end is checked
 against the remote state first and repeated only if it did not happen. So a

@@ -201,7 +201,7 @@ OLD_TAG=hardened-system-0.3.0-raw.12
 reset_remote() {
 	export FAKE_GH_STATE="$T/remote"
 	rm -rf "$FAKE_GH_STATE"
-	for tag in "$OLD_TAG" hardened-rust-preview hardened-system-preview
+	for tag in "$OLD_TAG" hardened-rust-preview hardened-system-preview hardened-system-stable
 	do
 		mkdir -p "$FAKE_GH_STATE/releases/$tag/assets"
 		printf '{"draft": false, "latest": %s, "target": null}' \
@@ -216,6 +216,7 @@ reset_remote() {
 	for file in system-latest.json system-latest.json.sha256 system-latest.json.sig system-latest.json.sig.base64
 	do
 		echo "old $file" > "$FAKE_GH_STATE/releases/hardened-system-preview/assets/$file"
+		echo "old stable $file" > "$FAKE_GH_STATE/releases/hardened-system-stable/assets/$file"
 	done
 	: > "$FAKE_GH_STATE/log"
 	rm -rf "$T/out"
@@ -231,7 +232,14 @@ writes() {
 }
 channels_old() {
 	grep -q '^old ' "$FAKE_GH_STATE/releases/hardened-rust-preview/assets/latest.json" &&
-		grep -q '^old ' "$FAKE_GH_STATE/releases/hardened-system-preview/assets/system-latest.json"
+		grep -q '^old ' "$FAKE_GH_STATE/releases/hardened-system-preview/assets/system-latest.json" &&
+		stable_old
+}
+stable_old() {
+	for file in system-latest.json system-latest.json.sha256 system-latest.json.sig system-latest.json.sig.base64
+	do
+		[ "$(cat "$FAKE_GH_STATE/releases/hardened-system-stable/assets/$file")" = "old stable $file" ] || return 1
+	done
 }
 refused_publish() {
 	if publish; then
@@ -294,6 +302,8 @@ cmp -s "$FAKE_GH_STATE/releases/hardened-system-preview/assets/system-latest.jso
 	"$OUTPUT_DIR/system-latest.json" || fail "the system channel was not switched"
 grep -q '^old ' "$OUTPUT_DIR.publish/backup/app/latest.json" || fail "the app backup"
 grep -q '^old ' "$OUTPUT_DIR.publish/backup/system/system-latest.json.sig" || fail "the system backup"
+stable_old || fail "the stable system channel changed without being named"
+[ ! -e "$OUTPUT_DIR.publish/backup-stable-system" ] || fail "a stable backup was made without being asked"
 ok "publish drafts, verifies, publishes, switches both channels and marks latest, in order"
 : > "$FAKE_GH_STATE/log"
 publish || fail "a rerun after completion failed"
@@ -337,4 +347,65 @@ cmp -s "$FAKE_GH_STATE/releases/hardened-system-preview/assets/system-latest.jso
 [ "$(grep -c '^gh release upload hardened-rust-preview' "$FAKE_GH_STATE/log")" = 1 ] ||
 	fail "the app channel was switched twice"
 ok "a failed channel switch names the backup and a rerun finishes it"
+
+# The stable system channel, which a device without preview updates reads.
+export STABLE_SYSTEM_CHANNEL=hardened-system-stable
+reset_remote
+publish || {
+	cat "$T/publish.log" >&2
+	fail "publish with the stable system channel failed"
+}
+expected="download hardened-rust-preview
+download hardened-system-preview
+download hardened-system-stable
+create $RELEASE_TAG --draft
+download $RELEASE_TAG
+edit $RELEASE_TAG --draft=false
+upload hardened-rust-preview
+download hardened-rust-preview
+upload hardened-system-preview
+download hardened-system-preview
+upload hardened-system-stable
+download hardened-system-stable
+edit $RELEASE_TAG --latest
+curl"
+[ "$(order)" = "$expected" ] || {
+	order >&2
+	fail "unexpected publication order with the stable system channel"
+}
+for file in system-latest.json system-latest.json.sha256 system-latest.json.sig system-latest.json.sig.base64
+do
+	cmp -s "$FAKE_GH_STATE/releases/hardened-system-stable/assets/$file" "$OUTPUT_DIR/$file" ||
+		fail "the stable system channel does not hold the release's $file"
+	[ "$(cat "$OUTPUT_DIR.publish/backup-stable-system/$file")" = "old stable $file" ] ||
+		fail "the stable system backup lacks $file"
+done
+: > "$FAKE_GH_STATE/log"
+publish || fail "a rerun with the stable system channel failed"
+[ "$(writes)" = 0 ] || fail "a rerun with the stable system channel wrote again"
+ok "the stable system channel is saved, switched after the preview channel and verified"
+
+reset_remote
+if FAKE_GH_FAIL=upload:hardened-system-stable publish; then fail "a failed stable channel upload succeeded"; fi
+grep -q 'previous channel files are in .*backup-stable-system' "$T/publish.log" || fail "no stable restore hint"
+# The publish edit carries --latest=false; only a bare --latest marks latest.
+[ "$(grep -cE -- '--latest( |$)' "$FAKE_GH_STATE/log")" = 0 ] || fail "the release became latest before the stable channel"
+publish || {
+	cat "$T/publish.log" >&2
+	fail "the rerun after a failed stable channel upload failed"
+}
+cmp -s "$FAKE_GH_STATE/releases/hardened-system-stable/assets/system-latest.json.sig" \
+	"$OUTPUT_DIR/system-latest.json.sig" || fail "the stable system channel after the rerun"
+[ "$(grep -c '^gh release upload hardened-system-preview' "$FAKE_GH_STATE/log")" = 1 ] ||
+	fail "the preview system channel was switched twice"
+ok "a failed stable channel switch names its backup, holds latest back, and a rerun finishes it"
+
+reset_remote
+if STABLE_SYSTEM_CHANNEL=hardened-system-preview publish; then fail "the preview channel passed as the stable one"; fi
+[ "$(writes)" = 0 ] || fail "a refused stable channel name wrote to the remote"
+if STABLE_SYSTEM_CHANNEL='bad name' publish; then fail "an invalid stable channel name passed"; fi
+[ "$(writes)" = 0 ] || fail "an invalid stable channel name wrote to the remote"
+channels_old || fail "a refused stable channel name changed a channel"
+ok "a stable channel that names another release of the run, or no release, is refused"
+unset STABLE_SYSTEM_CHANNEL
 echo "release pipeline test: PASS"
