@@ -1,6 +1,5 @@
 clippy::chunks_exact_to_as_chunks	using `chunks_exact` with a constant chunk size	src/api/download.rs	&& sector[446..510].chunks_exact(16).any(|entry| {
 clippy::cmp_owned	this creates an owned instance just for comparison	src/config.rs	if self.paths.update_cache_dir == PathBuf::from("/root/.kvmcache") {
-clippy::collapsible_if	this `if` statement can be collapsed	src/api/autostart.rs	if let Ok(metadata) = fs::symlink_metadata(&path) {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/download.rs	if let Ok(metadata) = fs::symlink_metadata(&target) {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if current_dns_mode(paths) == DNS_MODE_DHCP {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Err(err) = dhcp_result {
@@ -10,7 +9,6 @@ clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	i
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Ok(config) = effective_result {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/network.rs	if let Some(index) = fields.iter().position(|field| *field == "via") {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/picoclaw.rs	if let Ok(doc) = load_config_document() {
-clippy::collapsible_if	this `if` statement can be collapsed	src/api/script.rs	if let Ok(metadata) = fs::symlink_metadata(&path) {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/storage.rs	if let Some(name) = entry.file_name().to_str() {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/stream.rs	if let Some(value) = read_i32(SCREEN_GOP_FILE).and_then(|value| u8::try_from(value).ok()) {
 clippy::collapsible_if	this `if` statement can be collapsed	src/api/system_log.rs	if truncated {

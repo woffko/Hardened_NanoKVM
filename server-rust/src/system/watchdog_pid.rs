@@ -78,11 +78,11 @@ fn command(args: &[OsString]) -> io::Result<i32> {
             )
         }
         (Some("status"), 2) => {
-            if let Some(record) = store.load()? {
-                if let Some(pinned) = Pinned::from_identity(&record.identity, 0)? {
-                    println!("{}", pinned.identity.pid);
-                    return Ok(0);
-                }
+            if let Some(record) = store.load()?
+                && let Some(pinned) = Pinned::from_identity(&record.identity, 0)?
+            {
+                println!("{}", pinned.identity.pid);
+                return Ok(0);
             }
             if let Some((pinned, _)) = legacy_watchdog(&legacy_path)? {
                 println!("{}", pinned.identity.pid);
