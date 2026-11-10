@@ -158,7 +158,7 @@ async function test(name, work) {
   });
 
   await test('a listed system release that is not newer is never offered for download', () => {
-    // 10.0.87.133 on the stable channel: system 0.3.0-raw.13 runs, the channel
+    // A device on the stable channel: system 0.3.0-raw.13 runs, the channel
     // lists 0.2.23-raw.1, and the backend says no update is available.
     const latest = { version: '0.2.23-raw.1', name: 'hardened-nanokvm-system-0.2.23-raw.1.tar.gz', sha256: 'a' };
     const staged = { version: '0.3.0-raw.13', archiveName: 'hardened-nanokvm-system-0.3.0-raw.13.tar.gz', sha256: 'b' };
