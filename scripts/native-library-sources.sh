@@ -39,8 +39,24 @@ current() {
 	sha256sum $files "${LIBRARIES[@]}"
 }
 
+# The compiler writes source paths into the libraries (assertion and log
+# texts). A path under a home directory is the build directory of one machine:
+# the libraries are built with -ffile-prefix-map for the SDK and the checkout,
+# which also makes them independent of where the build stands.
+without_local_paths() {
+	local library found=0
+	for library in "${LIBRARIES[@]}"; do
+		if LC_ALL=C grep -aq '/home/' "$ROOT/$library"; then
+			echo "native-library-sources: $library names a path under /home/; build it with -ffile-prefix-map" >&2
+			found=1
+		fi
+	done
+	return "$found"
+}
+
 case "${1:-}" in
 write)
+	without_local_paths
 	current > "$ROOT/$MANIFEST.new"
 	mv -f "$ROOT/$MANIFEST.new" "$ROOT/$MANIFEST"
 	echo "native-library-sources: recorded $(wc -l < "$ROOT/$MANIFEST") files in $MANIFEST"
@@ -56,6 +72,7 @@ check)
 		echo "rebuild libkvm.so and libkvm_mmf.so, commit them, then run: $0 write" >&2
 		exit 1
 	fi
+	without_local_paths
 	echo "native-library-sources: PASS ($(wc -l < "$ROOT/$MANIFEST") files)"
 	;;
 *)
