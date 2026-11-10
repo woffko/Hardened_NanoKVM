@@ -91,6 +91,39 @@ fn unique_temp(path: &Path) -> Result<PathBuf> {
     )))
 }
 
+/// Whether `name` is a temporary file of an atomic write that never finished:
+/// `.<name>.<pid>.<counter>.<random>.tmp` of `unique_temp`, or the
+/// `.<name>.<pid>.<nanoseconds>.tmp` that earlier versions wrote. Such a file
+/// was never published under its real name, so it is no state of anyone's.
+pub(crate) fn is_abandoned_temp(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let random = |part: &str| {
+        part.len() == 16
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let mut parts = stem.rsplit('.');
+    let (Some(last), Some(middle)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let rest: Vec<&str> = parts.collect();
+    match rest.split_first() {
+        // .<name>.<pid>.<counter>.<random>.tmp
+        Some((pid, name)) if random(last) && digits(middle) && digits(pid) => {
+            name.iter().any(|part| !part.is_empty())
+        }
+        // .<name>.<pid>.<nanoseconds>.tmp
+        _ => digits(last) && digits(middle) && rest.iter().any(|part| !part.is_empty()),
+    }
+}
+
 pub fn clean_relative_path(input: &Path) -> Result<PathBuf> {
     if input.is_absolute() {
         return Err(AppError::BadRequest(

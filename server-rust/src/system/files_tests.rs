@@ -86,3 +86,34 @@ fn removing_a_file_is_durable_and_idempotent() {
     remove_file(&path).unwrap();
     assert_eq!(names(dir.path()), Vec::<String>::new());
 }
+
+#[test]
+fn only_the_temporary_names_of_atomic_writes_count_as_abandoned() {
+    // The names this module creates, for a plain and a dotted target.
+    for target in ["run.sh", "a.b.c.py", "x"] {
+        let temp = unique_temp(Path::new("/etc/kvm/scripts").join(target).as_path()).unwrap();
+        let name = temp.file_name().unwrap().to_str().unwrap();
+        assert!(is_abandoned_temp(name), "{name}");
+    }
+    // The shape earlier versions wrote: pid and nanoseconds.
+    assert!(is_abandoned_temp(".boot.sh.1234.1793036903123456789.tmp"));
+    assert!(is_abandoned_temp(".run.sh.77.3.00ff00ff00ff00ff.tmp"));
+    for name in [
+        // Real scripts and hidden files of a person are state, not leftovers.
+        "run.sh",
+        ".run.sh",
+        ".hidden.tmp",
+        ".x.tmp",
+        "run.sh.1.2.tmp",
+        ".run.sh.1.2.tmp.sh",
+        ".run.sh.pid.2.tmp",
+        ".run.sh.1.2.00FF00FF00FF00FF.tmp",
+        ".run.sh.1.x.00ff00ff00ff00ff.tmp",
+        "..1.2.tmp",
+        ".1.2.tmp",
+        "",
+        ".tmp",
+    ] {
+        assert!(!is_abandoned_temp(name), "{name:?}");
+    }
+}

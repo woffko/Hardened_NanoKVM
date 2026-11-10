@@ -31,6 +31,9 @@ use crate::{
 };
 
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+/// Scripts kept at most. With the size limit this keeps the directory far below
+/// what a raw update can carry.
+const MAX_SCRIPT_FILES: usize = 64;
 /// A mode of this static helper. Not of the backend: starting NanoKVM-Server
 /// loads the vendor libraries, which take the video devices from the running
 /// backend and keep the process from ever exiting.
@@ -153,7 +156,7 @@ pub async fn upload_script(
             .file_name()
             .ok_or_else(|| AppError::BadRequest("missing script filename".to_string()))?
             .to_string();
-        let filename = validate_script_name(&filename)?;
+        let filename = validate_new_script_name(&filename)?;
         let data = field
             .bytes()
             .await
@@ -243,6 +246,17 @@ fn validate_script_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+/// The name of a script to store. Stricter than the names that can be listed,
+/// run and deleted: a raw update refuses a script directory that holds a name
+/// it does not carry, so no such name may enter it.
+fn validate_new_script_name(name: &str) -> Result<String> {
+    let name = validate_script_name(name)?;
+    if !crate::update::restore_carries(&format!("etc/kvm/scripts/{name}")) {
+        return Err(AppError::BadRequest("invalid script filename".to_string()));
+    }
+    Ok(name)
+}
+
 fn is_script_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     (lower.ends_with(".sh") || lower.ends_with(".py")) && name.len() <= 128 && name.len() > 3
@@ -262,13 +276,45 @@ fn checked_script_path(name: &str) -> Result<PathBuf> {
 }
 
 fn write_script_file(name: &str, data: &[u8]) -> Result<()> {
-    let path = script_path(name)?;
-    if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if metadata.file_type().is_symlink() {
+    store_script(Path::new(SCRIPT_DIRECTORY), name, data)
+}
+
+/// Store one script in `directory`. The caller holds the configuration permit,
+/// so no other upload is in flight.
+fn store_script(directory: &Path, name: &str, data: &[u8]) -> Result<()> {
+    let path = directory.join(validate_new_script_name(name)?);
+    let replaces = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(AppError::BadRequest("invalid script file".to_string()));
         }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let mut stored = 0;
+    if directory.exists() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            // What an upload cut short by power loss left behind.
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(crate::system::files::is_abandoned_temp)
+            {
+                fs::remove_file(entry.path())?;
+                continue;
+            }
+            stored += 1;
+        }
     }
-
+    if !replaces && stored >= MAX_SCRIPT_FILES {
+        return Err(AppError::BadRequest(format!(
+            "at most {MAX_SCRIPT_FILES} scripts are kept; delete one first"
+        )));
+    }
     crate::system::files::write_atomic(&path, data, 0o755)
 }
 
@@ -646,6 +692,87 @@ mod tests {
             validate_script_name("hello_world-1.py").unwrap(),
             "hello_world-1.py"
         );
+    }
+
+    #[test]
+    fn a_new_script_gets_only_a_name_that_a_raw_update_carries() {
+        for name in ["test.sh", "hello_world-1.py", "a.b.sh", "UPPER.SH"] {
+            assert_eq!(validate_new_script_name(name).unwrap(), name);
+        }
+        // A hidden name can still be listed, run and deleted, so that a script
+        // an earlier version accepted can be removed, but not stored again.
+        for name in [".hidden.sh", ".a.py", "..sh"] {
+            assert!(validate_script_name(name).is_ok(), "{name}");
+            assert!(validate_new_script_name(name).is_err(), "{name}");
+        }
+        // Every name an upload may get is one the restore policy carries.
+        let alphabet = [".", "a", "Z", "0", "_", "-", ".sh", ".py", " ", "/", "x.sh"];
+        for first in alphabet {
+            for second in alphabet {
+                for third in alphabet {
+                    // The name that is stored is the one the validator returns.
+                    let name = format!("{first}{second}{third}");
+                    if let Ok(stored) = validate_new_script_name(&name) {
+                        assert!(
+                            crate::update::restore_carries(&format!("etc/kvm/scripts/{stored}")),
+                            "{name:?} is stored as {stored:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn storing_a_script_keeps_the_directory_small_and_free_of_leftovers() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("scripts");
+        // The directory is created with the first script.
+        store_script(&dir, "first.sh", b"echo 1\n").unwrap();
+        assert_eq!(
+            fs::metadata(dir.join("first.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755
+        );
+        assert!(store_script(&dir, ".hidden.sh", b"echo\n").is_err());
+        // An upload that power loss cut short is removed by the next one.
+        let leftover = dir.join(".first.sh.812.4.00ff00ff00ff00ff.tmp");
+        fs::write(&leftover, b"half").unwrap();
+        fs::write(
+            dir.join(".kept.sh"),
+            b"a script an earlier version accepted",
+        )
+        .unwrap();
+        store_script(&dir, "second.py", b"print(2)\n").unwrap();
+        assert!(!leftover.exists());
+        assert!(dir.join(".kept.sh").exists());
+
+        // Three files are stored. At the limit a new name is refused, an
+        // existing one is still replaced, and a deletion makes room.
+        for index in 3..MAX_SCRIPT_FILES {
+            store_script(&dir, &format!("s{index}.sh"), b"echo\n").unwrap();
+        }
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), MAX_SCRIPT_FILES);
+        assert!(matches!(
+            store_script(&dir, "one-more.sh", b"echo\n"),
+            Err(AppError::BadRequest(_))
+        ));
+        store_script(&dir, "first.sh", b"echo replaced\n").unwrap();
+        assert_eq!(fs::read(dir.join("first.sh")).unwrap(), b"echo replaced\n");
+        fs::remove_file(dir.join("second.py")).unwrap();
+        store_script(&dir, "one-more.sh", b"echo\n").unwrap();
+
+        // A link in place of a script is refused and its target kept.
+        let target = root.path().join("target");
+        fs::write(&target, b"untouched").unwrap();
+        fs::remove_file(dir.join("s3.sh")).unwrap();
+        symlink(&target, dir.join("s3.sh")).unwrap();
+        assert!(store_script(&dir, "s3.sh", b"echo\n").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
     }
 
     #[test]

@@ -421,11 +421,58 @@ fn unsupported_selected_tree_state_aborts_instead_of_silently_losing_it() {
             path,
             b"operator state needs an explicit migration",
         );
-        assert!(matches!(
-            capture(source.path(), staging.path()),
-            Err(RestoreArchiveError::InvalidSource)
-        ));
+        // The refusal names the entry, so its owner can remove or rename it.
+        match capture(source.path(), staging.path()) {
+            Err(RestoreArchiveError::UnsupportedEntry(named)) => assert_eq!(named, path),
+            other => panic!("{path}: {:?}", other.map(|_| ())),
+        }
         assert_eq!(fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn a_hidden_script_stops_the_capture_by_name_and_an_abandoned_upload_does_not() {
+    let source = source_fixture();
+    let staging = tempdir().unwrap();
+    put(source.path(), "etc/kvm/scripts/manual.sh", b"echo kept\n");
+    // What an upload cut short by power loss leaves: never published.
+    for leftover in [
+        "etc/kvm/scripts/.manual.sh.812.4.00ff00ff00ff00ff.tmp",
+        "etc/kvm/autostart/.boot.sh.812.1793036903123456789.tmp",
+    ] {
+        put(source.path(), leftover, b"half an upload");
+    }
+    let mut snapshot = capture(source.path(), staging.path()).unwrap();
+    let mut bytes = Vec::new();
+    snapshot.read_to_end(&mut bytes).unwrap();
+    let validated = validate(authenticated(&bytes, staging.path())).unwrap();
+    let carried: Vec<&str> = validated
+        .members()
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| {
+            path.starts_with("etc/kvm/scripts/") || path.starts_with("etc/kvm/autostart/")
+        })
+        .collect();
+    assert_eq!(carried, ["etc/kvm/scripts/manual.sh"]);
+    drop(validated);
+    drop(snapshot);
+
+    // A hidden script is a person's file: it is neither carried nor dropped.
+    put(
+        source.path(),
+        "etc/kvm/scripts/.hidden.sh",
+        b"echo hidden\n",
+    );
+    let staging = tempdir().unwrap();
+    match capture(source.path(), staging.path()) {
+        Err(error @ RestoreArchiveError::UnsupportedEntry(_)) => {
+            assert_eq!(
+                error.to_string(),
+                "a raw update cannot carry etc/kvm/scripts/.hidden.sh; remove or rename it and try again"
+            );
+        }
+        other => panic!("{:?}", other.map(|_| ())),
     }
 }
 

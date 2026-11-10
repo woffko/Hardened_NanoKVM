@@ -35,6 +35,13 @@ pub mod restore_job;
 pub mod restore_key;
 pub mod restore_native;
 mod restore_policy;
+
+/// Whether a raw update carries the file at `path`, relative to the root, onto
+/// the new system. A file the API stores under a carried directory must pass
+/// this, because the capture refuses a directory that holds anything else.
+pub(crate) fn restore_carries(path: &str) -> bool {
+    restore_policy::allowed(path)
+}
 pub mod restore_preflight;
 pub mod restore_rootfs;
 pub mod restore_runtime;
