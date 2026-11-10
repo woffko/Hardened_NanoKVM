@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${RUST_TARGET:-riscv64gc-unknown-linux-musl}"
-APP_VERSION="${APP_VERSION:-2.0.47}"
+APP_VERSION="${APP_VERSION:-2.1.3}"
 KVM_SYSTEM_SOURCE="${KVM_SYSTEM_SOURCE:-$ROOT/support/sg2002/kvm_system/build/kvm_system}"
 STAGE_DIR="${STAGE_DIR:-$ROOT/build/kvmapp-rust}"
 EXTRA_NATIVE_LIB_DIR="${EXTRA_NATIVE_LIB_DIR:-$ROOT/build/latestbuildroot/vendor-runtime-v2/kvmapp-dl-lib}"
