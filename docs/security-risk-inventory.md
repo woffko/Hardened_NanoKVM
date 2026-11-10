@@ -115,8 +115,27 @@ Known exceptions:
   connections, ahead of any rule there that accepts by address. Turning USB network on does not open
   management: that takes `/etc/kvm/usb_management` and a firewall restart, and a raw
   update keeps the file. Traffic of a connection the device started is unaffected.
-- Autostart directory: `/etc/kvm/autostart`, with traversal rejection. Nothing
+- Firewall modes and Tailscale: the managed rules live in the chains
+  `NKVM-INPUT` and `NKVM-OUTPUT`, and chains that other software owns keep
+  their place ahead of them. Tailscale's `ts-input` accepts traffic on
+  `tailscale0` before the managed chain runs, so a tailnet peer reaches SSH and
+  the web interface in every mode, Restricted and Paranoid included. Tailscale
+  is installed by the owner and is not in the image; access from the tailnet is
+  governed by Tailscale ACLs, not by the firewall mode.
+- Moderate firewall mode filters by source address only. A new connection from
+  a private, link-local or loopback range reaches every port that a service
+  listens on, not only SSH and the web interface. It protects against sources
+  outside those ranges and gives no protection from a computer on the same
+  network. H.264 WebRTC needs it that way; Restricted and Paranoid list ports.
+- Autostart directory: `/etc/kvm/autostart`. The upload API is removed. Nothing
   executes these files; historical autostart uploads are never activated.
+- Script directory: `/etc/kvm/scripts` holds at most 64 scripts of 256 KiB. An
+  upload takes only a name that a raw update carries, so a hidden name such as
+  `.x.sh` is refused; one that an earlier version stored can still be deleted.
+- Shared directories: `/tmp` and `/dev/shm` are mounted `nosuid,nodev,noexec`
+  by the image and remounted so by `S01fs` on an older image. Nothing on the
+  system runs a program from either. The kernel's protections for links,
+  hard links, files and FIFOs of other accounts there are on.
 - Settings files (syslog, time and timezone, firewall, inittab): replaced
   through a temporary file whose name no other writer shares, created without
   following links and fsynced, then renamed, with the directory fsynced.
