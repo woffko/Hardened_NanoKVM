@@ -1,6 +1,8 @@
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { isExternalLink } from './link.ts';
+
 type MarkdownContentProps = {
   content?: string;
   className?: string;
@@ -17,31 +19,29 @@ export const MarkdownContent = ({ content, className }: MarkdownContentProps) =>
         remarkPlugins={[remarkGfm]}
         disallowedElements={['img']}
         unwrapDisallowed
-        urlTransform={(url) => {
-          try {
-            const parsed = new URL(url, window.location.origin);
-            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
-            return defaultUrlTransform(url);
-          } catch {
-            return '';
-          }
-        }}
+        urlTransform={(url) =>
+          isExternalLink(url, window.location.host) ? defaultUrlTransform(url) : ''
+        }
         components={{
           p: ({ children }) => (
             <p className="my-2 whitespace-pre-wrap break-words leading-6 first:mt-0 last:mb-0">
               {children}
             </p>
           ),
-          a: ({ children, href }) => (
-            <a
-              className="text-sky-300 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-200"
-              href={href}
-              rel="noreferrer"
-              target="_blank"
-            >
-              {children}
-            </a>
-          ),
+          // A link that was refused keeps its text and loses its address.
+          a: ({ children, href }) =>
+            href ? (
+              <a
+                className="text-sky-300 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-200"
+                href={href}
+                rel="noreferrer"
+                target="_blank"
+              >
+                {children}
+              </a>
+            ) : (
+              <span>{children}</span>
+            ),
           ul: ({ children }) => <ul className="my-2 list-disc pl-5">{children}</ul>,
           ol: ({ children }) => <ol className="my-2 list-decimal pl-5">{children}</ol>,
           li: ({ children }) => <li className="my-1 break-words leading-6">{children}</li>,
