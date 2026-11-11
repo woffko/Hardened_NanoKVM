@@ -658,13 +658,17 @@ mod tests {
         // The HTTP handler's future is dropped when its client goes away.
         request.abort();
         assert!(request.await.unwrap_err().is_cancelled());
-        for _ in 0..100 {
-            if marker.exists() {
+        // The shell creates the file before it writes the line, so the file
+        // can be seen empty: wait for the line, not for the name.
+        let mut written = String::new();
+        for _ in 0..250 {
+            written = fs::read_to_string(&marker).unwrap_or_default();
+            if written == "finished\n" {
                 break;
             }
             time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "finished\n");
+        assert_eq!(written, "finished\n");
     }
 
     #[tokio::test]
