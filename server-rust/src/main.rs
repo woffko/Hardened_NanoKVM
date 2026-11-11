@@ -170,6 +170,15 @@ async fn authorize_trial(
     Ok(Some(video))
 }
 
+/// Committed: the trial is now the device's application, whichever listener it
+/// serves. SSH is restored before serving. The account lock needs the writers,
+/// which the update engine releases only after it has retired the previous
+/// application, so it runs beside the server instead of delaying it.
+async fn finish_trial_commit(state: AppState) {
+    state.restore_ssh_after_switch().await;
+    tokio::spawn(async move { state.lock_service_accounts_after_commit().await });
+}
+
 /// An unconfirmed firewall change left by a stopped backend is rolled back
 /// before serving. The frozen trial never writes, so it never does this.
 async fn roll_back_unconfirmed_firewall(state: &AppState) {
@@ -376,8 +385,7 @@ async fn run_http(
     install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
     if let Some(state) = trial {
-        // Committed: the trial is now the device's application.
-        state.lock_service_accounts().await;
+        finish_trial_commit(state).await;
     }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(listener, app, "starting dedicated loopback HTTP listener");
@@ -436,9 +444,7 @@ async fn run_https(
     install_shutdown_signal_handler(state);
     let _trial_video = authorize_trial(startup).await?;
     if let Some(state) = trial {
-        // Committed: the trial is now the device's application.
-        state.lock_service_accounts().await;
-        state.restore_ssh_after_switch().await;
+        finish_trial_commit(state).await;
     }
     if let Some((listener, app)) = loopback {
         spawn_bound_http(

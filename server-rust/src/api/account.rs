@@ -775,6 +775,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_trial_locks_service_accounts_once_the_update_freeze_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, shadow) = change_fixture(&dir).await;
+        std::fs::write(
+            dir.path().join("passwd"),
+            "root:x:0:0::/root:/bin/sh\ndaemon:x:1:1::/:/bin/false\n",
+        )
+        .unwrap();
+        let open = "root:*:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::\n";
+        std::fs::write(&shadow, open).unwrap();
+        // The update engine still holds the writers when a trial hears of its
+        // commit, and lets go only after it has retired the previous slot.
+        let freeze = state.writers.pause().unwrap();
+        state.lock_service_accounts().await;
+        assert_eq!(std::fs::read_to_string(&shadow).unwrap(), open);
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move { state.lock_service_accounts_after_commit().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!waiting.is_finished());
+        assert_eq!(std::fs::read_to_string(&shadow).unwrap(), open);
+        drop(freeze);
+        tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+            .await
+            .expect("the lock did not follow the end of the freeze")
+            .unwrap();
+        let locked = std::fs::read_to_string(&shadow).unwrap();
+        assert!(locked.starts_with("root:*:"));
+        assert!(locked.contains("\ndaemon:!*:"));
+        assert!(!dir.path().join("ssh-refresh.snapshots").exists());
+    }
+
+    #[tokio::test]
     async fn failed_ssh_preparation_leaves_credentials_and_session_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let (state, session, shadow) = change_fixture(&dir).await;

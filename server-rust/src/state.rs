@@ -20,6 +20,12 @@ use crate::{
     update::state_writers::{StateWriters, WriterDrain},
 };
 
+/// How long a committed trial waits for the update engine to release the
+/// writers, and how often it asks. Retiring the previous application takes
+/// seconds; the bound only ends the wait when the engine never lets go.
+const COMMIT_LOCK_WAIT: Duration = Duration::from_secs(600);
+const COMMIT_LOCK_INTERVAL: Duration = Duration::from_millis(500);
+
 pub const DEFAULT_SESSION_LOCK_DURATION_SECS: u64 = 900;
 pub const SESSION_LOCK_DURATION_OPTIONS: [u64; 4] = [300, 900, 1800, 3600];
 
@@ -162,30 +168,49 @@ impl AppState {
     }
 
     /// Lock the service accounts whose shadow field holds no hash, and log the
-    /// ones it changed. Every full start runs this, and so does a trial once
-    /// its commit makes it the device's application. A running sshd is not
+    /// ones it changed. Every full start runs this. A running sshd is not
     /// restarted here: a replacement started from the backend is reaped with
     /// the backend scope on the next application switch. The start script
     /// applies the current SSH barriers at the next boot.
     pub async fn lock_service_accounts(&self) {
-        let accounts = Arc::clone(&self.accounts);
-        let result = async {
-            self.writers
-                .account()?
-                .run(move |permit| async move {
-                    let locked = accounts.lock_service_accounts(&permit)?;
-                    Ok(locked)
-                })
-                .await
+        if let Err(error) = self.try_lock_service_accounts().await {
+            tracing::error!(%error, "SSH account protection was not fully applied");
         }
-        .await;
-        match result {
-            Ok(locked) if !locked.is_empty() => {
-                tracing::warn!(accounts = ?locked, "locked service accounts that had no password hash");
+    }
+
+    /// The same lock for a trial whose commit has just made it the device's
+    /// application. The update engine keeps the writers paused until it has
+    /// retired the previous application, and that ends after the trial hears
+    /// of its commit, so the first request is always refused. Ask again until
+    /// the pause is over: without the lock an application update protects no
+    /// account before the next boot.
+    pub async fn lock_service_accounts_after_commit(&self) {
+        let deadline = tokio::time::Instant::now() + COMMIT_LOCK_WAIT;
+        loop {
+            match self.try_lock_service_accounts().await {
+                Ok(()) => return,
+                Err(AppError::Conflict(_)) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(COMMIT_LOCK_INTERVAL).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "SSH account protection was not fully applied");
+                    return;
+                }
             }
-            Ok(_) => {}
-            Err(error) => tracing::error!(%error, "SSH account protection was not fully applied"),
         }
+    }
+
+    async fn try_lock_service_accounts(&self) -> Result<()> {
+        let accounts = Arc::clone(&self.accounts);
+        let locked = self
+            .writers
+            .account()?
+            .run(move |permit| async move { accounts.lock_service_accounts(&permit) })
+            .await?;
+        if !locked.is_empty() {
+            tracing::warn!(accounts = ?locked, "locked service accounts that had no password hash");
+        }
+        Ok(())
     }
 
     /// The application switch removes the backend scope, and a daemon started
