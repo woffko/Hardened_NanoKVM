@@ -71,6 +71,7 @@ support/sg2002/additional/vision/include/base/**
 !support/sg2002/additional/vision/include/maix_vision.hpp
 !support/sg2002/additional/vision/include_private
 support/sg2002/additional/vision/include_private/**
+!support/sg2002/additional/vision/include_private/maix_image_size.hpp
 !support/sg2002/additional/vision/include_private/maix_image_util.hpp
 !support/sg2002/additional/vision/port
 support/sg2002/additional/vision/port/**
