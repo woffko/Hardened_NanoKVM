@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-HARDENED_NANOKVM_KVMAPP_VERSION = 2.1.6
+HARDENED_NANOKVM_KVMAPP_VERSION = 2.1.7
 NANOKVM_KVMAPP_SOURCE_DIR ?= \
 	$(abspath $(BR2_EXTERNAL_HARDENED_SG2002_PATH)/../../build/kvmapp-rust/kvmapp)
 HARDENED_NANOKVM_KVMAPP_SITE = $(NANOKVM_KVMAPP_SOURCE_DIR)
