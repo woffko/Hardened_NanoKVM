@@ -185,10 +185,18 @@ impl AppState {
     /// the pause is over: without the lock an application update protects no
     /// account before the next boot.
     pub async fn lock_service_accounts_after_commit(&self) {
-        let deadline = tokio::time::Instant::now() + COMMIT_LOCK_WAIT;
+        let started = tokio::time::Instant::now();
+        let deadline = started + COMMIT_LOCK_WAIT;
         loop {
             match self.try_lock_service_accounts().await {
-                Ok(()) => return,
+                Ok(()) => {
+                    // The one line that shows, on a device, that the lock ran.
+                    tracing::info!(
+                        waited_ms = started.elapsed().as_millis() as u64,
+                        "service accounts checked after the application update"
+                    );
+                    return;
+                }
                 Err(AppError::Conflict(_)) if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(COMMIT_LOCK_INTERVAL).await;
                 }
