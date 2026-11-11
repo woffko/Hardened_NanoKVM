@@ -204,7 +204,13 @@ impl AppState {
         if running {
             return;
         }
-        if let Err(error) = run_allowed(AllowedCommand::ServiceSshdKvmapp, ["start"], Duration::from_secs(20)).await {
+        if let Err(error) = run_allowed(
+            AllowedCommand::ServiceSshdKvmapp,
+            ["start"],
+            Duration::from_secs(20),
+        )
+        .await
+        {
             tracing::error!(%error, "SSH was not restored after the application switch");
         }
     }
