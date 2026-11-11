@@ -6,6 +6,7 @@
  */
 
 #include "maix_image.hpp"
+#include "maix_image_size.hpp"
 #include "opencv2/opencv.hpp"
 #include "opencv2/freetype.hpp"
 #include <map>
@@ -292,17 +293,9 @@ namespace maix::image
             _data_size = data_size;
         } else {
             // not use data_size, uncompressed image only use fixed size.
-            const size_t width_sz = static_cast<size_t>(width);
-            const size_t height_sz = static_cast<size_t>(height);
-            const size_t element_sz = static_cast<size_t>(image::fmt_size[format]);
-            const size_t max_sz = std::numeric_limits<size_t>::max();
-            if (element_sz == 0 || width_sz > max_sz / height_sz ||
-                width_sz * height_sz > max_sz / element_sz)
+            int size_calc = 0;
+            if (!uncompressed_bytes(width, height, image::fmt_size[format], &size_calc))
                 throw err::Exception(err::ERR_ARGS, "image dimensions overflow");
-            const size_t size_calc_sz = width_sz * height_sz * element_sz;
-            if (size_calc_sz > static_cast<size_t>(INT_MAX))
-                throw err::Exception(err::ERR_ARGS, "image is too large");
-            const int size_calc = static_cast<int>(size_calc_sz);
             if(data_size > 0 && data_size != size_calc)
             {
                 log::error("data_size not match image content size, data_size: %d, image content size: %d\n", data_size, size_calc);
@@ -382,12 +375,9 @@ namespace maix::image
         if (size > max_sz - 0x1000)
             throw err::Exception(err::ERR_NO_MEM, "image is too large");
         if (img._format <= Format::FMT_COMPRESSED_MIN) {
-            const size_t width_sz = static_cast<size_t>(img._width);
-            const size_t height_sz = static_cast<size_t>(img._height);
-            const size_t element_sz = static_cast<size_t>(image::fmt_size[img._format]);
-            if (element_sz == 0 || width_sz > max_sz / height_sz ||
-                width_sz * height_sz > max_sz / element_sz ||
-                width_sz * height_sz * element_sz != size)
+            int expected = 0;
+            if (!uncompressed_bytes(img._width, img._height, image::fmt_size[img._format], &expected) ||
+                static_cast<size_t>(expected) != size)
                 throw err::Exception(err::ERR_ARGS, "image size mismatch");
         }
         void *actual = malloc(size + 0x1000);
