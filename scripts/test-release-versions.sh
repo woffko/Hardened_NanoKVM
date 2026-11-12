@@ -30,8 +30,8 @@ accepted 0.4.0-raw.99 2.1.99
 for system in 0.3.0-raw.10 0.3.0-raw.11 0.3.0-raw.12 0.3.0-raw.13; do refused "$system" 2.0.99; done
 for app in 2.0.40 2.0.41 2.0.42 2.0.43 2.0.44; do refused 0.3.0-raw.99 "$app"; done
 # Numbers signed with the release key and never published are used up as well.
-for system in 0.4.0-raw.1 0.4.0-raw.2 0.4.0-raw.3 0.4.0-raw.4 0.4.0-raw.5; do refused "$system" 2.1.99; done
-for app in 2.1.0 2.1.1 2.1.2 2.1.3 2.1.4 2.1.5 2.1.6; do refused 0.4.0-raw.99 "$app"; done
+for system in 0.4.0-raw.1 0.4.0-raw.2 0.4.0-raw.3 0.4.0-raw.4 0.4.0-raw.5 0.4.0-raw.6; do refused "$system" 2.1.99; done
+for app in 2.1.0 2.1.1 2.1.2 2.1.3 2.1.4 2.1.5 2.1.6 2.1.7; do refused 0.4.0-raw.99 "$app"; done
 # Below the debug range, or not a known family.
 refused 0.3.0-raw.9 2.0.99
 refused 0.3.0-raw.99 2.0.39

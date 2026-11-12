@@ -13,6 +13,8 @@
 0.4.0-raw.1
 2.1.5
 0.4.0-raw.4
+2.1.7
+0.4.0-raw.6
 
 # Signed or installed for testing, never published.
 2.0.43
