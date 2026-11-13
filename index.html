@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed app and system updates, Buildroot 2026.05.1, Linux 5.10.265, guarded raw updates, firewall modes, mobile view, and safer web administration."
+      content="Hardened NanoKVM is a Rust-backend security fork for Sipeed NanoKVM with signed app and system updates, Buildroot 2026.05.1, Linux 5.10.272, OpenSSH 10.6p2, guarded raw updates, firewall modes, mobile view, and safer web administration."
     />
     <meta
       name="google-site-verification"
@@ -366,7 +366,7 @@
         <div class="nav-links">
           <a href="https://github.com/woffko/Hardened_NanoKVM">Repository</a>
           <a href="https://github.com/woffko/Hardened_NanoKVM/releases">Releases</a>
-          <a href="https://github.com/woffko/Hardened_NanoKVM/blob/main/README.md">Docs</a>
+          <a href="https://github.com/woffko/Hardened_NanoKVM/blob/security/2.1.0-fixes/README.md">Docs</a>
           <a href="https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html">NanoKVM</a>
         </div>
       </nav>
@@ -379,13 +379,14 @@
         <p class="lead">
           A beta firmware fork focused on a smaller Rust web backend, signed
           updates, local-use firewall defaults, mobile and tablet browser
-          usability, and safer administration. RC12 adds a production update
-          trust transition, Buildroot 2026.05.1, and a reviewed SG2002 port of
-          Linux 5.10.265 while keeping physical recovery explicit.
+          usability, and safer administration. RC16 fixes an SSH authentication
+          bypass that affects every release before RC15, and carries OpenSSH
+          10.6p2, Buildroot 2026.05.1, and a reviewed SG2002 port of Linux
+          5.10.272 while keeping physical recovery explicit.
         </p>
         <div class="actions">
-          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12"
-            >Download RC12</a
+          <a class="button" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.4.0-raw.6"
+            >Download RC16</a
           >
           <a class="button secondary" href="https://github.com/woffko/Hardened_NanoKVM"
             >View source</a
@@ -397,26 +398,28 @@
     <aside class="shell status-row" aria-label="Current project status">
       <div class="status">
         <strong>App channel</strong>
-        <span>Latest: app 2.0.42 RC12 with production-key signed metadata.</span>
+        <span>Latest: app 2.1.7 RC16, signed with the production key. Only that key is trusted.</span>
       </div>
       <div class="status">
         <strong>System channel</strong>
-        <span>Preview: 0.3.0-raw.12 on Buildroot 2026.05.1 and Linux 5.10.265. Stable remains 0.2.23-raw.1.</span>
+        <span>Stable and preview: 0.4.0-raw.6 on Buildroot 2026.05.1 and Linux 5.10.272.</span>
       </div>
       <div class="status">
         <strong>Hardware test</strong>
-        <span>RC12 passed signed-raw, full-SD expansion, reboot, runtime, and physical recovery-round-trip gates.</span>
+        <span>RC16 passed offline and online updates on three test devices, with video checked on the two that have an HDMI source. Physical recovery was not retested.</span>
       </div>
     </aside>
 
     <main class="shell">
       <section class="warning">
-        <strong>Important upgrade order:</strong> existing installations must
-        manually install application <strong>2.0.42 first</strong> through
-        Settings &gt; Update &gt; Offline Update, confirm that version after
-        restart, and only then enable Preview and install system
-        <strong>0.3.0-raw.12</strong>. A manually flashed RC12 SD image already
-        contains app 2.0.42 and does not need the separate bridge step.
+        <strong>Security update:</strong> every release before RC15 is affected
+        by an SSH authentication bypass (CVE-2026-123158) while SSH is enabled.
+        Install application <strong>2.1.7 first</strong> through Settings &gt;
+        Update, confirm that version after the restart, and only then install
+        system <strong>0.4.0-raw.6</strong>. Do not install RC15 (2.1.5): its
+        video stream does not work on a device with an HDMI source. An
+        installation older than application 2.0.42 takes the 2.0.42 trust
+        bridge first. A manually flashed RC16 SD image already contains both.
       </section>
 
       <section>
@@ -449,8 +452,8 @@
             <p>
               Application and system channels use signed metadata, archive verification,
               guarded installs, and explicit separation between app and raw system updates.
-              RC12 adds a production-key trust bridge and preserves the required
-              app-first order for existing installations.
+              Since RC15 only the production key is trusted, and the app-first
+              order for existing installations is enforced by the system update.
             </p>
           </article>
           <article class="card">
@@ -486,10 +489,11 @@
             </p>
           </article>
           <article class="card">
-            <h3>Buildroot and Linux security preview</h3>
+            <h3>Buildroot and Linux security base</h3>
             <p>
-              The optional raw/SD preview uses Buildroot 2026.05.1 and Linux
-              5.10.265-tag- with restricted dmesg, disabled user namespaces,
+              The raw update and SD image use Buildroot 2026.05.1 and Linux
+              5.10.272-tag- with OpenSSH 10.6p2, locked service accounts,
+              no-exec temporary directories, restricted dmesg, disabled user namespaces,
               SLUB freelist randomisation, and heap initialization on allocation.
             </p>
           </article>
@@ -500,31 +504,31 @@
         <div class="section-head">
           <h2>Current Downloads</h2>
           <p>
-            RC12 is one combined release, while the manual trust bridge and
-            system Preview channel remain independently controlled. Existing
-            installations must install app 2.0.42 first; stable system remains RC9.
+            RC16 is one combined release. The stable and preview channels both
+            carry it, so Preview Updates is not needed. Existing installations
+            install app 2.1.7 first.
           </p>
         </div>
         <article class="release">
           <div>
-            <h3>Combined 2.0.42 RC12 release</h3>
+            <h3>Combined 2.1.7 RC16 release</h3>
             <p>
               One verified release containing the app update, production-signed
-              raw.12 bundle, Buildroot 2026.05.1/Linux 5.10.265 SD image,
+              raw.6 bundle, Buildroot 2026.05.1/Linux 5.10.272 SD image,
               detached signatures, checksums, changes, and recovery limits.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12"
-            >RC12 + raw.12</a
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.4.0-raw.6"
+            >RC16 + raw.6</a
           >
         </article>
         <article class="release">
           <div>
-            <h3>Manual trust bridge — install first</h3>
+            <h3>Manual trust bridge — only for installations older than 2.0.42</h3>
             <p>
-              App 2.0.42 retains historical trust, adds the production public
-              key and an explicit three-ID policy. Verify the archive SHA-256
-              before authenticated Offline Update.
+              App 2.0.42 adds the production public key to an older
+              installation, which can then take RC16. Verify the archive
+              SHA-256 before authenticated Offline Update.
             </p>
           </div>
           <a
@@ -535,31 +539,32 @@
         </article>
         <article class="release">
           <div>
-            <h3>Buildroot 2026.05.1 + Linux 5.10.265 preview</h3>
+            <h3>System 0.4.0-raw.6: Buildroot 2026.05.1 + Linux 5.10.272</h3>
             <p>
-              System 0.3.0-raw.12 requires app 2.0.42 and updates both userspace
-              and the SG2002 kernel port. Use only with physical recovery access.
+              System 0.4.0-raw.6 requires app 2.1.7 and carries OpenSSH 10.6p2.
+              A system older than 0.3.0-raw.12 takes 0.3.0-raw.12 first. Use
+              only with physical recovery access.
+            </p>
+          </div>
+          <a
+            class="tag"
+            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.4.0-raw.6"
+            >system 0.4.0-raw.6</a
+          >
+        </article>
+        <article class="release">
+          <div>
+            <h3>Bridge system for old installations</h3>
+            <p>
+              System 0.3.0-raw.12 is the oldest system that RC16 can restore
+              its settings from. An older system installs it first, together
+              with app 2.0.42.
             </p>
           </div>
           <a
             class="tag"
             href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.3.0-raw.12"
-            >system preview</a
-          >
-        </article>
-        <article class="release">
-          <div>
-            <h3>Stable system fallback</h3>
-            <p>
-              The stable raw channel intentionally remains on RC9 system
-              0.2.23-raw.1 while RC12 Buildroot/kernel compatibility feedback
-              is collected.
-            </p>
-          </div>
-          <a
-            class="tag"
-            href="https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.2.23-raw.1"
-            >stable 0.2.23</a
+            >system 0.3.0-raw.12</a
           >
         </article>
         <article class="release">
@@ -572,7 +577,7 @@
           </div>
           <a
             class="tag"
-            href="https://github.com/woffko/Hardened_NanoKVM/blob/main/docs/sd-card-flashing.md"
+            href="https://github.com/woffko/Hardened_NanoKVM/blob/security/2.1.0-fixes/docs/sd-card-flashing.md"
             >flash SD</a
           >
         </article>
@@ -583,7 +588,7 @@
               Detailed changelog, release history, channel policy, and superseded lab builds.
             </p>
           </div>
-          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/blob/main/docs/release-archive.md"
+          <a class="tag" href="https://github.com/woffko/Hardened_NanoKVM/blob/security/2.1.0-fixes/docs/release-archive.md"
             >release archive</a
           >
         </article>
@@ -625,11 +630,12 @@
       <section class="warning">
         Hardened NanoKVM is beta/lab firmware. Read the release notes before installing,
         keep the original SD card or a known-good backup, and do not enable raw system
-        updates without physical recovery access. RC12 passed the signed raw
-        update path, exact app 2.0.40/raw.10 bridge, full-SD expansion and
-        runtime, two post-expansion reboots, pristine raw.10 recovery, and final
-        return to the accepted RC12 card. The previously waived HDMI/Wi-Fi/HID
-        physical matrix is not presented as newly tested. Some
+        updates without physical recovery access. RC16 passed the signed
+        application and raw update paths on three test devices, offline and
+        from the public channels, with SSH kept across updates and video
+        checked on the devices that have an HDMI source. A boot from a freshly
+        written RC16 SD image, recovery from an SD card, power loss during an
+        update, and the H.264 and WebRTC streams were not tested. Some
         retained vendor components have <code>NOASSERTION</code> licensing metadata;
         see the release notes and vendor-input manifest.
       </section>
