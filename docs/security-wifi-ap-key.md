@@ -40,8 +40,11 @@ These live in `S30wifi`, which is digest-bound in the support catalog. A change
 ships only with a support transition or a full image:
 
 - hostapd gets `wpa=2` without `rsn_pairwise=CCMP`, so TKIP is not excluded;
-- `/etc/hostapd.conf`, which holds the key, is created with the default mode;
 - the AP has no timeout, and open networks have no explicit mode.
+
+Since RC15 `/etc/hostapd.conf` and `/etc/wpa_supplicant.conf`, which hold the
+key, are written with mode 0600, and the plain passphrase is no longer kept as
+a comment.
 
 A provisioning token separate from the WPA2 passphrase, and the headless or
 no-OLED claim channel, are WP-09 owner decisions.

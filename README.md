@@ -239,8 +239,8 @@ https://github.com/woffko/Hardened_NanoKVM/releases/latest/download/latest.json
 ```
 
 The metadata points to a versioned app archive such as
-`hardened-nanokvm-kvmapp-2.0.42.tar.gz` on the combined
-`hardened-system-0.3.0-raw.12` release tag.
+`hardened-nanokvm-kvmapp-2.1.7.tar.gz` on the combined
+`hardened-system-0.4.0-raw.6` release tag.
 The device verifies signed metadata and the archive sha512 before
 installing. The preview toggle uses the `hardened-rust-preview` channel
 metadata, but it still installs the versioned archive named by that metadata.
@@ -287,7 +287,7 @@ The Preview Updates switch is shared with application updates, but it does not
 replace the separate **Allow raw system updates** safety switch.
 
 That channel metadata points to a versioned raw-system tag such as
-`hardened-system-0.2.23-raw.1`, which contains:
+`hardened-system-0.4.0-raw.6`, which contains:
 
 - `hardened-nanokvm-system-<version>.tar.gz`;
 - `system-latest.json` and signature files;
@@ -435,10 +435,10 @@ When the Rust backend is active,
 - Online update checks read Hardened release metadata from
   `github.com/woffko/Hardened_NanoKVM` and install versioned release archives
   after signed metadata and payload hash verification.
-- GUI system updates can stage, verify, install, and confirm boot-good. The
-  `0.3.0-raw.10` preview carries the Buildroot `2026.05.1` userspace port while
-  retaining vendor kernel `5.10.4-tag-`; the future `5.10.265` kernel merge is
-  still pending recoverable-media validation.
+- GUI system updates can stage, verify, install, and confirm boot-good. System
+  `0.4.0-raw.6` carries the Buildroot `2026.05.1` userspace and the reviewed
+  SG2002 port of Linux `5.10.272`. A raw update has no automatic rollback:
+  recovery is a reflash.
 - Remote ISO download remains disabled by default and needs a final production
   policy before it should be treated as generally safe.
 - First-boot/account setup is implemented for Rust/Hardened images. Existing
