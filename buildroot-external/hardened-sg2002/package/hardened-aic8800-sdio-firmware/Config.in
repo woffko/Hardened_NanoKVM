@@ -1,0 +1,7 @@
+config BR2_PACKAGE_HARDENED_AIC8800_SDIO_FIRMWARE
+	bool "AIC8800 SDIO Wi-Fi firmware (vendor port input)"
+	depends on BR2_riscv
+	help
+	  Install the immutable AIC8800 firmware input under
+	  /usr/lib/firmware/aic8800_sdio. It is disabled by default because the
+	  matching kernel driver and license review are not yet part of the port.

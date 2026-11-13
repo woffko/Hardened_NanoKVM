@@ -1,0 +1,7 @@
+{
+  "version": "0.3.0-raw.11",
+  "target": "sg2002-licheervnano-sd",
+  "base_version": "Buildroot 2026.05.1 port",
+  "kernel_version": "5.10.4-tag-",
+  "security_patch_level": "Buildroot 2026.05.1 security maintenance; vendor kernel 5.10.4"
+}

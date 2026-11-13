@@ -6,6 +6,20 @@ usb_wakeup_enabled() {
     [ -e /boot/usb.wakeup ]
 }
 
+# A vendor or product ID from /boot, or the default when the file does not hold
+# exactly one 16-bit hexadecimal number, with or without a DOS line ending.
+usb_id() {
+    value=""
+    if [ -f "$1" ]; then
+        IFS= read -r value < "$1" || true
+        value="${value%"$(printf '\r')"}"
+    fi
+    case "$value" in
+        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) printf '%s\n' "$value" ;;
+        *) printf '%s\n' "$2" ;;
+    esac
+}
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -18,18 +32,8 @@ start_usb_dev(){
     echo 0x0623 > bcdDevice
     # echo 0x3346 > idVendor
     # echo 0x1009 > idProduct
-    if [ -e /boot/usb.vid ]
-    then
-        cat /boot/usb.vid > idVendor
-    else
-        echo 0x3346 > idVendor
-    fi
-    if [ -e /boot/usb.pid ]
-    then
-        cat /boot/usb.pid > idProduct
-    else
-        echo 0x1009 > idProduct
-    fi
+    usb_id /boot/usb.vid 0x3346 > idVendor
+    usb_id /boot/usb.pid 0x1009 > idProduct
     mkdir strings/0x409
     # echo '0' > strings/0x409/serialnumber
     echo 'sipeed' > strings/0x409/manufacturer

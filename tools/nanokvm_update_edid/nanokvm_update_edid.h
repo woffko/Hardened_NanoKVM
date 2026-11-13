@@ -1,7 +1,9 @@
 #ifndef NANOKVM_UPDATE_EDID_H
 #define NANOKVM_UPDATE_EDID_H
 
+#ifndef I2C_DEVICE
 #define I2C_DEVICE          "/dev/i2c-4"    // I2C 设备文件
+#endif
 #define EDID_BUFFER_SIZE    256             // 最大支持的字节数
 
 #define I2C_ADDRESS             0x2b            // I2C 设备地址（根据实际设备调整）
@@ -25,8 +27,16 @@
 #define LT6911C_WR_SIZE         16              // LT6911C单次读写最大字节数
 #define LT6911D_WR_SIZE         32              // LT6911D单次读写最大字节数
 
+#ifndef VERSION_PATH
 #define VERSION_PATH "/etc/kvm/hdmi_version"
+#endif
+#ifndef PRODUCT_PATH
 #define PRODUCT_PATH "/etc/kvm/hw"
+#endif
+// Where the EDID that the chip holds is saved before it is erased.
+#ifndef EDID_BACKUP_DIR
+#define EDID_BACKUP_DIR "/data"
+#endif
 
 typedef enum {
     CHIP_LT6911UXC = 0,

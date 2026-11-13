@@ -13,6 +13,8 @@ const en = {
       placeholderUsername: 'Username',
       placeholderPassword: 'Password',
       placeholderPassword2: 'Please enter password again',
+      placeholderCurrentPassword: 'Current password',
+      wrongCurrentPassword: 'The current password is incorrect',
       noEmptyUsername: 'Username required',
       noEmptyPassword: 'Password required',
       noAccount: 'Failed to get user information, please refresh web page or reset password',
@@ -34,6 +36,8 @@ const en = {
       setupDescription:
         'No web account exists on this device yet. Create the first administrator account to continue.',
       setupRecovery: 'If this password is lost, recovery requires reflashing the SD card.',
+      claimPlaceholder: 'First-boot claim token: serial console, or /etc/kvm/first-boot-claim',
+      claimRequired: 'Enter the one-time claim token shown on the device',
       setupButtonText: 'Create account',
       tips: {
         reset1: 'Password recovery for this Hardened image requires reflashing the SD card.',
@@ -245,7 +249,10 @@ const en = {
       confirm: 'Yes',
       cancel: 'No',
       delete: 'Delete',
-      close: 'Close'
+      close: 'Close',
+      unlockDesc:
+        'Scripts run as root on NanoKVM. Enter your web account password to upload or run one.',
+      terminalRequired: 'Scripts need web terminal access. Enable the terminal in settings first.'
     },
     terminal: {
       title: 'Terminal',
@@ -426,7 +433,9 @@ const en = {
           no: 'No',
           scriptName: 'Autostart Script Name',
           scriptContent: 'Autostart Script Content',
-          settings: 'Settings'
+          settings: 'Settings',
+          notExecuted:
+            'This image does not run autostart scripts. Files saved here are kept but never executed.'
         },
         hidOnly: 'HID-Only Mode',
         hidOnlyDesc: 'Stop emulating virtual devices, retaining only basic HID control',
@@ -749,6 +758,7 @@ const en = {
         cancel: 'Cancel',
         preview: 'Preview Updates',
         previewDesc: 'Get early access to new features and improvements',
+        previewChannels: 'Controls both application and system preview channels',
         previewTip:
           'Please be aware that preview releases may contain bugs or incomplete functionality!',
         application: {
@@ -757,6 +767,9 @@ const en = {
         system: {
           title: 'System Update',
           queryFailed: 'Get system version failed',
+          appUpdateRequired:
+            'Update the application to {{version}} before installing this system update.',
+          requiredAppVersion: 'Required application version',
           downloadFailed: 'Download or verification failed',
           rawEnable: 'Allow raw system updates',
           rawEnableDesc:

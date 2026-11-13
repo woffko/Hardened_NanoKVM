@@ -1,0 +1,12 @@
+config BR2_PACKAGE_HARDENED_SG2002_VENDOR_RUNTIME
+	bool "SG2002 vendor MMF/kernel runtime (lab input)"
+	depends on BR2_RISCV_64
+	depends on BR2_HARDENED_SG2002_VENDOR_ABI_READY
+	select BR2_PACKAGE_HARDENED_NANOKVM_KVMAPP
+	help
+	  Install the prepared /mnt/system vendor BSP runtime and the pinned
+	  OpenCV/protobuf dependency closure needed by the current libkvm build.
+
+	  This input is generated from the pinned vendor rootfs and is restricted
+	  to recoverable-media testing. It is not approved for redistribution or
+	  a stable raw update.

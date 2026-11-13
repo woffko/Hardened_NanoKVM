@@ -27,6 +27,7 @@ export type SystemLatest = {
   url: string;
   releaseNotesUrl: string;
   securityPatchLevel?: string | null;
+  requiredAppVersion?: string | null;
 };
 
 export type SystemStagedUpdate = {
@@ -40,6 +41,7 @@ export type SystemStagedUpdate = {
   baseVersion: string;
   kernelVersion: string;
   securityPatchLevel?: string | null;
+  requiredAppVersion?: string | null;
   requiredFreeBytes: number;
   requiresReboot: boolean;
   fileCount: number;
@@ -76,6 +78,7 @@ export type SystemRollbackInfo = {
 
 export type SystemBootHealth = {
   backendRunning: boolean;
+  rebooted: boolean;
   versionMatchesPending: boolean;
   bootMarkerPresent: boolean;
   webRootPresent: boolean;
@@ -154,6 +157,11 @@ export function update() {
   });
 }
 
+// observe the installer transaction of an app update
+export function getUpdateJob(transactionId: string) {
+  return http.get(`/api/application/update/jobs/${encodeURIComponent(transactionId)}`);
+}
+
 // offline update application
 export function offlineUpdate(data: FormData) {
   const baseUrl = getBaseUrl('http');
@@ -161,6 +169,7 @@ export function offlineUpdate(data: FormData) {
   const csrfToken = getCsrfToken();
   return fetch(url, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
     body: data
   });

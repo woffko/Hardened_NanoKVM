@@ -1,0 +1,13 @@
+# Hardened NanoKVM provisions the root password through the authenticated web
+# account setup/change flow. Permit that managed root account to use SSH while
+# continuing to reject empty passwords.
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+PermitEmptyPasswords no
+# No transport compression: the LZ77 side channel and the inflation bound
+# fixed in OpenSSH 10.6 are not reachable, and nothing here needs it.
+Compression no
+UsePAM no
+
+Subsystem sftp /usr/libexec/sftp-server

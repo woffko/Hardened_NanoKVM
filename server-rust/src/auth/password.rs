@@ -1,9 +1,4 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -11,7 +6,12 @@ use argon2::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, Result};
+use crate::{
+    AppError, Result,
+    auth::credential_txn::{self, Change, CredentialFiles},
+    system::command::AllowedCommand,
+    update::state_writers::AccountPermit,
+};
 
 pub const LEGACY_DEFAULT_USERNAME: &str = "admin";
 pub const LEGACY_DEFAULT_PASSWORD: &str = "admin";
@@ -22,14 +22,74 @@ pub struct Account {
     pub password: String,
 }
 
+/// The web account file and root's entry in `/etc/shadow`, which change together.
 #[derive(Debug)]
 pub struct AccountStore {
     path: PathBuf,
+    shadow: PathBuf,
+    passwd: PathBuf,
+    #[cfg(test)]
+    root_hasher: Option<PathBuf>,
 }
 
 impl AccountStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            shadow: PathBuf::from(credential_txn::SHADOW_FILE),
+            passwd: PathBuf::from(credential_txn::PASSWD_FILE),
+            #[cfg(test)]
+            root_hasher: None,
+        }
+    }
+
+    /// Host fixture: a temporary shadow file, the `passwd` file beside it, and a
+    /// program standing in for `mkpasswd`.
+    #[cfg(test)]
+    pub(crate) fn fixture(path: PathBuf, shadow: PathBuf, root_hasher: PathBuf) -> Self {
+        Self {
+            path,
+            passwd: shadow.with_file_name("passwd"),
+            shadow,
+            root_hasher: Some(root_hasher),
+        }
+    }
+
+    fn credentials(&self) -> CredentialFiles {
+        CredentialFiles {
+            shadow: self.shadow.clone(),
+            account: self.path.clone(),
+        }
+    }
+
+    /// The program that hashes root's password: BusyBox `mkpasswd`.
+    pub(crate) fn root_hasher(&self) -> AllowedCommand {
+        #[cfg(test)]
+        if let Some(path) = &self.root_hasher {
+            return AllowedCommand::CustomForTest(path.clone());
+        }
+        AllowedCommand::Mkpasswd
+    }
+
+    /// Use the committed application's script, not the previous boot's copy.
+    /// The script preserves stopped/disabled SSH; failures block publication
+    /// of a new password hash when this runs before the credential transaction.
+    pub(crate) async fn refresh_ssh(&self, permit: &AccountPermit) -> Result<()> {
+        let command = AllowedCommand::ServiceSshdKvmapp;
+        #[cfg(test)]
+        let command = match &self.root_hasher {
+            Some(path) => AllowedCommand::CustomForTest(path.with_file_name("ssh-service")),
+            None => command,
+        };
+        let output = permit
+            .command(command, ["refresh"], std::time::Duration::from_secs(10))
+            .await?;
+        if output.status != 0 {
+            return Err(AppError::Internal(
+                "SSH account protection refresh failed".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn exists(&self) -> bool {
@@ -46,14 +106,47 @@ impl AccountStore {
         Ok(Some(account))
     }
 
-    pub fn set_account(&self, username: &str, password: &str) -> Result<()> {
+    /// Set root's password hash and the web account as one journaled change.
+    /// `root_hash` is the SHA-512 crypt(3) string of the same password.
+    pub(crate) fn replace_credentials(
+        &self,
+        _permit: &AccountPermit,
+        change: Change,
+        username: &str,
+        password: &str,
+        root_hash: &str,
+    ) -> Result<()> {
         validate_username(username)?;
         validate_password(password)?;
         let hash = hash_password(password)?;
-        self.write_account(username, &hash)
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        credential_txn::replace(
+            &self.credentials(),
+            change,
+            &account_file(username, &hash)?,
+            root_hash,
+        )
     }
 
-    pub fn seed_legacy_default_account(&self) -> Result<bool> {
+    /// A journal or scratch file of an interrupted credential change exists.
+    pub(crate) fn credential_recovery_pending(&self) -> bool {
+        self.credentials().recovery_pending()
+    }
+
+    /// Restore the stores of an interrupted change; `Ok(true)` if one was undone.
+    pub(crate) fn recover_credentials(&self, _permit: &AccountPermit) -> Result<bool> {
+        credential_txn::recover(&self.credentials())
+    }
+
+    /// Lock the service accounts whose shadow field holds no hash; see
+    /// `credential_txn::lock_service_accounts`. Returns their names.
+    pub(crate) fn lock_service_accounts(&self, _permit: &AccountPermit) -> Result<Vec<String>> {
+        credential_txn::lock_service_accounts(&self.credentials(), &self.passwd)
+    }
+
+    pub(crate) fn seed_legacy_default_account(&self, _permit: &AccountPermit) -> Result<bool> {
         if self.exists() {
             return Ok(false);
         }
@@ -63,23 +156,20 @@ impl AccountStore {
     }
 
     fn write_account(&self, username: &str, hash: &str) -> Result<()> {
-        let account = Account {
-            username: username.to_string(),
-            password: hash.to_string(),
-        };
-        let data = serde_json::to_vec(&account)
-            .map_err(|err| AppError::Internal(format!("account serialization failed: {err}")))?;
-        write_account_0600(&self.path, &data)
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        credential_txn::write_private(&self.path, &account_file(username, hash)?)
     }
 
+    /// The stored hash is checked even for a wrong username, so the reply
+    /// time does not reveal whether the username exists.
     pub fn verify(&self, username: &str, password: &str) -> Result<bool> {
         let Some(account) = self.load()? else {
             return Ok(false);
         };
-        if account.username != username {
-            return Ok(false);
-        }
-        verify_password(&account.password, password)
+        let password_matches = verify_password(&account.password, password)?;
+        Ok(password_matches && account.username == username)
     }
 }
 
@@ -126,7 +216,7 @@ fn validate_username(username: &str) -> Result<()> {
     if username.is_empty() || username.len() > 64 {
         return Err(AppError::BadRequest("invalid username".to_string()));
     }
-    if username.contains(['\'', '"', '\\', '/']) {
+    if username.contains(['\'', '"', '\\', '/']) || username.chars().any(char::is_control) {
         return Err(AppError::BadRequest("invalid username".to_string()));
     }
     Ok(())
@@ -138,29 +228,137 @@ fn validate_password(password: &str) -> Result<()> {
             "password must be between 8 and 256 characters".to_string(),
         ));
     }
+    if password.contains(['\0', '\r', '\n']) {
+        return Err(AppError::BadRequest(
+            "password must not contain NUL, CR, or LF".to_string(),
+        ));
+    }
     Ok(())
 }
 
-fn write_account_0600(path: &PathBuf, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+/// The complete web account file for `username` and its password hash.
+fn account_file(username: &str, hash: &str) -> Result<Vec<u8>> {
+    let account = Account {
+        username: username.to_string(),
+        password: hash.to_string(),
+    };
+    let mut data = serde_json::to_vec(&account)
+        .map_err(|err| AppError::Internal(format!("account serialization failed: {err}")))?;
+    data.push(b'\n');
+    Ok(data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_preflight_rejects_password_protocol_delimiters_after_decoding() {
+        let encoded = [
+            "synthetic%0Apassword",
+            "synthetic%0Dpassword",
+            "synthetic%00password",
+            "synthetic%0D%0Apassword",
+        ];
+        let rejected = encoded
+            .iter()
+            .filter(|value| {
+                let password = crate::auth::compat_crypto::decode_frontend_password(value).unwrap();
+                matches!(
+                    validate_account_credentials("operator", &password),
+                    Err(AppError::BadRequest(_))
+                )
+            })
+            .count();
+        assert_eq!(rejected, encoded.len());
+    }
+
+    #[test]
+    fn credential_preflight_rejects_username_control_characters() {
+        let controls = ['\0', '\n', '\r', '\t', '\x1b', '\x7f', '\u{85}'];
+        let rejected = controls
+            .iter()
+            .filter(|control| {
+                let username = format!("oper{control}ator");
+                matches!(
+                    validate_account_credentials(&username, "synthetic password"),
+                    Err(AppError::BadRequest(_))
+                )
+            })
+            .count();
+        assert_eq!(rejected, controls.len());
+    }
+
+    #[test]
+    fn credential_preflight_preserves_supported_passwords_and_byte_limits() {
+        for username in ["operator", "оператор", "操作员"] {
+            for password in [
+                "synthetic password with spaces",
+                r#"synthetic "quotes" 'spaces' \ ;$()&| password"#,
+                "синтетический пароль",
+                "synthetic\tpassword",
+            ] {
+                validate_account_credentials(username, password).unwrap();
+            }
+        }
+        validate_account_credentials(&"a".repeat(64), &"é".repeat(128)).unwrap();
+        for (username, password) in [
+            ("".to_string(), "synthetic password".to_string()),
+            ("a".repeat(65), "synthetic password".to_string()),
+            ("operator".to_string(), "a".repeat(7)),
+            ("operator".to_string(), "é".repeat(129)),
+        ] {
+            assert!(validate_account_credentials(&username, &password).is_err());
+        }
+    }
+
+    #[test]
+    fn credential_preflight_does_not_reject_existing_legacy_password_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("pwd"));
+        let password = "synthetic\nlegacy password";
+        let hash = hash_password_unchecked(password).unwrap();
+        store.write_account("operator", &hash).unwrap();
+        assert!(store.verify("operator", password).unwrap());
+        assert!(
+            !store
+                .verify("operator", "synthetic wrong password")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_wrong_username_still_costs_a_full_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("pwd"));
+        let hash = hash_password_unchecked("synthetic right password").unwrap();
+        store.write_account("operator", &hash).unwrap();
+        assert!(
+            store
+                .verify("operator", "synthetic right password")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .verify("intruder", "synthetic right password")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .verify("operator", "synthetic wrong password")
+                .unwrap()
+        );
+        // An unusable stored hash fails for any username: the hash is always
+        // read and verified, never skipped after a username mismatch.
+        store
+            .write_account("operator", "not-a-password-hash")
+            .unwrap();
+        assert!(
+            store
+                .verify("intruder", "synthetic right password")
+                .is_err()
+        );
+    }
 
     #[test]
     fn argon2_hash_verifies() {
@@ -182,8 +380,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path().join("pwd"));
 
-        assert!(store.seed_legacy_default_account().unwrap());
-        assert!(!store.seed_legacy_default_account().unwrap());
+        let writers = crate::update::state_writers::StateWriters::for_test_parent(
+            std::fs::File::open(dir.path()).unwrap(),
+        );
+        let permit = writers.account().unwrap();
+        assert!(store.seed_legacy_default_account(&permit).unwrap());
+        assert!(!store.seed_legacy_default_account(&permit).unwrap());
         assert!(store.verify("admin", "admin").unwrap());
         assert!(!store.verify("admin", "wrong").unwrap());
     }

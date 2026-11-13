@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+. "$SCRIPT_ROOT/scripts/lib/build-security.sh"
+
 if [ "$#" -ne 4 ]; then
   echo "usage: $0 <version> <tag> <archive> <output-json>" >&2
   exit 1
@@ -11,8 +14,9 @@ TAG="$2"
 ARCHIVE="$3"
 OUTPUT="$4"
 NAME=$(basename "$ARCHIVE")
-SIZE=$(wc -c < "$ARCHIVE" | tr -d ' ')
-SHA512=$(openssl dgst -sha512 -binary "$ARCHIVE" | base64 | tr -d '\n')
+[ -s "$ARCHIVE" ] || { echo "update archive is missing or empty" >&2; exit 1; }
+SIZE=$(wc -c < "$ARCHIVE")
+SHA512=$(build_file_sha512_base64 "$ARCHIVE")
 URL="https://github.com/woffko/Hardened_NanoKVM/releases/download/$TAG/$NAME"
 SIGNING_KEY="${APP_UPDATE_SIGNING_KEY:-${SYSTEM_UPDATE_SIGNING_KEY:-}}"
 
@@ -25,10 +29,20 @@ else
 fi
 
 case "$VERSION" in
-  *[!0-9.]* | .* | *..* | *.)
+  '' | *[!0-9.]* | .* | *..* | *.)
     echo "invalid semver version: $VERSION" >&2
     exit 1
     ;;
+esac
+printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+  echo "invalid semver version: $VERSION" >&2
+  exit 1
+}
+case "$TAG" in
+  '' | *[!A-Za-z0-9._/-]* | /* | *..*) echo "invalid release tag: $TAG" >&2; exit 1 ;;
+esac
+case "$NAME" in
+  *[!A-Za-z0-9._+-]*) echo "invalid update archive name: $NAME" >&2; exit 1 ;;
 esac
 
 case "$NAME" in
@@ -70,7 +84,8 @@ else
   fi
 fi
 
-cat > "$OUTPUT" <<EOF
+build_begin_metadata_output "$OUTPUT" || exit 1
+cat > "$metadata_work/metadata.json" <<EOF
 {
   "version": "$VERSION",
   "name": "$NAME",
@@ -82,11 +97,6 @@ cat > "$OUTPUT" <<EOF
 }
 EOF
 
-sha256sum "$OUTPUT" > "$OUTPUT.sha256"
-
-if [ -n "$SIGNING_KEY" ]; then
-  openssl dgst -sha256 -sign "$SIGNING_KEY" -out "$OUTPUT.sig" "$OUTPUT"
-  base64 "$OUTPUT.sig" | tr -d '\n' > "$OUTPUT.sig.base64"
-fi
+build_publish_metadata_output || exit 1
 
 echo "$OUTPUT"

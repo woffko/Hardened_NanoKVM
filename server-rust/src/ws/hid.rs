@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,7 +22,17 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{AppError, Result, state::AppState, ws::origin::validate_ws_origin};
+use crate::{
+    AppError, Result,
+    http::middleware::{CurrentSession, TransportSession},
+    state::AppState,
+    system::usb,
+    ws::origin::validate_ws_origin,
+};
+
+#[path = "hid_ownership.rs"]
+mod ownership;
+use ownership::{Bus, Endpoint, Lease, Report, Sink};
 
 const HID_KEYBOARD: &str = "/dev/hidg0";
 const HID_MOUSE_RELATIVE: &str = "/dev/hidg1";
@@ -32,6 +43,9 @@ const HID_REOPEN_TIMEOUT: Duration = Duration::from_secs(2);
 const HID_REOPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
 const HID_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const HID_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// At most one USB gadget reset per this interval: each reset also drops
+/// virtual media and the USB network, and it cannot help while the host is off.
+const HID_RECOVERY_COOLDOWN: Duration = Duration::from_secs(60);
 const HID_EVENT_QUEUE_CAPACITY: usize = 200;
 const MAX_WS_MESSAGE_BYTES: usize = 16;
 const MOUSE_JIGGLER_CONFIG: &str = "/etc/kvm/mouse-jiggler";
@@ -45,7 +59,7 @@ const MOUSE_EVENT: u8 = 2;
 const JIGGLER_MODE_RELATIVE: &str = "relative";
 const JIGGLER_MODE_ABSOLUTE: &str = "absolute";
 
-static HID: LazyLock<HidDevices> = LazyLock::new(HidDevices::default);
+static HID: LazyLock<Bus<HidDevices>> = LazyLock::new(|| Bus::new(HidDevices::default()));
 static MOUSE_JIGGLER: LazyLock<Mutex<MouseJiggler>> =
     LazyLock::new(|| Mutex::new(MouseJiggler::from_config()));
 static WS_EVENTS: LazyLock<broadcast::Sender<String>> = LazyLock::new(|| {
@@ -65,7 +79,8 @@ struct HidDevices {
     keyboard: Mutex<Option<File>>,
     relative_mouse: Mutex<Option<File>>,
     absolute_mouse: Mutex<Option<File>>,
-    recovery: Mutex<()>,
+    /// When the last gadget reset was attempted.
+    recovery: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug)]
@@ -78,16 +93,31 @@ struct MouseJiggler {
 
 impl MouseJiggler {
     fn from_config() -> Self {
-        let mode = fs::read_to_string(MOUSE_JIGGLER_CONFIG)
+        Self::from_config_at(Path::new(MOUSE_JIGGLER_CONFIG))
+    }
+
+    fn from_config_at(path: &Path) -> Self {
+        let mode = fs::read_to_string(path)
             .ok()
             .map(|value| normalize_jiggler_mode(value.trim()))
             .unwrap_or_else(|| JIGGLER_MODE_RELATIVE.to_string());
         Self {
-            enabled: Path::new(MOUSE_JIGGLER_CONFIG).exists(),
+            enabled: path.exists(),
             running: false,
             mode,
             last_updated: Instant::now(),
         }
+    }
+
+    /// Mark a loop as running when the jiggler is enabled and none runs yet.
+    /// True means the caller must start that loop.
+    fn claim_loop(&mut self) -> bool {
+        if !self.enabled || self.running {
+            return false;
+        }
+        self.running = true;
+        self.last_updated = Instant::now();
+        true
     }
 }
 
@@ -149,6 +179,18 @@ impl HidDevices {
                                     deadline = Instant::now() + HID_REOPEN_TIMEOUT;
                                     continue;
                                 }
+                                // A skipped reset (host off or asleep, or a
+                                // reset just done) is expected; do not flood.
+                                Err(recovery_err)
+                                    if recovery_err.kind() == io::ErrorKind::WouldBlock =>
+                                {
+                                    tracing::debug!(
+                                        path,
+                                        error = %err,
+                                        reason = %recovery_err,
+                                        "HID recovery skipped after write failure"
+                                    );
+                                }
                                 Err(recovery_err) => {
                                     tracing::warn!(
                                         path,
@@ -181,39 +223,118 @@ impl HidDevices {
     }
 
     fn recover_usb_device(&self, path: &str) -> io::Result<()> {
-        let _guard = self
+        let _gadget_guard = usb::GADGET_LOCK.try_lock().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "USB gadget operation is in progress",
+            )
+        })?;
+        let mut last_reset = self
             .recovery
             .lock()
             .map_err(|_| io::Error::other("hid recovery lock poisoned"))?;
 
-        if usb_udc_is_configured().unwrap_or(false) {
-            return Ok(());
+        let state = read_usb_udc_state().unwrap_or(None);
+        match gadget_reset_decision(state.as_deref(), *last_reset, Instant::now()) {
+            ResetDecision::NotNeeded => return Ok(()),
+            ResetDecision::Skip(reason) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, reason));
+            }
+            ResetDecision::Reset => {}
         }
 
         tracing::warn!(
             path,
+            state = state.as_deref().unwrap_or("unknown"),
             "HID write failed while USB gadget is not configured; resetting USB gadget"
         );
+        *last_reset = Some(Instant::now());
         self.close_all()?;
         run_usb_dev_restart()?;
         wait_for_usb_udc_configured(HID_RECOVERY_TIMEOUT)
     }
 }
 
-pub fn write_keyboard_report(report: &[u8]) -> io::Result<()> {
-    HID.write_keyboard(report)
+impl Sink for HidDevices {
+    fn write(&mut self, report: Report) -> io::Result<()> {
+        match report {
+            Report::Keyboard(report) => self.write_keyboard(&report),
+            Report::Relative(report) => self.write_relative_mouse(&report),
+            Report::Absolute(report) => self.write_absolute_mouse(&report),
+        }
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.close_all()
+    }
 }
 
-pub fn write_relative_mouse_report(report: &[u8]) -> io::Result<()> {
-    HID.write_relative_mouse(report)
+#[derive(Clone)]
+pub(crate) struct InputOwner {
+    lease: Lease<'static, HidDevices>,
 }
 
-pub fn write_absolute_mouse_report(report: &[u8]) -> io::Result<()> {
-    HID.write_absolute_mouse(report)
+pub(crate) fn begin_input() -> io::Result<InputOwner> {
+    Ok(InputOwner {
+        lease: HID.begin()?,
+    })
 }
 
-pub fn close_cached_hid_devices() -> io::Result<()> {
-    HID.close_all()
+/// Statically dispatched action I/O; the real implementation retains a bus
+/// lease, while fixtures inject the same ownership core with a recording sink.
+pub(crate) trait HidReports {
+    fn keyboard(&self, report: &[u8; 8]) -> io::Result<usize>;
+    fn absolute(&self, report: &[u8; 6]) -> io::Result<usize>;
+    fn settle_keyboard(&self) -> io::Result<usize>;
+    fn settle_absolute(&self) -> io::Result<usize>;
+    fn finish(&self) -> io::Result<usize>;
+}
+
+impl HidReports for InputOwner {
+    fn keyboard(&self, report: &[u8; 8]) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write(Report::Keyboard(*report))
+    }
+    fn absolute(&self, report: &[u8; 6]) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write(Report::Absolute(*report))
+    }
+    fn settle_keyboard(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Keyboard, true)
+    }
+    fn settle_absolute(&self) -> io::Result<usize> {
+        self.lease.release(Endpoint::Absolute, true)
+    }
+    fn finish(&self) -> io::Result<usize> {
+        self.lease.finish()
+    }
+}
+
+// The WS executor is statically dispatched over the same ownership bus in
+// production and recording fixtures. Session authority is checked under that
+// bus lock, not only before queueing a blocking write.
+trait WsInput: Clone + Send + Sync + 'static {
+    fn write(&self, report: Report, session: &TransportSession) -> io::Result<usize>;
+    fn release(&self, endpoint: Endpoint) -> io::Result<usize>;
+}
+
+impl WsInput for InputOwner {
+    fn write(&self, report: Report, session: &TransportSession) -> io::Result<usize> {
+        touch_mouse_jiggler();
+        self.lease.write_if(report, || session.is_active())
+    }
+
+    fn release(&self, endpoint: Endpoint) -> io::Result<usize> {
+        self.lease.release(endpoint, false)
+    }
+}
+
+pub async fn close_cached_hid_devices() -> io::Result<()> {
+    // All callers retain run_exclusive's gadget guard, so at most one cache
+    // close is queued. Never wait behind report/recovery I/O on a Tokio worker.
+    tokio::task::spawn_blocking(|| HID.close())
+        .await
+        .map_err(|error| io::Error::other(format!("HID cache close task failed: {error}")))?
 }
 
 pub fn broadcast_event(kind: &str, data: &str) {
@@ -224,43 +345,89 @@ pub fn broadcast_event(kind: &str, data: &str) {
 
 pub async fn connect(
     State(state): State<AppState>,
+    current: Option<Extension<CurrentSession>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse> {
+    let session = TransportSession::capture(&state.config, current)?;
     if !validate_ws_origin(&headers, &state.config) {
         return Err(AppError::Forbidden("invalid websocket origin".to_string()));
     }
 
     Ok(ws
         .max_message_size(MAX_WS_MESSAGE_BYTES)
-        .on_upgrade(handle_socket))
+        .on_upgrade(move |socket| handle_socket(socket, session)))
 }
 
-async fn handle_socket(socket: WebSocket) {
+async fn handle_socket(socket: WebSocket, session: TransportSession) {
+    if !session.is_active() {
+        return;
+    }
+    let Ok(owner) = begin_input() else {
+        return;
+    };
+    handle_socket_owned(socket, session, owner).await;
+}
+
+async fn handle_socket_owned<Owner: WsInput>(
+    socket: WebSocket,
+    session: TransportSession,
+    owner: Owner,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (keyboard_tx, keyboard_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
     let (mouse_tx, mouse_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
-    let keyboard_worker = tokio::spawn(keyboard_worker(keyboard_rx));
-    let mouse_worker = tokio::spawn(mouse_worker(mouse_rx));
-    send_capture_status_snapshot(&mut ws_tx).await;
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(report_worker(
+        keyboard_rx,
+        owner.clone(),
+        session.clone(),
+        &[Endpoint::Keyboard],
+    ));
+    workers.spawn(report_worker(
+        mouse_rx,
+        owner,
+        session.clone(),
+        &[Endpoint::Relative, Endpoint::Absolute],
+    ));
+    send_capture_status_snapshot(&mut ws_tx, &session).await;
 
     let mut event_rx = WS_EVENTS.subscribe();
+    let event_session = session.clone();
     let event_writer = tokio::spawn(async move {
         loop {
-            match event_rx.recv().await {
-                Ok(message) => {
-                    if ws_tx.send(Message::Text(message.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            let message = tokio::select! {
+                biased;
+                _ = event_session.ended() => break,
+                message = event_rx.recv() => match message {
+                    Ok(message) => message,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            let sent = tokio::select! {
+                biased;
+                _ = event_session.ended() => break,
+                sent = ws_tx.send(Message::Text(message.into())) => sent,
+            };
+            if sent.is_err() {
+                break;
             }
         }
     });
 
-    while let Some(message) = ws_rx.next().await {
-        let Ok(message) = message else {
+    let mut clean = true;
+    loop {
+        let message = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            finished = workers.join_next() => {
+                clean &= matches!(finished, Some(Ok(true)));
+                break;
+            }
+            message = ws_rx.next() => message,
+        };
+        let Some(Ok(message)) = message else {
             break;
         };
 
@@ -282,23 +449,29 @@ async fn handle_socket(socket: WebSocket) {
                     continue;
                 }
                 touch_mouse_jiggler();
-                let report = data[1..].to_vec();
-                if keyboard_tx.send(report).await.is_err() {
+                let Ok(report) = data[1..].try_into() else {
+                    continue;
+                };
+                if !enqueue_report(&keyboard_tx, Report::Keyboard(report), &session).await {
                     break;
                 }
             }
             MOUSE_EVENT => match data.len() - 1 {
                 4 => {
                     touch_mouse_jiggler();
-                    let report = data[1..].to_vec();
-                    if mouse_tx.send(report).await.is_err() {
+                    let Ok(report) = data[1..].try_into() else {
+                        continue;
+                    };
+                    if !enqueue_report(&mouse_tx, Report::Relative(report), &session).await {
                         break;
                     }
                 }
                 6 => {
                     touch_mouse_jiggler();
-                    let report = data[1..].to_vec();
-                    if mouse_tx.send(report).await.is_err() {
+                    let Ok(report) = data[1..].try_into() else {
+                        continue;
+                    };
+                    if !enqueue_report(&mouse_tx, Report::Absolute(report), &session).await {
                         break;
                     }
                 }
@@ -311,12 +484,16 @@ async fn handle_socket(socket: WebSocket) {
     drop(keyboard_tx);
     drop(mouse_tx);
     event_writer.abort();
-    let _ = keyboard_worker.await;
-    let _ = mouse_worker.await;
+    let _ = event_writer.await;
+    while let Some(finished) = workers.join_next().await {
+        clean &= matches!(finished, Ok(true));
+    }
+    tracing::debug!(clean, "HID websocket workers joined");
 }
 
 async fn send_capture_status_snapshot(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    session: &TransportSession,
 ) {
     for status in crate::api::stream::capture_status_snapshot() {
         let Ok(data) = serde_json::to_string(&status) else {
@@ -326,7 +503,12 @@ async fn send_capture_status_snapshot(
         else {
             continue;
         };
-        if ws_tx.send(Message::Text(message.into())).await.is_err() {
+        let sent = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            sent = ws_tx.send(Message::Text(message.into())) => sent,
+        };
+        if sent.is_err() {
             break;
         }
     }
@@ -336,71 +518,71 @@ fn ws_event_message(kind: &str, data: &str) -> Option<String> {
     serde_json::to_string(&WsEnvelope { kind, data }).ok()
 }
 
-async fn keyboard_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
-    while let Some(report) = queue.recv().await {
-        if report.len() != 8 {
-            continue;
-        }
-
-        if !write_hid_blocking(move || HID.write_keyboard(&report)).await {
-            drain_hid_queue(&mut queue);
-        }
+async fn enqueue_report(
+    queue: &mpsc::Sender<Report>,
+    report: Report,
+    session: &TransportSession,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = session.ended() => false,
+        sent = queue.send(report) => sent.is_ok(),
     }
-
-    let _ = write_hid_blocking(|| HID.write_keyboard(&[0; 8])).await;
 }
 
-async fn mouse_worker(mut queue: mpsc::Receiver<Vec<u8>>) {
-    let mut absolute_buttons_active = false;
-    let mut absolute_release_report = [0_u8; 6];
-
-    while let Some(report) = queue.recv().await {
-        match report.len() {
-            4 => {
-                if !write_hid_blocking(move || HID.write_relative_mouse(&report)).await {
-                    drain_hid_queue(&mut queue);
-                    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
-                }
+async fn report_worker<Owner: WsInput>(
+    mut queue: mpsc::Receiver<Report>,
+    owner: Owner,
+    session: TransportSession,
+    endpoints: &'static [Endpoint],
+) -> bool {
+    loop {
+        let report = tokio::select! {
+            biased;
+            _ = session.ended() => break,
+            report = queue.recv() => match report {
+                Some(report) => report,
+                None => break,
+            },
+        };
+        if queue.is_closed() || !session.is_active() {
+            break;
+        }
+        let writer = owner.clone();
+        let authority = session.clone();
+        if !write_hid_blocking(move || writer.write(report, &authority)).await {
+            drain_hid_queue(&mut queue);
+            if !finish_ws_input(&owner, endpoints).await {
+                return false;
             }
-            6 => {
-                let release_report = absolute_mouse_release_report(&report);
-                let buttons_active = report.first().copied().unwrap_or_default() != 0;
-                if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
-                    absolute_release_report = release_report;
-                    absolute_buttons_active = buttons_active;
-                } else {
-                    drain_hid_queue(&mut queue);
-                    if absolute_buttons_active {
-                        let report = absolute_release_report;
-                        if write_hid_blocking(move || HID.write_absolute_mouse(&report)).await {
-                            absolute_buttons_active = false;
-                        }
-                    } else if buttons_active {
-                        let _ =
-                            write_hid_blocking(move || HID.write_absolute_mouse(&release_report))
-                                .await;
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
-    let _ = write_hid_blocking(|| HID.write_relative_mouse(&[0; 4])).await;
-    if absolute_buttons_active {
-        let report = absolute_release_report;
-        let _ = write_hid_blocking(move || HID.write_absolute_mouse(&report)).await;
+    // Never execute the revoked/closed connection's pending queue as cleanup.
+    // The current I/O is joined first, then only its owned endpoints compensate.
+    queue.close();
+    finish_ws_input(&owner, endpoints).await
+}
+
+async fn finish_ws_input<Owner: WsInput>(owner: &Owner, endpoints: &[Endpoint]) -> bool {
+    let mut clean = true;
+    for &endpoint in endpoints {
+        let writer = owner.clone();
+        if !write_hid_blocking(move || writer.release(endpoint)).await {
+            clean = false;
+        }
     }
+    clean
 }
 
 async fn write_hid_blocking<F>(write: F) -> bool
 where
-    F: FnOnce() -> io::Result<()> + Send + 'static,
+    F: FnOnce() -> io::Result<usize> + Send + 'static,
 {
-    matches!(tokio::task::spawn_blocking(write).await, Ok(Ok(())))
+    matches!(tokio::task::spawn_blocking(write).await, Ok(Ok(_)))
 }
 
-fn drain_hid_queue(queue: &mut mpsc::Receiver<Vec<u8>>) -> usize {
+fn drain_hid_queue<T>(queue: &mut mpsc::Receiver<T>) -> usize {
     let mut dropped = 0;
     while queue.try_recv().is_ok() {
         dropped += 1;
@@ -460,6 +642,35 @@ fn close_hid_slot(slot: &Mutex<Option<File>>) -> io::Result<()> {
 
 fn usb_udc_is_configured() -> io::Result<bool> {
     Ok(read_usb_udc_state()?.as_deref() == Some("configured"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResetDecision {
+    NotNeeded,
+    Skip(&'static str),
+    Reset,
+}
+
+/// Whether a failed HID write may reset the USB gadget. A reset cannot help
+/// while the host is off ("not attached"), and while it sleeps ("suspended")
+/// it would break wakeup by keyboard. Other states may be a stuck enumeration,
+/// reset at most once per cooldown.
+fn gadget_reset_decision(
+    state: Option<&str>,
+    last_reset: Option<Instant>,
+    now: Instant,
+) -> ResetDecision {
+    match state {
+        Some("configured") => ResetDecision::NotNeeded,
+        Some("not attached") => ResetDecision::Skip("the USB host is not attached"),
+        Some("suspended") => ResetDecision::Skip("the USB host is suspended"),
+        _ if last_reset
+            .is_some_and(|last| now.saturating_duration_since(last) < HID_RECOVERY_COOLDOWN) =>
+        {
+            ResetDecision::Skip("the USB gadget was reset recently")
+        }
+        _ => ResetDecision::Reset,
+    }
 }
 
 fn read_usb_udc_state() -> io::Result<Option<String>> {
@@ -558,14 +769,6 @@ fn write_with_timeout(file: &mut File, report: &[u8]) -> io::Result<()> {
     }
 }
 
-fn absolute_mouse_release_report(position_report: &[u8]) -> [u8; 6] {
-    let mut report = [0_u8; 6];
-    if position_report.len() >= 5 {
-        report[1..5].copy_from_slice(&position_report[1..5]);
-    }
-    report
-}
-
 pub fn mouse_jiggler_snapshot() -> Result<(bool, String)> {
     let state = MOUSE_JIGGLER
         .lock()
@@ -576,27 +779,27 @@ pub fn mouse_jiggler_snapshot() -> Result<(bool, String)> {
 pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
     if enabled {
         let mode = validate_jiggler_mode(mode)?;
-        fs::write(MOUSE_JIGGLER_CONFIG, mode.as_bytes())?;
+        crate::system::files::write_atomic(
+            Path::new(MOUSE_JIGGLER_CONFIG),
+            mode.as_bytes(),
+            0o644,
+        )?;
 
-        let mut should_spawn = false;
-        {
+        let should_spawn = {
             let mut state = MOUSE_JIGGLER
                 .lock()
                 .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
             state.enabled = true;
             state.mode = mode;
             state.last_updated = Instant::now();
-            if !state.running {
-                state.running = true;
-                should_spawn = true;
-            }
-        }
+            state.claim_loop()
+        };
 
         if should_spawn {
             tokio::spawn(mouse_jiggler_loop());
         }
     } else {
-        remove_file_if_exists(MOUSE_JIGGLER_CONFIG)?;
+        crate::system::files::remove_file(Path::new(MOUSE_JIGGLER_CONFIG))?;
         let mut state = MOUSE_JIGGLER
             .lock()
             .map_err(|_| AppError::Internal("mouse jiggler lock poisoned".to_string()))?;
@@ -606,6 +809,19 @@ pub fn set_mouse_jiggler(enabled: bool, mode: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resume a jiggler that was enabled before the backend restarted. Its setting
+/// survives a reboot, so it must run again without being set anew. The frozen
+/// app trial never calls this: it drives no input.
+pub fn start_persisted_mouse_jiggler() {
+    let should_spawn = MOUSE_JIGGLER
+        .lock()
+        .map(|mut state| state.claim_loop())
+        .unwrap_or(false);
+    if should_spawn {
+        tokio::spawn(mouse_jiggler_loop());
+    }
 }
 
 fn touch_mouse_jiggler() {
@@ -639,15 +855,23 @@ async fn mouse_jiggler_loop() {
 }
 
 fn move_mouse_jiggler(mode: &str) -> io::Result<()> {
-    if mode == JIGGLER_MODE_ABSOLUTE {
-        HID.write_absolute_mouse(&[0x00, 0x00, 0x3f, 0x00, 0x3f, 0x00])?;
-        thread::sleep(Duration::from_millis(100));
-        HID.write_absolute_mouse(&[0x00, 0xff, 0x3f, 0xff, 0x3f, 0x00])
+    let owner = begin_input()?;
+    let (first, second) = if mode == JIGGLER_MODE_ABSOLUTE {
+        (
+            Report::Absolute([0x00, 0x00, 0x3f, 0x00, 0x3f, 0x00]),
+            Report::Absolute([0x00, 0xff, 0x3f, 0xff, 0x3f, 0x00]),
+        )
     } else {
-        HID.write_relative_mouse(&[0x00, 0x0a, 0x0a, 0x00])?;
+        (
+            Report::Relative([0x00, 0x0a, 0x0a, 0x00]),
+            Report::Relative([0x00, 0xf6, 0xf6, 0x00]),
+        )
+    };
+    if owner.lease.passive_mouse(first, false)? != 0 {
         thread::sleep(Duration::from_millis(100));
-        HID.write_relative_mouse(&[0x00, 0xf6, 0xf6, 0x00])
+        owner.lease.passive_mouse(second, true)?;
     }
+    Ok(())
 }
 
 fn validate_jiggler_mode(mode: &str) -> Result<String> {
@@ -669,17 +893,62 @@ fn normalize_jiggler_mode(mode: &str) -> String {
     }
 }
 
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_usb_gadget_is_reset_only_when_it_can_help_and_not_too_often() {
+        let now = Instant::now();
+        let recently = now.checked_sub(Duration::from_secs(10));
+        let long_ago = now.checked_sub(HID_RECOVERY_COOLDOWN + Duration::from_secs(1));
+        assert_eq!(
+            gadget_reset_decision(Some("configured"), None, now),
+            ResetDecision::NotNeeded
+        );
+        for state in ["not attached", "suspended"] {
+            assert!(matches!(
+                gadget_reset_decision(Some(state), None, now),
+                ResetDecision::Skip(_)
+            ));
+        }
+        for state in [Some("default"), Some("addressed"), Some("powered"), None] {
+            assert_eq!(
+                gadget_reset_decision(state, None, now),
+                ResetDecision::Reset
+            );
+            assert_eq!(
+                gadget_reset_decision(state, long_ago, now),
+                ResetDecision::Reset
+            );
+            if recently.is_some() {
+                assert!(matches!(
+                    gadget_reset_decision(state, recently, now),
+                    ResetDecision::Skip(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_persisted_jiggler_claims_one_loop_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mouse-jiggler");
+        let mut absent = MouseJiggler::from_config_at(&path);
+        assert!(!absent.enabled);
+        assert!(!absent.claim_loop());
+
+        fs::write(&path, b"absolute\n").unwrap();
+        let mut persisted = MouseJiggler::from_config_at(&path);
+        assert!(persisted.enabled);
+        assert_eq!(persisted.mode, JIGGLER_MODE_ABSOLUTE);
+        // A restart finds the setting enabled but no loop running.
+        assert!(!persisted.running);
+        assert!(persisted.claim_loop());
+        assert!(persisted.running);
+        // A second start, or enabling it again, does not add a second loop.
+        assert!(!persisted.claim_loop());
+    }
 
     #[test]
     fn validates_jiggler_modes() {

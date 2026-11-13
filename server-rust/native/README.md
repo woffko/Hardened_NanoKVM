@@ -12,4 +12,23 @@ by Rust, but native capture/detection threads still have their own lifecycle.
 Known native lifecycle, VENC, bounds, and hardware-error findings are tracked in
 [`docs/native-code-audit.md`](../../docs/native-code-audit.md).
 
+`dl_lib/libkvm.so` and `dl_lib/libkvm_mmf.so` are built with MaixCDK from those
+sources and from two more files: `peripheral/port/maixcam/maix_i2c.cpp` and the
+vendor file `sophgo-middleware/v2/sample/common/sample_common_sensor.c`. The
+application build only copies the committed libraries, so a source can change
+without them. `library-sources.sha256` records every source and both libraries
+as they were at the last rebuild, and `scripts/native-library-sources.sh check`
+(a host test) fails when either side has moved since. After a rebuild, commit
+the libraries and run `scripts/native-library-sources.sh write`.
+
+The compiler writes source paths into both libraries, in assertion and log
+texts. Build them with `-ffile-prefix-map=<prefix>=<name>` for the MaixCDK
+directory and for this checkout (in the `c_flags` and `cxx_flags` of the
+MaixCDK platform file), so that they do not name the build directory of one
+machine and come out the same wherever the build stands. The check refuses a
+library that names a path under `/home/`.
+
+`kvm_system` is built from `support/sg2002/kvm_system` the same way and is not
+committed: each application build names the binary it packages.
+
 The Rust server is the only supported backend for these runtime assets.

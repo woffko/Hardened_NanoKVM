@@ -1,0 +1,33 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/wpa_supplicant: update to 2.12
+
+wpa_supplicant 2.12 (2026-08-07) contains the w1.fi 2026-1 to 2026-4 fixes,
+among them the PMKSA network-context check (2026-2) the board patch
+wpa_supplicant/2.11/0001 carried until now. The tarball's PGP signature
+verifies with Jouni Malinen's key EC4AA0A991A5F2464582D52D2B6EF432EFC895FA;
+the hash equals the upstream Buildroot master pin and Gentoo's manifest.
+Buildroot's two 2.11 package patches are obsolete (one is in 2.12, the other no
+longer applies) and the preparation script removes them, as upstream master
+did.
+
+diff --git a/package/wpa_supplicant/wpa_supplicant.hash b/package/wpa_supplicant/wpa_supplicant.hash
+--- a/package/wpa_supplicant/wpa_supplicant.hash
++++ b/package/wpa_supplicant/wpa_supplicant.hash
+@@ -1,3 +1,3 @@
+ # Locally calculated
+-sha256  912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a  wpa_supplicant-2.11.tar.gz
+-sha256  f1b5992bbdd015c3ccb7faaadd62ef58ed821e15b9329bf2ceb27511ccc3f562  README
++sha256  08e23937e16d0155e55cab2b51f51fbe10d80a1aa91c4e15442645059b737ef6  wpa_supplicant-2.12.tar.gz
++sha256  83be1b142c59ccf0d6c5dde0695d8f84dfba109bea058e78ec2942389ccf327f  README
+diff --git a/package/wpa_supplicant/wpa_supplicant.mk b/package/wpa_supplicant/wpa_supplicant.mk
+--- a/package/wpa_supplicant/wpa_supplicant.mk
++++ b/package/wpa_supplicant/wpa_supplicant.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-WPA_SUPPLICANT_VERSION = 2.11
++WPA_SUPPLICANT_VERSION = 2.12
+ WPA_SUPPLICANT_SITE = http://w1.fi/releases
+ WPA_SUPPLICANT_LICENSE = BSD-3-Clause
+ WPA_SUPPLICANT_LICENSE_FILES = README

@@ -21,6 +21,7 @@ checkout_ref() {
   local dir="$4"
   local origin_url
   local actual_sha
+  local fetch_target
 
   mkdir -p "$(dirname "$dir")"
 
@@ -42,7 +43,12 @@ checkout_ref() {
     fi
   fi
 
-  git -C "$dir" fetch --depth=1 origin "$ref"
+  fetch_target="$ref"
+  if [ -n "$expected_sha" ]; then
+    fetch_target="$expected_sha"
+  fi
+
+  git -C "$dir" fetch --depth=1 origin "$fetch_target"
   git -C "$dir" checkout --detach --force FETCH_HEAD
 
   actual_sha="$(git -C "$dir" rev-parse HEAD)"

@@ -21,9 +21,13 @@ import type {
 } from '@/api/application.ts';
 import * as firewallApi from '@/api/system-firewall.ts';
 import type { FirewallStatus } from '@/api/system-firewall.ts';
+import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
 
+import { appUpdateMessage, followAppUpdate, pendingAppUpdate } from './job.ts';
+import type { AppUpdateOutcome } from './job.ts';
 import { Offline } from './offline.tsx';
 import { Preview } from './preview.tsx';
+import { canOfferSystemDownload, refusalMessage, stagedMatchesLatest } from './system.ts';
 
 type UpdateProps = {
   setIsLocked: (isClosable: boolean) => void;
@@ -45,14 +49,37 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
   const [systemRollback, setSystemRollback] = useState<SystemRollbackInfo | null>(null);
   const [systemProgress, setSystemProgress] = useState<SystemUpdateProgress | null>(null);
   const [systemErrMsg, setSystemErrMsg] = useState('');
+  // Why the backend refused the download or install that was just asked for.
+  // Unlike a stale record's text, this stays on screen next to a newer offer.
+  const [systemRefusal, setSystemRefusal] = useState('');
+  const [systemAppUpdateRequired, setSystemAppUpdateRequired] = useState(false);
+  const [systemUpdateAvailable, setSystemUpdateAvailable] = useState(false);
   const [systemRawEnabled, setSystemRawEnabled] = useState(false);
   const [systemRawUpdating, setSystemRawUpdating] = useState(false);
   const [firewallStatus, setFirewallStatus] = useState<FirewallStatus | null>(null);
 
   useEffect(() => {
+    const pending = pendingAppUpdate();
+    if (pending) {
+      setIsLocked(true);
+      setStatus('updating');
+      followAppUpdate(pending).then(finishAppUpdate);
+      return;
+    }
     refreshFirewallStatus();
     refreshRawSystemUpdatesEnabled();
   }, []);
+
+  function finishAppUpdate(outcome: AppUpdateOutcome) {
+    setIsLocked(false);
+    const message = appUpdateMessage(outcome, 'settings.update.updateFailed');
+    if (message) {
+      setStatus('failed');
+      setErrMsg(t(message));
+      return;
+    }
+    window.location.reload();
+  }
 
   const onlineUpdatesBlocked = !!firewallStatus?.paranoidActive;
 
@@ -116,7 +143,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
           const isLatest = isVersionAtLeast(rsp.data.current, rsp.data.latest);
           setStatus(isLatest ? 'latest' : 'outdated');
         } else {
-          setStatus('latest');
+          // No answer from the release feed says nothing about being up to date.
+          setStatus('failed');
+          setErrMsg(t('settings.update.queryFailed'));
         }
       })
       .catch(() => {
@@ -135,6 +164,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     if (systemStatus === 'loading') return;
     setSystemStatus('loading');
     setSystemErrMsg('');
+    setSystemRefusal('');
+    setSystemAppUpdateRequired(false);
+    setSystemUpdateAvailable(false);
 
     api
       .checkSystemUpdate()
@@ -147,25 +179,33 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
 
         setSystemCurrent(rsp.data.current);
         setSystemLatest(rsp.data.latest || null);
+        setSystemAppUpdateRequired(!!rsp.data.appUpdateRequired);
+        setSystemUpdateAvailable(!!rsp.data.updateAvailable);
 
         if (rsp.data.error) {
           setSystemStatus('failed');
           setSystemErrMsg(
-            rsp.data.error.includes('Paranoid Firewall')
-              ? t('settings.update.paranoidBlocked')
-              : t('settings.update.system.queryFailed')
+            rsp.data.appUpdateRequired && rsp.data.latest?.requiredAppVersion
+              ? t('settings.update.system.appUpdateRequired', {
+                  version: rsp.data.latest.requiredAppVersion,
+                  defaultValue: `Update the application to ${rsp.data.latest.requiredAppVersion} before installing this system update.`
+                })
+              : rsp.data.error.includes('Paranoid Firewall')
+                ? t('settings.update.paranoidBlocked')
+                : t('settings.update.system.queryFailed')
           );
           return;
         }
 
-        if (rsp.data.latest?.version) {
-          const isLatest = isVersionAtLeast(rsp.data.current.version, rsp.data.latest.version);
-          setSystemStatus(isLatest ? 'latest' : 'outdated');
-        } else {
-          setSystemStatus('latest');
-        }
+        // The backend decides: a listed release that is not newer than the
+        // running system is no update, whatever the channel lists.
+        setSystemStatus(
+          rsp.data.latest?.version && rsp.data.updateAvailable ? 'outdated' : 'latest'
+        );
       })
       .catch(() => {
+        setSystemAppUpdateRequired(false);
+        setSystemUpdateAvailable(false);
         setSystemStatus('failed');
         setSystemErrMsg(t('settings.update.system.queryFailed'));
       })
@@ -174,7 +214,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       });
   }
 
-  function refreshSystemUpdateStatus() {
+  // keepStatus: the backend has just refused, and an older record must not
+  // replace its reason on screen.
+  function refreshSystemUpdateStatus(keepStatus = false) {
     api
       .getSystemUpdateStatus()
       .then((rsp: any) => {
@@ -189,6 +231,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemBootHealth(rsp.data.bootHealth || null);
         setSystemRollback(rsp.data.rollback || null);
         setSystemProgress(progress);
+        if (keepStatus) return;
 
         if (progress?.phase === 'failed') {
           setSystemStatus('failed');
@@ -276,13 +319,18 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     setIsLocked(true);
     setSystemStatus('downloading');
     setSystemErrMsg('');
+    setSystemRefusal('');
+    let refused = false;
 
     api
       .downloadSystemUpdate()
       .then((rsp: any) => {
         if (rsp.code !== 0 || !rsp.data) {
+          refused = true;
+          const reason = refusalMessage(rsp, t('settings.update.system.downloadFailed'));
           setSystemStatus('failed');
-          setSystemErrMsg(t('settings.update.system.downloadFailed'));
+          setSystemErrMsg(reason);
+          setSystemRefusal(reason);
           return;
         }
 
@@ -291,18 +339,22 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemStaged(rsp.data.staged);
         setSystemStatus('staged');
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        // No answer is no refusal: the status that follows may still show the
+        // operation running.
+        const reason = refusalMessage(error, t('settings.update.system.downloadFailed'));
         setSystemStatus('failed');
-        setSystemErrMsg(t('settings.update.system.downloadFailed'));
+        setSystemErrMsg(reason);
+        setSystemRefusal(reason);
       })
       .finally(() => {
-        refreshSystemUpdateStatus();
+        refreshSystemUpdateStatus(refused);
         setIsLocked(false);
       });
   }
 
   function confirmInstallSystemUpdate() {
-    if (!systemStaged || systemStatus === 'installing') return;
+    if (!systemStaged || systemStatus === 'installing' || !stagedAppRequirementMet) return;
 
     Modal.confirm({
       title: t('settings.update.system.installConfirmTitle'),
@@ -324,13 +376,18 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     setIsLocked(true);
     setSystemStatus('installing');
     setSystemErrMsg('');
+    setSystemRefusal('');
+    let refused = false;
 
     return api
       .installSystemUpdate()
       .then((rsp: any) => {
         if (rsp.code !== 0 || !rsp.data) {
+          refused = true;
+          const reason = refusalMessage(rsp, t('settings.update.system.installFailed'));
           setSystemStatus('failed');
-          setSystemErrMsg(t('settings.update.system.installFailed'));
+          setSystemErrMsg(reason);
+          setSystemRefusal(reason);
           return;
         }
 
@@ -338,12 +395,16 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
         setSystemStatus('installed');
         refreshSystemUpdateStatus();
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        // No answer is no refusal: the status that follows may still show the
+        // operation running.
+        const reason = refusalMessage(error, t('settings.update.system.installFailed'));
         setSystemStatus('failed');
-        setSystemErrMsg(t('settings.update.system.installFailed'));
+        setSystemErrMsg(reason);
+        setSystemRefusal(reason);
       })
       .finally(() => {
-        refreshSystemUpdateStatus();
+        refreshSystemUpdateStatus(refused);
         setIsLocked(false);
       });
   }
@@ -433,18 +494,24 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     api
       .update()
       .then((rsp: any) => {
-        if (rsp.code !== 0) {
+        if (rsp.code !== 0 || !rsp.data?.transactionId) {
           setStatus('failed');
-          setErrMsg(t('settings.update.updateFailed'));
-        }
-      })
-      .finally(() => {
-        setTimeout(() => {
+          setErrMsg(rsp.msg || t('settings.update.updateFailed'));
           setIsLocked(false);
-          setErrMsg('');
-
-          window.location.reload();
-        }, 12000);
+          return;
+        }
+        return followAppUpdate(rsp.data.transactionId).then(finishAppUpdate);
+      })
+      .catch(async () => {
+        // No reply: the device may already be restarting for the update, and
+        // without its transaction nothing here can say how that ended.
+        setStatus('restarting');
+        const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
+        setStatus('failed');
+        setErrMsg(
+          t(outcome === 'back' ? 'settings.update.outcomeUnknown' : 'settings.update.unreachable')
+        );
+        setIsLocked(false);
       });
   }
 
@@ -468,22 +535,20 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
     return `${value} B`;
   }
 
-  function stagedMatchesLatest(staged: SystemStagedUpdate | null, latest: SystemLatest | null) {
-    if (!staged || !latest) return true;
-
-    return (
-      staged.version === latest.version &&
-      staged.archiveName === latest.name &&
-      staged.sha256 === latest.sha256
-    );
-  }
-
   const isStagedLatest = stagedMatchesLatest(systemStaged, systemLatest);
-  const canDownloadLatestSystemUpdate =
-    !!systemLatest &&
-    !onlineUpdatesBlocked &&
-    (!systemStaged || !isStagedLatest) &&
-    systemStatus !== 'downloading';
+  const stagedAppRequirementMet =
+    !systemStaged?.requiredAppVersion ||
+    (!!currentVersion && isVersionAtLeast(currentVersion, systemStaged.requiredAppVersion));
+  const canDownloadLatestSystemUpdate = canOfferSystemDownload({
+    latest: systemLatest,
+    staged: systemStaged,
+    updateAvailable: systemUpdateAvailable,
+    blocked: onlineUpdatesBlocked,
+    appUpdateRequired: systemAppUpdateRequired,
+    downloading: systemStatus === 'downloading'
+  });
+  // A staged update stays installable when the listed release offers nothing newer.
+  const offerNewerThanStaged = !isStagedLatest && canDownloadLatestSystemUpdate;
   const showSystemProgress =
     !!systemProgress && !(systemProgress.phase === 'failed' && canDownloadLatestSystemUpdate);
 
@@ -492,7 +557,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
       <div className="text-base">{t('settings.update.title')}</div>
       <Divider className="opacity-50" />
 
-      <Preview checkForUpdates={checkForUpdates} />
+      <Preview refreshUpdates={refreshFirewallStatus} />
       <Offline
         status={status}
         setStatus={setStatus}
@@ -522,6 +587,13 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
           <div className="flex flex-col items-center justify-center space-y-10 pb-10 pt-24">
             <Spin size="large" />
             <span className="text-neutral-500">{t('settings.update.updating')}</span>
+          </div>
+        )}
+
+        {status === 'restarting' && (
+          <div className="flex flex-col items-center justify-center space-y-10 pb-10 pt-24">
+            <Spin size="large" />
+            <span className="text-neutral-500">{t('settings.update.restarting')}</span>
           </div>
         )}
 
@@ -630,14 +702,14 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             />
           )}
 
-          {systemStatus === 'staged' && systemStaged && isStagedLatest && (
+          {systemStatus === 'staged' && systemStaged && !offerNewerThanStaged && (
             <Result
               status="success"
               icon={<CloudSyncOutlined />}
               title={`${systemStaged.version} ${t('settings.update.system.staged')}`}
               subTitle={t('settings.update.system.stagedDesc')}
               extra={[
-                systemLatest?.releaseNotesUrl ? (
+                isStagedLatest && systemLatest?.releaseNotesUrl ? (
                   <Button
                     key="release"
                     href={systemLatest.releaseNotesUrl}
@@ -654,7 +726,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   key="install"
                   type="primary"
                   danger
-                  disabled={systemStaged.destructive && !systemRawEnabled}
+                  disabled={
+                    !stagedAppRequirementMet || (systemStaged.destructive && !systemRawEnabled)
+                  }
                   onClick={confirmInstallSystemUpdate}
                 >
                   {t('settings.update.system.install')}
@@ -663,7 +737,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
             />
           )}
 
-          {systemStatus === 'staged' && systemStaged && !isStagedLatest && systemLatest && (
+          {systemStatus === 'staged' && systemStaged && offerNewerThanStaged && systemLatest && (
             <Result
               status="warning"
               icon={<CloudSyncOutlined />}
@@ -778,7 +852,10 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               icon={<CloudSyncOutlined />}
               title={systemCurrent?.version || t('settings.update.system.title')}
               subTitle={
-                canDownloadLatestSystemUpdate ? t('settings.update.system.available') : systemErrMsg
+                systemRefusal ||
+                (canDownloadLatestSystemUpdate
+                  ? t('settings.update.system.available')
+                  : systemErrMsg)
               }
               extra={[
                 <Button key="refresh" onClick={refreshFirewallStatus}>
@@ -794,7 +871,7 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                     {t('settings.update.system.downloadVerify')}
                   </Button>
                 ) : null,
-                systemStaged && isStagedLatest ? (
+                systemStaged && isStagedLatest && stagedAppRequirementMet ? (
                   <Button
                     key="install"
                     type="primary"
@@ -831,8 +908,22 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
               {versionLine(t('settings.update.system.target'), systemCurrent.target)}
               {systemLatest &&
                 versionLine(t('settings.update.system.latestTarget'), systemLatest.target)}
+              {systemLatest?.requiredAppVersion &&
+                versionLine(
+                  t('settings.update.system.requiredAppVersion', {
+                    defaultValue: 'Required application version'
+                  }),
+                  systemLatest.requiredAppVersion
+                )}
               {systemStaged &&
                 versionLine(t('settings.update.system.stagedVersion'), systemStaged.version)}
+              {systemStaged?.requiredAppVersion &&
+                versionLine(
+                  t('settings.update.system.requiredAppVersion', {
+                    defaultValue: 'Required application version'
+                  }),
+                  systemStaged.requiredAppVersion
+                )}
               {systemStaged?.securityPatchLevel &&
                 versionLine(
                   t('settings.update.system.stagedSecurityPatchLevel'),
@@ -870,7 +961,9 @@ export const Update = ({ setIsLocked }: UpdateProps) => {
                   t('settings.update.system.bootHealth'),
                   systemBootHealth.healthy
                     ? t('settings.update.system.healthy')
-                    : t('settings.update.system.unhealthy')
+                    : systemPending?.requiresReboot && !systemBootHealth.rebooted
+                      ? t('settings.update.system.rebootRequired')
+                      : t('settings.update.system.unhealthy')
                 )}
               {systemPending && systemBootHealth?.healthy && (
                 <div className="flex justify-end pt-2">

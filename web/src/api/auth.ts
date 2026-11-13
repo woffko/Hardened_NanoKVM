@@ -12,10 +12,11 @@ export function getSetupState() {
   return http.get('/api/auth/setup');
 }
 
-export function setupFirstAccount(username: string, password: string) {
+export function setupFirstAccount(username: string, password: string, claim: string) {
   const data = {
     username,
-    password
+    password,
+    claim
   };
   return http.post('/api/auth/setup', data);
 }
@@ -28,10 +29,11 @@ export function getAccount() {
   return http.get('/api/auth/account');
 }
 
-export function changePassword(username: string, password: string) {
+export function changePassword(username: string, password: string, currentPassword: string) {
   const data = {
     username,
-    password
+    password,
+    currentPassword
   };
   return http.post('/api/auth/password', data);
 }

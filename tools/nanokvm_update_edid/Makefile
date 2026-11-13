@@ -1,9 +1,10 @@
-# CROSS_COMPILE = aarch64-none-linux-gnu-
-# CROSS_COMPILE = riscv64-unknown-linux-gnu-
-CROSS_COMPILE = riscv64-unknown-linux-musl-
-# CROSS_COMPILE = riscv64-unknown-elf-
+# The committed binary is built with the MaixCDK Xuantie toolchain; the same
+# command gives the same bytes from any directory.
+TOOLCHAIN ?= $(HOME)/MaixCDK/dl/extracted/toolchains/maixcam/host-tools/gcc/riscv64-linux-musl-x86_64
+CROSS_COMPILE = $(TOOLCHAIN)/bin/riscv64-unknown-linux-musl-
+KVM_INCLUDE = ../../support/sg2002/additional/kvm/include
 
-CFLAGS += -I/usr/local/RISC-V-toolchain/riscv64-linux-musl-x86_64/sysroot/usr/include
+CFLAGS += -I$(TOOLCHAIN)/sysroot/usr/include -I$(KVM_INCLUDE) -march=rv64gc
 
 CC = $(CROSS_COMPILE)gcc
 
@@ -13,8 +14,8 @@ TARGET = nanokvm_update_edid
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) -march=rv64gc -o $@ $^
+$(TARGET): $(SRC) nanokvm_update_edid.h $(KVM_INCLUDE)/i2c_bus_lock.h
+	$(CC) $(CFLAGS) -o $@ $(SRC)
 
 clean:
 	rm -f $(TARGET)

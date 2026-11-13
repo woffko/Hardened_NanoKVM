@@ -24,9 +24,7 @@ export function setConfig(config: SystemLogConfig) {
 }
 
 export function getMessages(kind: SystemLogKind, lines: number) {
-  return http.get('/api/system-log/messages', {
-    params: { kind, lines }
-  });
+  return http.get('/api/system-log/messages', { kind, lines });
 }
 
 export function sendTestMessage() {

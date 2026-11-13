@@ -84,7 +84,7 @@ Phase 1 source provenance is now reconstructed beyond the original inventory:
   Milk-V kernel history;
 - Milk-V `303ec5da` (`linux: version release v4.1.5`) is the nearest recorded
   source state to the first Sipeed snapshot, with a 147-path import gap;
-- [`reconstruct-vendor-kernel-5.10-patch-stack.sh`](https://github.com/woffko/Hardened_NanoKVM/blob/security/kernel-5.10.265/scripts/reconstruct-vendor-kernel-5.10-patch-stack.sh)
+- [`reconstruct-vendor-kernel-5.10-patch-stack.sh`](../scripts/reconstruct-vendor-kernel-5.10-patch-stack.sh)
   produces 24 reviewable binary-safe layers: 7 official/Milk-V layers and 17
   Sipeed layers including the import gap;
 - every layer is checked against its source snapshot with `git write-tree`.
@@ -102,7 +102,7 @@ mismatches against the retained vendor output. Evidence is under
 
 Module provenance and external-module baseline reconstruction are now complete:
 
-- [`audit-vendor-module-provenance.sh`](https://github.com/woffko/Hardened_NanoKVM/blob/security/kernel-5.10.265/scripts/audit-vendor-module-provenance.sh)
+- [`audit-vendor-module-provenance.sh`](../scripts/audit-vendor-module-provenance.sh)
   inventories all 57 modules in the accepted raw.10 rootfs, including hashes,
   vermagic, license, dependencies, matching build outputs, and Kbuild `.mod`
   source-object lists;
@@ -111,7 +111,7 @@ Module provenance and external-module baseline reconstruction are now complete:
 - 3 media modules are independently source-built and hardware-accepted;
 - the remaining 30 modules map to concrete SDK build outputs and all source
   object lists resolve;
-- [`rebuild-vendor-external-modules-5.10-baseline.sh`](https://github.com/woffko/Hardened_NanoKVM/blob/security/kernel-5.10.265/scripts/rebuild-vendor-external-modules-5.10-baseline.sh)
+- [`rebuild-vendor-external-modules-5.10-baseline.sh`](../scripts/rebuild-vendor-external-modules-5.10-baseline.sh)
   rebuilds those 30 modules from an isolated source copy with the pinned board
   config, clean kernel baseline, and Xuantie toolchain. All 30 packaged SHA-256
   values match the accepted raw.10 bytes, while kernel baseline sentinels remain
@@ -122,7 +122,7 @@ Module provenance and external-module baseline reconstruction are now complete:
 
 The vendor boot FIT is now independently reproducible as well:
 
-- [`rebuild-vendor-boot-sd-5.10-baseline.sh`](https://github.com/woffko/Hardened_NanoKVM/blob/security/kernel-5.10.265/scripts/rebuild-vendor-boot-sd-5.10-baseline.sh)
+- [`rebuild-vendor-boot-sd-5.10-baseline.sh`](../scripts/rebuild-vendor-boot-sd-5.10-baseline.sh)
   assembles the clean Image, clean board DTB, source-generated ramdisk, generated
   single-board ITS, and vendor `mkimage` output without copying accepted FIT
   payloads into the result;

@@ -1,7 +1,29 @@
 #!/bin/bash
 
-export MAIXCDK_PATH=~/MaixCDK
-export NanoKVM_PATH=~/NanoKVM
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export MAIXCDK_PATH="${MAIXCDK_PATH:-$HOME/MaixCDK}"
+export NanoKVM_PATH="${NanoKVM_PATH:-$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)}"
+MAIXCDK_BIN="${MAIXCDK_BIN:-$MAIXCDK_PATH/bin/maixcdk}"
+
+if [ ! -x "$MAIXCDK_BIN" ]
+then
+  echo "maixcdk executable not found: $MAIXCDK_BIN" >&2
+  exit 1
+fi
+
+if ! command -v python >/dev/null 2>&1
+then
+  PYTHON3_BIN="${PYTHON3_BIN:-$(command -v python3 || true)}"
+  if [ -z "$PYTHON3_BIN" ]
+  then
+    echo "python3 executable not found" >&2
+    exit 1
+  fi
+  PYTHON_SHIM_DIR="$NanoKVM_PATH/build/host-tools/python-shim"
+  mkdir -p "$PYTHON_SHIM_DIR"
+  ln -sf "$PYTHON3_BIN" "$PYTHON_SHIM_DIR/python"
+  export PATH="$PYTHON_SHIM_DIR:$PATH"
+fi
 
 Project_Name="None"
 Project_PATH="None"
@@ -16,11 +38,11 @@ maixcdk_build() {
   
   if [ "$input_value" = "from_zero" ]
   then
-    maixcdk build <<EOF
+    "$MAIXCDK_BIN" build <<EOF
 2
 EOF
   else
-    maixcdk build
+    "$MAIXCDK_BIN" build
   fi
 }
 
@@ -35,8 +57,8 @@ chack_build(){
 }
 
 maixcdk_clean(){
-  maixcdk distclean
-  maixcdk clean
+  "$MAIXCDK_BIN" distclean
+  "$MAIXCDK_BIN" clean
 }
 
 case "$1" in
@@ -48,7 +70,7 @@ case "$1" in
     cp -f $NanoKVM_PATH/support/sg2002/additional/sophgo-middleware/v2/sample/common/sample_common_sensor.c $MAIXCDK_PATH/components/3rd_party/sophgo-middleware/sophgo-middleware/v2/sample/common/
 
     echo -e "\e[36m[build] \e[32mupdate_lib ok!\e[0m"
-    exit 1
+    exit 0
   ;;
   kvm_system)
     Project_Name="kvm_system"
@@ -121,14 +143,14 @@ then
       cd $Project_PATH
       if [ -f $JSON_PATH ]
       then
-        if grep -q $Platform_Char $JSON_PATH; then
-          maixcdk_build
+        if grep -qF "$Platform_Char" "$JSON_PATH"; then
+          maixcdk_build || exit 1
         else
           maixcdk_clean
-          maixcdk_build "from_zero"
+          maixcdk_build "from_zero" || exit 1
         fi
       else
-        maixcdk_build "from_zero"
+        maixcdk_build "from_zero" || exit 1
       fi
 
       RES=$(chack_build)
@@ -138,6 +160,7 @@ then
         echo -e "\e[36m[build] \e[32mBuild completed! Use \e[34m./build $Project_Name add_to_kvmapp\e[32m to add it to kvmapp.\e[0m"
       else
         echo -e "\e[36m[build] \e[31mBuild Error!\e[0m"
+        exit 1
       fi
     ;;
     clean)

@@ -1,0 +1,1 @@
+buildroot-external/hardened-sg2002/board/sg2002/kernel/patches/*.patch -whitespace

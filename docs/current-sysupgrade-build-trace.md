@@ -495,7 +495,7 @@ Risk notes:
 
 Start state before installing `0.1.4-raw.1`:
 
-- SSH login works as `root/admin1234`.
+- SSH login works with the enrolled test credential (value redacted).
 - Local WSL `curl` to `http://10.0.87.132:80` failed, but SSH showed
   `NanoKVM-Server` listening on `0.0.0.0:80`; API calls will be made from the
   device itself through `localhost`.
@@ -849,7 +849,7 @@ Reason:
 
 Device check before the 2.0.1 release:
 
-- `10.0.87.41` login: `admin/admin1234`
+- `10.0.87.41` login succeeded with the test credential (value redacted).
 - current app: `1.0.5`
 - visible app update after republishing preview channel metadata: `2.0.0`
 - current system: `0.1.4-raw.1`
@@ -1239,8 +1239,8 @@ Corrected device diagnostic:
 
 - device is `10.0.87.48`, not `.47`;
 - HTTP is reachable, HTTPS is disabled/refused;
-- web login `admin/admin1234` succeeded;
-- SSH `root/admin1234` succeeded via askpass;
+- web login succeeded with the test credential (value redacted);
+- SSH login succeeded via askpass with the same redacted test credential;
 - current app: `2.0.4`;
 - current system: `0.2.2-raw.1`, base `2026-06-29-12-08-d88d58.img`;
 - hostname: `secondary`;
@@ -1834,7 +1834,7 @@ Device discovery:
 - `10.0.87.44` exposed NanoKVM HTTP:
   `/api/health` returned Rust backend status.
 - Web login initially failed with `password setup required`; first setup was
-  recreated as `admin/admin1234`.
+  recreated with the test account credential (value redacted).
 
 Diagnostics through Scripts API:
 
@@ -1871,7 +1871,7 @@ Final verified state:
 
 - `10.0.87.132` responds to ICMP, SSH 22, and HTTP 80;
 - `/api/health`: OK, Rust backend;
-- web login `admin/admin1234`: OK;
+- web login with the test credential: OK (value redacted);
 - `/api/application/version`: current `2.0.15`, latest `2.0.14`;
 - `/api/system-update/status`: current `0.2.10-raw.1`, no staged/pending
   update;
@@ -1894,7 +1894,7 @@ Discovery:
 
 - `10.0.87.133` reappeared with ICMP, SSH 22, and HTTP 80 available.
 - `/api/health` returned Rust backend status.
-- Web login `admin/admin1234` worked.
+- Web login with the test credential worked (value redacted).
 
 Initial state:
 

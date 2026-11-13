@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+. "$SCRIPT_ROOT/scripts/lib/build-security.sh"
+
 if [ "$#" -ne 4 ]; then
   echo "usage: $0 <version> <tag> <archive> <output-json>" >&2
   exit 1
@@ -13,13 +16,17 @@ OUTPUT="$4"
 NAME=$(basename "$ARCHIVE")
 TARGET="${TARGET:-sg2002-licheervnano-sd}"
 CHANNEL="${CHANNEL:-stable}"
-SIZE=$(wc -c < "$ARCHIVE" | tr -d ' ')
-SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-SHA512=$(openssl dgst -sha512 -binary "$ARCHIVE" | base64 | tr -d '\n')
+[ -s "$ARCHIVE" ] || { echo "system update archive is missing or empty" >&2; exit 1; }
+SIZE=$(wc -c < "$ARCHIVE")
+SHA256=$(build_file_sha256 "$ARCHIVE")
+SHA512=$(build_file_sha512_base64 "$ARCHIVE")
 URL="https://github.com/woffko/Hardened_NanoKVM/releases/download/$TAG/$NAME"
 RELEASE_NOTES_URL="https://github.com/woffko/Hardened_NanoKVM/releases/tag/$TAG"
 SIGNING_KEY="${SYSTEM_UPDATE_SIGNING_KEY:-}"
 SECURITY_PATCH_LEVEL="${SECURITY_PATCH_LEVEL:-}"
+SYSTEM_UPDATE_FORMAT="${SYSTEM_UPDATE_FORMAT:-1}"
+REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-}"
+MINIMUM_SYSTEM_VERSION="${SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION:-}"
 
 if [ -n "$SIGNING_KEY" ]; then
   SIGNATURE_ALGORITHM="${SYSTEM_UPDATE_SIGNATURE_ALGORITHM:-sha256-rsa-pkcs1-v1_5}"
@@ -58,6 +65,25 @@ case "$CHANNEL" in
     ;;
 esac
 
+case "$SYSTEM_UPDATE_FORMAT" in
+  1)
+    [ -z "$REQUIRED_APP_VERSION" ] && [ -z "$MINIMUM_SYSTEM_VERSION" ] || {
+      echo "system metadata v1 cannot require an application or system version" >&2
+      exit 1
+    }
+    ;;
+  2)
+    if ! printf '%s' "$REQUIRED_APP_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+      echo "system metadata v2 requires SYSTEM_UPDATE_REQUIRED_APP_VERSION=x.y.z" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "invalid system update metadata format: $SYSTEM_UPDATE_FORMAT" >&2
+    exit 1
+    ;;
+esac
+
 if [ -n "$SECURITY_PATCH_LEVEL" ]; then
   case "$SECURITY_PATCH_LEVEL" in
     .* | *..* | *.)
@@ -92,12 +118,16 @@ if [ -z "$SIGNING_KEY" ]; then
     exit 1
   fi
 else
+  [ -f "$SIGNING_KEY" ] || { echo "signing key does not exist: $SIGNING_KEY" >&2; exit 1; }
   if [ "$SIGNATURE_ALGORITHM" = "unsigned" ] || [ "$SIGNATURE_KEY_ID" = "unsigned" ]; then
     echo "signed metadata cannot use unsigned signature markers" >&2
     exit 1
   fi
 fi
 
+case "$NAME" in
+  *[!A-Za-z0-9._+-]*) echo "invalid system update archive name: $NAME" >&2; exit 1 ;;
+esac
 case "$NAME" in
   hardened-nanokvm-system-*.tar.gz) ;;
   *)
@@ -106,10 +136,11 @@ case "$NAME" in
     ;;
 esac
 
-cat > "$OUTPUT" <<EOF
+build_begin_metadata_output "$OUTPUT" || exit 1
+cat > "$metadata_work/metadata.json" <<EOF
 {
   "kind": "hardened-nanokvm-system-update",
-  "format": 1,
+  "format": $SYSTEM_UPDATE_FORMAT,
   "channel": "$CHANNEL",
   "version": "$VERSION",
   "target": "$TARGET",
@@ -120,20 +151,13 @@ cat > "$OUTPUT" <<EOF
   "url": "$URL",
   "release_notes_url": "$RELEASE_NOTES_URL",
 $(if [ -n "$SECURITY_PATCH_LEVEL" ]; then printf '  "security_patch_level": "%s",\n' "$SECURITY_PATCH_LEVEL"; fi)
+$(if [ -n "$REQUIRED_APP_VERSION" ]; then printf '  "required_app_version": "%s",\n' "$REQUIRED_APP_VERSION"; fi)
+$(if [ -n "$MINIMUM_SYSTEM_VERSION" ]; then printf '  "minimum_system_version": "%s",\n' "$MINIMUM_SYSTEM_VERSION"; fi)
   "signature_algorithm": "$SIGNATURE_ALGORITHM",
   "signature_key_id": "$SIGNATURE_KEY_ID"
 }
 EOF
 
-sha256sum "$OUTPUT" > "$OUTPUT.sha256"
-
-if [ -n "$SIGNING_KEY" ]; then
-  [ -f "$SIGNING_KEY" ] || {
-    echo "signing key does not exist: $SIGNING_KEY" >&2
-    exit 1
-  }
-  openssl dgst -sha256 -sign "$SIGNING_KEY" -out "$OUTPUT.sig" "$OUTPUT"
-  base64 "$OUTPUT.sig" | tr -d '\n' > "$OUTPUT.sig.base64"
-fi
+build_publish_metadata_output || exit 1
 
 echo "$OUTPUT"

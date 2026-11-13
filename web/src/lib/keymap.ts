@@ -220,37 +220,12 @@ export const KeycodeMap: Record<string, number> = {
   NumpadMemoryAdd: 0xd3,
   NumpadMemorySubtract: 0xd4,
   NumpadClear: 0xd8,
-  NumpadClearEntry: 0xd9,
+  NumpadClearEntry: 0xd9
 
-  // Additional browser/system keys
-  BrowserSearch: 0xf0,
-  BrowserHome: 0xf1,
-  BrowserBack: 0xf2,
-  BrowserForward: 0xf3,
-  BrowserStop: 0xf4,
-  BrowserRefresh: 0xf5,
-  BrowserFavorites: 0xf6,
-
-  // Media keys
-  MediaPlayPause: 0xe8,
-  MediaStop: 0xe9,
-  MediaTrackPrevious: 0xea,
-  MediaTrackNext: 0xeb,
-  Eject: 0xec,
-  MediaSelect: 0xed,
-
-  // Application launch keys
-  LaunchMail: 0xee,
-  LaunchApp1: 0xef,
-  LaunchApp2: 0xf0,
-
-  // Sleep/Wake keys
-  Sleep: 0xf8,
-  Wake: 0xf9,
-
-  // Accessibility keys
-  MediaRewind: 0xfa,
-  MediaFastForward: 0xfb
+  // Browser, media, launch, sleep/wake and transport keys are consumer-page
+  // usages. The keyboard page ends at 0xe7 (RightMeta), and the boot keyboard
+  // report has no place for them, so they stay unmapped and are ignored
+  // instead of being sent as made-up keyboard usages.
 };
 
 // Check if code is a modifier key

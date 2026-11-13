@@ -1,0 +1,1485 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:41:30 +0300
+Subject: [PATCH 4/9] net: reconcile CVITEK ioctl and stmmac support
+
+Keep the vendor user/compat ifreq API and CVITEK stmmac DT setup while adopting stable socket ioctl command validation, direct IPv4 gifconf handling, ethtool copy fixes and the remaining 5.10.265 networking updates.
+---
+ .../ethernet/stmicro/stmmac/stmmac_platform.c | 122 ++++++++--
+ include/linux/netdevice.h                     | 218 +++++++++++++-----
+ net/core/dev_ioctl.c                          |  72 ++----
+ net/ethtool/ioctl.c                           | 155 +++++++++----
+ net/socket.c                                  | 189 ++++++++-------
+ 5 files changed, 497 insertions(+), 259 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_platform.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_platform.c
+index ac5d4356bf..8bc53cf1f2 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_platform.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_platform.c
+@@ -9,6 +9,7 @@
+ *******************************************************************************/
+ 
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ #include <linux/module.h>
+ #include <linux/io.h>
+ #include <linux/of.h>
+@@ -107,10 +108,10 @@ static struct stmmac_axi *stmmac_axi_setup(struct platform_device *pdev)
+ 
+ 	axi->axi_lpi_en = of_property_read_bool(np, "snps,lpi_en");
+ 	axi->axi_xit_frm = of_property_read_bool(np, "snps,xit_frm");
+-	axi->axi_kbbe = of_property_read_bool(np, "snps,axi_kbbe");
+-	axi->axi_fb = of_property_read_bool(np, "snps,axi_fb");
+-	axi->axi_mb = of_property_read_bool(np, "snps,axi_mb");
+-	axi->axi_rb =  of_property_read_bool(np, "snps,axi_rb");
++	axi->axi_kbbe = of_property_read_bool(np, "snps,kbbe");
++	axi->axi_fb = of_property_read_bool(np, "snps,fb");
++	axi->axi_mb = of_property_read_bool(np, "snps,mb");
++	axi->axi_rb =  of_property_read_bool(np, "snps,rb");
+ 
+ 	if (of_property_read_u32(np, "snps,wr_osr_lmt", &axi->axi_wr_osr_lmt))
+ 		axi->axi_wr_osr_lmt = 1;
+@@ -399,6 +400,8 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ 	struct device_node *np = pdev->dev.of_node;
+ 	struct plat_stmmacenet_data *plat;
+ 	struct stmmac_dma_cfg *dma_cfg;
++	static int bus_id = -ENODEV;
++	int phy_mode;
+ 	int rc;
+ 
+ 	plat = devm_kzalloc(&pdev->dev, sizeof(*plat), GFP_KERNEL);
+@@ -413,10 +416,11 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ 		*mac = NULL;
+ 	}
+ 
+-	plat->phy_interface = device_get_phy_mode(&pdev->dev);
+-	if (plat->phy_interface < 0)
+-		return ERR_PTR(plat->phy_interface);
++	phy_mode = device_get_phy_mode(&pdev->dev);
++	if (phy_mode < 0)
++		return ERR_PTR(phy_mode);
+ 
++	plat->phy_interface = phy_mode;
+ 	plat->interface = stmmac_of_get_mac_mode(np);
+ 	if (plat->interface < 0)
+ 		plat->interface = plat->phy_interface;
+@@ -429,12 +433,17 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ 	plat->phylink_node = np;
+ 
+ 	/* Get max speed of operation from device tree */
+-	if (of_property_read_u32(np, "max-speed", &plat->max_speed))
+-		plat->max_speed = -1;
++	of_property_read_u32(np, "max-speed", &plat->max_speed);
+ 
+ 	plat->bus_id = of_alias_get_id(np, "ethernet");
+-	if (plat->bus_id < 0)
+-		plat->bus_id = 0;
++	if (plat->bus_id < 0) {
++		if (bus_id < 0)
++			bus_id = of_alias_get_highest_id("ethernet");
++		/* No ethernet alias found, init at -1 so first bus_id is 0 */
++		if (bus_id < 0)
++			bus_id = -1;
++		plat->bus_id = ++bus_id;
++	}
+ 
+ 	/* Default to phy auto-detection */
+ 	plat->phy_addr = -1;
+@@ -525,6 +534,14 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ 		plat->pmt = 0;
+ 	}
+ 
++	if (of_device_is_compatible(np, "snps,dwmac-3.40a")) {
++		plat->has_gmac = 1;
++		plat->enh_desc = 1;
++		plat->tx_coe = 1;
++		plat->bugged_jumbo = 1;
++		plat->pmt = 1;
++	}
++
+ 	if (of_device_is_compatible(np, "snps,dwmac-4.00") ||
+ 	    of_device_is_compatible(np, "snps,dwmac-4.10a") ||
+ 	    of_device_is_compatible(np, "snps,dwmac-4.20a") ||
+@@ -568,7 +585,7 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ 	dma_cfg->mixed_burst = of_property_read_bool(np, "snps,mixed-burst");
+ 
+ 	plat->force_thresh_dma_mode = of_property_read_bool(np, "snps,force_thresh_dma_mode");
+-	if (plat->force_thresh_dma_mode) {
++	if (plat->force_thresh_dma_mode && plat->force_sf_dma_mode) {
+ 		plat->force_sf_dma_mode = 0;
+ 		dev_warn(&pdev->dev,
+ 			 "force_sf_dma_mode is ignored if force_thresh_dma_mode is set.\n");
+@@ -645,6 +662,8 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
+ void stmmac_remove_config_dt(struct platform_device *pdev,
+ 			     struct plat_stmmacenet_data *plat)
+ {
++	clk_disable_unprepare(plat->stmmac_clk);
++	clk_disable_unprepare(plat->pclk);
+ 	of_node_put(plat->phy_node);
+ 	of_node_put(plat->mdio_node);
+ }
+@@ -727,7 +746,6 @@ int stmmac_pltfr_remove(struct platform_device *pdev)
+ }
+ EXPORT_SYMBOL_GPL(stmmac_pltfr_remove);
+ 
+-#ifdef CONFIG_PM_SLEEP
+ /**
+  * stmmac_pltfr_suspend
+  * @dev: device pointer
+@@ -735,7 +753,7 @@ EXPORT_SYMBOL_GPL(stmmac_pltfr_remove);
+  * call the main suspend function and then, if required, on some platform, it
+  * can call an exit helper.
+  */
+-static int stmmac_pltfr_suspend(struct device *dev)
++static int __maybe_unused stmmac_pltfr_suspend(struct device *dev)
+ {
+ 	int ret;
+ 	struct net_device *ndev = dev_get_drvdata(dev);
+@@ -756,7 +774,7 @@ static int stmmac_pltfr_suspend(struct device *dev)
+  * the main resume function, on some platforms, it can call own init helper
+  * if required.
+  */
+-static int stmmac_pltfr_resume(struct device *dev)
++static int __maybe_unused stmmac_pltfr_resume(struct device *dev)
+ {
+ 	struct net_device *ndev = dev_get_drvdata(dev);
+ 	struct stmmac_priv *priv = netdev_priv(ndev);
+@@ -767,10 +785,78 @@ static int stmmac_pltfr_resume(struct device *dev)
+ 
+ 	return stmmac_resume(dev);
+ }
+-#endif /* CONFIG_PM_SLEEP */
+ 
+-SIMPLE_DEV_PM_OPS(stmmac_pltfr_pm_ops, stmmac_pltfr_suspend,
+-				       stmmac_pltfr_resume);
++static int __maybe_unused stmmac_runtime_suspend(struct device *dev)
++{
++	struct net_device *ndev = dev_get_drvdata(dev);
++	struct stmmac_priv *priv = netdev_priv(ndev);
++
++	stmmac_bus_clks_config(priv, false);
++
++	return 0;
++}
++
++static int __maybe_unused stmmac_runtime_resume(struct device *dev)
++{
++	struct net_device *ndev = dev_get_drvdata(dev);
++	struct stmmac_priv *priv = netdev_priv(ndev);
++
++	return stmmac_bus_clks_config(priv, true);
++}
++
++static int __maybe_unused stmmac_pltfr_noirq_suspend(struct device *dev)
++{
++	struct net_device *ndev = dev_get_drvdata(dev);
++	struct stmmac_priv *priv = netdev_priv(ndev);
++	int ret;
++
++	if (!netif_running(ndev))
++		return 0;
++
++	if (!device_may_wakeup(priv->device) || !priv->plat->pmt) {
++		/* Disable clock in case of PWM is off */
++		clk_disable_unprepare(priv->plat->clk_ptp_ref);
++
++		ret = pm_runtime_force_suspend(dev);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int __maybe_unused stmmac_pltfr_noirq_resume(struct device *dev)
++{
++	struct net_device *ndev = dev_get_drvdata(dev);
++	struct stmmac_priv *priv = netdev_priv(ndev);
++	int ret;
++
++	if (!netif_running(ndev))
++		return 0;
++
++	if (!device_may_wakeup(priv->device) || !priv->plat->pmt) {
++		/* enable the clk previously disabled */
++		ret = pm_runtime_force_resume(dev);
++		if (ret)
++			return ret;
++
++		ret = clk_prepare_enable(priv->plat->clk_ptp_ref);
++		if (ret < 0) {
++			netdev_warn(priv->dev,
++				    "failed to enable PTP reference clock: %pe\n",
++				    ERR_PTR(ret));
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
++const struct dev_pm_ops stmmac_pltfr_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(stmmac_pltfr_suspend, stmmac_pltfr_resume)
++	SET_RUNTIME_PM_OPS(stmmac_runtime_suspend, stmmac_runtime_resume, NULL)
++	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(stmmac_pltfr_noirq_suspend, stmmac_pltfr_noirq_resume)
++};
+ EXPORT_SYMBOL_GPL(stmmac_pltfr_pm_ops);
+ 
+ MODULE_DESCRIPTION("STMMAC 10/100/1000 Ethernet platform support");
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index b87a56bc6e..dcd3d63b4b 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -166,31 +166,38 @@ static inline bool dev_xmit_complete(int rc)
+  *	(unsigned long) so they can be read and written atomically.
+  */
+ 
++#define NET_DEV_STAT(FIELD)			\
++	union {					\
++		unsigned long FIELD;		\
++		atomic_long_t __##FIELD;	\
++	}
++
+ struct net_device_stats {
+-	unsigned long	rx_packets;
+-	unsigned long	tx_packets;
+-	unsigned long	rx_bytes;
+-	unsigned long	tx_bytes;
+-	unsigned long	rx_errors;
+-	unsigned long	tx_errors;
+-	unsigned long	rx_dropped;
+-	unsigned long	tx_dropped;
+-	unsigned long	multicast;
+-	unsigned long	collisions;
+-	unsigned long	rx_length_errors;
+-	unsigned long	rx_over_errors;
+-	unsigned long	rx_crc_errors;
+-	unsigned long	rx_frame_errors;
+-	unsigned long	rx_fifo_errors;
+-	unsigned long	rx_missed_errors;
+-	unsigned long	tx_aborted_errors;
+-	unsigned long	tx_carrier_errors;
+-	unsigned long	tx_fifo_errors;
+-	unsigned long	tx_heartbeat_errors;
+-	unsigned long	tx_window_errors;
+-	unsigned long	rx_compressed;
+-	unsigned long	tx_compressed;
++	NET_DEV_STAT(rx_packets);
++	NET_DEV_STAT(tx_packets);
++	NET_DEV_STAT(rx_bytes);
++	NET_DEV_STAT(tx_bytes);
++	NET_DEV_STAT(rx_errors);
++	NET_DEV_STAT(tx_errors);
++	NET_DEV_STAT(rx_dropped);
++	NET_DEV_STAT(tx_dropped);
++	NET_DEV_STAT(multicast);
++	NET_DEV_STAT(collisions);
++	NET_DEV_STAT(rx_length_errors);
++	NET_DEV_STAT(rx_over_errors);
++	NET_DEV_STAT(rx_crc_errors);
++	NET_DEV_STAT(rx_frame_errors);
++	NET_DEV_STAT(rx_fifo_errors);
++	NET_DEV_STAT(rx_missed_errors);
++	NET_DEV_STAT(tx_aborted_errors);
++	NET_DEV_STAT(tx_carrier_errors);
++	NET_DEV_STAT(tx_fifo_errors);
++	NET_DEV_STAT(tx_heartbeat_errors);
++	NET_DEV_STAT(tx_window_errors);
++	NET_DEV_STAT(rx_compressed);
++	NET_DEV_STAT(tx_compressed);
+ };
++#undef NET_DEV_STAT
+ 
+ 
+ #include <linux/cache.h>
+@@ -263,9 +270,11 @@ struct hh_cache {
+  * relationship HH alignment <= LL alignment.
+  */
+ #define LL_RESERVED_SPACE(dev) \
+-	((((dev)->hard_header_len+(dev)->needed_headroom)&~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
++	((((dev)->hard_header_len + READ_ONCE((dev)->needed_headroom)) \
++	  & ~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
+ #define LL_RESERVED_SPACE_EXTRA(dev,extra) \
+-	((((dev)->hard_header_len+(dev)->needed_headroom+(extra))&~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
++	((((dev)->hard_header_len + READ_ONCE((dev)->needed_headroom) + (extra)) \
++	  & ~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
+ 
+ struct header_ops {
+ 	int	(*create) (struct sk_buff *skb, struct net_device *dev,
+@@ -633,9 +642,23 @@ extern int sysctl_devconf_inherit_init_net;
+  */
+ static inline bool net_has_fallback_tunnels(const struct net *net)
+ {
+-	return !IS_ENABLED(CONFIG_SYSCTL) ||
+-	       !sysctl_fb_tunnels_only_for_init_net ||
+-	       (net == &init_net && sysctl_fb_tunnels_only_for_init_net == 1);
++#if IS_ENABLED(CONFIG_SYSCTL)
++	int fb_tunnels_only_for_init_net = READ_ONCE(sysctl_fb_tunnels_only_for_init_net);
++
++	return !fb_tunnels_only_for_init_net ||
++		(net_eq(net, &init_net) && fb_tunnels_only_for_init_net == 1);
++#else
++	return true;
++#endif
++}
++
++static inline int net_inherit_devconf(void)
++{
++#if IS_ENABLED(CONFIG_SYSCTL)
++	return READ_ONCE(sysctl_devconf_inherit_init_net);
++#else
++	return 0;
++#endif
+ }
+ 
+ static inline int netdev_queue_numa_node_read(const struct netdev_queue *q)
+@@ -721,8 +744,11 @@ static inline void rps_record_sock_flow(struct rps_sock_flow_table *table,
+ 		/* We only give a hint, preemption can change CPU under us */
+ 		val |= raw_smp_processor_id();
+ 
+-		if (table->ents[index] != val)
+-			table->ents[index] = val;
++		/* The following WRITE_ONCE() is paired with the READ_ONCE()
++		 * here, and another one in get_rps_cpu().
++		 */
++		if (READ_ONCE(table->ents[index]) != val)
++			WRITE_ONCE(table->ents[index], val);
+ 	}
+ }
+ 
+@@ -1174,6 +1200,10 @@ struct netdev_net_notifier {
+  *		      struct net_device *dev,
+  *		      const unsigned char *addr, u16 vid)
+  *	Deletes the FDB entry from dev coresponding to addr.
++ * int (*ndo_fdb_del_bulk)(struct ndmsg *ndm, struct nlattr *tb[],
++ *			   struct net_device *dev,
++ *			   u16 vid,
++ *			   struct netlink_ext_ack *extack);
+  * int (*ndo_fdb_dump)(struct sk_buff *skb, struct netlink_callback *cb,
+  *		       struct net_device *dev, struct net_device *filter_dev,
+  *		       int *idx)
+@@ -1426,6 +1456,11 @@ struct net_device_ops {
+ 					       struct net_device *dev,
+ 					       const unsigned char *addr,
+ 					       u16 vid);
++	int			(*ndo_fdb_del_bulk)(struct ndmsg *ndm,
++						    struct nlattr *tb[],
++						    struct net_device *dev,
++						    u16 vid,
++						    struct netlink_ext_ack *extack);
+ 	int			(*ndo_fdb_dump)(struct sk_buff *skb,
+ 						struct netlink_callback *cb,
+ 						struct net_device *dev,
+@@ -1600,6 +1635,12 @@ enum netdev_priv_flags {
+ #define IFF_L3MDEV_RX_HANDLER		IFF_L3MDEV_RX_HANDLER
+ #define IFF_LIVE_RENAME_OK		IFF_LIVE_RENAME_OK
+ 
++/* Specifies the type of the struct net_device::ml_priv pointer */
++enum netdev_ml_priv_type {
++	ML_PRIV_NONE,
++	ML_PRIV_CAN,
++};
++
+ /**
+  *	struct net_device - The DEVICE structure.
+  *
+@@ -1727,7 +1768,6 @@ enum netdev_priv_flags {
+  *	@tipc_ptr:	TIPC specific data
+  *	@atalk_ptr:	AppleTalk link
+  *	@ip_ptr:	IPv4 specific data
+- *	@dn_ptr:	DECnet specific data
+  *	@ip6_ptr:	IPv6 specific data
+  *	@ax25_ptr:	AX.25 specific data
+  *	@ieee80211_ptr:	IEEE 802.11 specific data, assign before registering
+@@ -1795,6 +1835,7 @@ enum netdev_priv_flags {
+  * 	@nd_net:		Network namespace this network device is inside
+  *
+  * 	@ml_priv:	Mid-layer private
++ *	@ml_priv_type:  Mid-layer private type
+  * 	@lstats:	Loopback statistics
+  * 	@tstats:	Tunnel statistics
+  * 	@dstats:	Dummy statistics
+@@ -2005,9 +2046,6 @@ struct net_device {
+ 	void 			*atalk_ptr;
+ #endif
+ 	struct in_device __rcu	*ip_ptr;
+-#if IS_ENABLED(CONFIG_DECNET)
+-	struct dn_dev __rcu     *dn_ptr;
+-#endif
+ 	struct inet6_dev __rcu	*ip6_ptr;
+ #if IS_ENABLED(CONFIG_AX25)
+ 	void			*ax25_ptr;
+@@ -2054,7 +2092,7 @@ struct net_device {
+ 	struct netdev_queue	*_tx ____cacheline_aligned_in_smp;
+ 	unsigned int		num_tx_queues;
+ 	unsigned int		real_num_tx_queues;
+-	struct Qdisc		*qdisc;
++	struct Qdisc __rcu	*qdisc;
+ 	unsigned int		tx_queue_len;
+ 	spinlock_t		tx_global_lock;
+ 
+@@ -2107,8 +2145,10 @@ struct net_device {
+ 	possible_net_t			nd_net;
+ 
+ 	/* mid-layer private */
++	void				*ml_priv;
++	enum netdev_ml_priv_type	ml_priv_type;
++
+ 	union {
+-		void					*ml_priv;
+ 		struct pcpu_lstats __percpu		*lstats;
+ 		struct pcpu_sw_netstats __percpu	*tstats;
+ 		struct pcpu_dstats __percpu		*dstats;
+@@ -2298,6 +2338,29 @@ static inline void netdev_reset_rx_headroom(struct net_device *dev)
+ 	netdev_set_rx_headroom(dev, -1);
+ }
+ 
++static inline void *netdev_get_ml_priv(struct net_device *dev,
++				       enum netdev_ml_priv_type type)
++{
++	if (dev->ml_priv_type != type)
++		return NULL;
++
++	return dev->ml_priv;
++}
++
++static inline void netdev_set_ml_priv(struct net_device *dev,
++				      void *ml_priv,
++				      enum netdev_ml_priv_type type)
++{
++	WARN(dev->ml_priv_type && dev->ml_priv_type != type,
++	     "Overwriting already set ml_priv_type (%u) with different ml_priv_type (%u)!\n",
++	     dev->ml_priv_type, type);
++	WARN(!dev->ml_priv_type && dev->ml_priv,
++	     "Overwriting already set ml_priv and ml_priv_type is ML_PRIV_NONE!\n");
++
++	dev->ml_priv = ml_priv;
++	dev->ml_priv_type = type;
++}
++
+ /*
+  * Net namespace inlines
+  */
+@@ -2307,6 +2370,12 @@ struct net *dev_net(const struct net_device *dev)
+ 	return read_pnet(&dev->nd_net);
+ }
+ 
++static inline
++struct net *dev_net_rcu(const struct net_device *dev)
++{
++	return read_pnet_rcu(&dev->nd_net);
++}
++
+ static inline
+ void dev_net_set(struct net_device *dev, struct net *net)
+ {
+@@ -2511,6 +2580,7 @@ struct packet_type {
+ 					      struct net_device *);
+ 	bool			(*id_match)(struct packet_type *ptype,
+ 					    struct sock *sk);
++	struct net		*af_packet_net;
+ 	void			*af_packet_priv;
+ 	struct list_head	list;
+ };
+@@ -3138,11 +3208,6 @@ static inline bool dev_validate_header(const struct net_device *dev,
+ 	if (len < dev->min_header_len)
+ 		return false;
+ 
+-	if (capable(CAP_SYS_RAWIO)) {
+-		memset(ll_header + len, 0, dev->hard_header_len - len);
+-		return true;
+-	}
+-
+ 	if (dev->header_ops && dev->header_ops->validate)
+ 		return dev->header_ops->validate(ll_header, len);
+ 
+@@ -3154,14 +3219,6 @@ static inline bool dev_has_header(const struct net_device *dev)
+ 	return dev->header_ops && dev->header_ops->create;
+ }
+ 
+-typedef int gifconf_func_t(struct net_device * dev, char __user * bufptr,
+-			   int len, int size);
+-int register_gifconf(unsigned int family, gifconf_func_t *gifconf);
+-static inline int unregister_gifconf(unsigned int family)
+-{
+-	return register_gifconf(family, NULL);
+-}
+-
+ #ifdef CONFIG_NET_FLOW_LIMIT
+ #define FLOW_LIMIT_HISTORY	(1 << 7)  /* must be ^2 and !overflow buckets */
+ struct sd_flow_limit {
+@@ -3854,6 +3911,10 @@ void netdev_rx_handler_unregister(struct net_device *dev);
+ bool dev_valid_name(const char *name);
+ int get_user_ifreq(struct ifreq *ifr, void __user **ifrdata, void __user *arg);
+ int put_user_ifreq(struct ifreq *ifr, void __user *arg);
++static inline bool is_socket_ioctl_cmd(unsigned int cmd)
++{
++	return _IOC_TYPE(cmd) == SOCK_IOC_TYPE;
++}
+ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
+ 		bool *need_copyout);
+ int dev_ifconf(struct net *net, struct ifconf __user *ifc);
+@@ -3881,6 +3942,9 @@ int dev_pre_changeaddr_notify(struct net_device *dev, const char *addr,
+ 			      struct netlink_ext_ack *extack);
+ int dev_set_mac_address(struct net_device *dev, struct sockaddr *sa,
+ 			struct netlink_ext_ack *extack);
++int dev_set_mac_address_user(struct net_device *dev, struct sockaddr *sa,
++			     struct netlink_ext_ack *extack);
++int dev_get_mac_address(struct sockaddr *sa, struct net *net, char *dev_name);
+ int dev_change_carrier(struct net_device *, bool new_carrier);
+ int dev_get_phys_port_id(struct net_device *dev,
+ 			 struct netdev_phys_item_id *ppid);
+@@ -3920,7 +3984,7 @@ static __always_inline int ____dev_forward_skb(struct net_device *dev,
+ 		return NET_RX_DROP;
+ 	}
+ 
+-	skb_scrub_packet(skb, true);
++	skb_scrub_packet(skb, !net_eq(dev_net(dev), dev_net(skb->dev)));
+ 	skb->priority = 0;
+ 	return 0;
+ }
+@@ -3942,7 +4006,8 @@ void netdev_run_todo(void);
+  */
+ static inline void dev_put(struct net_device *dev)
+ {
+-	this_cpu_dec(*dev->pcpu_refcnt);
++	if (dev)
++		this_cpu_dec(*dev->pcpu_refcnt);
+ }
+ 
+ /**
+@@ -3953,7 +4018,8 @@ static inline void dev_put(struct net_device *dev)
+  */
+ static inline void dev_hold(struct net_device *dev)
+ {
+-	this_cpu_inc(*dev->pcpu_refcnt);
++	if (dev)
++		this_cpu_inc(*dev->pcpu_refcnt);
+ }
+ 
+ /* Carrier loss detection, dial on demand. The functions netif_carrier_on
+@@ -4175,7 +4241,8 @@ static inline u32 netif_msg_init(int debug_value, int default_msg_enable_bits)
+ static inline void __netif_tx_lock(struct netdev_queue *txq, int cpu)
+ {
+ 	spin_lock(&txq->_xmit_lock);
+-	txq->xmit_lock_owner = cpu;
++	/* Pairs with READ_ONCE() in __dev_queue_xmit() */
++	WRITE_ONCE(txq->xmit_lock_owner, cpu);
+ }
+ 
+ static inline bool __netif_tx_acquire(struct netdev_queue *txq)
+@@ -4192,26 +4259,32 @@ static inline void __netif_tx_release(struct netdev_queue *txq)
+ static inline void __netif_tx_lock_bh(struct netdev_queue *txq)
+ {
+ 	spin_lock_bh(&txq->_xmit_lock);
+-	txq->xmit_lock_owner = smp_processor_id();
++	/* Pairs with READ_ONCE() in __dev_queue_xmit() */
++	WRITE_ONCE(txq->xmit_lock_owner, smp_processor_id());
+ }
+ 
+ static inline bool __netif_tx_trylock(struct netdev_queue *txq)
+ {
+ 	bool ok = spin_trylock(&txq->_xmit_lock);
+-	if (likely(ok))
+-		txq->xmit_lock_owner = smp_processor_id();
++
++	if (likely(ok)) {
++		/* Pairs with READ_ONCE() in __dev_queue_xmit() */
++		WRITE_ONCE(txq->xmit_lock_owner, smp_processor_id());
++	}
+ 	return ok;
+ }
+ 
+ static inline void __netif_tx_unlock(struct netdev_queue *txq)
+ {
+-	txq->xmit_lock_owner = -1;
++	/* Pairs with READ_ONCE() in __dev_queue_xmit() */
++	WRITE_ONCE(txq->xmit_lock_owner, -1);
+ 	spin_unlock(&txq->_xmit_lock);
+ }
+ 
+ static inline void __netif_tx_unlock_bh(struct netdev_queue *txq)
+ {
+-	txq->xmit_lock_owner = -1;
++	/* Pairs with READ_ONCE() in __dev_queue_xmit() */
++	WRITE_ONCE(txq->xmit_lock_owner, -1);
+ 	spin_unlock_bh(&txq->_xmit_lock);
+ }
+ 
+@@ -4315,6 +4388,7 @@ static inline void netif_tx_disable(struct net_device *dev)
+ 
+ 	local_bh_disable();
+ 	cpu = smp_processor_id();
++	spin_lock(&dev->tx_global_lock);
+ 	for (i = 0; i < dev->num_tx_queues; i++) {
+ 		struct netdev_queue *txq = netdev_get_tx_queue(dev, i);
+ 
+@@ -4322,6 +4396,7 @@ static inline void netif_tx_disable(struct net_device *dev)
+ 		netif_tx_stop_queue(txq);
+ 		__netif_tx_unlock(txq);
+ 	}
++	spin_unlock(&dev->tx_global_lock);
+ 	local_bh_enable();
+ }
+ 
+@@ -4411,6 +4486,24 @@ void __hw_addr_unsync_dev(struct netdev_hw_addr_list *list,
+ void __hw_addr_init(struct netdev_hw_addr_list *list);
+ 
+ /* Functions used for device addresses handling */
++static inline void
++__dev_addr_set(struct net_device *dev, const u8 *addr, size_t len)
++{
++	memcpy(dev->dev_addr, addr, len);
++}
++
++static inline void dev_addr_set(struct net_device *dev, const u8 *addr)
++{
++	__dev_addr_set(dev, addr, dev->addr_len);
++}
++
++static inline void
++dev_addr_mod(struct net_device *dev, unsigned int offset,
++	     const u8 *addr, size_t len)
++{
++	memcpy(&dev->dev_addr[offset], addr, len);
++}
++
+ int dev_addr_add(struct net_device *dev, const unsigned char *addr,
+ 		 unsigned char addr_type);
+ int dev_addr_del(struct net_device *dev, const unsigned char *addr,
+@@ -4794,7 +4887,8 @@ netdev_features_t netdev_increment_features(netdev_features_t all,
+ static inline netdev_features_t netdev_add_tso_features(netdev_features_t features,
+ 							netdev_features_t mask)
+ {
+-	return netdev_increment_features(features, NETIF_F_ALL_TSO, mask);
++	return netdev_increment_features(features, NETIF_F_ALL_TSO |
++					 NETIF_F_ALL_FOR_ALL, mask);
+ }
+ 
+ int __netdev_update_features(struct net_device *dev);
+@@ -5201,4 +5295,10 @@ do {								\
+ 
+ extern struct net_device *blackhole_netdev;
+ 
++/* Note: Avoid these macros in fast path, prefer per-cpu or per-queue counters. */
++#define DEV_STATS_INC(DEV, FIELD) atomic_long_inc(&(DEV)->stats.__##FIELD)
++#define DEV_STATS_ADD(DEV, FIELD, VAL) 	\
++		atomic_long_add((VAL), &(DEV)->stats.__##FIELD)
++#define DEV_STATS_READ(DEV, FIELD) atomic_long_read(&(DEV)->stats.__##FIELD)
++
+ #endif	/* _LINUX_NETDEVICE_H */
+diff --git a/net/core/dev_ioctl.c b/net/core/dev_ioctl.c
+index 90e122c7a9..b3313a8e58 100644
+--- a/net/core/dev_ioctl.c
++++ b/net/core/dev_ioctl.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/kmod.h>
+ #include <linux/netdevice.h>
++#include <linux/inetdevice.h>
+ #include <linux/etherdevice.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/net_tstamp.h>
+@@ -25,26 +26,6 @@ static int dev_ifname(struct net *net, struct ifreq *ifr)
+ 	return netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
+ }
+ 
+-static gifconf_func_t *gifconf_list[NPROTO];
+-
+-/**
+- *	register_gifconf	-	register a SIOCGIF handler
+- *	@family: Address family
+- *	@gifconf: Function handler
+- *
+- *	Register protocol dependent address dumping routines. The handler
+- *	that is passed must not be freed or reused until it has been replaced
+- *	by another handler.
+- */
+-int register_gifconf(unsigned int family, gifconf_func_t *gifconf)
+-{
+-	if (family >= NPROTO)
+-		return -EINVAL;
+-	gifconf_list[family] = gifconf;
+-	return 0;
+-}
+-EXPORT_SYMBOL(register_gifconf);
+-
+ /*
+  *	Perform a SIOCGIFCONF call. This structure will change
+  *	size eventually, and there is nothing I can do about it.
+@@ -53,9 +34,9 @@ EXPORT_SYMBOL(register_gifconf);
+ int dev_ifconf(struct net *net, struct ifconf __user *uifc)
+ {
+ 	struct net_device *dev;
+-	void __user *pos;
++	char __user *pos;
+ 	size_t size;
+-	int i, len, total = 0;
++	int len, total = 0;
+ 
+ #ifdef CONFIG_COMPAT
+ 	/* both the ifconf and the ifreq structures are slightly different */
+@@ -84,21 +65,18 @@ int dev_ifconf(struct net *net, struct ifconf __user *uifc)
+ 	/* Loop over the interfaces, and write an info block for each. */
+ 	rtnl_lock();
+ 	for_each_netdev(net, dev) {
+-		for (i = 0; i < NPROTO; i++) {
+-			if (gifconf_list[i]) {
+-				int done;
+-				if (!pos)
+-					done = gifconf_list[i](dev, NULL, 0, size);
+-				else
+-					done = gifconf_list[i](dev, pos + total,
+-							       len - total, size);
+-				if (done < 0) {
+-					rtnl_unlock();
+-					return -EFAULT;
+-				}
+-				total += done;
+-			}
++		int done;
++
++		if (!pos)
++			done = inet_gifconf(dev, NULL, 0, size);
++		else
++				done = inet_gifconf(dev, pos + total,
++						    len - total, size);
++		if (done < 0) {
++			rtnl_unlock();
++			return -EFAULT;
+ 		}
++		total += done;
+ 	}
+ 	rtnl_unlock();
+ 
+@@ -183,17 +161,6 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
+ 		ifr->ifr_mtu = dev->mtu;
+ 		return 0;
+ 
+-	case SIOCGIFHWADDR:
+-		if (!dev->addr_len)
+-			memset(ifr->ifr_hwaddr.sa_data, 0,
+-			       sizeof(ifr->ifr_hwaddr.sa_data));
+-		else
+-			memcpy(ifr->ifr_hwaddr.sa_data, dev->dev_addr,
+-			       min(sizeof(ifr->ifr_hwaddr.sa_data),
+-				   (size_t)dev->addr_len));
+-		ifr->ifr_hwaddr.sa_family = dev->type;
+-		return 0;
+-
+ 	case SIOCGIFSLAVE:
+ 		err = -EINVAL;
+ 		break;
+@@ -328,13 +295,13 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, unsigned int cmd)
+ 	case SIOCSIFHWADDR:
+ 		if (dev->addr_len > sizeof(struct sockaddr))
+ 			return -EINVAL;
+-		return dev_set_mac_address(dev, &ifr->ifr_hwaddr, NULL);
++		return dev_set_mac_address_user(dev, &ifr->ifr_hwaddr, NULL);
+ 
+ 	case SIOCSIFHWBROADCAST:
+ 		if (ifr->ifr_hwaddr.sa_family != dev->type)
+ 			return -EINVAL;
+ 		memcpy(dev->broadcast, ifr->ifr_hwaddr.sa_data,
+-		       min(sizeof(ifr->ifr_hwaddr.sa_data),
++		       min(sizeof(ifr->ifr_hwaddr.sa_data_min),
+ 			   (size_t)dev->addr_len));
+ 		call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
+ 		return 0;
+@@ -467,6 +434,12 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr, bool *need_c
+ 	 */
+ 
+ 	switch (cmd) {
++	case SIOCGIFHWADDR:
++		dev_load(net, ifr->ifr_name);
++		ret = dev_get_mac_address(&ifr->ifr_hwaddr, net, ifr->ifr_name);
++		if (colon)
++			*colon = ':';
++		return ret;
+ 	/*
+ 	 *	These ioctl calls:
+ 	 *	- can be done by all.
+@@ -476,7 +449,6 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr, bool *need_c
+ 	case SIOCGIFFLAGS:
+ 	case SIOCGIFMETRIC:
+ 	case SIOCGIFMTU:
+-	case SIOCGIFHWADDR:
+ 	case SIOCGIFSLAVE:
+ 	case SIOCGIFMAP:
+ 	case SIOCGIFINDEX:
+diff --git a/net/ethtool/ioctl.c b/net/ethtool/ioctl.c
+index edb849e886..729dfb21a4 100644
+--- a/net/ethtool/ioctl.c
++++ b/net/ethtool/ioctl.c
+@@ -432,6 +432,9 @@ int __ethtool_get_link_ksettings(struct net_device *dev,
+ 	if (!dev->ethtool_ops->get_link_ksettings)
+ 		return -EOPNOTSUPP;
+ 
++	if (!netif_device_present(dev))
++		return -ENODEV;
++
+ 	memset(link_ksettings, 0, sizeof(*link_ksettings));
+ 	return dev->ethtool_ops->get_link_ksettings(dev, link_ksettings);
+ }
+@@ -490,7 +493,7 @@ store_link_ksettings_for_user(void __user *to,
+ {
+ 	struct ethtool_link_usettings link_usettings;
+ 
+-	memcpy(&link_usettings.base, &from->base, sizeof(link_usettings));
++	memcpy(&link_usettings, from, sizeof(link_usettings));
+ 	bitmap_to_arr32(link_usettings.link_modes.supported,
+ 			from->link_modes.supported,
+ 			__ETHTOOL_LINK_MODE_MASK_NBITS);
+@@ -906,7 +909,7 @@ static int ethtool_rxnfc_copy_to_user(void __user *useraddr,
+ 						   rule_buf);
+ 		useraddr += offsetof(struct compat_ethtool_rxnfc, rule_locs);
+ 	} else {
+-		ret = copy_to_user(useraddr, &rxnfc, size);
++		ret = copy_to_user(useraddr, rxnfc, size);
+ 		useraddr += offsetof(struct ethtool_rxnfc, rule_locs);
+ 	}
+ 
+@@ -1525,7 +1528,7 @@ static int ethtool_get_any_eeprom(struct net_device *dev, void __user *useraddr,
+ 	if (eeprom.offset + eeprom.len > total_len)
+ 		return -EINVAL;
+ 
+-	data = kmalloc(PAGE_SIZE, GFP_USER);
++	data = kzalloc(PAGE_SIZE, GFP_USER);
+ 	if (!data)
+ 		return -ENOMEM;
+ 
+@@ -1590,7 +1593,7 @@ static int ethtool_set_eeprom(struct net_device *dev, void __user *useraddr)
+ 	if (eeprom.offset + eeprom.len > ops->get_eeprom_len(dev))
+ 		return -EINVAL;
+ 
+-	data = kmalloc(PAGE_SIZE, GFP_USER);
++	data = kzalloc(PAGE_SIZE, GFP_USER);
+ 	if (!data)
+ 		return -ENOMEM;
+ 
+@@ -1869,7 +1872,7 @@ static int ethtool_self_test(struct net_device *dev, char __user *useraddr)
+ 		return -EFAULT;
+ 
+ 	test.len = test_len;
+-	data = kmalloc_array(test_len, sizeof(u64), GFP_USER);
++	data = kcalloc(test_len, sizeof(u64), GFP_USER);
+ 	if (!data)
+ 		return -ENOMEM;
+ 
+@@ -1906,7 +1909,10 @@ static int ethtool_get_strings(struct net_device *dev, void __user *useraddr)
+ 		return -ENOMEM;
+ 	WARN_ON_ONCE(!ret);
+ 
+-	gstrings.len = ret;
++	if (gstrings.len && gstrings.len != ret)
++		gstrings.len = 0;
++	else
++		gstrings.len = ret;
+ 
+ 	if (gstrings.len) {
+ 		data = vzalloc(array_size(gstrings.len, ETH_GSTRING_LEN));
+@@ -1966,7 +1972,8 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
+ 	} else {
+ 		/* Driver expects to be called at twice the frequency in rc */
+ 		int n = rc * 2, interval = HZ / n;
+-		u64 count = n * id.data, i = 0;
++		u64 count = mul_u32_u32(n, id.data);
++		u64 i = 0;
+ 
+ 		do {
+ 			rtnl_lock();
+@@ -2006,10 +2013,13 @@ static int ethtool_get_stats(struct net_device *dev, void __user *useraddr)
+ 	if (copy_from_user(&stats, useraddr, sizeof(stats)))
+ 		return -EFAULT;
+ 
+-	stats.n_stats = n_stats;
++	if (stats.n_stats && stats.n_stats != n_stats)
++		stats.n_stats = 0;
++	else
++		stats.n_stats = n_stats;
+ 
+-	if (n_stats) {
+-		data = vzalloc(array_size(n_stats, sizeof(u64)));
++	if (stats.n_stats) {
++		data = vzalloc(array_size(stats.n_stats, sizeof(u64)));
+ 		if (!data)
+ 			return -ENOMEM;
+ 		ops->get_ethtool_stats(dev, &stats, data);
+@@ -2021,7 +2031,9 @@ static int ethtool_get_stats(struct net_device *dev, void __user *useraddr)
+ 	if (copy_to_user(useraddr, &stats, sizeof(stats)))
+ 		goto out;
+ 	useraddr += sizeof(stats);
+-	if (n_stats && copy_to_user(useraddr, data, array_size(n_stats, sizeof(u64))))
++	if (stats.n_stats &&
++	    copy_to_user(useraddr, data,
++			 array_size(stats.n_stats, sizeof(u64))))
+ 		goto out;
+ 	ret = 0;
+ 
+@@ -2030,58 +2042,101 @@ static int ethtool_get_stats(struct net_device *dev, void __user *useraddr)
+ 	return ret;
+ }
+ 
+-static int ethtool_get_phy_stats(struct net_device *dev, void __user *useraddr)
++static int ethtool_vzalloc_stats_array(int n_stats, u64 **data)
+ {
++	if (n_stats < 0)
++		return n_stats;
++	if (n_stats > S32_MAX / sizeof(u64))
++		return -ENOMEM;
++	if (WARN_ON_ONCE(!n_stats))
++		return -EOPNOTSUPP;
++
++	*data = vzalloc(array_size(n_stats, sizeof(u64)));
++	if (!*data)
++		return -ENOMEM;
++
++	return 0;
++}
++
++static int ethtool_get_phy_stats_phydev(struct phy_device *phydev,
++					 struct ethtool_stats *stats,
++					 u64 **data)
++ {
+ 	const struct ethtool_phy_ops *phy_ops = ethtool_phy_ops;
++	int n_stats, ret;
++
++	if (!phy_ops || !phy_ops->get_sset_count || !phy_ops->get_stats)
++		return -EOPNOTSUPP;
++
++	n_stats = phy_ops->get_sset_count(phydev);
++	if (stats->n_stats && stats->n_stats != n_stats) {
++		stats->n_stats = 0;
++		return 0;
++	}
++
++	ret = ethtool_vzalloc_stats_array(n_stats, data);
++	if (ret)
++		return ret;
++
++	stats->n_stats = n_stats;
++	return phy_ops->get_stats(phydev, stats, *data);
++}
++
++static int ethtool_get_phy_stats_ethtool(struct net_device *dev,
++					  struct ethtool_stats *stats,
++					  u64 **data)
++{
+ 	const struct ethtool_ops *ops = dev->ethtool_ops;
+-	struct phy_device *phydev = dev->phydev;
+-	struct ethtool_stats stats;
+-	u64 *data;
+-	int ret, n_stats;
++	int n_stats, ret;
+ 
+-	if (!phydev && (!ops->get_ethtool_phy_stats || !ops->get_sset_count))
++	if (!ops || !ops->get_sset_count || !ops->get_ethtool_phy_stats)
+ 		return -EOPNOTSUPP;
+ 
+-	if (dev->phydev && !ops->get_ethtool_phy_stats &&
+-	    phy_ops && phy_ops->get_sset_count)
+-		n_stats = phy_ops->get_sset_count(dev->phydev);
+-	else
+-		n_stats = ops->get_sset_count(dev, ETH_SS_PHY_STATS);
+-	if (n_stats < 0)
+-		return n_stats;
+-	if (n_stats > S32_MAX / sizeof(u64))
+-		return -ENOMEM;
+-	WARN_ON_ONCE(!n_stats);
++	n_stats = ops->get_sset_count(dev, ETH_SS_PHY_STATS);
++	if (stats->n_stats && stats->n_stats != n_stats) {
++		stats->n_stats = 0;
++		return 0;
++	}
++
++	ret = ethtool_vzalloc_stats_array(n_stats, data);
++	if (ret)
++		return ret;
++
++	stats->n_stats = n_stats;
++	ops->get_ethtool_phy_stats(dev, stats, *data);
++
++	return 0;
++}
++
++static int ethtool_get_phy_stats(struct net_device *dev, void __user *useraddr)
++{
++	struct phy_device *phydev = dev->phydev;
++	struct ethtool_stats stats;
++	u64 *data = NULL;
++	int ret = -EOPNOTSUPP;
+ 
+ 	if (copy_from_user(&stats, useraddr, sizeof(stats)))
+ 		return -EFAULT;
+ 
+-	stats.n_stats = n_stats;
++	if (phydev)
++		ret = ethtool_get_phy_stats_phydev(phydev, &stats, &data);
+ 
+-	if (n_stats) {
+-		data = vzalloc(array_size(n_stats, sizeof(u64)));
+-		if (!data)
+-			return -ENOMEM;
++	if (ret == -EOPNOTSUPP)
++		ret = ethtool_get_phy_stats_ethtool(dev, &stats, &data);
+ 
+-		if (dev->phydev && !ops->get_ethtool_phy_stats &&
+-		    phy_ops && phy_ops->get_stats) {
+-			ret = phy_ops->get_stats(dev->phydev, &stats, data);
+-			if (ret < 0)
+-				goto out;
+-		} else {
+-			ops->get_ethtool_phy_stats(dev, &stats, data);
+-		}
+-	} else {
+-		data = NULL;
+-	}
++	if (ret)
++		goto out;
+ 
+-	ret = -EFAULT;
+-	if (copy_to_user(useraddr, &stats, sizeof(stats)))
++	if (copy_to_user(useraddr, &stats, sizeof(stats))) {
++		ret = -EFAULT;
+ 		goto out;
++	}
++
+ 	useraddr += sizeof(stats);
+-	if (n_stats && copy_to_user(useraddr, data, array_size(n_stats, sizeof(u64))))
+-		goto out;
+-	ret = 0;
++	if (stats.n_stats &&
++	    copy_to_user(useraddr, data,
++			 array_size(stats.n_stats, sizeof(u64))))
++		ret = -EFAULT;
+ 
+  out:
+ 	vfree(data);
+@@ -2385,7 +2440,7 @@ static int ethtool_get_tunable(struct net_device *dev, void __user *useraddr)
+ 	ret = ethtool_tunable_valid(&tuna);
+ 	if (ret)
+ 		return ret;
+-	data = kmalloc(tuna.len, GFP_USER);
++	data = kzalloc(tuna.len, GFP_USER);
+ 	if (!data)
+ 		return -ENOMEM;
+ 	ret = ops->get_tunable(dev, &tuna, data);
+@@ -2577,7 +2632,7 @@ static int get_phy_tunable(struct net_device *dev, void __user *useraddr)
+ 	ret = ethtool_phy_tunable_valid(&tuna);
+ 	if (ret)
+ 		return ret;
+-	data = kmalloc(tuna.len, GFP_USER);
++	data = kzalloc(tuna.len, GFP_USER);
+ 	if (!data)
+ 		return -ENOMEM;
+ 	if (phy_drv_tunable) {
+diff --git a/net/socket.c b/net/socket.c
+index 418d67ca87..3864e64628 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -608,7 +608,7 @@ static void __sock_release(struct socket *sock, struct inode *inode)
+ 		iput(SOCK_INODE(sock));
+ 		return;
+ 	}
+-	sock->file = NULL;
++	WRITE_ONCE(sock->file, NULL);
+ }
+ 
+ /**
+@@ -655,6 +655,14 @@ static inline int sock_sendmsg_nosec(struct socket *sock, struct msghdr *msg)
+ 	return ret;
+ }
+ 
++static int __sock_sendmsg(struct socket *sock, struct msghdr *msg)
++{
++	int err = security_socket_sendmsg(sock, msg,
++					  msg_data_left(msg));
++
++	return err ?: sock_sendmsg_nosec(sock, msg);
++}
++
+ /**
+  *	sock_sendmsg - send a message through @sock
+  *	@sock: socket
+@@ -665,10 +673,21 @@ static inline int sock_sendmsg_nosec(struct socket *sock, struct msghdr *msg)
+  */
+ int sock_sendmsg(struct socket *sock, struct msghdr *msg)
+ {
+-	int err = security_socket_sendmsg(sock, msg,
+-					  msg_data_left(msg));
++	struct sockaddr_storage *save_addr = (struct sockaddr_storage *)msg->msg_name;
++	struct sockaddr_storage address;
++	int save_len = msg->msg_namelen;
++	int ret;
+ 
+-	return err ?: sock_sendmsg_nosec(sock, msg);
++	if (msg->msg_name) {
++		memcpy(&address, msg->msg_name, msg->msg_namelen);
++		msg->msg_name = &address;
++	}
++
++	ret = __sock_sendmsg(sock, msg);
++	msg->msg_name = save_addr;
++	msg->msg_namelen = save_len;
++
++	return ret;
+ }
+ EXPORT_SYMBOL(sock_sendmsg);
+ 
+@@ -687,7 +706,7 @@ EXPORT_SYMBOL(sock_sendmsg);
+ int kernel_sendmsg(struct socket *sock, struct msghdr *msg,
+ 		   struct kvec *vec, size_t num, size_t size)
+ {
+-	iov_iter_kvec(&msg->msg_iter, WRITE, vec, num, size);
++	iov_iter_kvec(&msg->msg_iter, ITER_SOURCE, vec, num, size);
+ 	return sock_sendmsg(sock, msg);
+ }
+ EXPORT_SYMBOL(kernel_sendmsg);
+@@ -713,7 +732,7 @@ int kernel_sendmsg_locked(struct sock *sk, struct msghdr *msg,
+ 	if (!sock->ops->sendmsg_locked)
+ 		return sock_no_sendmsg_locked(sk, msg, size);
+ 
+-	iov_iter_kvec(&msg->msg_iter, WRITE, vec, num, size);
++	iov_iter_kvec(&msg->msg_iter, ITER_SOURCE, vec, num, size);
+ 
+ 	return sock->ops->sendmsg_locked(sk, msg, msg_data_left(msg));
+ }
+@@ -721,12 +740,13 @@ EXPORT_SYMBOL(kernel_sendmsg_locked);
+ 
+ static bool skb_is_err_queue(const struct sk_buff *skb)
+ {
+-	/* pkt_type of skbs enqueued on the error queue are set to
+-	 * PACKET_OUTGOING in skb_set_err_queue(). This is only safe to do
+-	 * in recvmsg, since skbs received on a local socket will never
+-	 * have a pkt_type of PACKET_OUTGOING.
++	/* Error-queue skbs are marked as PACKET_OUTGOING in
++	 * skb_set_err_queue() and use the destructor installed by
++	 * sock_queue_err_skb(). PACKET_OUTGOING alone is not unique:
++	 * AF_PACKET outgoing taps use the same pkt_type.
+ 	 */
+-	return skb->pkt_type == PACKET_OUTGOING;
++	return skb->pkt_type == PACKET_OUTGOING &&
++	       skb->destructor == sock_rmem_free;
+ }
+ 
+ /* On transmit, software and hardware timestamps are returned independently.
+@@ -924,7 +944,7 @@ int kernel_recvmsg(struct socket *sock, struct msghdr *msg,
+ 		   struct kvec *vec, size_t num, size_t size, int flags)
+ {
+ 	msg->msg_control_is_user = false;
+-	iov_iter_kvec(&msg->msg_iter, READ, vec, num, size);
++	iov_iter_kvec(&msg->msg_iter, ITER_DEST, vec, num, size);
+ 	return sock_recvmsg(sock, msg, flags);
+ }
+ EXPORT_SYMBOL(kernel_recvmsg);
+@@ -995,7 +1015,7 @@ static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from)
+ 	if (sock->type == SOCK_SEQPACKET)
+ 		msg.msg_flags |= MSG_EOR;
+ 
+-	res = sock_sendmsg(sock, &msg);
++	res = __sock_sendmsg(sock, &msg);
+ 	*from = msg.msg_iter;
+ 	return res;
+ }
+@@ -1055,13 +1075,14 @@ static long sock_do_ioctl(struct net *net, struct socket *sock,
+ 	if (err != -ENOIOCTLCMD)
+ 		return err;
+ 
+-	if (copy_from_user(&ifr, argp, sizeof(struct ifreq)))
++	if (!is_socket_ioctl_cmd(cmd))
++		return -ENOTTY;
++	if (get_user_ifreq(&ifr, NULL, argp))
+ 		return -EFAULT;
+ 	err = dev_ioctl(net, cmd, &ifr, &need_copyout);
+ 	if (!err && need_copyout)
+-		if (copy_to_user(argp, &ifr, sizeof(struct ifreq)))
++		if (put_user_ifreq(&ifr, argp))
+ 			return -EFAULT;
+-
+ 	return err;
+ }
+ 
+@@ -1070,19 +1091,6 @@ static long sock_do_ioctl(struct net *net, struct socket *sock,
+  *	what to do with it - that's up to the protocol still.
+  */
+ 
+-/**
+- *	get_net_ns - increment the refcount of the network namespace
+- *	@ns: common namespace (net)
+- *
+- *	Returns the net's common namespace.
+- */
+-
+-struct ns_common *get_net_ns(struct ns_common *ns)
+-{
+-	return &get_net(container_of(ns, struct net, ns))->ns;
+-}
+-EXPORT_SYMBOL_GPL(get_net_ns);
+-
+ static long sock_ioctl(struct file *file, unsigned cmd, unsigned long arg)
+ {
+ 	struct socket *sock;
+@@ -1676,7 +1684,7 @@ int __sys_listen(int fd, int backlog)
+ 
+ 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+ 	if (sock) {
+-		somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
++		somaxconn = READ_ONCE(sock_net(sock->sk)->core.sysctl_somaxconn);
+ 		if ((unsigned int)backlog > somaxconn)
+ 			backlog = somaxconn;
+ 
+@@ -1694,30 +1702,22 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
+ 	return __sys_listen(fd, backlog);
+ }
+ 
+-int __sys_accept4_file(struct file *file, unsigned file_flags,
++struct file *do_accept(struct file *file, unsigned file_flags,
+ 		       struct sockaddr __user *upeer_sockaddr,
+-		       int __user *upeer_addrlen, int flags,
+-		       unsigned long nofile)
++		       int __user *upeer_addrlen, int flags)
+ {
+ 	struct socket *sock, *newsock;
+ 	struct file *newfile;
+-	int err, len, newfd;
++	int err, len;
+ 	struct sockaddr_storage address;
+ 
+-	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+-		return -EINVAL;
+-
+-	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
+-		flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
+-
+ 	sock = sock_from_file(file, &err);
+ 	if (!sock)
+-		goto out;
++		return ERR_PTR(err);
+ 
+-	err = -ENFILE;
+ 	newsock = sock_alloc();
+ 	if (!newsock)
+-		goto out;
++		return ERR_PTR(-ENFILE);
+ 
+ 	newsock->type = sock->type;
+ 	newsock->ops = sock->ops;
+@@ -1728,18 +1728,9 @@ int __sys_accept4_file(struct file *file, unsigned file_flags,
+ 	 */
+ 	__module_get(newsock->ops->owner);
+ 
+-	newfd = __get_unused_fd_flags(flags, nofile);
+-	if (unlikely(newfd < 0)) {
+-		err = newfd;
+-		sock_release(newsock);
+-		goto out;
+-	}
+ 	newfile = sock_alloc_file(newsock, flags, sock->sk->sk_prot_creator->name);
+-	if (IS_ERR(newfile)) {
+-		err = PTR_ERR(newfile);
+-		put_unused_fd(newfd);
+-		goto out;
+-	}
++	if (IS_ERR(newfile))
++		return newfile;
+ 
+ 	err = security_socket_accept(sock, newsock);
+ 	if (err)
+@@ -1764,16 +1755,38 @@ int __sys_accept4_file(struct file *file, unsigned file_flags,
+ 	}
+ 
+ 	/* File flags are not inherited via accept() unlike another OSes. */
+-
+-	fd_install(newfd, newfile);
+-	err = newfd;
+-out:
+-	return err;
++	return newfile;
+ out_fd:
+ 	fput(newfile);
+-	put_unused_fd(newfd);
+-	goto out;
++	return ERR_PTR(err);
++}
++
++int __sys_accept4_file(struct file *file, unsigned file_flags,
++		       struct sockaddr __user *upeer_sockaddr,
++		       int __user *upeer_addrlen, int flags,
++		       unsigned long nofile)
++{
++	struct file *newfile;
++	int newfd;
+ 
++	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
++		return -EINVAL;
++
++	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
++		flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
++
++	newfd = __get_unused_fd_flags(flags, nofile);
++	if (unlikely(newfd < 0))
++		return newfd;
++
++	newfile = do_accept(file, file_flags, upeer_sockaddr, upeer_addrlen,
++			    flags);
++	if (IS_ERR(newfile)) {
++		put_unused_fd(newfd);
++		return PTR_ERR(newfile);
++	}
++	fd_install(newfd, newfile);
++	return newfd;
+ }
+ 
+ /*
+@@ -1963,7 +1976,7 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
+ 	struct iovec iov;
+ 	int fput_needed;
+ 
+-	err = import_single_range(WRITE, buff, len, &iov, &msg.msg_iter);
++	err = import_single_range(ITER_SOURCE, buff, len, &iov, &msg.msg_iter);
+ 	if (unlikely(err))
+ 		return err;
+ 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+@@ -1984,7 +1997,7 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
+ 	msg.msg_flags = flags;
+-	err = sock_sendmsg(sock, &msg);
++	err = __sock_sendmsg(sock, &msg);
+ 
+ out_put:
+ 	fput_light(sock->file, fput_needed);
+@@ -2024,7 +2037,7 @@ int __sys_recvfrom(int fd, void __user *ubuf, size_t size, unsigned int flags,
+ 	int err, err2;
+ 	int fput_needed;
+ 
+-	err = import_single_range(READ, ubuf, size, &iov, &msg.msg_iter);
++	err = import_single_range(ITER_DEST, ubuf, size, &iov, &msg.msg_iter);
+ 	if (unlikely(err))
+ 		return err;
+ 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+@@ -2138,6 +2151,9 @@ SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
+ 	return __sys_setsockopt(fd, level, optname, optval, optlen);
+ }
+ 
++INDIRECT_CALLABLE_DECLARE(bool tcp_bpf_bypass_getsockopt(int level,
++							 int optname));
++
+ /*
+  *	Get a socket option. Because we don't know the option lengths we have
+  *	to pass a user mode parameter for the protocols to sort out.
+@@ -2187,6 +2203,17 @@ SYSCALL_DEFINE5(getsockopt, int, fd, int, level, int, optname,
+  *	Shutdown a socket.
+  */
+ 
++int __sys_shutdown_sock(struct socket *sock, int how)
++{
++	int err;
++
++	err = security_socket_shutdown(sock, how);
++	if (!err)
++		err = sock->ops->shutdown(sock, how);
++
++	return err;
++}
++
+ int __sys_shutdown(int fd, int how)
+ {
+ 	int err, fput_needed;
+@@ -2194,9 +2221,7 @@ int __sys_shutdown(int fd, int how)
+ 
+ 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+ 	if (sock != NULL) {
+-		err = security_socket_shutdown(sock, how);
+-		if (!err)
+-			err = sock->ops->shutdown(sock, how);
++		err = __sys_shutdown_sock(sock, how);
+ 		fput_light(sock->file, fput_needed);
+ 	}
+ 	return err;
+@@ -2283,7 +2308,7 @@ static int copy_msghdr_from_user(struct msghdr *kmsg,
+ 	if (err)
+ 		return err;
+ 
+-	err = import_iovec(save_addr ? READ : WRITE,
++	err = import_iovec(save_addr ? ITER_DEST : ITER_SOURCE,
+ 			    msg.msg_iov, msg.msg_iovlen,
+ 			    UIO_FASTIOV, iov, &kmsg->msg_iter);
+ 	return err < 0 ? err : 0;
+@@ -2345,7 +2370,7 @@ static int ____sys_sendmsg(struct socket *sock, struct msghdr *msg_sys,
+ 		err = sock_sendmsg_nosec(sock, msg_sys);
+ 		goto out_freectl;
+ 	}
+-	err = sock_sendmsg(sock, msg_sys);
++	err = __sock_sendmsg(sock, msg_sys);
+ 	/*
+ 	 * If this is sendmmsg() and sending to current destination address was
+ 	 * successful, remember it.
+@@ -2411,10 +2436,6 @@ static int ___sys_sendmsg(struct socket *sock, struct user_msghdr __user *msg,
+ long __sys_sendmsg_sock(struct socket *sock, struct msghdr *msg,
+ 			unsigned int flags)
+ {
+-	/* disallow ancillary data requests from this path */
+-	if (msg->msg_control || msg->msg_controllen)
+-		return -EINVAL;
+-
+ 	return ____sys_sendmsg(sock, msg, flags, NULL, 0);
+ }
+ 
+@@ -2623,12 +2644,6 @@ long __sys_recvmsg_sock(struct socket *sock, struct msghdr *msg,
+ 			struct user_msghdr __user *umsg,
+ 			struct sockaddr __user *uaddr, unsigned int flags)
+ {
+-	if (msg->msg_control || msg->msg_controllen) {
+-		/* disallow ancillary data reqs unless cmsg is plain data */
+-		if (!(sock->ops->flags & PROTO_CMSG_DATA_ONLY))
+-			return -EINVAL;
+-	}
+-
+ 	return ____sys_recvmsg(sock, msg, umsg, uaddr, flags, 0);
+ }
+ 
+@@ -2766,7 +2781,7 @@ static int do_recvmmsg(int fd, struct mmsghdr __user *mmsg,
+ 		 * error to return on the next call or if the
+ 		 * app asks about it using getsockopt(SO_ERROR).
+ 		 */
+-		sock->sk->sk_err = -err;
++		WRITE_ONCE(sock->sk->sk_err, -err);
+ 	}
+ out_put:
+ 	fput_light(sock->file, fput_needed);
+@@ -3174,6 +3189,8 @@ static int compat_ifr_data_ioctl(struct net *net, unsigned int cmd,
+ 	struct ifreq ifreq;
+ 	u32 data32;
+ 
++	if (!is_socket_ioctl_cmd(cmd))
++		return -ENOTTY;
+ 	if (copy_from_user(ifreq.ifr_name, u_ifreq32->ifr_name, IFNAMSIZ))
+ 		return -EFAULT;
+ 	if (get_user(data32, &u_ifreq32->ifr_data))
+@@ -3361,7 +3378,11 @@ static long compat_sock_ioctl(struct file *file, unsigned int cmd,
+ 
+ int kernel_bind(struct socket *sock, struct sockaddr *addr, int addrlen)
+ {
+-	return sock->ops->bind(sock, addr, addrlen);
++	struct sockaddr_storage address;
++
++	memcpy(&address, addr, addrlen);
++
++	return sock->ops->bind(sock, (struct sockaddr *)&address, addrlen);
+ }
+ EXPORT_SYMBOL(kernel_bind);
+ 
+@@ -3431,7 +3452,11 @@ EXPORT_SYMBOL(kernel_accept);
+ int kernel_connect(struct socket *sock, struct sockaddr *addr, int addrlen,
+ 		   int flags)
+ {
+-	return sock->ops->connect(sock, addr, addrlen, flags);
++	struct sockaddr_storage address;
++
++	memcpy(&address, addr, addrlen);
++
++	return sock->ops->connect(sock, (struct sockaddr *)&address, addrlen, flags);
+ }
+ EXPORT_SYMBOL(kernel_connect);
+ 

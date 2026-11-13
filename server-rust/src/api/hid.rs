@@ -1,4 +1,4 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,14 +7,19 @@ use std::{
     path::{Path, PathBuf},
     sync::{LazyLock, RwLock},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time;
 
+use crate::ws::hid::HidReports;
 use crate::{
     AppError, Result,
     error::ApiResponse,
-    system::command::{AllowedCommand, run_allowed},
+    state::AppState,
+    system::{
+        command::{AllowedCommand, run_allowed},
+        usb,
+    },
     ws::hid as hid_ws,
 };
 
@@ -33,7 +38,7 @@ const MAX_SHORTCUT_KEYS: usize = 6;
 const MAX_KEY_CODE_LEN: usize = 64;
 const MAX_KEY_LABEL_LEN: usize = 64;
 const MAX_PASTE_BYTES: usize = 1024;
-const PASTE_KEY_DELAY: Duration = Duration::from_millis(30);
+pub(crate) const PASTE_KEY_DELAY: Duration = Duration::from_millis(30);
 
 static SHORTCUT_LOCK: LazyLock<RwLock<()>> = LazyLock::new(|| RwLock::new(()));
 
@@ -118,8 +123,12 @@ pub async fn get_shortcuts() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn add_shortcut(Json(req): Json<AddShortcutReq>) -> Result<impl IntoResponse> {
+pub async fn add_shortcut(
+    State(state): State<AppState>,
+    Json(req): Json<AddShortcutReq>,
+) -> Result<impl IntoResponse> {
     validate_shortcut_keys(&req.keys)?;
+    let _writer = state.writers.configuration()?;
 
     let _guard = SHORTCUT_LOCK
         .write()
@@ -134,10 +143,14 @@ pub async fn add_shortcut(Json(req): Json<AddShortcutReq>) -> Result<impl IntoRe
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn delete_shortcut(Json(req): Json<DeleteShortcutReq>) -> Result<impl IntoResponse> {
+pub async fn delete_shortcut(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteShortcutReq>,
+) -> Result<impl IntoResponse> {
     if req.id.trim().is_empty() || req.id.len() > 128 {
         return Err(AppError::BadRequest("invalid arguments".to_string()));
     }
+    let _writer = state.writers.configuration()?;
 
     let _guard = SHORTCUT_LOCK
         .write()
@@ -166,10 +179,14 @@ pub async fn get_leader_key() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetLeaderKeyRsp { key })))
 }
 
-pub async fn set_leader_key(Json(req): Json<SetLeaderKeyReq>) -> Result<impl IntoResponse> {
+pub async fn set_leader_key(
+    State(state): State<AppState>,
+    Json(req): Json<SetLeaderKeyReq>,
+) -> Result<impl IntoResponse> {
     let key = req.key.trim();
+    let _writer = state.writers.configuration()?;
     if key.is_empty() {
-        remove_file_if_exists(LEADER_KEY_FILE)?;
+        crate::system::files::remove_file(Path::new(LEADER_KEY_FILE))?;
     } else {
         validate_key_code(key)?;
         write_file(Path::new(LEADER_KEY_FILE), key.as_bytes(), 0o644)?;
@@ -183,10 +200,19 @@ pub async fn get_mode() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(GetHidModeRsp { mode })))
 }
 
-pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoResponse> {
+pub async fn set_mode(
+    State(state): State<AppState>,
+    Json(req): Json<SetHidModeReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    usb::run_exclusive(set_mode_locked(req)).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+async fn set_mode_locked(req: SetHidModeReq) -> Result<()> {
     let mode = validate_hid_mode(&req.mode)?;
     if read_hid_mode().ok().as_deref() == Some(mode) {
-        return Ok(Json(ApiResponse::<()>::ok_empty()));
+        return Ok(());
     }
 
     copy_hid_mode_file(mode)?;
@@ -203,7 +229,7 @@ pub async fn set_mode(Json(req): Json<SetHidModeReq>) -> Result<impl IntoRespons
         }
     });
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn get_usb_wakeup() -> Result<impl IntoResponse> {
@@ -212,9 +238,17 @@ pub async fn get_usb_wakeup() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_usb_wakeup(Json(req): Json<SetUsbWakeupReq>) -> Result<impl IntoResponse> {
-    write_usb_wakeup_config(req.enabled)?;
-    apply_usb_wakeup_live(req.enabled)?;
+pub async fn set_usb_wakeup(
+    State(state): State<AppState>,
+    Json(req): Json<SetUsbWakeupReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    usb::run_exclusive(async move {
+        write_usb_wakeup_config(req.enabled)?;
+        apply_usb_wakeup_live(req.enabled)?;
+        Ok(())
+    })
+    .await?;
 
     Ok(Json(ApiResponse::ok(UsbWakeupRsp {
         enabled: req.enabled,
@@ -222,6 +256,12 @@ pub async fn set_usb_wakeup(Json(req): Json<SetUsbWakeupReq>) -> Result<impl Int
 }
 
 pub async fn reset_hid() -> Result<impl IntoResponse> {
+    usb::run_exclusive(reset_hid_locked()).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+async fn reset_hid_locked() -> Result<()> {
+    hid_ws::close_cached_hid_devices().await?;
     let output = run_allowed(
         AllowedCommand::ServiceUsbDev,
         ["restart_phy"],
@@ -235,7 +275,7 @@ pub async fn reset_hid() -> Result<impl IntoResponse> {
         )));
     }
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn paste(Json(req): Json<PasteReq>) -> Result<impl IntoResponse> {
@@ -260,42 +300,106 @@ fn validate_paste_request(req: &PasteReq) -> Result<()> {
             msg: "content too long".to_string(),
         });
     }
-    Ok(())
-}
-
-fn paste_blocking(content: &str, language: &str) -> Result<()> {
-    let key_up = [0_u8; 8];
-    for ch in content.chars() {
-        let Some(key) = paste_key(ch, language) else {
-            tracing::debug!(char = %ch, codepoint = ch as u32, "unknown HID paste character");
-            continue;
-        };
-
-        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
-        hid_ws::write_keyboard_report(&key_down)?;
-        hid_ws::write_keyboard_report(&key_up)?;
-        thread::sleep(PASTE_KEY_DELAY);
+    // Refuse before the first key goes out: a paste that silently dropped
+    // characters typed something other than what was shown.
+    let unsupported = unsupported_paste_chars(&req.content, &req.langue);
+    if !unsupported.is_empty() {
+        return Err(AppError::BadRequest(unsupported_paste_message(
+            &unsupported,
+        )));
     }
     Ok(())
 }
 
+/// The characters `language` has no key for, each once, in order of first
+/// appearance. A carriage return is line-ending noise and is dropped, not
+/// refused.
+fn unsupported_paste_chars(content: &str, language: &str) -> Vec<char> {
+    let mut unsupported = Vec::new();
+    for ch in content.chars() {
+        if ch != '\r' && paste_key(ch, language).is_none() && !unsupported.contains(&ch) {
+            unsupported.push(ch);
+        }
+    }
+    unsupported
+}
+
+fn unsupported_paste_message(unsupported: &[char]) -> String {
+    const SHOWN: usize = 8;
+    let shown: Vec<String> = unsupported
+        .iter()
+        .take(SHOWN)
+        .map(|ch| {
+            if ch.is_control() || ch.is_whitespace() {
+                format!("U+{:04X}", *ch as u32)
+            } else {
+                format!("'{ch}' (U+{:04X})", *ch as u32)
+            }
+        })
+        .collect();
+    let message = format!(
+        "unsupported characters for this keyboard layout: {}",
+        shown.join(", ")
+    );
+    match unsupported.len().saturating_sub(SHOWN) {
+        0 => message,
+        more => format!("{message} and {more} more"),
+    }
+}
+
+fn paste_blocking(content: &str, language: &str) -> Result<()> {
+    let owner = hid_ws::begin_input()?;
+    let result = (|| -> Result<()> {
+        for ch in content.chars() {
+            // validate_paste_request refused anything but '\r' already.
+            let Some(key) = paste_key(ch, language) else {
+                continue;
+            };
+
+            let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
+            owner.keyboard(&key_down)?;
+            owner.settle_keyboard()?;
+            thread::sleep(PASTE_KEY_DELAY);
+        }
+        Ok(())
+    })();
+    let cleanup = owner.finish();
+    result?;
+    cleanup?;
+    Ok(())
+}
+
 pub fn type_text_blocking(content: &str, language: &str) -> Result<usize> {
-    let key_up = [0_u8; 8];
+    let reports = prepare_type_text(content, language)?;
+    let owner = hid_ws::begin_input()?;
     let mut writes = 0;
+    let result = (|| -> Result<()> {
+        for key_down in reports {
+            writes += owner.keyboard(&key_down)?;
+            writes += owner.settle_keyboard()?;
+            thread::sleep(PASTE_KEY_DELAY);
+        }
+        Ok(())
+    })();
+    let cleanup = owner.finish();
+    result?;
+    writes += cleanup?;
+    Ok(writes)
+}
+
+/// Validate the complete strict typing sequence before any device write.
+/// Callers own their input/aggregate limits; this preserves layout mapping.
+pub(crate) fn prepare_type_text(content: &str, language: &str) -> Result<Vec<[u8; 8]>> {
+    let mut reports = Vec::with_capacity(content.chars().count());
     for ch in content.chars() {
         let Some(key) = paste_key(ch, language) else {
             return Err(AppError::BadRequest(
                 "unsupported character in type action".to_string(),
             ));
         };
-
-        let key_down = [key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00];
-        hid_ws::write_keyboard_report(&key_down)?;
-        hid_ws::write_keyboard_report(&key_up)?;
-        writes += 2;
-        thread::sleep(PASTE_KEY_DELAY);
+        reports.push([key.modifiers, 0x00, key.code, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
-    Ok(writes)
+    Ok(reports)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +486,8 @@ fn de_paste_key(ch: char) -> Option<PasteKey> {
         '`' => Some(key(2, 46)),
         '"' => Some(key(2, 31)),
         '?' => Some(key(2, 45)),
+        // Shift+0 on the German layout; the US key 46 is the acute accent there.
+        '=' => Some(key(2, 39)),
         '{' => Some(key(0x40, 36)),
         '[' => Some(key(0x40, 37)),
         ']' => Some(key(0x40, 38)),
@@ -452,6 +558,9 @@ fn fr_paste_key(ch: char) -> Option<PasteKey> {
         '/' => Some(key(2, 55)),
         '!' => Some(key(0, 56)),
         '\u{00a7}' => Some(key(2, 56)),
+        // The 102nd key left of W; the US Shift+comma types a period here.
+        '<' => Some(key(0, 100)),
+        '>' => Some(key(2, 100)),
         '~' => Some(key(0x40, 31)),
         '#' => Some(key(0x40, 32)),
         '{' => Some(key(0x40, 33)),
@@ -601,10 +710,10 @@ fn live_usb_wakeup_enabled() -> Result<bool> {
 
 fn write_usb_wakeup_config(enabled: bool) -> Result<()> {
     if enabled {
-        remove_file_if_exists(USB_WAKEUP_DISABLE_FILE)?;
+        crate::system::files::remove_file(Path::new(USB_WAKEUP_DISABLE_FILE))?;
         write_file(Path::new(USB_WAKEUP_ENABLE_FILE), b"", 0o644)
     } else {
-        remove_file_if_exists(USB_WAKEUP_ENABLE_FILE)?;
+        crate::system::files::remove_file(Path::new(USB_WAKEUP_ENABLE_FILE))?;
         write_file(Path::new(USB_WAKEUP_DISABLE_FILE), b"", 0o644)
     }
 }
@@ -669,46 +778,7 @@ fn is_resource_busy(err: &AppError) -> bool {
 }
 
 fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let tmp = tmp_path_for(path);
-    fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
-    Ok(())
-}
-
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    path.with_file_name(format!(".{filename}.{}.{}.tmp", std::process::id(), stamp))
-}
-
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    remove_file_if_exists_path(Path::new(path))
-}
-
-fn remove_file_if_exists_path(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
+    crate::system::files::write_atomic(path, content, mode)
 }
 
 fn command_error(message: &str, output: crate::system::command::CommandOutput) -> String {
@@ -783,6 +853,39 @@ mod tests {
         assert_eq!(paste_key('a', "fr").unwrap(), key(0, 20));
         assert_eq!(paste_key('1', "fr").unwrap(), key(2, 30));
         assert_eq!(paste_key('@', "fr").unwrap(), key(0x40, 39));
+    }
+
+    #[test]
+    fn german_equals_and_french_angle_brackets_use_their_own_keys() {
+        assert_eq!(paste_key('=', "de").unwrap(), key(2, 39));
+        assert_eq!(paste_key('<', "fr").unwrap(), key(0, 100));
+        assert_eq!(paste_key('>', "fr").unwrap(), key(2, 100));
+        // The US layout keeps its keys.
+        assert_eq!(paste_key('=', "").unwrap(), key(0, 46));
+        assert_eq!(paste_key('<', "").unwrap(), key(2, 54));
+        assert_eq!(paste_key('>', "").unwrap(), key(2, 55));
+    }
+
+    #[test]
+    fn a_paste_with_unsupported_characters_is_refused_naming_them() {
+        assert!(unsupported_paste_chars("abc\r\n", "").is_empty());
+        assert_eq!(
+            unsupported_paste_chars("a\u{20ac}b\u{20ac}\u{fc}", ""),
+            vec!['\u{20ac}', '\u{fc}']
+        );
+        assert!(unsupported_paste_chars("\u{20ac}\u{fc}", "de").is_empty());
+        let err = validate_paste_request(&PasteReq {
+            content: "x\u{20ac}y".to_string(),
+            langue: String::new(),
+        })
+        .unwrap_err();
+        let AppError::BadRequest(msg) = err else {
+            panic!("{err:?}");
+        };
+        assert!(msg.contains("U+20AC"), "{msg}");
+        let many: String = ('\u{0400}'..'\u{0410}').collect();
+        let msg = unsupported_paste_message(&unsupported_paste_chars(&many, ""));
+        assert!(msg.ends_with("and 8 more"), "{msg}");
     }
 
     #[test]

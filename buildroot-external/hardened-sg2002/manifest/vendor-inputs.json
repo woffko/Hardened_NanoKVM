@@ -1,0 +1,105 @@
+{
+  "format": 1,
+  "status": "port-inputs-only",
+  "target": "sg2002-licheervnano-sd",
+  "vendor_sdk": {
+    "repository": "https://github.com/sipeed/LicheeRV-Nano-Build.git",
+    "commit": "d88d58feca49ef15f4cc7bd1f27dbf17dc25f85e"
+  },
+  "buildroot": {
+    "upstream_version": "2026.05.1",
+    "archive_sha256": "ae7f706f087b9ae9083a10a587368dfbf53103c28bf81c2d690198dc4090cb58"
+  },
+  "inputs": [
+    {
+      "name": "vendor-linux",
+      "source": "LicheeRV-Nano-Build/linux_5.10",
+      "role": "kernel, device tree, SG2002 drivers, USB gadget and media support",
+      "status": "retained in pinned vendor boot.sd; not rebuilt by Buildroot; hardware validation required"
+    },
+    {
+      "name": "vendor-u-boot",
+      "source": "LicheeRV-Nano-Build/u-boot-2021.10",
+      "role": "bootloader and current SD boot chain",
+      "status": "retained in pinned vendor fip.bin/boot.sd inputs; reproducible SDK build already exists"
+    },
+    {
+      "name": "vendor-middleware",
+      "source": "LicheeRV-Nano-Build/middleware and osdrv",
+      "role": "MMF/VENC/LT6911 userspace ABI",
+      "license": "NOASSERTION; pinned vendor repository has no root license file",
+      "status": "minimal runtime staged from pinned rootfs; on-device ABI validated, redistribution remains blocked"
+    },
+    {
+      "name": "sg2002-codec-firmware",
+      "repository": "https://github.com/0x754C/sg2002_codec_fw",
+      "commit": "1e339b782642ce1b2c8aa81f9fdef212912a6a83",
+      "archive_sha256": "2fdc9b39b5fe00f0e3be01f7b39b78aee8540cf823573c44423e45aed0d0587c",
+      "destination": "/usr/share/fw_vcodec",
+      "license": "NOASSERTION; GitHub metadata and pinned root contain no license",
+      "status": "external package added as PROPRIETARY with redistribution disabled"
+    },
+    {
+      "name": "aic8800-sdio-firmware",
+      "repository": "https://github.com/lxowalle/aic8800-sdio-firmware",
+      "commit": "c56f910044cc854d6c553bcb9a644f3bca5a4c38",
+      "archive_sha256": "17821e42c674f20b99b45f8dc1dac997815d8655591c038a2d72cd4f8b773642",
+      "destination": "/usr/lib/firmware/aic8800_sdio",
+      "license": "NOASSERTION; GitHub metadata and pinned root contain no license",
+      "status": "external package added as PROPRIETARY with redistribution disabled; matching modules are carried under /mnt/system/ko/3rd"
+    },
+    {
+      "name": "cvitek-riscv64-musl-sysroot",
+      "repository": "https://github.com/0x754C/cvitek-riscv64-musl-sysroot",
+      "commit": "fb0a6ac7409fb477c5f46ced75bf05527def7cb9",
+      "archive_sha256": "160ea358012820d92330363e619e5bbcb36afdfbc6f7b738a56873aa122ee46e",
+      "destination": "/",
+      "license": "NOASSERTION; GitHub metadata and pinned root contain no license",
+      "status": "external package available but unselected; two required loader files are staged separately under non-redistributable vendor runtime"
+    },
+    {
+      "name": "tpudemo-sg200x",
+      "repository": "https://github.com/0x754C/tpudemo-sg200x",
+      "commit": "e50c97cbfc3f6018d674883a6a60bccd63bbf01d",
+      "archive_sha256": "92170d47c74b0628f99164102fc5beeaf0b5625013e47802184ac6743738ec15",
+      "license": "NOASSERTION; GitHub metadata and pinned root contain no license",
+      "status": "deferred and excluded; no NanoKVM runtime dependency has been proven"
+    },
+    {
+      "name": "board-overlay",
+      "source": "LicheeRV-Nano-Build/buildroot/board/cvitek/SG200X",
+      "role": "legacy init, console, SSH, environment, and sensor configuration",
+      "license": "NOASSERTION for the vendor repository root; individual kernel and U-Boot subtrees carry their own licenses",
+      "status": "review required; only a minimal independently reviewed overlay is tracked"
+    },
+    {
+      "name": "hardened-nanokvm-kvmapp",
+      "source": "build/kvmapp-rust/kvmapp",
+      "role": "Rust backend, web assets, native runtime, kvm_system, init scripts, and update key",
+      "license": "GPL-3.0-only source plus non-redistributable vendor ABI payload",
+      "status": "local Buildroot package added; native ABI closure validated, redistribution disabled"
+    },
+    {
+      "name": "sg2002-vendor-runtime",
+      "source": "pinned vendor rootfs /mnt/system plus thirteen SHA-256-pinned runtime files",
+      "role": "MMF/tuning assets, hardware-accepted source-built media modules, and libkvm OpenCV/protobuf dependency closure",
+      "license": "NOASSERTION; staged binary inputs have no repository-level redistribution grant",
+      "runtime_files": {
+        "libopencv_video.so.4.9.0": "4bda8c165e9e53090cdc783a826c8c61a81ccff3a022bef5f7243a95596f52c7",
+        "libopencv_dnn.so.4.9.0": "3d2ae102eb4a2d2eb2e109ba23015d761ad43cf9299fdbc427e02c52377bfc79",
+        "libopencv_calib3d.so.4.9.0": "119f69d7bb3c5fd033689e87faeaa37c75547a226dde150fadf01ded04e85466",
+        "libopencv_features2d.so.4.9.0": "f620d5466f0bd241ce70ed34d3bca07a4dc666a2addf624a2f52902e3c6ec015",
+        "libopencv_flann.so.4.9.0": "1dadc13c42828b3fef7b3c20026b3a0263fcbcd882bfb904105de0bea1a0c991",
+        "libprotobuf.so.32.0.12": "096d35f5f085b74d6654d30bdfa91c69398093fc47548979d5c8ed4e5caebd27",
+        "libstdc++.so.6.0.28": "9ebc8352014fbb7499194fdca56eb496c51c119b50d08d7b70b96058d3c5be17",
+        "libgcc_s.so.1": "4b483b84f730b5e127ee8441cc143d5d90f1a31f0bfb999f94ef834eefa3da8c",
+        "libgomp.so.1.0.0": "986f21b24574f0e58672c865b34d9eba102ba45c05f18a608bf612816b84c901",
+        "libatomic.so.1.2.0": "2421e827d033c3a055b973e6fbcf5a78fe987b50dd21e82a422a3728f4d3da3d",
+        "libc.so": "fbc494806cad67edbf4584221bdc481593fa04b317d9405cf3418aad9a9500c4",
+        "ld-musl-riscv64xthead.so.1": "e966ce689d386af715ec2ca558a90661731cd875192af91749b52475629cb7d2",
+        "ld-musl-riscv64v0p7_xthead.so.1": "8e4f81c0280b2337abea47bf151259f6fa3bf3261578dee8bba30f83c60fe7e8"
+      },
+      "status": "local non-redistributable Buildroot package added for recoverable-media tests"
+    }
+  ]
+}

@@ -8,11 +8,11 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
     api::{
-        account, application, autostart, compatibility, download, hid, network, picoclaw, script,
-        storage, stream, system_firewall, system_log, system_time, system_update, tailscale, vm,
+        account, application, compatibility, download, hid, network, picoclaw, script, storage,
+        stream, system_firewall, system_log, system_time, system_update, tailscale, vm,
         webrtc_stream,
     },
-    http::middleware::{picoclaw_internal, protected},
+    http::middleware::{conceal_internal_errors, picoclaw_internal, protected},
     security::headers::security_headers,
     state::AppState,
     ws::hid as hid_ws,
@@ -29,6 +29,14 @@ pub fn build(state: AppState) -> Router {
         .route("/api/ws", get(hid_ws::connect))
         .route("/api/application/version", get(application::get_version))
         .route("/api/application/update", post(application::update))
+        .route(
+            "/api/application/update/status",
+            get(application::update_status),
+        )
+        .route(
+            "/api/application/update/jobs/{transaction}",
+            get(application::job_status),
+        )
         .route(
             "/api/application/update/offline",
             post(application::offline_update).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
@@ -119,14 +127,6 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/vm/mouse-jiggler/", post(vm::set_mouse_jiggler))
         .route("/api/vm/tls", post(vm::set_tls))
-        .route("/api/vm/autostart", get(autostart::get_autostart))
-        .route(
-            "/api/vm/autostart/{name}",
-            get(autostart::get_autostart_content)
-                .post(autostart::upload_autostart)
-                .delete(autostart::delete_autostart)
-                .layer(DefaultBodyLimit::max(autostart::MAX_AUTOSTART_BYTES + 1024)),
-        )
         .route(
             "/api/vm/script",
             get(script::get_scripts).delete(script::delete_script),
@@ -217,7 +217,8 @@ pub fn build(state: AppState) -> Router {
         .merge(compatibility_routes())
         .route_layer(from_fn_with_state(state.clone(), protected));
 
-    Router::new()
+    // Reached without a session: internal error text stays in the log.
+    let public_routes = Router::new()
         .route("/api/health", get(compatibility::health))
         .route(
             "/api/application/current-version",
@@ -230,6 +231,10 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/network/wifi", post(network::connect_wifi_no_auth))
         .route("/api/network/wifi/verify", post(network::verify_ap_login))
+        .route_layer(from_fn(conceal_internal_errors));
+
+    Router::new()
+        .merge(public_routes)
         .merge(picoclaw_loopback_routes())
         .merge(protected_routes)
         .fallback_service(ServeDir::new(state.config.paths.web_root.clone()))
@@ -303,4 +308,103 @@ pub fn picoclaw_loopback_routes() -> Router<AppState> {
         .route("/api/picoclaw/mcp", post(picoclaw::mcp))
         .route("/api/picoclaw/load-image", post(picoclaw::load_image))
         .route_layer(from_fn(picoclaw_internal))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, net::SocketAddr, time::Duration};
+
+    use serde_json::Value;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::*;
+    use crate::{AppError, http::tls::ClientAddr};
+
+    async fn serve(router: Router) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<ClientAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        address
+    }
+
+    async fn request(address: SocketAddr, method: &str, path: &str, body: &str) -> Value {
+        let mut socket = TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(30), socket.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (_, body) = text.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn internal_error_text_is_withheld_and_other_errors_pass() {
+        let router = Router::new()
+            .route(
+                "/io",
+                get(|| async { Err::<(), _>(AppError::Io(std::io::Error::other("/etc/kvm/pwd"))) }),
+            )
+            .route(
+                "/config",
+                get(|| async { Err::<(), _>(AppError::Config("/etc/kvm/server.yaml".into())) }),
+            )
+            .route(
+                "/bad",
+                get(|| async { Err::<(), _>(AppError::BadRequest("invalid hostname".into())) }),
+            )
+            .route_layer(from_fn(conceal_internal_errors));
+        let address = serve(router).await;
+        for (path, code, msg) in [
+            ("/io", -500, "internal error"),
+            ("/config", -500, "internal error"),
+            ("/bad", -1, "invalid hostname"),
+        ] {
+            let body = request(address, "GET", path, "").await;
+            assert_eq!(
+                (body["code"].as_i64(), body["msg"].as_str()),
+                (Some(code), Some(msg))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_login_route_does_not_show_why_the_account_file_failed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.security.allow_default_admin = false;
+        config.security.allow_auth_disable = false;
+        config.paths.account_file = root.path().join("account");
+        config.paths.web_root = root.path().join("web");
+        fs::write(&config.paths.account_file, b"not an account").unwrap();
+        let state = AppState::new(config).await.unwrap();
+        let address = serve(build(state)).await;
+
+        let body = request(
+            address,
+            "POST",
+            "/api/auth/login",
+            r#"{"username":"admin","password":"long-enough-secret"}"#,
+        )
+        .await;
+        assert_eq!(body["code"], -500);
+        assert_eq!(body["msg"], "internal error");
+    }
 }

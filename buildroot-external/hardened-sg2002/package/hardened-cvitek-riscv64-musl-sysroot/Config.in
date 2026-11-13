@@ -1,0 +1,9 @@
+config BR2_PACKAGE_HARDENED_CVITEK_RISCV64_MUSL_SYSROOT
+	bool "CVITEK RV64 musl runtime sysroot (ABI experiment)"
+	depends on BR2_riscv
+	depends on BR2_HARDENED_SG2002_VENDOR_ABI_READY
+	help
+	  Install the vendor runtime sysroot for an explicitly verified ABI
+	  experiment. This package can overwrite or shadow Buildroot runtime
+	  libraries. Do not enable it until the full MMF/VENC/libkvm loader
+	  closure and license review have passed on SG2002 hardware.

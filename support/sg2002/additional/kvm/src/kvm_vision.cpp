@@ -19,6 +19,12 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdarg>
+#include <exception>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "i2c_bus_lock.h"
 
 #define default_venc_chn        1
 
@@ -50,8 +56,8 @@
 #define hdmi_mode_path          "/etc/kvm/hdmi_mode"
 #define hdmi_state_path         "/proc/lt_int"
 #define watchdog_mode_path      "/etc/kvm/watchdog"
-#define watchdog_temp_path      "/tmp/watchdog"
-#define watchdog_file           "/tmp/nanokvm_wd"
+#define watchdog_temp_path      "/run/nanokvm-vision-watchdog"
+#define watchdog_file           "/run/nanokvm-vision-heartbeat"
 
 #define LT6911_ADDR 	0x2B
 #define LT6911_READ 	0xFF
@@ -72,6 +78,56 @@ static bool vi_detection_thread_started = false;
 static bool watchdog_thread_started = false;
 static bool vi_mutex_initialized = false;
 static std::atomic<bool> stop_threads{false};
+
+/* The vendor camera, encoder and I2C wrappers report failures as C++
+ * exceptions.  None may cross the C interface into the Rust backend or end a
+ * worker thread through std::terminate, and none may leave vi_mutex held. */
+namespace {
+class ViLock {
+public:
+    ViLock() = default;
+    ViLock(const ViLock &) = delete;
+    ViLock &operator=(const ViLock &) = delete;
+    ~ViLock() { unlock(); }
+
+    int lock()
+    {
+        int res = pthread_mutex_lock(&vi_mutex);
+        held = res == 0;
+        return res;
+    }
+
+    int lock_until(const struct timespec *deadline)
+    {
+        int res = pthread_mutex_timedlock(&vi_mutex, deadline);
+        held = res == 0;
+        return res;
+    }
+
+    void unlock()
+    {
+        if (held) {
+            held = false;
+            pthread_mutex_unlock(&vi_mutex);
+        }
+    }
+
+private:
+    bool held = false;
+};
+} // namespace
+
+/* Call only from a catch handler: logs the exception being handled. */
+static void report_exception(const char *where)
+{
+    try {
+        throw;
+    } catch (const std::exception &error) {
+        fprintf(stderr, "[kvmv] %s failed: %s\n", where, error.what());
+    } catch (...) {
+        fprintf(stderr, "[kvmv] %s failed\n", where);
+    }
+}
 static kvmv_lifecycle_state_t lifecycle_state = kvmv_lifecycle_state_t::stopped;
 
 static char NanoKVM_edit[] = {
@@ -150,13 +206,47 @@ void debug(const char *format, ...)
     }
 }
 
+/* The LT6911 shares /dev/i2c-4 with the EDID tool and S15kvmhwd's probes
+ * (see i2c_bus_lock.h). Every chip transaction of the detection thread runs
+ * under that lock. A bus held longer than this wait skips one poll; the next
+ * interrupt or retry comes back to it. Only the detection thread uses it. */
+#define LT6911_BUS_WAIT_MS 1000
+static int lt6911_bus_lock_fd = -1;
+namespace {
+class I2cBusLock {
+public:
+    I2cBusLock() = default;
+    I2cBusLock(const I2cBusLock &) = delete;
+    I2cBusLock &operator=(const I2cBusLock &) = delete;
+    ~I2cBusLock()
+    {
+        if (held) {
+            i2c_bus_lock_release(lt6911_bus_lock_fd);
+        }
+    }
+
+    bool acquire(unsigned wait_ms)
+    {
+        if (lt6911_bus_lock_fd < 0) {
+            lt6911_bus_lock_fd = i2c_bus_lock_open(I2C_BUS_LOCK_PATH);
+        }
+        held = lt6911_bus_lock_fd >= 0 && i2c_bus_lock_acquire(lt6911_bus_lock_fd, wait_ms) == 0;
+        return held;
+    }
+
+private:
+    bool held = false;
+};
+} // namespace
+
 static bool restart_camera_from_worker()
 {
     if (stop_threads.load(std::memory_order_acquire)) {
         return false;
     }
 
-    int lock_res = pthread_mutex_lock(&vi_mutex);
+    ViLock vi_lock;
+    int lock_res = vi_lock.lock();
     if (lock_res != 0) {
         fprintf(stderr, "[kvmv] failed to lock camera mutex: %s\n", strerror(lock_res));
         return false;
@@ -164,11 +254,15 @@ static bool restart_camera_from_worker()
 
     bool restarted = false;
     if (!stop_threads.load(std::memory_order_acquire)) {
-        cam->restart(default_vpss_width, default_vpss_height, image::FMT_YVU420SP);
-        restarted = true;
+        try {
+            cam->restart(default_vpss_width, default_vpss_height, image::FMT_YVU420SP);
+            restarted = true;
+        } catch (...) {
+            report_exception("camera restart");
+        }
     }
 
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
     return restarted;
 }
 
@@ -218,23 +312,34 @@ static bool read_uint16_file(const char *path, uint16_t *value)
         return false;
     }
 
-    char buffer[35] = {0};
-    bool ok = fgets(buffer, sizeof(buffer), fp) != NULL;
-    if (ok && strchr(buffer, '\n') == NULL && !feof(fp)) {
-        ok = false;
-    }
+    // Accept only the whole input: decimal digits with at most one trailing
+    // newline. Reject whitespace, signs, extra lines and oversized input
+    // instead of silently parsing a prefix.
+    char buffer[36] = {0};
+    size_t len = fread(buffer, 1, sizeof(buffer) - 1, fp);
+    const bool read_error = ferror(fp) != 0;
+    const bool extra = fgetc(fp) != EOF;
     fclose(fp);
-    if (!ok) {
+    if (read_error || extra || len == 0) {
         return false;
+    }
+    size_t digits = len;
+    if (buffer[digits - 1] == '\n') {
+        digits--;
+    }
+    if (digits == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < digits; i++) {
+        if (buffer[i] < '0' || buffer[i] > '9') {
+            return false;
+        }
     }
 
     errno = 0;
     char *end = NULL;
     unsigned long parsed = strtoul(buffer, &end, 10);
-    while (end && std::isspace(static_cast<unsigned char>(*end))) {
-        ++end;
-    }
-    if (errno != 0 || end == buffer || !end || *end != '\0' || parsed > UINT16_MAX) {
+    if (errno != 0 || end != buffer + digits || parsed > UINT16_MAX) {
         return false;
     }
 
@@ -418,25 +523,31 @@ int get_hdmi_mode(void)
     return 0;
 }
 
+static bool trusted_watchdog_flag(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_uid == 0 && (st.st_mode & 0022) == 0;
+}
+
 uint8_t watchdog_sf_is_open(void)
 {
-	if(access(watchdog_mode_path, F_OK) == 0) return 1;
-    else if(access(watchdog_temp_path, F_OK) == 0) return 1;
-	else return 0;
+    return trusted_watchdog_flag(watchdog_mode_path) ||
+           trusted_watchdog_flag(watchdog_temp_path);
 }
 
 int vision_update_watchdog()
 {
-    FILE *file;
-
-    file = fopen(watchdog_file, "w");
-    if (file == NULL) {
-        debug("[kvmv] watchdog open error\n");
+    const int fd = open(watchdog_file,
+                        O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+    if(fd < 0) return -1;
+    struct stat st;
+    if(fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+       st.st_nlink != 1 || (st.st_mode & 0022) != 0 || ftruncate(fd, 0) != 0){
+        close(fd);
         return -1;
     }
-    // fprintf(file, "%s", 'v');
-    fclose(file);
-    return 1;
+    return close(fd) == 0 ? 1 : -1;
 }
 
 int get_manual_resolution(void)
@@ -975,6 +1086,11 @@ uint8_t lt6911_read_one_reg(uint8_t reg)
 
 void lt6911_write_edid(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint8_t i, j;
 	uint8_t buf[2];
 	lt6911_enable();
@@ -1034,6 +1150,11 @@ void lt6911_write_edid(void)
 
 void lt6911_read_edid(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint8_t i;
 	lt6911_enable();
 
@@ -1097,6 +1218,11 @@ void lt6911_read_edid(void)
 
 void lt6911_read_fw(void)
 {
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] I2C bus busy; nothing done\n");
+        return;
+    }
 	uint32_t i;
 	uint8_t buf[3];
 	lt6911_enable();
@@ -1164,7 +1290,7 @@ void lt6911_read_fw(void)
 
 // ==============================================================
 
-void* watchdog_sf_feed(void * arg)
+static void* watchdog_sf_feed_loop(void * arg)
 {
     while(!stop_threads.load(std::memory_order_acquire))
     {
@@ -1228,7 +1354,37 @@ void get_hdmi_version()
     }
 }
 
-void* vi_subsystem_detection(void * arg)
+/* One chip poll after an interrupt: resolution and cable state, under the
+ * bus lock. The chip stays disabled again afterwards, as before. */
+static void poll_lt6911(const char *chip, uint8_t *auto_change_mode)
+{
+    I2cBusLock bus;
+    if (!bus.acquire(LT6911_BUS_WAIT_MS)) {
+        debug("[hdmi] %s: I2C bus busy, polling later\n", chip);
+        return;
+    }
+    lt6911_enable();
+    if(lt6911_get_hdmi_res()){
+        // hdmi get res
+        debug("[hdmi] %s HDMI cable insertion!\n", chip);
+        kvmv_cfg.hdmi_cable_state = 1;
+        kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
+        if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
+        else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
+            /* Move HDMI resolution modification directly
+                to mode1 to solve deadlock problem */
+            *auto_change_mode = 1;
+            set_hdmi_mode(1);
+        }
+    } else {
+        // HDMI res = 0*0/x*0
+        debug("[hdmi] %s HDMI cable unplugged!\n", chip);
+        kvmv_cfg.hdmi_cable_state = 0;
+    }
+    lt6911_disable();
+}
+
+static void* vi_subsystem_detection_loop(void * arg)
 {
 	uint64_t __attribute__((unused)) int_time;
 
@@ -1290,75 +1446,21 @@ void* vi_subsystem_detection(void * arg)
                         if(kvmv_cfg.hdmi_version == 0){
                             // LT6911C
                             if(rising_times != 0){
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] C HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] C HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("C", &auto_change_mode);
                             }
                         } else if (kvmv_cfg.hdmi_version == 1){
                             // LT6911UXC
                                 debug("[hdmi] UXC int\n");
                             if(falling_times != 0){
                                 debug("[hdmi] UXC int && \n");
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] UXC HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] UXC HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("UXC", &auto_change_mode);
                             }
                         } else if (kvmv_cfg.hdmi_version == 3){
                             // LT6911D
                                 debug("[hdmi] D int\n");
                             if(falling_times != 0){
                                 debug("[hdmi] D int && \n");
-                                lt6911_enable();
-                                if(lt6911_get_hdmi_res()){
-                                    // hdmi get res
-                                    debug("[hdmi] D HDMI cable insertion!\n");
-                                    kvmv_cfg.hdmi_cable_state = 1;
-                                    kvmv_cfg.hdmi_res_type = refresh_csi_resolution();
-                                    if (kvmv_cfg.hdmi_res_type == NEW_RES) kvmv_cfg.reopen_cam_flag = 1;
-                                    else if (kvmv_cfg.hdmi_res_type == UNKNOWN_RES){
-                                        /* Move HDMI resolution modification directly
-                                            to mode1 to solve deadlock problem */
-                                        auto_change_mode = 1;
-                                        set_hdmi_mode(1);
-                                    }
-                                } else {
-                                    // HDMI res = 0*0/x*0
-                                    debug("[hdmi] D HDMI cable unplugged!\n");
-                                    kvmv_cfg.hdmi_cable_state = 0;
-                                }
-                                lt6911_disable();
+                                poll_lt6911("D", &auto_change_mode);
                             }
                         } else {
                             debug("[hdmi] Chip not supported for reading \n");
@@ -1478,6 +1580,27 @@ void* vi_subsystem_detection(void * arg)
         }
 
 		time::sleep_ms(10);
+    }
+    return NULL;
+}
+
+/* Worker entry points: an exception ends the worker with a log line. */
+void* vi_subsystem_detection(void * arg)
+{
+    try {
+        return vi_subsystem_detection_loop(arg);
+    } catch (...) {
+        report_exception("HDMI detection worker");
+    }
+    return NULL;
+}
+
+void* watchdog_sf_feed(void * arg)
+{
+    try {
+        return watchdog_sf_feed_loop(arg);
+    } catch (...) {
+        report_exception("watchdog worker");
     }
     return NULL;
 }
@@ -1757,9 +1880,17 @@ void kvmv_init(uint8_t _debug_info_en)
 
     // debug("[kvmv]kvmv_init - 1\r\n");
 
-    pthread_mutex_lock(&vi_mutex);
-    cam->hmirror(1);
-    cam->vflip(1);
+    ViLock vi_lock;
+    vi_lock.lock();
+    try {
+        cam->hmirror(1);
+        cam->vflip(1);
+    } catch (...) {
+        report_exception("camera setup");
+        vi_lock.unlock();
+        pthread_mutex_unlock(&lifecycle_mutex);
+        return;
+    }
     /* The global camera is already open.  Recreating it here immediately
      * tears down a freshly started ISP/VI stack and is unreliable with a
      * cleanly rebuilt vendor MMF library.  Real input-resolution changes are
@@ -1769,7 +1900,7 @@ void kvmv_init(uint8_t _debug_info_en)
         kvmv_data_buffer[i].img_data_size = 0;
     }
     kvmv_data_buffer_index = 0;
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
 
     // debug("[kvmv]kvmv_init - 2\r\n");
 
@@ -1850,7 +1981,7 @@ void set_venc_auto_recyc(uint8_t _enable)
          4: Acquire H264 encoded images(P)
          5: IMG not changed
  **********************************************************************************/
-int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
+static int read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
 {
     static uint8_t frame_undetact_count = 0;
 	// uint64_t __attribute__((unused)) start_time = time::time_ms();
@@ -1859,20 +1990,21 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 1;
     // pthread_mutex_lock(&vi_mutex);         // Add lock
-    int mutex_res = pthread_mutex_timedlock(&vi_mutex, &ts);
+    ViLock vi_lock;
+    int mutex_res = vi_lock.lock_until(&ts);
     if(mutex_res != 0){
         return -5;
     }
     if (kvmv_cfg.hdmi_res_err == ERROR_RES){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -7;
     }
     if (kvmv_cfg.hdmi_res_type == UNSUPPORT_RES){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -6;
     }
     if (kvmv_cfg.vi_detect_state == 1){
-        pthread_mutex_unlock(&vi_mutex);
+        vi_lock.unlock();
         return -4;
     }
     uint8_t try_num = 0;
@@ -1926,7 +2058,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
                         debug("[kvmv]frame not changed...\n");
                         kvmv_cfg.stream_stop = 1;
                         delete img;
-                        pthread_mutex_unlock(&vi_mutex);
+                        vi_lock.unlock();
                         return 5;
                     } else {
                         kvmv_cfg.stream_stop = 0;
@@ -1975,7 +2107,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				delete img;
 				*_pp_kvm_data = NULL;
 				*_p_kvmv_data_size = 0;
-				pthread_mutex_unlock(&vi_mutex);
+				vi_lock.unlock();
 				return IMG_VENC_ERROR;
 			}
             kvmv_data_t* p_kvmv_data = get_save_buffer();
@@ -1985,7 +2117,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 			    delete img;
                 debug("[kvmv]jpg buffer full\n");
                 *_pp_kvm_data = NULL;
-                pthread_mutex_unlock(&vi_mutex);
+                vi_lock.unlock();
                 return IMG_BUFFER_FULL;
             }
 			if (jpg_dump(p_kvmv_data, jpg) != 0) {
@@ -1993,14 +2125,14 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				delete img;
 				*_pp_kvm_data = NULL;
 				*_p_kvmv_data_size = 0;
-				pthread_mutex_unlock(&vi_mutex);
+				vi_lock.unlock();
 				return IMG_VENC_ERROR;
 			}
             delete jpg;
 			delete img;
             *_pp_kvm_data = p_kvmv_data->p_img_data;
             *_p_kvmv_data_size = p_kvmv_data->img_data_size;
-            pthread_mutex_unlock(&vi_mutex);
+            vi_lock.unlock();
             return IMG_MJPEG_TYPE;
         } else if (kvmv_cfg.venc_type == VENC_H264){
             int ret;
@@ -2009,7 +2141,7 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
                 // buffer full
 			    delete img;
                 *_pp_kvm_data = NULL;
-                pthread_mutex_unlock(&vi_mutex);
+                vi_lock.unlock();
                 return IMG_BUFFER_FULL;
             }
             // debug("[kvmv]get_save_buffer: %d \r\n", (int)(time::time_ms() - start_time));
@@ -2023,18 +2155,36 @@ int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _ql
 				*_pp_kvm_data = p_kvmv_data->p_img_data;
 				*_p_kvmv_data_size = p_kvmv_data->img_data_size;
 			}
-            pthread_mutex_unlock(&vi_mutex);
+            vi_lock.unlock();
             return ret;
         }
     } while (check_kvmv(try_num++));
     // debug("[kvmv]return: %d \r\n", (int)(time::time_ms() - start_time));
     *_pp_kvm_data = NULL;
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
     return IMG_NOT_EXIST;
+}
+
+int kvmv_read_img(uint16_t _width, uint16_t _height, uint8_t _type, uint16_t _qlty, uint8_t** _pp_kvm_data, uint32_t* _p_kvmv_data_size)
+{
+    try {
+        return read_img(_width, _height, _type, _qlty, _pp_kvm_data, _p_kvmv_data_size);
+    } catch (...) {
+        // read_img's lock guard has released vi_mutex by now.
+        report_exception("image read");
+    }
+    *_pp_kvm_data = NULL;
+    *_p_kvmv_data_size = 0;
+    return IMG_VENC_ERROR;
 }
 
 int free_kvmv_data(uint8_t ** _pp_kvm_data)
 {
+    // Serialize with read_img, which writes the same rotating buffer slots.
+    // deinit calls free_all_kvmv_data() while already holding ViLock, so only
+    // this externally invoked free takes the lock.
+    ViLock vi_lock;
+    if (vi_mutex_initialized) vi_lock.lock();
         // debug("[kvmv]free_kvmv_data - 1\r\n");
     for(int i = 0; i < kvmv_data_buffer_size; i++){
         if(*_pp_kvm_data == kvmv_data_buffer[i].p_img_data){
@@ -2095,11 +2245,24 @@ void kvmv_deinit()
         return;
     }
 
-    pthread_mutex_lock(&vi_mutex);
-    cam->close();
-    mmf_deinit();
+    ViLock vi_lock;
+    vi_lock.lock();
+    try {
+        cam->close();
+        /* Camera and the optional JPEG encoder each hold an MMF reference.  A
+         * process-level shutdown must release the complete vendor stack rather
+         * than decrementing only one reference and leaving VB/VENC initialized
+         * for the next backend process. */
+        mmf_try_deinit(true);
+    } catch (...) {
+        report_exception("camera shutdown");
+        vi_lock.unlock();
+        fprintf(stderr, "[kvmv] camera shutdown incomplete; leaving camera/MMF state intact\n");
+        pthread_mutex_unlock(&lifecycle_mutex);
+        return;
+    }
     free_all_kvmv_data();
-    pthread_mutex_unlock(&vi_mutex);
+    vi_lock.unlock();
 
     int mutex_res = pthread_mutex_destroy(&vi_mutex);
     if (mutex_res == 0) {

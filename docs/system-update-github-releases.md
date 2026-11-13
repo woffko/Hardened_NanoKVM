@@ -37,6 +37,11 @@ https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-sta
 Do not use `https://github.com/woffko/Hardened_NanoKVM/releases/latest/...` for
 system updates while application updates still use that endpoint.
 
+Releases are prepared and published with `scripts/prepare-release.sh` and
+`scripts/publish-release.sh`. The channel metadata changes only after the
+versioned release is published and verified; see
+[release-procedure.md](release-procedure.md).
+
 ## Versioned Release Assets
 
 A versioned system release tag should be named like:
@@ -176,6 +181,8 @@ contains:
 - `base_version`: base image marker expected before update.
 - `kernel_version`: kernel version expected after update.
 - `required_app_version`: minimum application version, currently `2.0.42`.
+- `minimum_system_version`: the oldest system this update restores from; older
+  systems install that release first. Optional, format 2 only.
 - `required_free_bytes`: required free space on `/data`.
 - `requires_reboot`: whether the update must reboot.
 - `operations`: fixed backend operation list.

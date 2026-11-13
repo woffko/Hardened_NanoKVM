@@ -1,5 +1,5 @@
 import { ReactElement, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { LockOutlined, UserOutlined } from '@ant-design/icons';
+import { LockOutlined, SafetyCertificateOutlined, UserOutlined } from '@ant-design/icons';
 import { Button, Form, Input } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -127,13 +127,18 @@ export const Login = (): ReactElement => {
       return;
     }
 
-    setIsloading(true);
+    const claim = String(values.claim ?? '').trim();
+    if (!claim) {
+      setMsg(t('auth.claimRequired'));
+      return;
+    }
 
+    setIsloading(true);
     const username = values.username;
     const password = encrypt(values.password);
 
     api
-      .setupFirstAccount(username, password)
+      .setupFirstAccount(username, password, claim)
       .then((rsp: any) => {
         if (rsp.code !== 0) {
           setMsg(rsp.msg || t('auth.error'));
@@ -238,6 +243,18 @@ export const Login = (): ReactElement => {
                 prefix={<LockOutlined />}
                 type="password"
                 placeholder={t('auth.placeholderPassword2')}
+              />
+            </Form.Item>
+          )}
+          {isSetup && (
+            <Form.Item
+              name="claim"
+              rules={[{ required: true, message: t('auth.claimRequired'), min: 1 }]}
+            >
+              <Input
+                prefix={<SafetyCertificateOutlined />}
+                placeholder={t('auth.claimPlaceholder')}
+                autoComplete="one-time-code"
               />
             </Form.Item>
           )}

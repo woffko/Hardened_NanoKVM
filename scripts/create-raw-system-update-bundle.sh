@@ -6,11 +6,14 @@ usage() {
   echo "" >&2
   echo "environment:" >&2
   echo "  BASE_VERSION=<current base image marker>" >&2
+  echo "  ROOTFS_SYSTEM_BASE_VERSION=<optional human-readable rootfs base marker>" >&2
   echo "  KERNEL_VERSION=<kernel version after update>" >&2
   echo "  SECURITY_PATCH_LEVEL=<optional security patch/backport label>" >&2
   echo "  RAW_IMAGE_COMPRESSION=gzip|none (default: gzip)" >&2
   echo "  REQUIRED_FREE_BYTES=<bytes required on staging filesystem>" >&2
   echo "  BUNDLE_NAME=<archive filename>" >&2
+  echo "  SYSTEM_UPDATE_FORMAT=1|2 (default: 1)" >&2
+  echo "  SYSTEM_UPDATE_REQUIRED_APP_VERSION=x.y.z (required for format 2)" >&2
   exit 1
 }
 
@@ -52,20 +55,29 @@ json_image() {
 patch_rootfs_image() {
   rootfs="$1"
   fstab_file="$STAGE_DIR/rootfs-fstab"
+  current_version_file="$STAGE_DIR/system-version.current.json"
   version_file="$STAGE_DIR/system-version.json"
   debugfs_cmds="$STAGE_DIR/rootfs-patch.debugfs"
+  fstab_exists=1
+  version_exists=1
+  fstab_changed=0
 
   command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
-  debugfs -R "dump /etc/fstab $fstab_file" "$rootfs" >/dev/null 2>&1 || : > "$fstab_file"
+  command -v cmp >/dev/null 2>&1 || die "cmp is required"
+  debugfs -R "dump /etc/fstab $fstab_file" "$rootfs" >/dev/null 2>&1 || {
+    fstab_exists=0
+    : > "$fstab_file"
+  }
   if ! grep -Eq '^[[:space:]]*[^#]+[[:space:]]+/data[[:space:]]+' "$fstab_file"; then
     printf '\n/dev/mmcblk0p3\t/data\texfat\tdefaults\t0\t0\n' >> "$fstab_file"
+    fstab_changed=1
   fi
 
   {
     printf '{\n'
     printf '  "version": "%s",\n' "$VERSION"
     printf '  "target": "%s",\n' "$TARGET"
-    printf '  "base_version": "%s",\n' "$BASE_VERSION"
+    printf '  "base_version": "%s",\n' "$ROOTFS_BASE_VERSION"
     printf '  "kernel_version": "%s"' "$KERNEL_VERSION"
     if [ -n "$SECURITY_PATCH_LEVEL" ]; then
       printf ',\n  "security_patch_level": "%s"' "$SECURITY_PATCH_LEVEL"
@@ -74,21 +86,79 @@ patch_rootfs_image() {
     printf '}\n'
   } > "$version_file"
 
+  debugfs -R "dump /etc/kvm/system-version.json $current_version_file" \
+    "$rootfs" >/dev/null 2>&1 || {
+    version_exists=0
+    : > "$current_version_file"
+  }
+  if cmp -s "$current_version_file" "$version_file"; then
+    version_changed=0
+  else
+    version_changed=1
+  fi
+
+  if [ "$fstab_changed" -eq 0 ] && [ "$version_changed" -eq 0 ]; then
+    echo "rootfs metadata is already exact; preserving input image bytes"
+    return
+  fi
+
   {
-    printf 'mkdir /etc/kvm\n'
-    printf 'rm /etc/fstab\n'
-    printf 'write %s /etc/fstab\n' "$fstab_file"
-    printf 'sif /etc/fstab mode 0100644\n'
-    printf 'sif /etc/fstab uid 0\n'
-    printf 'sif /etc/fstab gid 0\n'
-    printf 'rm /etc/kvm/system-version.json\n'
-    printf 'write %s /etc/kvm/system-version.json\n' "$version_file"
-    printf 'sif /etc/kvm/system-version.json mode 0100644\n'
-    printf 'sif /etc/kvm/system-version.json uid 0\n'
-    printf 'sif /etc/kvm/system-version.json gid 0\n'
+    if [ "$fstab_changed" -eq 1 ]; then
+      [ "$fstab_exists" -eq 0 ] || printf 'rm /etc/fstab\n'
+      printf 'write %s /etc/fstab\n' "$fstab_file"
+      printf 'sif /etc/fstab mode 0100644\n'
+      printf 'sif /etc/fstab uid 0\n'
+      printf 'sif /etc/fstab gid 0\n'
+    fi
+    if [ "$version_changed" -eq 1 ]; then
+      if [ "$version_exists" -eq 0 ]; then
+        debugfs -R 'stat /etc/kvm' "$rootfs" >/dev/null 2>&1 || \
+          printf 'mkdir /etc/kvm\n'
+      else
+        printf 'rm /etc/kvm/system-version.json\n'
+      fi
+      printf 'write %s /etc/kvm/system-version.json\n' "$version_file"
+      printf 'sif /etc/kvm/system-version.json mode 0100644\n'
+      printf 'sif /etc/kvm/system-version.json uid 0\n'
+      printf 'sif /etc/kvm/system-version.json gid 0\n'
+    fi
   } > "$debugfs_cmds"
 
   debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1
+}
+
+mark_raw_restore_required() {
+  rootfs="$1"
+  early_bin="${NANOKVM_EARLY_RESTORE_BIN:-}"
+  early_script="${NANOKVM_EARLY_RESTORE_SCRIPT:-$ROOT_DIR/support/sg2002/raw/S01restore}"
+  [ -n "$early_bin" ] || die "NANOKVM_EARLY_RESTORE_BIN is required for a raw image"
+  [ -f "$early_bin" ] || die "early restore binary does not exist: $early_bin"
+  [ -f "$early_script" ] || die "early restore script does not exist: $early_script"
+  marker="$STAGE_DIR/raw-restore-required"
+  printf 'nanokvm-raw-restore-required-v1\n' > "$marker"
+  debugfs_cmds="$STAGE_DIR/raw-restore.debugfs"
+  {
+    printf 'mkdir /etc/kvm/.raw-restore\n'
+    printf 'sif /etc/kvm/.raw-restore mode 040700\n'
+    printf 'sif /etc/kvm/.raw-restore uid 0\n'
+    printf 'sif /etc/kvm/.raw-restore gid 0\n'
+    printf 'write %s /etc/kvm/raw-restore-required\n' "$marker"
+    printf 'sif /etc/kvm/raw-restore-required mode 0100644\n'
+    printf 'sif /etc/kvm/raw-restore-required uid 0\n'
+    printf 'sif /etc/kvm/raw-restore-required gid 0\n'
+    printf 'write %s /usr/libexec/nanokvm-early-restore\n' "$early_bin"
+    printf 'sif /usr/libexec/nanokvm-early-restore mode 0100755\n'
+    printf 'sif /usr/libexec/nanokvm-early-restore uid 0\n'
+    printf 'sif /usr/libexec/nanokvm-early-restore gid 0\n'
+    printf 'write %s /etc/init.d/S01restore\n' "$early_script"
+    printf 'sif /etc/init.d/S01restore mode 0100755\n'
+    printf 'sif /etc/init.d/S01restore uid 0\n'
+    printf 'sif /etc/init.d/S01restore gid 0\n'
+  } > "$debugfs_cmds"
+  debugfs -w -f "$debugfs_cmds" "$rootfs" >/dev/null 2>&1 || \
+    die "failed to install the raw restore discriminator, helper or S01restore"
+  sh "$ROOT_DIR/scripts/validate-raw-restore-rootfs.sh" "$rootfs" || \
+    die "raw restore image prerequisites are invalid"
 }
 
 if [ "$#" -ne 5 ]; then
@@ -109,11 +179,27 @@ validate_token "target" "$TARGET"
 "$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$ROOTFS_IMAGE" >/dev/null
 
 BASE_VERSION="${BASE_VERSION:-unknown}"
+ROOTFS_BASE_VERSION="${ROOTFS_SYSTEM_BASE_VERSION:-$BASE_VERSION}"
 KERNEL_VERSION="${KERNEL_VERSION:-unknown}"
 SECURITY_PATCH_LEVEL="${SECURITY_PATCH_LEVEL:-}"
 RAW_IMAGE_COMPRESSION="${RAW_IMAGE_COMPRESSION:-gzip}"
 REQUIRED_FREE_BYTES="${REQUIRED_FREE_BYTES:-671088640}"
 BUNDLE_NAME="${BUNDLE_NAME:-hardened-nanokvm-system-$VERSION.tar.gz}"
+SYSTEM_UPDATE_FORMAT="${SYSTEM_UPDATE_FORMAT:-1}"
+REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-}"
+MINIMUM_SYSTEM_VERSION="${SYSTEM_UPDATE_MINIMUM_SYSTEM_VERSION:-}"
+
+case "$SYSTEM_UPDATE_FORMAT" in
+  1)
+    [ -z "$REQUIRED_APP_VERSION" ] || die "manifest v1 cannot require an application version"
+    [ -z "$MINIMUM_SYSTEM_VERSION" ] || die "manifest v1 cannot require a system version"
+    ;;
+  2)
+    printf '%s' "$REQUIRED_APP_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+      die "manifest v2 requires SYSTEM_UPDATE_REQUIRED_APP_VERSION=x.y.z"
+    ;;
+  *) die "invalid SYSTEM_UPDATE_FORMAT: $SYSTEM_UPDATE_FORMAT" ;;
+esac
 
 case "$RAW_IMAGE_COMPRESSION" in
   gzip | none) ;;
@@ -145,6 +231,7 @@ cp -f "$BOOT_IMAGE" "$STAGE_DIR/raw/boot.vfat"
 cp -f "$ROOTFS_IMAGE" "$STAGE_DIR/raw/rootfs.sd"
 patch_rootfs_image "$STAGE_DIR/raw/rootfs.sd"
 "$ROOT_DIR/scripts/validate-nanokvm-rootfs.sh" "$STAGE_DIR/raw/rootfs.sd" >/dev/null
+mark_raw_restore_required "$STAGE_DIR/raw/rootfs.sd"
 
 if [ "$RAW_IMAGE_COMPRESSION" = "gzip" ]; then
   gzip -n -c "$STAGE_DIR/raw/boot.vfat" > "$STAGE_DIR/payload/images/boot.vfat.gz"
@@ -163,18 +250,35 @@ else
 fi
 
 CREATED_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-SOURCE_COMMIT=$(git -C "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)" rev-parse --short HEAD 2>/dev/null || printf unknown)
+PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SOURCE_COMMIT_OVERRIDE=${SYSTEM_UPDATE_SOURCE_COMMIT:-}
+if [ -n "$SOURCE_COMMIT_OVERRIDE" ]; then
+  case "$SOURCE_COMMIT_OVERRIDE" in
+    *[!0-9a-fA-F]*) die "invalid system update source commit" ;;
+  esac
+  git -C "$PROJECT_ROOT" cat-file -e "$SOURCE_COMMIT_OVERRIDE^{commit}" 2>/dev/null || \
+    die "system update source commit does not exist"
+  SOURCE_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse --short "$SOURCE_COMMIT_OVERRIDE^{commit}")
+else
+  SOURCE_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || printf unknown)
+fi
 MANIFEST="$STAGE_DIR/manifest.json"
 
 {
   printf '{\n'
-  printf '  "format": "hardened-nanokvm-system-update-v1",\n'
+  printf '  "format": "hardened-nanokvm-system-update-v%s",\n' "$SYSTEM_UPDATE_FORMAT"
   printf '  "version": "%s",\n' "$VERSION"
   printf '  "target": "%s",\n' "$TARGET"
   printf '  "base_version": "%s",\n' "$BASE_VERSION"
   printf '  "kernel_version": "%s",\n' "$KERNEL_VERSION"
   if [ -n "$SECURITY_PATCH_LEVEL" ]; then
     printf '  "security_patch_level": "%s",\n' "$SECURITY_PATCH_LEVEL"
+  fi
+  if [ -n "$REQUIRED_APP_VERSION" ]; then
+    printf '  "required_app_version": "%s",\n' "$REQUIRED_APP_VERSION"
+  fi
+  if [ -n "$MINIMUM_SYSTEM_VERSION" ]; then
+    printf '  "minimum_system_version": "%s",\n' "$MINIMUM_SYSTEM_VERSION"
   fi
   printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
   printf '  "created_utc": "%s",\n' "$CREATED_UTC"

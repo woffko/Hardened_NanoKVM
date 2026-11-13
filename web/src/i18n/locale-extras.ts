@@ -4571,6 +4571,212 @@ const timeLogExtras = keyedExtras(timeLogKeys, {
   ]
 });
 
+const scriptUnlockKeys = ['script.unlockDesc', 'script.terminalRequired'] as const;
+
+const scriptUnlockExtras = keyedExtras(scriptUnlockKeys, {
+  ca: [
+    'Els scripts s’executen com a root al NanoKVM. Introduïu la contrasenya del compte web per pujar-ne o executar-ne un.',
+    'Els scripts necessiten accés al terminal web. Activeu primer el terminal a la configuració.'
+  ],
+  cz: [
+    'Skripty běží na NanoKVM jako root. Zadejte heslo webového účtu, abyste mohli skript nahrát nebo spustit.',
+    'Skripty vyžadují přístup k webovému terminálu. Nejprve terminál zapněte v nastavení.'
+  ],
+  da: [
+    'Scripts kører som root på NanoKVM. Indtast adgangskoden til webkontoen for at uploade eller køre et script.',
+    'Scripts kræver adgang til webterminalen. Aktivér først terminalen i indstillingerne.'
+  ],
+  de: [
+    'Skripte laufen auf dem NanoKVM als root. Geben Sie das Passwort des Webkontos ein, um ein Skript hochzuladen oder auszuführen.',
+    'Skripte benötigen Zugriff auf das Web-Terminal. Aktivieren Sie zuerst das Terminal in den Einstellungen.'
+  ],
+  es: [
+    'Los scripts se ejecutan como root en el NanoKVM. Introduzca la contraseña de la cuenta web para subir o ejecutar uno.',
+    'Los scripts necesitan acceso al terminal web. Active primero el terminal en la configuración.'
+  ],
+  et: [
+    'Skriptid töötavad NanoKVM-is root-õigustes. Skripti üleslaadimiseks või käivitamiseks sisestage veebikonto parool.',
+    'Skriptid vajavad juurdepääsu veebiterminalile. Lubage esmalt terminal seadetes.'
+  ],
+  fi: [
+    'Skriptit suoritetaan NanoKVM:ssä root-oikeuksin. Anna verkkotilin salasana ladataksesi tai suorittaaksesi skriptin.',
+    'Skriptit tarvitsevat pääsyn verkkopäätteeseen. Ota pääte ensin käyttöön asetuksista.'
+  ],
+  fr: [
+    'Les scripts s’exécutent en root sur le NanoKVM. Saisissez le mot de passe du compte web pour en téléverser ou en exécuter un.',
+    'Les scripts nécessitent l’accès au terminal web. Activez d’abord le terminal dans les paramètres.'
+  ],
+  hu: [
+    'A szkriptek rootként futnak a NanoKVM-en. Szkript feltöltéséhez vagy futtatásához adja meg a webes fiók jelszavát.',
+    'A szkriptekhez webes terminálhozzáférés szükséges. Először engedélyezze a terminált a beállításokban.'
+  ],
+  id: [
+    'Skrip berjalan sebagai root di NanoKVM. Masukkan kata sandi akun web untuk mengunggah atau menjalankan skrip.',
+    'Skrip memerlukan akses terminal web. Aktifkan terminal di pengaturan terlebih dahulu.'
+  ],
+  it: [
+    'Gli script vengono eseguiti come root sul NanoKVM. Inserisci la password dell’account web per caricarne o eseguirne uno.',
+    'Gli script richiedono l’accesso al terminale web. Attiva prima il terminale nelle impostazioni.'
+  ],
+  ja: [
+    'スクリプトは NanoKVM 上で root として実行されます。スクリプトをアップロードまたは実行するには、Web アカウントのパスワードを入力してください。',
+    'スクリプトには Web ターミナルへのアクセスが必要です。先に設定でターミナルを有効にしてください。'
+  ],
+  ko: [
+    '스크립트는 NanoKVM에서 root로 실행됩니다. 스크립트를 업로드하거나 실행하려면 웹 계정 비밀번호를 입력하세요.',
+    '스크립트에는 웹 터미널 접근이 필요합니다. 먼저 설정에서 터미널을 활성화하세요.'
+  ],
+  nb: [
+    'Skript kjøres som root på NanoKVM. Skriv inn passordet til nettkontoen for å laste opp eller kjøre et skript.',
+    'Skript krever tilgang til nettterminalen. Aktiver terminalen i innstillingene først.'
+  ],
+  nl: [
+    'Scripts draaien als root op de NanoKVM. Voer het wachtwoord van het webaccount in om een script te uploaden of uit te voeren.',
+    'Scripts hebben toegang tot de webterminal nodig. Schakel eerst de terminal in bij de instellingen.'
+  ],
+  pl: [
+    'Skrypty działają na NanoKVM jako root. Wprowadź hasło konta webowego, aby przesłać lub uruchomić skrypt.',
+    'Skrypty wymagają dostępu do terminala webowego. Najpierw włącz terminal w ustawieniach.'
+  ],
+  pt_br: [
+    'Os scripts são executados como root no NanoKVM. Digite a senha da conta web para enviar ou executar um script.',
+    'Os scripts exigem acesso ao terminal web. Ative primeiro o terminal nas configurações.'
+  ],
+  se: [
+    'Skript körs som root på NanoKVM. Ange webbkontots lösenord för att ladda upp eller köra ett skript.',
+    'Skript kräver åtkomst till webbterminalen. Aktivera först terminalen i inställningarna.'
+  ],
+  th: [
+    'สคริปต์ทำงานในฐานะ root บน NanoKVM ป้อนรหัสผ่านบัญชีเว็บเพื่ออัปโหลดหรือเรียกใช้สคริปต์',
+    'สคริปต์ต้องใช้การเข้าถึงเทอร์มินัลเว็บ โปรดเปิดใช้งานเทอร์มินัลในการตั้งค่าก่อน'
+  ],
+  tr: [
+    'Betikler NanoKVM üzerinde root olarak çalışır. Bir betik yüklemek veya çalıştırmak için web hesabı parolasını girin.',
+    'Betikler web terminali erişimi gerektirir. Önce ayarlardan terminali etkinleştirin.'
+  ],
+  uk: [
+    'Скрипти виконуються на NanoKVM від root. Введіть пароль вебоблікового запису, щоб завантажити або запустити скрипт.',
+    'Для скриптів потрібен доступ до вебтерміналу. Спочатку увімкніть термінал у налаштуваннях.'
+  ],
+  vi: [
+    'Các script chạy với quyền root trên NanoKVM. Nhập mật khẩu tài khoản web để tải lên hoặc chạy script.',
+    'Script cần quyền truy cập terminal web. Hãy bật terminal trong phần cài đặt trước.'
+  ],
+  zh: [
+    '脚本在 NanoKVM 上以 root 身份运行。请输入 Web 账户密码以上传或运行脚本。',
+    '脚本需要 Web 终端访问权限。请先在设置中启用终端。'
+  ],
+  zh_tw: [
+    '腳本在 NanoKVM 上以 root 身分執行。請輸入 Web 帳戶密碼以上傳或執行腳本。',
+    '腳本需要 Web 終端機存取權限。請先在設定中啟用終端機。'
+  ]
+});
+
+const currentPasswordKeys = [
+  'auth.placeholderCurrentPassword',
+  'auth.wrongCurrentPassword'
+] as const;
+
+const currentPasswordExtras = keyedExtras(currentPasswordKeys, {
+  ca: ['Contrasenya actual', 'La contrasenya actual no és correcta'],
+  cz: ['Současné heslo', 'Současné heslo je nesprávné'],
+  da: ['Nuværende adgangskode', 'Den nuværende adgangskode er forkert'],
+  de: ['Aktuelles Passwort', 'Das aktuelle Passwort ist falsch'],
+  es: ['Contraseña actual', 'La contraseña actual es incorrecta'],
+  et: ['Praegune parool', 'Praegune parool on vale'],
+  fi: ['Nykyinen salasana', 'Nykyinen salasana on väärä'],
+  fr: ['Mot de passe actuel', 'Le mot de passe actuel est incorrect'],
+  hu: ['Jelenlegi jelszó', 'A jelenlegi jelszó helytelen'],
+  id: ['Kata sandi saat ini', 'Kata sandi saat ini salah'],
+  it: ['Password attuale', 'La password attuale non è corretta'],
+  ja: ['現在のパスワード', '現在のパスワードが正しくありません'],
+  ko: ['현재 비밀번호', '현재 비밀번호가 올바르지 않습니다'],
+  nb: ['Nåværende passord', 'Det nåværende passordet er feil'],
+  nl: ['Huidig wachtwoord', 'Het huidige wachtwoord is onjuist'],
+  pl: ['Obecne hasło', 'Obecne hasło jest nieprawidłowe'],
+  pt_br: ['Senha atual', 'A senha atual está incorreta'],
+  se: ['Nuvarande lösenord', 'Det nuvarande lösenordet är fel'],
+  th: ['รหัสผ่านปัจจุบัน', 'รหัสผ่านปัจจุบันไม่ถูกต้อง'],
+  tr: ['Mevcut şifre', 'Mevcut şifre yanlış'],
+  uk: ['Поточний пароль', 'Поточний пароль неправильний'],
+  vi: ['Mật khẩu hiện tại', 'Mật khẩu hiện tại không đúng'],
+  zh: ['当前密码', '当前密码不正确'],
+  zh_tw: ['目前密碼', '目前密碼不正確']
+});
+
+const autostartNoticeKeys = ['settings.device.autostart.notExecuted'] as const;
+
+const autostartNoticeExtras = keyedExtras(autostartNoticeKeys, {
+  ca: [
+    'Aquesta imatge no executa scripts d’inici automàtic. Els fitxers desats aquí es conserven, però no s’executen mai.'
+  ],
+  cz: [
+    'Tento obraz nespouští skripty automatického spuštění. Zde uložené soubory zůstanou zachovány, ale nikdy se nespustí.'
+  ],
+  da: [
+    'Dette image kører ikke autostart-scripts. Filer, der gemmes her, bevares, men køres aldrig.'
+  ],
+  de: [
+    'Dieses Image führt keine Autostart-Skripte aus. Hier gespeicherte Dateien bleiben erhalten, werden aber nie ausgeführt.'
+  ],
+  es: [
+    'Esta imagen no ejecuta scripts de inicio automático. Los archivos guardados aquí se conservan, pero nunca se ejecutan.'
+  ],
+  et: [
+    'See tõmmis ei käivita automaatkäivituse skripte. Siia salvestatud failid säilivad, kuid neid ei käivitata kunagi.'
+  ],
+  fi: [
+    'Tämä levykuva ei suorita automaattisen käynnistyksen skriptejä. Tänne tallennetut tiedostot säilyvät, mutta niitä ei koskaan suoriteta.'
+  ],
+  fr: [
+    'Cette image n’exécute pas les scripts de démarrage automatique. Les fichiers enregistrés ici sont conservés mais jamais exécutés.'
+  ],
+  hu: [
+    'Ez a rendszerkép nem futtat automatikus indítási szkripteket. Az itt mentett fájlok megmaradnak, de soha nem futnak le.'
+  ],
+  id: [
+    'Image ini tidak menjalankan skrip mulai otomatis. File yang disimpan di sini tetap tersimpan tetapi tidak pernah dijalankan.'
+  ],
+  it: [
+    'Questa immagine non esegue script di avvio automatico. I file salvati qui vengono conservati ma non vengono mai eseguiti.'
+  ],
+  ja: [
+    'このイメージは自動起動スクリプトを実行しません。ここに保存したファイルは保持されますが、実行されることはありません。'
+  ],
+  ko: [
+    '이 이미지는 자동 시작 스크립트를 실행하지 않습니다. 여기에 저장한 파일은 보관되지만 실행되지 않습니다.'
+  ],
+  nb: [
+    'Dette bildet kjører ikke autostart-skript. Filer som lagres her, beholdes, men kjøres aldri.'
+  ],
+  nl: [
+    'Deze image voert geen autostartscripts uit. Bestanden die hier zijn opgeslagen, blijven bewaard maar worden nooit uitgevoerd.'
+  ],
+  pl: [
+    'Ten obraz nie uruchamia skryptów autostartu. Zapisane tu pliki są przechowywane, ale nigdy nie są wykonywane.'
+  ],
+  pt_br: [
+    'Esta imagem não executa scripts de inicialização automática. Os arquivos salvos aqui são mantidos, mas nunca executados.'
+  ],
+  se: [
+    'Den här avbildningen kör inte autostartskript. Filer som sparas här behålls men körs aldrig.'
+  ],
+  th: [
+    'อิมเมจนี้ไม่เรียกใช้สคริปต์เริ่มอัตโนมัติ ไฟล์ที่บันทึกไว้ที่นี่จะถูกเก็บไว้ แต่จะไม่ถูกเรียกใช้'
+  ],
+  tr: [
+    'Bu imaj otomatik başlatma betiklerini çalıştırmaz. Buraya kaydedilen dosyalar saklanır ancak hiçbir zaman çalıştırılmaz.'
+  ],
+  uk: [
+    'Цей образ не запускає скрипти автозапуску. Збережені тут файли зберігаються, але ніколи не виконуються.'
+  ],
+  vi: [
+    'Bản image này không chạy các script tự khởi động. Các tệp lưu ở đây được giữ lại nhưng không bao giờ được thực thi.'
+  ],
+  zh: ['此镜像不会运行自启动脚本。保存在这里的文件会被保留，但永远不会被执行。'],
+  zh_tw: ['此映像不會執行自動啟動腳本。儲存在這裡的檔案會被保留，但永遠不會被執行。']
+});
+
 const hardenedCommonKeys = [
   'head.firstSetup',
   'auth.setupTitle',
@@ -7025,6 +7231,34 @@ function setDeep(target: Record<string, unknown>, path: string, value: string) {
   current[leaf] = value;
 }
 
+const updateRestartFallbackExtras: TranslationMap = {
+  'settings.update.offline.signedDesc':
+    'Select the package, latest.json and latest.json.sig of one signed release.',
+  'settings.update.offline.invalidPackage':
+    'Select exactly three files of one release: the package, latest.json and latest.json.sig.',
+  'settings.update.outcomeUnknown':
+    'The outcome of this update is not known. Reload the page and compare the version before installing again.',
+  'settings.update.restarting':
+    'Installed. Waiting for the device to come back (up to two minutes); keep it powered.',
+  'settings.update.unreachable':
+    'The device did not answer within two minutes. Reload this page by hand; if its address or certificate changed, open it again from the address bar.'
+};
+
+const updateRestartLocalizedExtras: Record<string, TranslationMap> = {
+  ru: {
+    'settings.update.offline.signedDesc':
+      'Выберите пакет, latest.json и latest.json.sig одного подписанного выпуска.',
+    'settings.update.offline.invalidPackage':
+      'Выберите ровно три файла одного выпуска: пакет, latest.json и latest.json.sig.',
+    'settings.update.outcomeUnknown':
+      'Результат обновления неизвестен. Перезагрузите страницу и сравните версию, прежде чем устанавливать снова.',
+    'settings.update.restarting':
+      'Установлено. Ждём, пока устройство снова ответит (до двух минут); не выключайте питание.',
+    'settings.update.unreachable':
+      'Устройство не ответило за две минуты. Перезагрузите страницу вручную; если изменились адрес или сертификат, откройте устройство заново из адресной строки.'
+  }
+};
+
 export function applyLocaleExtras(language: string, resource: ResourceLanguage) {
   const key = languageAliases[language] || language;
   const firewallModerateExtras = key === 'en' || key === 'ru' ? {} : firewallModerateFallbackExtras;
@@ -7053,6 +7287,7 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
   const firewallNoWebrtcModeDescriptionExtras =
     firewallNoWebrtcModeDescriptionLocalizedExtras[key] ||
     firewallNoWebrtcModeDescriptionFallbackExtras;
+  const updateRestartExtras = updateRestartLocalizedExtras[key] || updateRestartFallbackExtras;
   const extras = {
     ...(downloadExtras[key] || {}),
     ...(downloadOkExtras[key] || {}),
@@ -7064,6 +7299,9 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...virtualMediaExtras,
     ...(networkExtras[key] || {}),
     ...(hardenedCommonExtras[key] || {}),
+    ...(scriptUnlockExtras[key] || {}),
+    ...(currentPasswordExtras[key] || {}),
+    ...(autostartNoticeExtras[key] || {}),
     ...(legacyExtras[key] || {}),
     ...(systemUpdateExtras[key] || {}),
     ...(firewallExtras[key] || {}),
@@ -7071,7 +7309,8 @@ export function applyLocaleExtras(language: string, resource: ResourceLanguage) 
     ...(firewallModerateLocalizedExtras[key] || {}),
     ...(timeLogExtras[key] || {}),
     ...firewallNoWebrtcExtras,
-    ...firewallNoWebrtcModeDescriptionExtras
+    ...firewallNoWebrtcModeDescriptionExtras,
+    ...updateRestartExtras
   };
   if (!Object.keys(extras).length) return;
 

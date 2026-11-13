@@ -1,4 +1,5 @@
 #include "oled_ctrl.h"
+#include "hw_version.h"
 
 using namespace maix;
 using namespace maix::sys;
@@ -44,14 +45,7 @@ int oled_exist(void)
     // system("devmem 0x030010D0 32 0x2");
     // system("devmem 0x030010DC 32 0x2");
 
-	if(access("/etc/kvm/hw", F_OK) == 0){
-		uint8_t RW_Data[2];
-		FILE *fp = fopen("/etc/kvm/hw", "r");
-		fread(RW_Data, sizeof(char), 2, fp);
-		fclose(fp);
-		if(RW_Data[0] == 'b') kvm_hw_ver = 1;
-		else if(RW_Data[0] == 'p') kvm_hw_ver = 2;
-	}
+	kvm_hw_ver = hw_version_read("/etc/kvm/hw");
 
 	uint8_t buf[2];
 
@@ -139,10 +133,15 @@ void OLED_ShowChar(uint8_t x,uint8_t y,char chr,uint8_t sizey)
 {
 	uint8_t c=0,sizex=sizey/2;
 	uint16_t i=0,size1;
+	if((unsigned char)chr < (unsigned char)' ' || (unsigned char)chr > (unsigned char)'~') return;
+	c=(uint8_t)(chr-' ');//得到偏移后的值
 	if(sizey==8)size1=6;
 	else if(sizey==4)size1=4;
-	else size1=(sizey/8+((sizey%8)?1:0))*(sizey/2);
-	c=chr-' ';//得到偏移后的值
+	else if(sizey==16)size1=16;
+	else return;
+	if(sizey==8 && (size_t)c >= sizeof(oled_asc2_0806)/sizeof(oled_asc2_0806[0])) return;
+	if(sizey==16 && (size_t)c >= sizeof(oled_asc2_1608)/sizeof(oled_asc2_1608[0])) return;
+	if(sizey==4 && (size_t)c >= sizeof(oled_asc2_0804)/sizeof(oled_asc2_0804[0])) return;
 	OLED_Set_Pos(x, y);
 	for(i=0; i<size1; i++)
 	{
@@ -157,9 +156,13 @@ void OLED_ShowCharTurn(uint8_t x,uint8_t y,char chr,uint8_t sizey)
 {
 	uint8_t c=0,sizex=sizey/2;
 	uint16_t i=0,size1;
+	if((unsigned char)chr < (unsigned char)' ' || (unsigned char)chr > (unsigned char)'~') return;
+	c=(uint8_t)(chr-' ');//得到偏移后的值
 	if(sizey==8)size1=6;
-	else size1=(sizey/8+((sizey%8)?1:0))*(sizey/2);
-	c=chr-' ';//得到偏移后的值
+	else if(sizey==16)size1=16;
+	else return;
+	if(sizey==8 && (size_t)c >= sizeof(oled_asc2_0806)/sizeof(oled_asc2_0806[0])) return;
+	if(sizey==16 && (size_t)c >= sizeof(oled_asc2_1608)/sizeof(oled_asc2_1608[0])) return;
 	OLED_Set_Pos(x, y);
 	for(i=0; i<size1; i++)
 	{
@@ -340,6 +343,8 @@ void OLED_ROW(uint8_t _EN)
 void OLED_ShowState(uint8_t x,uint8_t y,char chr,uint8_t size)
 {
 	uint16_t i=0;
+	if((unsigned char)chr >= sizeof(oled_kvm_0621)/sizeof(oled_kvm_0621[0])) return;
+	if((size_t)size > sizeof(oled_kvm_0621[0])) return;
 	OLED_Set_Pos(x, y);
 	for(i=0; i<size; i++)
 	{

@@ -1,0 +1,4 @@
+# This port never enables legacy management daemons in BusyBox.
+# CONFIG_HTTPD is not set
+# CONFIG_TELNETD is not set
+# CONFIG_FTPD is not set

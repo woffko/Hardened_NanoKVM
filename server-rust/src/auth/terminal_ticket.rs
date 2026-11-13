@@ -62,6 +62,7 @@ impl TerminalTicketStore {
         ticket.expires_at > now
             && ticket.username == session.username
             && ticket.session_token == session.token
+            && session.lifetime().is_active()
     }
 }
 
@@ -82,25 +83,13 @@ fn unix_deadline_from_now(now: Instant, deadline: Instant) -> u64 {
 mod tests {
     use super::*;
 
-    fn session(username: &str, token: &str, ttl_secs: u64) -> Session {
-        let ttl = Duration::from_secs(ttl_secs);
-        Session {
-            token: token.to_string(),
-            username: username.to_string(),
-            csrf_token: "csrf".to_string(),
-            expires_at: Instant::now() + ttl,
-            expires_at_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .saturating_add(ttl)
-                .as_secs(),
-        }
-    }
+    use crate::auth::session::SessionStore;
 
     #[tokio::test]
     async fn consumes_ticket_once_for_same_session() {
         let store = TerminalTicketStore::new();
-        let session = session("admin", "session-token", 300);
+        let sessions = SessionStore::new();
+        let session = sessions.issue("admin", 300).await;
         let ticket = store.issue(&session, 120).await;
 
         assert!(store.consume(&ticket.token, &session).await);
@@ -110,8 +99,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_ticket_for_different_session() {
         let store = TerminalTicketStore::new();
-        let session_a = session("admin", "session-a", 300);
-        let session_b = session("admin", "session-b", 300);
+        let sessions = SessionStore::new();
+        let session_a = sessions.issue("admin", 300).await;
+        let session_b = sessions.issue("admin", 300).await;
         let ticket = store.issue(&session_a, 120).await;
 
         assert!(!store.consume(&ticket.token, &session_b).await);
@@ -120,9 +110,27 @@ mod tests {
     #[tokio::test]
     async fn ticket_deadline_does_not_exceed_session_deadline() {
         let store = TerminalTicketStore::new();
-        let session = session("admin", "session-token", 1);
+        let sessions = SessionStore::new();
+        let session = sessions.issue("admin", 1).await;
         let ticket = store.issue(&session, 120).await;
 
         assert!(ticket.expires_at <= session.expires_at);
+    }
+
+    #[tokio::test]
+    async fn captured_session_cannot_consume_a_ticket_after_logout_or_expiry() {
+        for expire in [false, true] {
+            let store = TerminalTicketStore::new();
+            let sessions = SessionStore::new();
+            let session = sessions.issue("admin", 300).await;
+            let ticket = store.issue(&session, 120).await;
+            if expire {
+                sessions.retime(&session.token, 0).await.unwrap();
+            } else {
+                sessions.revoke(&session.token).await;
+            }
+            assert!(!store.consume(&ticket.token, &session).await);
+            assert!(!store.consume(&ticket.token, &session).await);
+        }
     }
 }

@@ -1,15 +1,39 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 
 . /etc/profile
+# /etc/profile sets 022. Everything this script writes holds a Wi-Fi secret.
+umask 077
+LC_ALL=C
+export LC_ALL
 
-APFLAG_FILE=/tmp/wifiap
+# Opens the Wi-Fi routes that need no login, so only root may create it.
+APFLAG_FILE=/run/nanokvm-wifiap
+AP_GUARD_CHAIN=NKVM-AP-INGRESS
+rm -f /tmp/wifiap
+
+# Write stdin to $1 through a private temporary file, so that the file is never
+# readable by others, whatever mode an earlier writer left on it.
+write_private() {
+    [ ! -d "$1" ] || return 1
+    private_tmp=$(mktemp "$1.XXXXXX") || return 1
+    if chmod 600 "$private_tmp" && cat > "$private_tmp" && mv -f "$private_tmp" "$1"; then
+        return 0
+    fi
+    rm -f "$private_tmp"
+    return 1
+}
+chmod 600 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass /etc/wpa_supplicant.conf /etc/hostapd.conf 2>/dev/null
 
 gen_hostapd_conf() {
     ssid="${1}"
     pass="${2}"
     echo "ctrl_interface=/var/run/hostapd"
     echo "ctrl_interface_group=0"
-    echo "ssid=${ssid}"
+    printf 'ssid=%s\n' "$ssid"
     echo "hw_mode=g"
     echo "channel=1"
     echo "beacon_int=100"
@@ -20,8 +44,33 @@ gen_hostapd_conf() {
     echo "macaddr_acl=0"
     echo "auth_algs=3"
     echo "wpa=2"
-    echo "wpa_passphrase=${pass}"
+    printf 'wpa_passphrase=%s\n' "$pass"
     echo "ieee80211n=1"
+}
+
+# Accept one text record (with or without a final newline). Check the file
+# before command substitution, which would discard trailing newlines.
+valid_ap_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    awk 'NR > 1 || /[[:cntrl:]]/ { bad = 1 } END { exit (bad || NR != 1) }' "$1"
+}
+
+install_ap_guard() {
+    # mangle INPUT sees the final local destination after DNAT and runs before
+    # any filter-table ACCEPT (including established traffic and mode changes).
+    iptables -w 2 -t mangle -N "$AP_GUARD_CHAIN" 2>/dev/null || true
+    iptables -w 2 -t mangle -F "$AP_GUARD_CHAIN" || return 1
+    iptables -w 2 -t mangle -A "$AP_GUARD_CHAIN" -d "$1" ! -i wlan0 -j DROP || return 1
+    iptables -w 2 -t mangle -D INPUT -j "$AP_GUARD_CHAIN" 2>/dev/null || true
+    iptables -w 2 -t mangle -I INPUT 1 -j "$AP_GUARD_CHAIN" || return 1
+    iptables -w 2 -t mangle -C INPUT -j "$AP_GUARD_CHAIN" || return 1
+    iptables -w 2 -t mangle -C "$AP_GUARD_CHAIN" -d "$1" ! -i wlan0 -j DROP
+}
+
+remove_ap_guard() {
+    iptables -w 2 -t mangle -D INPUT -j "$AP_GUARD_CHAIN" 2>/dev/null || true
+    iptables -w 2 -t mangle -F "$AP_GUARD_CHAIN" 2>/dev/null || true
+    iptables -w 2 -t mangle -X "$AP_GUARD_CHAIN" 2>/dev/null || true
 }
 
 gen_udhcpd_conf() {
@@ -61,7 +110,7 @@ start() {
         mv /boot/wifi.pass /etc/kvm/wifi.pass
 
         chown root:root /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
-        chmod 644 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
+        chmod 600 /etc/kvm/wifi.ssid /etc/kvm/wifi.pass
     fi
     if [ -e /etc/kvm/wifi.ssid ]; then
         ssid=$(cat /etc/kvm/wifi.ssid)
@@ -69,15 +118,25 @@ start() {
     if [ -e /etc/kvm/wifi.pass ]; then
         pass=$(cat /etc/kvm/wifi.pass)
     fi
-    echo "ctrl_interface=/var/run/wpa_supplicant" >/etc/wpa_supplicant.conf
-    wpa_passphrase "$ssid" "$pass" >>/etc/wpa_supplicant.conf
-    wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
+    # wpa_passphrase also prints the passphrase itself as a comment.
+    station_conf=$(wpa_passphrase "$ssid" "$pass") || return 1
+    {
+        echo "ctrl_interface=/var/run/wpa_supplicant"
+        printf '%s\n' "$station_conf" | sed '/^[[:space:]]*#psk=/d'
+    } | write_private /etc/wpa_supplicant.conf || return 1
+    unset station_conf pass
+    wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf || return 1
     if [ ! -e /boot/wifi.nodhcp ]; then
         (udhcpc -i wlan0 -t 10 -T 1 -A 5 -b -p /run/udhcpc.wlan0.pid) &
     fi
 }
 
 ap_start() {
+    /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
+    if ! valid_ap_file /kvmapp/kvm/ap.ssid || ! valid_ap_file /kvmapp/kvm/ap.pass; then
+        echo "invalid AP credential file" >&2
+        return 1
+    fi
     echo "wifi mode: ap"
     id2=$(printf "%d" 0x$(sha512sum /sys/class/cvi-base/base_uid | head -c 2))
     id3=$(printf "%d" 0x$(sha512sum /sys/class/cvi-base/base_uid | head -c 4 | tail -c 2))
@@ -98,11 +157,15 @@ ap_start() {
     if [ -e /kvmapp/kvm/ap.pass ]; then
         pass=$(cat /kvmapp/kvm/ap.pass)
     fi
-    gen_hostapd_conf "$ssid" "$pass" >/etc/hostapd.conf
-    ipv4_prefix=10.$id3.$id2
-    if [ ! -e /etc/udhcpd.wlan0.conf ]; then
-        gen_udhcpd_conf wlan0 "${ipv4_prefix}" >/etc/udhcpd.wlan0.conf
+    if [ "${#ssid}" -lt 1 ] || [ "${#ssid}" -gt 32 ] ||
+       [ "${#pass}" -lt 8 ] || [ "${#pass}" -gt 63 ]; then
+        echo "invalid AP credential length" >&2
+        return 1
     fi
+    gen_hostapd_conf "$ssid" "$pass" | write_private /etc/hostapd.conf || return 1
+    unset pass
+    ipv4_prefix=10.$id3.$id2
+    gen_udhcpd_conf wlan0 "${ipv4_prefix}" | write_private /etc/udhcpd.wlan0.conf || return 1
     # gen_dnsmasq_conf "${ipv4_prefix}"  > /etc/dnsmasq.conf
 
     # iptables --policy INPUT ACCEPT
@@ -112,21 +175,22 @@ ap_start() {
     # iptables -t nat -F
     # iptables -t nat -A PREROUTING -i wlan0 -p udp --dport 53 -j DNAT --to ${ipv4_prefix}.1
 
-    ifconfig wlan0 up
+    ifconfig wlan0 up || return 1
     ip route del default || true
-    ip add flush dev wlan0
-    ip addr add $ipv4_prefix.1/24 dev wlan0
+    ip add flush dev wlan0 || return 1
+    ip addr add "$ipv4_prefix.1/24" dev wlan0 || return 1
+    install_ap_guard "$ipv4_prefix.1" || { stop; return 1; }
     # dnsmasq --pid-file=/tmp/dnsmasq.run -C /etc/dnsmasq.conf
-    hostapd -B -i wlan0 /etc/hostapd.conf
-    udhcpd -S /etc/udhcpd.wlan0.conf
-
-    if [ ! -f "$APFLAG_FILE" ]; then
-        touch "$APFLAG_FILE"
-    fi
+    hostapd -B -i wlan0 /etc/hostapd.conf || { stop; return 1; }
+    udhcpd -S /etc/udhcpd.wlan0.conf || { stop; return 1; }
+    printf '%s\n' "$ipv4_prefix.1" | write_private "$APFLAG_FILE" || { stop; return 1; }
 
 }
 
 stop() {
+    # Revoke provisioning before stopping daemons or changing interfaces.
+    rm -f "$APFLAG_FILE" || return 1
+    remove_ap_guard
     ps -ef | grep hostapd | grep -v grep | awk '{print $1}' | xargs kill -2 || true
     ps -ef | grep "udhcpd -S /etc/udhcpd.wlan0.conf" | grep -v grep | awk '{print $1}' | xargs kill -2 || true
     killall wpa_supplicant || true
@@ -138,7 +202,7 @@ stop() {
         kill $(cat /var/run/udhcpd.wlan0.pid) || true
         rm -f /var/run/udhcpd.wlan0.pid
     fi
-    if [ -e /tmp/dnsmasq.run ]; then
+    if [ -f /tmp/dnsmasq.run ] && [ ! -L /tmp/dnsmasq.run ] && [ -O /tmp/dnsmasq.run ]; then
         kill $(cat /tmp/dnsmasq.run) || true
         rm -f /tmp/dnsmasq.run
     fi
@@ -148,13 +212,10 @@ stop() {
     # fi
     airmon-ng stop wlan0mon || true
 
-    if [ -f "$APFLAG_FILE" ]; then
-        rm "$APFLAG_FILE"
-    fi
 }
 
 restart() {
-    stop
+    stop || return 1
     start
 }
 
@@ -163,7 +224,7 @@ if [ "${1}" = "start" ]; then
 elif [ "${1}" = "stop" ]; then
     stop
 elif [ "${1}" = "ap" ]; then
-    stop
+    stop || exit 1
     ap_start
 elif [ "${1}" = "restart" ]; then
     restart

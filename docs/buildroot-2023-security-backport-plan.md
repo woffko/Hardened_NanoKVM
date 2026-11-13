@@ -7,6 +7,10 @@ port.
 
 Date checked: 2026-06-29.
 
+The kernel-version observation in this historical userspace plan is preserved
+as of that date. The current kernel lineage and migration authority is
+[`vendor-kernel-5.10-security-plan.md`](vendor-kernel-5.10-security-plan.md).
+
 ## Feasibility
 
 This is feasible for userspace packages and is the preferred near-term route.

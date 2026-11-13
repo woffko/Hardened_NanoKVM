@@ -1,0 +1,321 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:42:39 +0300
+Subject: [PATCH 5/9] i2c: harden CVITEK numbering and OLED GPIO setup
+
+Preserve SG2002 fixed bus names and legacy OLED DT property names while handling missing OF nodes, dev_set_name failures and deferred GPIO probes. Incorporate the stable i2c validation and fbtft resource/backlight fixes.
+---
+ drivers/i2c/i2c-dev.c              | 71 ++++++++++++++----------
+ drivers/staging/fbtft/fbtft-core.c | 89 +++++++++++++-----------------
+ 2 files changed, 82 insertions(+), 78 deletions(-)
+
+diff --git a/drivers/i2c/i2c-dev.c b/drivers/i2c/i2c-dev.c
+index 2d55334cd5..c468a9e3b7 100644
+--- a/drivers/i2c/i2c-dev.c
++++ b/drivers/i2c/i2c-dev.c
+@@ -150,7 +150,7 @@ static ssize_t i2cdev_read(struct file *file, char __user *buf, size_t count,
+ 	if (count > 8192)
+ 		count = 8192;
+ 
+-	tmp = kmalloc(count, GFP_KERNEL);
++	tmp = kzalloc(count, GFP_KERNEL);
+ 	if (tmp == NULL)
+ 		return -ENOMEM;
+ 
+@@ -159,7 +159,8 @@ static ssize_t i2cdev_read(struct file *file, char __user *buf, size_t count,
+ 
+ 	ret = i2c_master_recv(client, tmp, count);
+ 	if (ret >= 0)
+-		ret = copy_to_user(buf, tmp, count) ? -EFAULT : ret;
++		if (copy_to_user(buf, tmp, ret))
++			ret = -EFAULT;
+ 	kfree(tmp);
+ 	return ret;
+ }
+@@ -449,8 +450,13 @@ static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 				   sizeof(rdwr_arg)))
+ 			return -EFAULT;
+ 
+-		/* Put an arbitrary limit on the number of messages that can
+-		 * be sent at once */
++		if (!rdwr_arg.msgs || rdwr_arg.nmsgs == 0)
++			return -EINVAL;
++
++		/*
++		 * Put an arbitrary limit on the number of messages that can
++		 * be sent at once
++		 */
+ 		if (rdwr_arg.nmsgs > I2C_RDWR_IOCTL_MAX_MSGS)
+ 			return -EINVAL;
+ 
+@@ -480,12 +486,13 @@ static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		client->adapter->retries = arg;
+ 		break;
+ 	case I2C_TIMEOUT:
+-		if (arg > INT_MAX)
++		/*
++		 * For historical reasons, user-space sets the timeout value in
++		 * units of 10 ms.
++		 */
++		if (arg > INT_MAX / 10)
+ 			return -EINVAL;
+ 
+-		/* For historical reasons, user-space sets the timeout
+-		 * value in units of 10 ms.
+-		 */
+ 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
+ 		break;
+ 	default:
+@@ -539,6 +546,9 @@ static long compat_i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned lo
+ 				   sizeof(rdwr_arg)))
+ 			return -EFAULT;
+ 
++		if (!rdwr_arg.msgs || rdwr_arg.nmsgs == 0)
++			return -EINVAL;
++
+ 		if (rdwr_arg.nmsgs > I2C_RDWR_IOCTL_MAX_MSGS)
+ 			return -EINVAL;
+ 
+@@ -671,34 +681,39 @@ static int i2cdev_attach_adapter(struct device *dev, void *dummy)
+ 	i2c_dev->dev.release = i2cdev_dev_release;
+ 
+ #if defined(CONFIG_ARCH_CVITEK)
+-	if (!strcmp(adap->dev.of_node->full_name, I2C0))
+-		adap->i2c_idx = 0;
+-	if (!strcmp(adap->dev.of_node->full_name, I2C1))
+-		adap->i2c_idx = 1;
+-	if (!strcmp(adap->dev.of_node->full_name, I2C2))
+-		adap->i2c_idx = 2;
+-	if (!strcmp(adap->dev.of_node->full_name, I2C3))
+-		adap->i2c_idx = 3;
+-	if (!strcmp(adap->dev.of_node->full_name, I2C4))
+-		adap->i2c_idx = 4;
+-	if (!strcmp(adap->dev.of_node->full_name, I2C5))
+-		adap->i2c_idx = 5;
+-
+-	dev_set_name(&i2c_dev->dev, "i2c-%d", adap->i2c_idx);
++	adap->i2c_idx = adap->nr;
++	if (adap->dev.of_node) {
++		if (!strcmp(adap->dev.of_node->full_name, I2C0))
++			adap->i2c_idx = 0;
++		else if (!strcmp(adap->dev.of_node->full_name, I2C1))
++			adap->i2c_idx = 1;
++		else if (!strcmp(adap->dev.of_node->full_name, I2C2))
++			adap->i2c_idx = 2;
++		else if (!strcmp(adap->dev.of_node->full_name, I2C3))
++			adap->i2c_idx = 3;
++		else if (!strcmp(adap->dev.of_node->full_name, I2C4))
++			adap->i2c_idx = 4;
++		else if (!strcmp(adap->dev.of_node->full_name, I2C5))
++			adap->i2c_idx = 5;
++	}
++	res = dev_set_name(&i2c_dev->dev, "i2c-%d", adap->i2c_idx);
+ #else
+-	dev_set_name(&i2c_dev->dev, "i2c-%d", adap->nr);
++	res = dev_set_name(&i2c_dev->dev, "i2c-%d", adap->nr);
+ #endif
+-
++	if (res)
++		goto err_put_i2c_dev;
+ 
+ 	res = cdev_device_add(&i2c_dev->cdev, &i2c_dev->dev);
+-	if (res) {
+-		put_i2c_dev(i2c_dev, false);
+-		return res;
+-	}
++	if (res)
++		goto err_put_i2c_dev;
+ 
+ 	pr_debug("i2c-dev: adapter [%s] registered as minor %d\n",
+ 		 adap->name, adap->nr);
+ 	return 0;
++
++err_put_i2c_dev:
++	put_i2c_dev(i2c_dev, false);
++	return res;
+ }
+ 
+ static int i2cdev_detach_adapter(struct device *dev, void *dummy)
+diff --git a/drivers/staging/fbtft/fbtft-core.c b/drivers/staging/fbtft/fbtft-core.c
+index 6bdb40c2b2..02e7f92cfa 100644
+--- a/drivers/staging/fbtft/fbtft-core.c
++++ b/drivers/staging/fbtft/fbtft-core.c
+@@ -40,8 +40,7 @@ int fbtft_write_buf_dc(struct fbtft_par *par, void *buf, size_t len, int dc)
+ {
+ 	int ret;
+ 
+-	if (par->gpio.dc)
+-		gpiod_set_value(par->gpio.dc, dc);
++	gpiod_set_value(par->gpio.dc, dc);
+ 
+ 	ret = par->fbtftops.write(par, buf, len);
+ 	if (ret < 0)
+@@ -77,40 +76,36 @@ static int fbtft_request_one_gpio(struct fbtft_par *par,
+ 				  const char *name, int index,
+ 				  struct gpio_desc **gpiop)
+ {
+-    struct device *dev = par->info->device;
+-    struct device_node *node = dev->of_node;
+-    int gpio, flags, ret = 0;
+-    enum of_gpio_flags of_flags;
+-
+-    if (of_find_property(node, name, NULL)) {
+-        gpio = of_get_named_gpio_flags(node, name, index, &of_flags);
+-        if (gpio == -ENOENT)
+-            return 0;
+-        if (gpio == -EPROBE_DEFER)
+-            return gpio;
+-        if (gpio < 0) {
+-            dev_err(dev,
+-                "failed to get '%s' from DT\n", name);
+-            return gpio;
+-        }
+-
+-        flags = (of_flags & OF_GPIO_ACTIVE_LOW) ? GPIOF_OUT_INIT_LOW :
+-                            GPIOF_OUT_INIT_HIGH;
+-        ret = devm_gpio_request_one(dev, gpio, flags,
+-                        dev->driver->name);
+-        if (ret) {
+-            dev_err(dev,
+-                "gpio_request_one('%s'=%d) failed with %d\n",
+-                name, gpio, ret);
+-            return ret;
+-        }
+-
+-        *gpiop = gpio_to_desc(gpio);
+-        fbtft_par_dbg(DEBUG_REQUEST_GPIOS, par, "%s: '%s' = GPIO%d\n",
+-                            __func__, name, gpio);
+-    }
+-
+-    return ret;
++	struct device *dev = par->info->device;
++	struct device_node *node = dev->of_node;
++	enum of_gpio_flags of_flags;
++	int flags;
++	int gpio;
++	int ret;
++
++	if (!node || !of_find_property(node, name, NULL))
++		return 0;
++
++	gpio = of_get_named_gpio_flags(node, name, index, &of_flags);
++	if (gpio == -ENOENT)
++		return 0;
++	if (gpio < 0)
++		return dev_err_probe(dev, gpio,
++				     "Failed to get %s GPIO from DT\n", name);
++
++	flags = of_flags & OF_GPIO_ACTIVE_LOW ?
++		GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH;
++	ret = devm_gpio_request_one(dev, gpio, flags, dev_name(dev));
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to request %s GPIO %d\n", name, gpio);
++
++	*gpiop = gpio_to_desc(gpio);
++
++	fbtft_par_dbg(DEBUG_REQUEST_GPIOS, par, "%s: '%s' = GPIO%d\n",
++		      __func__, name, gpio);
++
++	return 0;
+ }
+ 
+ static int fbtft_request_gpios(struct fbtft_par *par)
+@@ -154,7 +149,6 @@ static int fbtft_request_gpios(struct fbtft_par *par)
+ 	return 0;
+ }
+ 
+-#ifdef CONFIG_FB_BACKLIGHT
+ static int fbtft_backlight_update_status(struct backlight_device *bd)
+ {
+ 	struct fbtft_par *par = bl_get_data(bd);
+@@ -187,6 +181,7 @@ void fbtft_unregister_backlight(struct fbtft_par *par)
+ 		par->info->bl_dev = NULL;
+ 	}
+ }
++EXPORT_SYMBOL(fbtft_unregister_backlight);
+ 
+ static const struct backlight_ops fbtft_bl_ops = {
+ 	.get_brightness	= fbtft_backlight_get_brightness,
+@@ -224,12 +219,7 @@ void fbtft_register_backlight(struct fbtft_par *par)
+ 	if (!par->fbtftops.unregister_backlight)
+ 		par->fbtftops.unregister_backlight = fbtft_unregister_backlight;
+ }
+-#else
+-void fbtft_register_backlight(struct fbtft_par *par) { };
+-void fbtft_unregister_backlight(struct fbtft_par *par) { };
+-#endif
+ EXPORT_SYMBOL(fbtft_register_backlight);
+-EXPORT_SYMBOL(fbtft_unregister_backlight);
+ 
+ static void fbtft_set_addr_win(struct fbtft_par *par, int xs, int ys, int xe,
+ 			       int ye)
+@@ -247,13 +237,17 @@ static void fbtft_reset(struct fbtft_par *par)
+ {
+ 	if (!par->gpio.reset)
+ 		return;
++
+ 	fbtft_par_dbg(DEBUG_RESET, par, "%s()\n", __func__);
++
+ 	gpiod_set_value_cansleep(par->gpio.reset, 1);
+ 	msleep(10);
+ 	gpiod_set_value_cansleep(par->gpio.reset, 0);
+ 	msleep(200);
+ 	gpiod_set_value_cansleep(par->gpio.reset, 1);
+ 	msleep(10);
++
++	gpiod_set_value_cansleep(par->gpio.cs, 1);  /* Activate chip */
+ }
+ 
+ static void fbtft_update_display(struct fbtft_par *par, unsigned int start_line,
+@@ -774,6 +768,7 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display,
+ 	return info;
+ 
+ release_framebuf:
++	fb_deferred_io_cleanup(info);
+ 	framebuffer_release(info);
+ 
+ alloc_fail:
+@@ -877,13 +872,11 @@ int fbtft_register_framebuffer(struct fb_info *fb_info)
+ 		 fb_info->fix.smem_len >> 10, text1,
+ 		 HZ / fb_info->fbdefio->delay, text2);
+ 
+-#ifdef CONFIG_FB_BACKLIGHT
+ 	/* Turn on backlight if available */
+ 	if (fb_info->bl_dev) {
+ 		fb_info->bl_dev->props.power = FB_BLANK_UNBLANK;
+ 		fb_info->bl_dev->ops->update_status(fb_info->bl_dev);
+ 	}
+-#endif
+ 
+ 	return 0;
+ 
+@@ -945,8 +938,6 @@ static int fbtft_init_display_from_property(struct fbtft_par *par)
+ 		goto out_free;
+ 
+ 	par->fbtftops.reset(par);
+-	if (par->gpio.cs)
+-		gpiod_set_value(par->gpio.cs, 0);  /* Activate chip */
+ 
+ 	index = -1;
+ 	val = values[++index];
+@@ -1041,8 +1032,6 @@ int fbtft_init_display(struct fbtft_par *par)
+ 	}
+ 
+ 	par->fbtftops.reset(par);
+-	if (par->gpio.cs)
+-		gpiod_set_value(par->gpio.cs, 0);  /* Activate chip */
+ 
+ 	i = 0;
+ 	while (i < FBTFT_MAX_INIT_SEQUENCE) {
+@@ -1263,8 +1252,8 @@ int fbtft_probe_common(struct fbtft_display *display,
+ 	par->pdev = pdev;
+ 
+ 	if (display->buswidth == 0) {
+-		dev_err(dev, "buswidth is not set\n");
+-		return -EINVAL;
++		ret = dev_err_probe(dev, -EINVAL, "buswidth is not set\n");
++		goto out_release;
+ 	}
+ 
+ 	/* write register functions */

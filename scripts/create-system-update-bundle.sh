@@ -14,6 +14,8 @@ usage() {
   echo "  REQUIRED_FREE_BYTES=<bytes required on /data>" >&2
   echo "  REQUIRES_REBOOT=true|false" >&2
   echo "  BUNDLE_NAME=<archive filename>" >&2
+  echo "  SYSTEM_UPDATE_FORMAT=1|2 (default: 1)" >&2
+  echo "  SYSTEM_UPDATE_REQUIRED_APP_VERSION=x.y.z (required for format 2)" >&2
   exit 1
 }
 
@@ -100,6 +102,19 @@ KERNEL_VERSION="${KERNEL_VERSION:-unknown}"
 REQUIRED_FREE_BYTES="${REQUIRED_FREE_BYTES:-67108864}"
 REQUIRES_REBOOT="${REQUIRES_REBOOT:-true}"
 BUNDLE_NAME="${BUNDLE_NAME:-hardened-nanokvm-system-$VERSION.tar.gz}"
+SYSTEM_UPDATE_FORMAT="${SYSTEM_UPDATE_FORMAT:-1}"
+REQUIRED_APP_VERSION="${SYSTEM_UPDATE_REQUIRED_APP_VERSION:-}"
+
+case "$SYSTEM_UPDATE_FORMAT" in
+  1)
+    [ -z "$REQUIRED_APP_VERSION" ] || die "manifest v1 cannot require an application version"
+    ;;
+  2)
+    printf '%s' "$REQUIRED_APP_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+      die "manifest v2 requires SYSTEM_UPDATE_REQUIRED_APP_VERSION=x.y.z"
+    ;;
+  *) die "invalid SYSTEM_UPDATE_FORMAT: $SYSTEM_UPDATE_FORMAT" ;;
+esac
 
 case "$REQUIRED_FREE_BYTES" in
   "" | *[!0-9]*) die "invalid REQUIRED_FREE_BYTES: $REQUIRED_FREE_BYTES" ;;
@@ -137,11 +152,14 @@ MANIFEST="$STAGE_DIR/manifest.json"
 
 {
   printf '{\n'
-  printf '  "format": "hardened-nanokvm-system-update-v1",\n'
+  printf '  "format": "hardened-nanokvm-system-update-v%s",\n' "$SYSTEM_UPDATE_FORMAT"
   printf '  "version": "%s",\n' "$VERSION"
   printf '  "target": "%s",\n' "$TARGET"
   printf '  "base_version": "%s",\n' "$BASE_VERSION"
   printf '  "kernel_version": "%s",\n' "$KERNEL_VERSION"
+  if [ -n "$REQUIRED_APP_VERSION" ]; then
+    printf '  "required_app_version": "%s",\n' "$REQUIRED_APP_VERSION"
+  fi
   printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
   printf '  "created_utc": "%s",\n' "$CREATED_UTC"
   printf '  "required_free_bytes": %s,\n' "$REQUIRED_FREE_BYTES"

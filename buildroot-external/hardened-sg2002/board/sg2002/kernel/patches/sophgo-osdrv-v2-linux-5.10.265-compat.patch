@@ -1,0 +1,55 @@
+diff --git a/interdrv/v2/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h b/interdrv/v2/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
+--- a/interdrv/v2/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
++++ b/interdrv/v2/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
+@@ -7,6 +7,10 @@
+ #define PARA_CHANGE_RC_SEQ_INIT
+ 
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b)) ? (a) : (b))
++#endif
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b)) ? (a) : (b))
++#endif
+ #define CLIP3(a, b, c) (MIN(b, MAX(a, c)))
+ #define ABS(a) ((a >= 0) ? a : -a)
+diff --git a/interdrv/v2/cvi_vc_drv/jpeg/jdi/linux/driver/jmm.h b/interdrv/v2/cvi_vc_drv/jpeg/jdi/linux/driver/jmm.h
+--- a/interdrv/v2/cvi_vc_drv/jpeg/jdi/linux/driver/jmm.h
++++ b/interdrv/v2/cvi_vc_drv/jpeg/jdi/linux/driver/jmm.h
+@@ -91,5 +91,7 @@
+ #define VMEM_HEIGHT(_tree) (_tree == NULL ? -1 : _tree->height)
+ 
++#ifndef MAX
+ #define MAX(_a, _b) (_a >= _b ? _a : _b)
++#endif
+ #if 0
+ typedef enum { LEFT, RIGHT } rotation_dir_t;
+diff --git a/interdrv/v2/cvi_vc_drv/jpeg/jdi/mm.c b/interdrv/v2/cvi_vc_drv/jpeg/jdi/mm.c
+--- a/interdrv/v2/cvi_vc_drv/jpeg/jdi/mm.c
++++ b/interdrv/v2/cvi_vc_drv/jpeg/jdi/mm.c
+@@ -31,5 +31,7 @@
+ } link_t;
+ 
++#ifndef MAX
+ #define MAX(_a, _b) (_a >= _b ? _a : _b)
++#endif
+ 
+ typedef enum { LEFT, RIGHT } rotation_dir_t;
+diff --git a/interdrv/v2/cvi_vc_drv/module/src/cvi_venc.c b/interdrv/v2/cvi_vc_drv/module/src/cvi_venc.c
+--- a/interdrv/v2/cvi_vc_drv/module/src/cvi_venc.c
++++ b/interdrv/v2/cvi_vc_drv/module/src/cvi_venc.c
+@@ -51,3 +51,5 @@
+ 
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b)) ? (a) : (b))
++#endif
+ 
+diff --git a/interdrv/v2/cvi_vc_drv/vcodec/vdi/mm.c b/interdrv/v2/cvi_vc_drv/vcodec/vdi/mm.c
+--- a/interdrv/v2/cvi_vc_drv/vcodec/vdi/mm.c
++++ b/interdrv/v2/cvi_vc_drv/vcodec/vdi/mm.c
+@@ -26,4 +26,6 @@
+ #define HEIGHT(_tree) (_tree == NULL ? -1 : _tree->height)
++#ifndef MAX
+ #define MAX(_a, _b) (_a >= _b ? _a : _b)
++#endif
+ 
+ typedef enum { LEFT, RIGHT } rotation_dir_t;

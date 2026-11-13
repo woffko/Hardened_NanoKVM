@@ -4,6 +4,12 @@ import { ExternalLinkIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/application.ts';
+import { removeToken } from '@/lib/cookie.ts';
+import { DEFAULT_RECONNECT, probeHealth, waitForBackendRestart } from '@/lib/reconnect.ts';
+
+import { appUpdateMessage, followAppUpdate } from './job.ts';
+import { pickOfflinePackage } from './package.ts';
+import type { OfflinePackage } from './package.ts';
 
 interface UpdateProps {
   status: string;
@@ -22,70 +28,75 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) {
+    const selected = pickOfflinePackage(Array.from(e.target.files ?? []));
+    // Choosing the same files again after a refusal must fire this again.
+    e.target.value = '';
+    if (status === 'loading' || status === 'updating' || status === 'restarting') {
       return;
     }
-
-    if (!validateFilename(file.name)) {
+    if (!selected) {
       setStatus('failed');
-      setErrMsg(t('settings.update.offline.invalidName'));
+      setErrMsg(t('settings.update.offline.invalidPackage'));
       return;
     }
 
-    upload(file);
+    upload(selected);
   }
 
-  function upload(file: File | null) {
-    if (!file) return;
-
-    if (!validateFilename(file.name)) {
-      setStatus('failed');
-      setErrMsg(t('settings.update.offline.invalidName'));
-      return;
-    }
-
-    if (status === 'loading' || status === 'updating') {
-      return;
-    }
-
+  function upload(selected: OfflinePackage) {
     setIsLocked(true);
     setStatus('updating');
     setErrMsg('');
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('metadata', selected.metadata);
+    formData.append('signature', selected.signature);
+    formData.append('file', selected.file);
 
     api
       .offlineUpdate(formData)
-      .then((rsp: Response) => {
-        // Prüfen ob HTTP OK
-        if (!rsp.ok) throw new Error(`HTTP error ${rsp.status}`);
-        return rsp.json(); // JSON-Payload parsen
+      .then(async (rsp: Response) => {
+        if (rsp.ok) {
+          return rsp.json();
+        }
+        // An answer means the device did not restart for this upload.
+        const answer = await rsp.json().catch(() => null);
+        const csrf = rsp.status === 403 && /csrf/i.test(String(answer?.msg));
+        if (rsp.status === 401 || csrf) {
+          removeToken();
+          window.location.reload();
+        }
+        return { code: rsp.status, msg: answer?.msg };
       })
       .then((rspj: any) => {
-        // Jetzt rspj ist das tatsächliche JSON
-        if (rspj.code !== 0 || !rspj.data) {
+        if (rspj.code !== 0 || !rspj.data?.transactionId) {
           setStatus('failed');
           setErrMsg(rspj.msg || t('settings.update.offline.updateFailed'));
-          console.log(rspj);
+          setIsLocked(false);
           return;
         }
-      })
-      .finally(() => {
-        setTimeout(() => {
+        return followAppUpdate(rspj.data.transactionId).then((outcome) => {
           setIsLocked(false);
-          setErrMsg('');
-
+          const message = appUpdateMessage(outcome, 'settings.update.offline.updateFailed');
+          if (message) {
+            setStatus('failed');
+            setErrMsg(t(message));
+            return;
+          }
           window.location.reload();
-        }, 12000);
+        });
+      })
+      .catch(async () => {
+        // No reply: the device may already be restarting for the update, and
+        // without its transaction nothing here can say how that ended.
+        setStatus('restarting');
+        const outcome = await waitForBackendRestart(() => probeHealth(), DEFAULT_RECONNECT);
+        setStatus('failed');
+        setErrMsg(
+          t(outcome === 'back' ? 'settings.update.outcomeUnknown' : 'settings.update.unreachable')
+        );
+        setIsLocked(false);
       });
-  }
-
-  function validateFilename(filename: string) {
-    const regex: RegExp =
-      /^(nanokvm_\d+\.\d+\.\d+|hardened-nanokvm-kvmapp-\d+\.\d+\.\d+)\.tar\.gz$/;
-    return regex.test(filename);
   }
 
   return (
@@ -104,13 +115,16 @@ export const Offline = ({ status, setStatus, setIsLocked, setErrMsg }: UpdatePro
             </a>
           </div>
 
-          <span className="text-xs text-neutral-500">{t('settings.update.offline.desc')}</span>
+          <span className="text-xs text-neutral-500">
+            {t('settings.update.offline.signedDesc')}
+          </span>
         </div>
 
         <input
           id="file-upload"
           ref={inputRef}
           type="file"
+          multiple
           onChange={handleFileChange}
           className="hidden"
         />

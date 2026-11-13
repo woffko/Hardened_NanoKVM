@@ -1,4 +1,8 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 
 DAEMON=/usr/sbin/ntpd
 NTPDATE=/usr/bin/ntpdate
@@ -89,7 +93,11 @@ write_ntp_conf() {
             [ -n "$server" ] && printf 'server %s iburst\n' "$server"
         done
         echo
-        echo "restrict default kod nomodify notrap nopeer noquery"
+        # A client only: no time service, queries or peering for anyone.
+        # noserve also drops server replies, so each configured server gets
+        # its own entry from "restrict source", which leaves it out.
+        echo "restrict default nomodify notrap nopeer noquery noserve"
+        echo "restrict source nomodify notrap noquery"
         echo "restrict 127.0.0.1"
         echo "restrict ::1"
     } > "$tmp" && mv "$tmp" "$NTP_CONF"
@@ -101,8 +109,10 @@ sync_time_once() {
     server="$(ntp_servers | sed -n '1p')"
     [ -n "$server" ] || return 0
 
+    # /run is root-owned; never open a predictable file in shared /tmp.
+    ntpdate_log=$(umask 077; mktemp /run/ntpdate.XXXXXX) || return 1
     printf 'syncing time with %s: ' "$server"
-    "$NTPDATE" -u "$server" >/tmp/ntpdate.log 2>&1 &
+    "$NTPDATE" -u "$server" >"$ntpdate_log" 2>&1 &
     ntpdate_pid=$!
     (
         sleep 20
@@ -117,8 +127,9 @@ sync_time_once() {
         echo OK
     else
         echo WARN
-        sed -n '1,3p' /tmp/ntpdate.log 2>/dev/null
+        sed -n '1,3p' "$ntpdate_log" 2>/dev/null
     fi
+    rm -f "$ntpdate_log"
 }
 
 start() {

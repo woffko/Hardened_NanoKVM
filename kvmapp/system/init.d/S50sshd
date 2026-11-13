@@ -1,4 +1,8 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 #
 # sshd        Starts sshd.
 #
@@ -8,16 +12,104 @@
 [ -x /usr/sbin/sshd ] || exit 1
 
 PIDFILE="/var/run/sshd.pid"
+# Password guessing limits. Command-line options take precedence over
+# sshd_config, which a raw restore keeps as the device had it: three tries
+# per connection, a minute to log in, and after each connection that fails
+# to authenticate its source (an IPv6 /64) is refused for a minute, up to
+# ten minutes.
+SSHD_LIMITS="-o MaxAuthTries=3 -o LoginGraceTime=60 -o PerSourceNetBlockSize=32:64 \
+-o PerSourcePenalties=authfail:60s -o PerSourcePenalties=invaliduser:60s"
 
 umask 077
+LC_ALL=C
+export LC_ALL
+
+# CVE-2026-123158: without PAM, OpenSSH before 10.6p2 takes any password over
+# 256 bytes for an account whose shadow field is "*" once another account has a
+# "$" hash, because musl's crypt returns "*" for such a password. The backend
+# locks the service accounts with "!"; until it has, sshd refuses them by name.
+# Root and people whose field holds no hash keep their keys and lose only
+# passwords. Protect them even before setup introduces the first hash.
+LOGIN_SHELLS='^/bin/(a|ba)?sh$|^/usr/bin/bash$'
+SSHD_RUN_CONFIG=/run/nanokvm-sshd_config
+SSHD_ACCOUNT_CONFIG=/run/nanokvm-sshd-account-barriers.conf
+
+# The image's accounts: not root, outside the range of people, no login shell.
+service_users() {
+    awk -F: -v login="$LOGIN_SHELLS" '
+        $3 ~ /^[0-9]+$/ && $3 != 0 && ($3 < 1000 || $3 >= 60000) && $7 !~ login {
+            if (length($1) > 64 || $1 !~ /^[A-Za-z_][A-Za-z0-9_.-]*[$]?$/) exit 1
+            printf " -o DenyUsers=%s", $1
+        }
+    ' /etc/passwd 2>/dev/null
+}
+
+# Root and people whose shadow field is no hash.
+open_users() {
+    awk -F: -v login="$LOGIN_SHELLS" '
+        NR == FNR {
+            if ($3 ~ /^[0-9]+$/ && ($3 == 0 || ($3 >= 1000 && $3 < 60000) || $7 ~ login))
+                person[$1] = 1
+            next
+        }
+        ($1 in person) && length($2) < 4 && substr($2, 1, 1) != "!" {
+            if (length($1) > 64 || $1 !~ /^[A-Za-z_][A-Za-z0-9_.-]*[$]?$/) exit 1
+            names = names sep $1; sep = ","
+        }
+        END { if (names != "") print names }
+    ' /etc/passwd /etc/shadow 2>/dev/null
+}
+
+# The sshd options that close the bypass, on one line.
+bypass_options() {
+    options="$(service_users)" || return 1
+    users="$(open_users)" || return 1
+    if [ -n "$users" ]; then
+        # Include restores its caller's Match context. Keep the barrier in a
+        # separate first include: it wins over user Match blocks without
+        # placing the original global directives inside a Match block.
+        printf 'Match User %s\n\tPasswordAuthentication no\n\tKbdInteractiveAuthentication no\n' "$users" > "$SSHD_ACCOUNT_CONFIG" || return 1
+        printf 'Include %s\nInclude /etc/ssh/sshd_config\n' "$SSHD_ACCOUNT_CONFIG" > "$SSHD_RUN_CONFIG" || return 1
+    else
+        rm -f "$SSHD_ACCOUNT_CONFIG" || return 1
+        printf 'Include /etc/ssh/sshd_config\n' > "$SSHD_RUN_CONFIG" || return 1
+    fi
+    printf '%s -f %s' "$options" "$SSHD_RUN_CONFIG"
+}
+
+# OpenSSH 10.6 renamed this key type and reads no key of the old name, and
+# ssh-keygen -A leaves an existing file alone. An older system still reads and
+# uses that key, so only a key this OpenSSH cannot read gives way.
+replace_retired_key() {
+    key=/etc/ssh/ssh_host_mldsa44_ed25519_key
+    [ -f "$key.pub" ] || return 0
+    read -r type rest < "$key.pub" || return 0
+    [ "$type" = ssh-mldsa44-ed25519@openssh.com ] || return 0
+    /usr/bin/ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1 && return 0
+    rm -f "$key" "$key.pub" "$key-cert.pub"
+}
 
 startssh() {
-    # Generate SSH keys if they do not exist
-    [ ! -f /etc/ssh/ssh_host_rsa_key ] && /usr/bin/ssh-keygen -A
+    replace_retired_key
+    # Generate the key of every type that does not exist. The rest stay.
+    /usr/bin/ssh-keygen -A
 
         printf "Starting sshd: "
-        /usr/sbin/sshd
-        touch /var/lock/sshd
+        SSHD_BYPASS="$(bypass_options)" || {
+            echo "cannot prepare account barriers" >&2
+            return 1
+        }
+        # Older sshd may omit guessing limits, but never account barriers.
+        if /usr/sbin/sshd -t $SSHD_LIMITS $SSHD_BYPASS 2>/dev/null; then
+            /usr/sbin/sshd $SSHD_LIMITS $SSHD_BYPASS || return 1
+        elif /usr/sbin/sshd -t $SSHD_BYPASS 2>/dev/null; then
+            printf "without password guessing limits, "
+            /usr/sbin/sshd $SSHD_BYPASS || return 1
+        else
+            echo "account barrier configuration rejected; not starting" >&2
+            return 1
+        fi
+        touch /var/lock/sshd || return 1
         echo "OK"
 }
 
@@ -47,6 +139,65 @@ restart() {
         start
 }
 
+# Apply the current application's barriers without enabling a stopped service.
+# A master outside the backend's process scope is reloaded, not killed; the
+# backend's subreaper would otherwise reap a replacement when the app switches.
+refresh() {
+        command -v pidof >/dev/null || return 1
+        SSHD_BYPASS="$(bypass_options)" || return 1
+        if [ -e /etc/kvm/ssh_stop ]; then
+            killall sshd 2>/dev/null
+            rm -f /var/lock/sshd
+            return 0
+        fi
+        pids="$(pidof sshd)"
+        pidof_status=$?
+        [ "$pidof_status" -eq 1 ] && return 0
+        [ "$pidof_status" -eq 0 ] || return 1
+        old_master=0
+        for pid in $pids; do
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+            case "$cmdline" in
+                *"[listener]"*)
+                    case "$cmdline" in
+                        *" -f $SSHD_RUN_CONFIG"*) ;;
+                        *) old_master=1 ;;
+                    esac
+                    ;;
+            esac
+        done
+        if [ "$old_master" -ne 0 ]; then
+            killall sshd || return 1
+            attempts=0
+            while :; do
+                if pidof sshd >/dev/null; then
+                    :
+                else
+                    [ "$?" -eq 1 ] || return 1
+                    break
+                fi
+                [ "$attempts" -lt 30 ] || return 1
+                sleep 0.1
+                attempts=$((attempts + 1))
+            done
+            rm -f /var/lock/sshd
+            startssh
+            return $?
+        fi
+        /usr/sbin/sshd -t $SSHD_LIMITS $SSHD_BYPASS 2>/dev/null || return 1
+        for pid in $pids; do
+            cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+            case "$cmdline" in
+                *"[listener]"*)
+                    case "$cmdline" in
+                        *"-f $SSHD_RUN_CONFIG"*) kill -HUP "$pid" || return 1 ;;
+                    esac
+                    ;;
+            esac
+        done
+        return 0
+}
+
 case "$1" in
     start)
         start
@@ -57,17 +208,22 @@ case "$1" in
     restart|reload)
         restart
         ;;
+    refresh)
+        refresh
+        ;;
     permanent_on)
         rm -f /etc/kvm/ssh_stop
+        sync
         start
         ;;
     permanent_off)
         touch /etc/kvm/ssh_stop
+        sync
         stop
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart|permanent_on|permanent_off}"
+        echo "Usage: $0 {start|stop|restart|refresh|permanent_on|permanent_off}"
         exit 1
 esac
 
-exit 0
+exit $?

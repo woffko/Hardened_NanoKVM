@@ -1,8 +1,8 @@
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{
-        Path as AxumPath, Query,
+        Path as AxumPath, Query, State,
         ws::{CloseFrame as AxumCloseFrame, Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -12,16 +12,14 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use flate2::read::GzDecoder;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue, json};
+use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha512};
 use std::{
-    ffi::OsString,
     fs, io,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex, RwLock},
-    thread,
+    sync::{Arc, LazyLock, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tar::Archive;
@@ -39,31 +37,46 @@ use crate::{
     api::{hid, stream},
     auth::token::random_token,
     error::ApiResponse,
-    system::command::{self, AllowedCommand},
+    http::middleware::{CurrentSession, TransportSession},
+    state::AppState,
+    system::{
+        command::{self, AllowedCommand},
+        package_download::{self, Pinned},
+    },
+    update::picoclaw_startup as startup,
     ws::hid as hid_ws,
 };
 
+#[path = "picoclaw_action_plan.rs"]
+mod action_plan;
+use action_plan::{Batch as PreparedBatch, PreparedAction};
+#[path = "picoclaw_execution.rs"]
+pub(crate) mod execution;
+use execution::{Call, Completion};
+#[path = "picoclaw_worker.rs"]
+pub(crate) mod worker;
+
 const PICOCLAW_BINARY_PATH: &str = "/usr/bin/picoclaw";
 const PICOCLAW_CACHE_DIR: &str = "/root/.picoclaw-cache";
-const PICOCLAW_DOWNLOAD_URL: &str =
-    "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz";
-const PICOCLAW_CHECKSUM_URL: &str =
-    "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/sha512.txt";
-const ETC_INIT_PICOCLAW_SCRIPT: &str = "/etc/init.d/S96picoclaw";
-const KVMAPP_PICOCLAW_SCRIPT: &str = "/kvmapp/system/init.d/S96picoclaw";
-const DEFAULT_GATEWAY_HOST: &str = "127.0.0.1";
-const DEFAULT_GATEWAY_PORT: u16 = 18790;
+// picoclaw v0.2.8 for riscv64. Sipeed's CDN copy and the GitHub release asset
+// (sipeed/picoclaw v0.2.8, its digest and picoclaw_0.2.8_checksums.txt) are
+// these same bytes.
+pub(crate) const PACKAGE: Pinned = Pinned {
+    url: "https://cdn.sipeed.com/nanokvm/resources/picoclaw/v0.2.8/picoclaw_Linux_riscv64.tar.gz",
+    size: 20_825_810,
+    sha256: "acfa68d48a573e3805762fecbae99c9f495de19707e58ba43933657db55707ae",
+};
+const DEFAULT_GATEWAY_HOST: &str = startup::GATEWAY_HOST;
+const DEFAULT_GATEWAY_PORT: u16 = startup::GATEWAY_PORT;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_READ_TIMEOUT_MS: i32 = 60_000;
-const DEFAULT_WRITE_TIMEOUT_MS: i32 = 10_000;
-const DEFAULT_PING_INTERVAL_MS: i32 = 30_000;
+const DEFAULT_READ_TIMEOUT_MS: i32 = startup::READ_TIMEOUT_MS;
+const DEFAULT_WRITE_TIMEOUT_MS: i32 = startup::WRITE_TIMEOUT_MS;
+const DEFAULT_PING_INTERVAL_MS: i32 = startup::PING_INTERVAL_MS;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PICOCLAW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PICOCLAW_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PICOCLAW_STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const PICOCLAW_ONBOARD_TIMEOUT: Duration = Duration::from_secs(60);
-const INTERNAL_TOKEN_HEADER: &str = "X-NanoKVM-Internal-Token";
-const INTERNAL_TOKEN_FILE: &str = "/etc/kvm/.picoclaw_internal_token";
+const INTERNAL_TOKEN_HEADER: &str = startup::INTERNAL_TOKEN_HEADER;
 const SESSION_ID_HEADER: &str = "X-PicoClaw-Session-ID";
 
 const CODE_PICOCLAW_LOCK_HELD: &str = "AI_LOCK_HELD";
@@ -79,6 +92,8 @@ const CLOSE_NORMAL: u16 = 1000;
 const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
 const CLOSE_PICOCLAW_TAKEN_OVER: u16 = 4004;
 const CLOSE_UPSTREAM_CLOSED: u16 = 4005;
+/// The login that opened the socket was logged out, revoked or expired.
+const CLOSE_SESSION_ENDED: u16 = 1008;
 
 const SESSION_LOCK_DURATION: Duration = Duration::from_secs(30 * 60);
 const CACHED_FRAME_MAX_AGE: Duration = Duration::from_secs(2);
@@ -91,7 +106,10 @@ const DEFAULT_SCROLL_STEP: Duration = Duration::from_millis(20);
 
 static RUNTIME_STATUS: LazyLock<RwLock<RuntimeStatus>> =
     LazyLock::new(|| RwLock::new(RuntimeStatus::checking()));
-static INTERNAL_TOKEN_CACHE: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+/// Tests that take the process-wide Pico session lock run one at a time.
+#[cfg(test)]
+pub(crate) static SESSION_LOCK_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 static SESSION_LOCK: LazyLock<Mutex<PicoSessionLock>> =
     LazyLock::new(|| Mutex::new(PicoSessionLock::default()));
 
@@ -172,7 +190,7 @@ struct PicoSessionLock {
     expires_at: Option<Instant>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ModelConfigUpdateRequest {
     model: String,
     api_base: String,
@@ -257,6 +275,7 @@ struct Action {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ActionBatch {
+    #[serde(deserialize_with = "action_plan::deserialize_actions")]
     actions: Vec<Action>,
 }
 
@@ -456,12 +475,13 @@ pub async fn stop_runtime() -> Result<Response> {
 }
 
 pub async fn install_runtime() -> Result<Response> {
-    let current = runtime_status();
-    if current.installing {
+    // One check-and-mark under the status lock: two requests arriving
+    // together used to both read "not installing" and both start.
+    if let Some(current) = begin_install() {
         return Ok(Json(ApiResponse::ok(RuntimeInstallResult {
             installed: false,
             binary: PICOCLAW_BINARY_PATH.to_string(),
-            download: PICOCLAW_DOWNLOAD_URL.to_string(),
+            download: PACKAGE.url.to_string(),
             output: "picoclaw installation is already in progress".to_string(),
             status: current,
         }))
@@ -474,29 +494,12 @@ pub async fn install_runtime() -> Result<Response> {
         return Ok(Json(ApiResponse::ok(RuntimeInstallResult {
             installed: true,
             binary: PICOCLAW_BINARY_PATH.to_string(),
-            download: PICOCLAW_DOWNLOAD_URL.to_string(),
+            download: PACKAGE.url.to_string(),
             output: "picoclaw is already installed".to_string(),
             status: runtime_status(),
         }))
         .into_response());
     }
-
-    set_runtime_status(RuntimeStatus {
-        ready: false,
-        installed: false,
-        installing: true,
-        install_progress: Some(0),
-        install_stage: Some("preparing".to_string()),
-        install_path: Some(PICOCLAW_BINARY_PATH.to_string()),
-        agent_profile: Some(detect_agent_profile()),
-        model_configured: false,
-        model_name: None,
-        status: "installing".to_string(),
-        config_error: None,
-        last_error: None,
-        checked_at: Some(now_string()),
-        current_session: None,
-    });
 
     tokio::spawn(async {
         if let Err(err) = run_install_runtime().await {
@@ -522,7 +525,7 @@ pub async fn install_runtime() -> Result<Response> {
     Ok(Json(ApiResponse::ok(RuntimeInstallResult {
         installed: false,
         binary: PICOCLAW_BINARY_PATH.to_string(),
-        download: PICOCLAW_DOWNLOAD_URL.to_string(),
+        download: PACKAGE.url.to_string(),
         output: "picoclaw installation started".to_string(),
         status: runtime_status(),
     }))
@@ -537,14 +540,16 @@ pub async fn uninstall_runtime() -> Result<Response> {
         ));
     }
 
-    let _ = stop_runtime_inner().await;
-    if let Ok(config_path) = resolve_config_path() {
-        if let Some(parent) = config_path.parent() {
-            let _ = fs::remove_dir_all(parent);
-        }
+    // The broker quiesces a live runtime and removes exactly the managed
+    // executable, internal credential and configuration pair. The workspace
+    // and the rest of Home stay; any failure is reported, never ignored.
+    if let Err(err) = run_config_job(REMOVE_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_remove_job(CONFIG_JOB_TIMEOUT)
+    })
+    .await
+    {
+        return Ok(picoclaw_error(CODE_RUNTIME_START_FAILED, err.to_string()));
     }
-    let _ = fs::remove_file(PICOCLAW_BINARY_PATH);
-    let _ = fs::remove_dir_all(PICOCLAW_CACHE_DIR);
 
     set_runtime_status(RuntimeStatus {
         ready: false,
@@ -566,8 +571,8 @@ pub async fn uninstall_runtime() -> Result<Response> {
     Ok(Json(ApiResponse::ok(RuntimeInstallResult {
         installed: false,
         binary: PICOCLAW_BINARY_PATH.to_string(),
-        download: PICOCLAW_DOWNLOAD_URL.to_string(),
-        output: "picoclaw uninstalled successfully".to_string(),
+        download: PACKAGE.url.to_string(),
+        output: "picoclaw executable and configuration removed".to_string(),
         status: runtime_status(),
     }))
     .into_response())
@@ -581,17 +586,26 @@ pub async fn get_runtime_session() -> Result<Response> {
     .into_response())
 }
 
-pub async fn release_runtime_session(headers: HeaderMap) -> Result<Response> {
+pub async fn release_runtime_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response> {
     let session_id = match require_session_id(&headers) {
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
 
-    release_session_lock(&session_id);
-    release_all_hid_state();
+    let receipt = match state.picoclaw_worker.cancel(Some(&session_id)) {
+        Ok(receipt) => receipt,
+        Err(error) => return Ok(picoclaw_error_data(error)),
+    };
+    let released = release_session_lock(&session_id);
+    let cancelled_calls = receipt.wait(Duration::from_secs(1)).await;
 
     Ok(Json(ApiResponse::ok(json!({
-        "released": true,
+        "released": released,
+        "execution_stop_verified": false,
+        "cancelled_calls": cancelled_calls,
         "current_session": session_lock_owner()
     })))
     .into_response())
@@ -620,9 +634,28 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
         ));
     }
 
-    match update_model_config_file(api_base, api_key, model) {
-        Ok(model_name) => {
-            let _ = ensure_startup_defaults();
+    if crate::update::picoclaw_model::check_request(model, api_base, api_key).is_err() {
+        return Ok(picoclaw_error(
+            CODE_RUNTIME_UNAVAILABLE,
+            "invalid model configuration",
+        ));
+    }
+    let model_name = crate::update::picoclaw_model::model_name(model).unwrap_or_default();
+    // The broker selects the model and applies the startup defaults as one
+    // job; this handler never writes the pair.
+    let fields = [model, api_base, api_key].map(|field| zeroize::Zeroizing::new(field.to_string()));
+    let result = run_config_job(MODEL_JOB_KIND, move || {
+        let [model, api_base, api_key] = fields.clone();
+        crate::native_owner::broker::ipc::run_model_job(
+            model,
+            api_base,
+            api_key,
+            CONFIG_JOB_TIMEOUT,
+        )
+    })
+    .await;
+    match result {
+        Ok(()) => {
             let status = refresh_runtime_status().await;
             Ok(Json(ApiResponse::ok(json!({
                 "model_name": model_name,
@@ -636,11 +669,18 @@ pub async fn update_model_config(Json(req): Json<ModelConfigUpdateRequest>) -> R
 
 pub async fn update_agent_profile(Json(req): Json<AgentProfileUpdateRequest>) -> Result<Response> {
     let profile = req.profile.trim();
-    if profile != "default" && profile != "kvm" {
-        return Ok(picoclaw_error(CODE_INVALID_ACTION, "invalid agent profile"));
-    }
-
-    match apply_agent_profile(profile) {
+    let kvm = match profile {
+        "default" => false,
+        "kvm" => true,
+        _ => return Ok(picoclaw_error(CODE_INVALID_ACTION, "invalid agent profile")),
+    };
+    // The broker replaces the workspace AGENT.md only when it is absent or an
+    // exact shipped profile; a customized one is kept and reported.
+    match run_config_job(PROFILE_JOB_KIND, move || {
+        crate::native_owner::broker::ipc::run_profile_job(kvm, CONFIG_JOB_TIMEOUT)
+    })
+    .await
+    {
         Ok(()) => {
             let status = refresh_runtime_status().await;
             Ok(Json(ApiResponse::ok(json!({
@@ -668,6 +708,7 @@ pub async fn delete_session(AxumPath(_id): AxumPath<String>) -> Result<Response>
 }
 
 pub async fn screenshot(
+    State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ScreenshotQuery>,
 ) -> Result<Response> {
@@ -675,27 +716,14 @@ pub async fn screenshot(
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let release_after = match acquire_session_lock(&session_id) {
-        Ok(release_after) => release_after,
-        Err(err) => return Ok(picoclaw_error_data(err)),
-    };
-
     let wants_base64 = query.format == "base64";
-    let capture = task::spawn_blocking(move || capture_screenshot_blocking(query)).await;
-
-    if release_after {
-        release_session_lock(&session_id);
-    }
-
-    let (data, mut meta) = match capture {
-        Ok(Ok(capture)) => capture,
-        Ok(Err(err)) => return Ok(picoclaw_error_data(err)),
-        Err(err) => {
-            return Ok(picoclaw_error(
-                CODE_SCREENSHOT_FAILED,
-                format!("screenshot task failed: {err}"),
-            ));
-        }
+    let (data, mut meta) = match state
+        .picoclaw_worker
+        .screenshot(Some(session_id), query)
+        .await
+    {
+        Ok(capture) => capture,
+        Err(err) => return Ok(picoclaw_error_data(err)),
     };
 
     if wants_base64 {
@@ -706,39 +734,30 @@ pub async fn screenshot(
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], data).into_response())
 }
 
-pub async fn actions(headers: HeaderMap, body: Bytes) -> Result<Response> {
+pub async fn actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
     let session_id = match require_session_id(&headers) {
         Ok(session_id) => session_id,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let actions = match normalize_actions(&body) {
+    let actions = match normalize_actions(&body).and_then(PreparedBatch::prepare) {
         Ok(actions) => actions,
         Err(err) => return Ok(picoclaw_error_data(err)),
     };
-    let release_after = match acquire_session_lock(&session_id) {
-        Ok(release_after) => release_after,
-        Err(err) => return Ok(picoclaw_error_data(err)),
-    };
-
-    let exec_session_id = session_id.clone();
-    let result =
-        task::spawn_blocking(move || execute_actions_blocking(&exec_session_id, &actions)).await;
-
-    if release_after {
-        release_session_lock(&session_id);
-    }
-
-    match result {
-        Ok(Ok(result)) => Ok(Json(ApiResponse::ok(result)).into_response()),
-        Ok(Err(err)) => Ok(picoclaw_error_data(err)),
-        Err(err) => Ok(picoclaw_error(
-            CODE_INVALID_ACTION,
-            format!("action task failed: {err}"),
-        )),
+    match state.picoclaw_worker.actions(session_id, actions).await {
+        Ok(result) => Ok(Json(ApiResponse::ok(result)).into_response()),
+        Err(err) => Ok(picoclaw_error_data(err)),
     }
 }
 
-pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
+pub async fn mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
     let req = match serde_json::from_slice::<JsonRpcRequest>(&body) {
         Ok(req) => req,
         Err(_) => {
@@ -769,7 +788,7 @@ pub async fn mcp(headers: HeaderMap, body: Bytes) -> Result<Response> {
             }),
         ),
         "tools/list" => json_rpc_result(req.id, json!({ "tools": mcp_tool_definitions() })),
-        "tools/call" => mcp_tools_call(&headers, req),
+        "tools/call" => mcp_tools_call(&state, &headers, req).await,
         "ping" => json_rpc_result(req.id, json!({})),
         method => json_rpc_error(req.id, -32601, format!("method not found: {method}")),
     };
@@ -820,9 +839,19 @@ pub async fn load_image(headers: HeaderMap, body: Bytes) -> Result<Response> {
 }
 
 pub async fn gateway_ws(
+    State(state): State<AppState>,
+    session: Option<Extension<CurrentSession>>,
     Query(query): Query<GatewayQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
+    // As for every other authenticated WebSocket: a cross-site page can take
+    // no session lock, run no Startup job and reach no upstream gateway.
+    if !crate::ws::origin::validate_ws_origin(&headers, &state.config) {
+        return Err(AppError::Forbidden("invalid websocket origin".to_string()));
+    }
+    // The chat lives only as long as the login that opened it.
+    let transport = TransportSession::capture(&state.config, session)?;
     let session_id = gateway_session_id(&query);
     if let Err(err) = ensure_session_lock(&session_id) {
         return Ok(picoclaw_error_data_status(StatusCode::CONFLICT, err));
@@ -830,7 +859,6 @@ pub async fn gateway_ws(
 
     if !is_installed() {
         release_session_lock(&session_id);
-        release_all_hid_state();
         update_runtime_gateway_state(
             false,
             "not_installed",
@@ -844,9 +872,8 @@ pub async fn gateway_ws(
         ));
     }
 
-    if let Err(err) = ensure_startup_defaults() {
+    if let Err(err) = ensure_startup_defaults().await {
         release_session_lock(&session_id);
-        release_all_hid_state();
         update_runtime_gateway_state(false, "config_error", Some(err.to_string()), None);
         return Ok(picoclaw_error_with_session(
             CODE_RUNTIME_UNAVAILABLE,
@@ -859,7 +886,6 @@ pub async fn gateway_ws(
         Ok(settings) => settings,
         Err(err) => {
             release_session_lock(&session_id);
-            release_all_hid_state();
             update_runtime_gateway_state(false, "config_error", Some(err.to_string()), None);
             return Ok(picoclaw_error_with_session(
                 CODE_RUNTIME_UNAVAILABLE,
@@ -874,7 +900,6 @@ pub async fn gateway_ws(
         Ok(upstream) => upstream,
         Err(err) => {
             release_session_lock(&session_id);
-            release_all_hid_state();
             update_runtime_gateway_state(false, "unavailable", Some(err.clone()), None);
             return Ok(picoclaw_error_with_session(
                 CODE_RUNTIME_UNAVAILABLE,
@@ -886,7 +911,16 @@ pub async fn gateway_ws(
 
     update_runtime_gateway_state(true, "ready", None, Some(&session_id));
     Ok(ws
-        .on_upgrade(move |socket| handle_gateway_socket(session_id, socket, upstream, settings))
+        .on_upgrade(move |socket| {
+            handle_gateway_socket(
+                session_id,
+                socket,
+                upstream,
+                settings,
+                state.picoclaw_worker,
+                transport,
+            )
+        })
         .into_response())
 }
 
@@ -912,17 +946,50 @@ pub fn has_valid_loopback_internal_token(
     headers: &axum::http::HeaderMap,
     remote: Option<SocketAddr>,
 ) -> bool {
+    authorize_loopback_internal_token(headers, remote, crate::update::picoclaw_token::read)
+}
+
+fn authorize_loopback_internal_token(
+    headers: &HeaderMap,
+    remote: Option<SocketAddr>,
+    load: impl FnOnce() -> Result<String>,
+) -> bool {
     if !remote.map(|addr| addr.ip().is_loopback()).unwrap_or(false) {
         return false;
     }
-    let Ok(token) = internal_token() else {
+    let mut values = headers.get_all(INTERNAL_TOKEN_HEADER).iter();
+    let Some(provided) = values.next().and_then(|value| value.to_str().ok()) else {
         return false;
     };
-    let provided = headers
-        .get(INTERNAL_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    if values.next().is_some() || !crate::update::picoclaw_token::valid_token(provided) {
+        return false;
+    }
+    let Ok(token) = load() else {
+        return false;
+    };
+    let token = zeroize::Zeroizing::new(token);
+    if !crate::update::picoclaw_token::valid_token(&token) {
+        return false;
+    }
     constant_time_eq(provided, &token)
+}
+
+#[cfg(test)]
+#[path = "picoclaw_internal_auth_tests.rs"]
+mod internal_auth_tests;
+
+#[cfg(test)]
+#[path = "picoclaw_gateway_origin_tests.rs"]
+mod gateway_origin_tests;
+
+const MAX_SESSION_ID_BYTES: usize = 128;
+
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SESSION_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, PicoclawErrorData> {
@@ -937,11 +1004,17 @@ fn require_session_id(headers: &HeaderMap) -> std::result::Result<String, Picocl
             "missing X-PicoClaw-Session-ID",
         ));
     }
+    if !valid_session_id(session_id) {
+        return Err(PicoclawErrorData::new(
+            CODE_SESSION_ID_INVALID,
+            "invalid PicoClaw session",
+        ));
+    }
     Ok(session_id.to_string())
 }
 
 fn acquire_session_lock(session_id: &str) -> std::result::Result<bool, PicoclawErrorData> {
-    if session_id.trim().is_empty() {
+    if !valid_session_id(session_id.trim()) {
         return Err(PicoclawErrorData::new(
             CODE_SESSION_ID_INVALID,
             "invalid PicoClaw session",
@@ -975,6 +1048,20 @@ fn ensure_session_lock(session_id: &str) -> std::result::Result<(), PicoclawErro
     acquire_session_lock(session_id).map(|_| ())
 }
 
+fn check_session_lock(session_id: &str) -> std::result::Result<(), PicoclawErrorData> {
+    let mut lock = SESSION_LOCK
+        .lock()
+        .map_err(|_| PicoclawErrorData::new(CODE_RUNTIME_UNAVAILABLE, "session lock poisoned"))?;
+    lock.clear_expired(Instant::now());
+    if lock.owner_session_id != session_id || lock.owner_session_id.is_empty() {
+        return Err(PicoclawErrorData::new(
+            CODE_SESSION_ID_INVALID,
+            "PicoClaw input session is no longer active",
+        ));
+    }
+    Ok(())
+}
+
 fn release_session_lock(session_id: &str) -> bool {
     let Ok(mut lock) = SESSION_LOCK.lock() else {
         return false;
@@ -1002,10 +1089,10 @@ fn session_lock_owner() -> String {
 
 fn gateway_session_id(query: &GatewayQuery) -> String {
     let session_id = query.session_id.trim();
-    if session_id.is_empty() {
-        format!("rust-{}", random_token(16))
-    } else {
+    if valid_session_id(session_id) {
         session_id.to_string()
+    } else {
+        format!("rust-{}", random_token(16))
     }
 }
 
@@ -1053,6 +1140,8 @@ async fn handle_gateway_socket(
     socket: WebSocket,
     upstream: GatewayUpstream,
     settings: GatewaySettings,
+    worker: Arc<worker::Worker>,
+    transport: TransportSession,
 ) {
     let (mut downstream_tx, mut downstream_rx) = socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
@@ -1063,9 +1152,16 @@ async fn handle_gateway_socket(
 
     ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     debug!(session_id, "picoclaw gateway websocket connected");
+    let session_ended = transport.ended();
+    tokio::pin!(session_ended);
 
     let close = loop {
         tokio::select! {
+            // Logout, revocation or expiry ends the chat and, below, its
+            // admitted calls; an idle socket does not outlive its login.
+            _ = &mut session_ended => {
+                break GatewayClose::new(CLOSE_SESSION_ENDED, "session ended");
+            }
             _ = &mut read_deadline => {
                 break GatewayClose::upstream("gateway read timeout");
             }
@@ -1084,6 +1180,16 @@ async fn handle_gateway_socket(
                 }
                 if let Err(close) = validate_gateway_message_size(axum_message_len(&message), settings.max_message_bytes) {
                     break close;
+                }
+
+                match gateway_requests_cancel(&message, &session_id) {
+                    Ok(true) => {
+                        if let Err(error) = worker.cancel(Some(&session_id)) {
+                            break GatewayClose::upstream(error.message);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(close) => break close,
                 }
 
                 let is_close = matches!(message, AxumWsMessage::Close(_));
@@ -1152,18 +1258,26 @@ async fn handle_gateway_socket(
         }
     };
 
+    // Record cancellation before any potentially stalled transport close.
+    // This cancels selected admitted calls, not future task/session authority.
+    let _ = worker.cancel(Some(&session_id));
+    release_session_lock(&session_id);
     if close.code != CLOSE_NORMAL {
-        let _ = downstream_tx
-            .send(AxumWsMessage::Close(Some(AxumCloseFrame {
+        let _ = time::timeout(
+            write_timeout,
+            downstream_tx.send(AxumWsMessage::Close(Some(AxumCloseFrame {
                 code: close.code,
                 reason: close.reason.clone().into(),
-            })))
-            .await;
+            }))),
+        )
+        .await;
     }
-    let _ = upstream_tx.send(TungsteniteMessage::Close(None)).await;
+    let _ = time::timeout(
+        write_timeout,
+        upstream_tx.send(TungsteniteMessage::Close(None)),
+    )
+    .await;
 
-    release_session_lock(&session_id);
-    release_all_hid_state();
     update_runtime_gateway_state(false, "closed", Some(close.reason.clone()), None);
     debug!(
         session_id,
@@ -1171,6 +1285,38 @@ async fn handle_gateway_socket(
         reason = close.reason,
         "picoclaw gateway websocket closed"
     );
+}
+
+fn gateway_requests_cancel(
+    message: &AxumWsMessage,
+    session_id: &str,
+) -> std::result::Result<bool, GatewayClose> {
+    let text = match message {
+        AxumWsMessage::Text(text) => text,
+        AxumWsMessage::Binary(_) => {
+            return Err(GatewayClose::normal(
+                "binary gateway control is unsupported",
+            ));
+        }
+        _ => return Ok(false),
+    };
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+    }
+    let envelope: Envelope = serde_json::from_str(text)
+        .map_err(|_| GatewayClose::normal("invalid gateway control envelope"))?;
+    if envelope
+        .session_id
+        .as_deref()
+        .is_some_and(|id| id != session_id)
+    {
+        return Err(GatewayClose::normal("gateway session mismatch"));
+    }
+    Ok(envelope.r#type.as_deref() == Some("message.cancel"))
 }
 
 fn renew_gateway_session(session_id: &str) -> std::result::Result<(), GatewayClose> {
@@ -1263,16 +1409,71 @@ fn update_runtime_gateway_state(
     current.checked_at = Some(now_string());
 }
 
+/// Where a screenshot comes from: a frame the running MJPEG stream cached
+/// moments ago, one frame read directly while the capture is in MJPEG mode,
+/// or nothing in H.264 mode, where an MJPEG read would recreate the encoder
+/// under a running stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenshotSource {
+    Cached,
+    Capture,
+    Unavailable,
+}
+
+fn screenshot_source(cached: bool, mjpeg_mode: bool) -> ScreenshotSource {
+    if cached {
+        ScreenshotSource::Cached
+    } else if mjpeg_mode {
+        ScreenshotSource::Capture
+    } else {
+        ScreenshotSource::Unavailable
+    }
+}
+
+/// One frame from the capture at its current size and quality. The capture
+/// pipeline has one resolution, so a requested size is advisory and the reply
+/// carries the real one. A still screen under frame detection returns no
+/// bytes; the last cached frame is still that screen.
+fn capture_mjpeg_frame_blocking() -> std::result::Result<stream::LatestMjpegFrame, PicoclawErrorData>
+{
+    let screen = stream::current_mjpeg_screen();
+    let (data, result) = crate::ffi::kvm::read_mjpeg(screen.width, screen.height, screen.quality)
+        .map_err(|err| {
+        PicoclawErrorData::new(
+            CODE_SCREENSHOT_FAILED,
+            format!("mjpeg capture failed: {err}"),
+        )
+    })?;
+    if result >= 0 && !data.is_empty() {
+        return Ok(stream::LatestMjpegFrame::captured_now(
+            data,
+            screen.width,
+            screen.height,
+        ));
+    }
+    stream::latest_mjpeg_frame(Duration::MAX).ok_or_else(|| {
+        PicoclawErrorData::new(
+            CODE_SCREENSHOT_FAILED,
+            format!("no frame from the capture (result {result}) and none cached"),
+        )
+    })
+}
+
 fn capture_screenshot_blocking(
     query: ScreenshotQuery,
 ) -> std::result::Result<(Vec<u8>, ScreenshotMeta), PicoclawErrorData> {
     let (_width, _height, _quality, source_width, source_height) =
         resolve_screenshot_request(&query);
-    let Some(frame) = stream::latest_mjpeg_frame(CACHED_FRAME_MAX_AGE) else {
-        return Err(PicoclawErrorData::new(
-            CODE_SCREENSHOT_FAILED,
-            "no cached MJPEG frame available",
-        ));
+    let cached = stream::latest_mjpeg_frame(CACHED_FRAME_MAX_AGE);
+    let frame = match screenshot_source(cached.is_some(), stream::is_mjpeg_mode()) {
+        ScreenshotSource::Cached => cached.expect("checked above"),
+        ScreenshotSource::Capture => capture_mjpeg_frame_blocking()?,
+        ScreenshotSource::Unavailable => {
+            return Err(PicoclawErrorData::new(
+                CODE_SCREENSHOT_FAILED,
+                "no frame available: the capture is in H.264 mode and no MJPEG viewer cached a frame",
+            ));
+        }
     };
 
     Ok((
@@ -1395,14 +1596,25 @@ fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErr
         ));
     }
 
-    if let Ok(batch) = serde_json::from_slice::<ActionBatch>(raw) {
-        if !batch.actions.is_empty() {
-            return Ok(batch.actions);
-        }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(default, deserialize_with = "action_plan::deserialize_present_actions")]
+        actions: Option<Vec<Action>>,
+        #[serde(flatten)]
+        single: Action,
     }
-
-    let action = serde_json::from_slice::<Action>(raw)
+    let payload = serde_json::from_slice::<Payload>(raw)
         .map_err(|_| PicoclawErrorData::new(CODE_INVALID_ACTION, "invalid action payload"))?;
+    if let Some(actions) = payload.actions {
+        if actions.is_empty() || !payload.single.action.trim().is_empty() {
+            return Err(PicoclawErrorData::new(
+                CODE_INVALID_ACTION,
+                "invalid action batch",
+            ));
+        }
+        return Ok(actions);
+    }
+    let action = payload.single;
     if action.action.trim().is_empty() {
         return Err(PicoclawErrorData::new(
             CODE_INVALID_ACTION,
@@ -1414,137 +1626,174 @@ fn normalize_actions(raw: &[u8]) -> std::result::Result<Vec<Action>, PicoclawErr
 
 fn execute_actions_blocking(
     session_id: &str,
-    actions: &[Action],
-) -> std::result::Result<ActionResult, PicoclawErrorData> {
-    let started_at = Instant::now();
-    if actions.is_empty() {
-        return Err(PicoclawErrorData::new(CODE_INVALID_ACTION, "empty actions"));
-    }
-
-    let mut total_writes = 0;
-    for (idx, action) in actions.iter().enumerate() {
-        if let Err(err) = ensure_session_lock(session_id) {
-            release_all_hid_state();
-            return Err(err.with_index(idx));
+    batch: &PreparedBatch,
+    call: &Call,
+) -> Completion<ActionResult> {
+    let owner = match hid_ws::begin_input() {
+        Ok(owner) => owner,
+        Err(error) => {
+            return Completion {
+                result: Err(hid_owner_error(error)),
+                clean: true,
+            };
         }
-        match execute_action_blocking(action) {
-            Ok(writes) => total_writes += writes,
-            Err(err) => {
-                release_all_hid_state();
-                return Err(err.with_index(idx));
-            }
-        }
-    }
-
-    Ok(ActionResult {
-        action: if actions.len() > 1 {
-            "batch".to_string()
-        } else {
-            actions[0].action.clone()
-        },
-        duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
-        hid_writes: total_writes,
-        executed_actions: (actions.len() > 1).then_some(actions.len()),
-    })
+    };
+    execute_prepared(&owner, Some(session_id), batch, call)
 }
 
-fn execute_action_blocking(action: &Action) -> std::result::Result<usize, PicoclawErrorData> {
-    match action.action.trim().to_ascii_lowercase().as_str() {
-        "click" => {
-            let (x, y) = normalized_point(action.x, action.y)?;
-            let button = mouse_button(&action.button)?;
+fn execute_prepared<Output: hid_ws::HidReports>(
+    owner: &Output,
+    session_id: Option<&str>,
+    batch: &PreparedBatch,
+    call: &Call,
+) -> Completion<ActionResult> {
+    let started_at = Instant::now();
+    let (actions, result_action) = batch.parts();
+    let mut total_writes = 0;
+    let result = (|| {
+        for (idx, action) in actions.iter().enumerate() {
+            call.check().map_err(|error| error.with_index(idx))?;
+            if let Some(session_id) = session_id {
+                // Never reacquire authority after release/expiry. Full task
+                // generation binding is a separate gateway/bridge boundary.
+                check_session_lock(session_id).map_err(|error| error.with_index(idx))?;
+            }
+            total_writes += execute_action_blocking(owner, action, call)
+                .map_err(|error| error.with_index(idx))?;
+        }
+        call.check()
+    })();
+    // Cancellation/deadline never suppresses owned compensation. A failed
+    // cleanup must stop this executor, not hand its slot to the next call.
+    let cleanup = owner.finish();
+    let clean = cleanup.is_ok();
+    let result = match cleanup {
+        Err(_) => {
+            let mut error = PicoclawErrorData::new(
+                "HID_CLEANUP_UNCERTAIN",
+                "owned HID cleanup failed; executor retained for recovery",
+            );
+            error.index = result.as_ref().err().and_then(|error| error.index);
+            Err(error)
+        }
+        Ok(writes) => result.map(|()| ActionResult {
+            action: result_action.to_string(),
+            duration_ms: started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            hid_writes: total_writes + writes,
+            executed_actions: (actions.len() > 1).then_some(actions.len()),
+        }),
+    };
+    Completion { result, clean }
+}
+
+fn execute_action_blocking<Output: hid_ws::HidReports>(
+    owner: &Output,
+    action: &PreparedAction,
+    call: &Call,
+) -> std::result::Result<usize, PicoclawErrorData> {
+    match *action {
+        PreparedAction::Click {
+            point: (x, y),
+            button,
+        } => {
             let mut writes = 0;
-            writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
-            writes += send_mouse_move_with_button(x, y, button, 0)?;
-            thread::sleep(DEFAULT_CLICK_HOLD);
-            writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
+            writes += send_mouse_move_with_button(owner, x, y, 0x00, 0, call)?;
+            writes += send_mouse_move_with_button(owner, x, y, button, 0, call)?;
+            call.wait(DEFAULT_CLICK_HOLD)?;
+            writes += owner.settle_absolute().map_err(hid_owner_error)?;
             Ok(writes)
         }
-        "move" => {
-            let (x, y) = normalized_point(action.x, action.y)?;
-            send_mouse_move_with_button(x, y, 0x00, 0)
+        PreparedAction::Move { point: (x, y) } => {
+            send_mouse_move_with_button(owner, x, y, 0x00, 0, call)
         }
-        "wait" => {
-            if action.duration_ms < 0 {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "wait duration must be >= 0",
-                ));
-            }
-            thread::sleep(Duration::from_millis(action.duration_ms as u64));
+        PreparedAction::Wait(duration) => {
+            call.wait(duration)?;
             Ok(0)
         }
-        "drag" => {
-            let (from_x, from_y) = normalized_nested_point(action.from.as_ref())?;
-            let (to_x, to_y) = normalized_nested_point(action.to.as_ref())?;
-            let button = mouse_button(&action.button)?;
+        PreparedAction::Drag {
+            from: (from_x, from_y),
+            to: (to_x, to_y),
+            button,
+        } => {
             let mut writes = 0;
-            writes += send_mouse_move_with_button(from_x, from_y, 0x00, 0)?;
-            writes += send_mouse_move_with_button(from_x, from_y, button, 0)?;
+            writes += send_mouse_move_with_button(owner, from_x, from_y, 0x00, 0, call)?;
+            writes += send_mouse_move_with_button(owner, from_x, from_y, button, 0, call)?;
             for step in 1..=DEFAULT_DRAG_STEPS {
                 let ratio = step as f64 / DEFAULT_DRAG_STEPS as f64;
                 let x = from_x + (to_x - from_x) * ratio;
                 let y = from_y + (to_y - from_y) * ratio;
-                writes += send_mouse_move_with_button(x, y, button, 0)?;
+                writes += send_mouse_move_with_button(owner, x, y, button, 0, call)?;
             }
-            writes += send_mouse_move_with_button(to_x, to_y, 0x00, 0)?;
+            writes += owner.settle_absolute().map_err(hid_owner_error)?;
             Ok(writes)
         }
-        "scroll" => {
-            let (x, y) = if action.x.is_some() || action.y.is_some() {
-                normalized_point(action.x, action.y)?
-            } else {
-                (0.5, 0.5)
-            };
-            let amount = if action.amount == 0 { 1 } else { action.amount };
-            if amount < 0 {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "scroll amount must be > 0",
-                ));
-            }
-            let wheel = match action.direction.trim().to_ascii_lowercase().as_str() {
-                "" | "up" => 1,
-                "down" => -1,
-                _ => {
-                    return Err(PicoclawErrorData::new(
-                        CODE_INVALID_ACTION,
-                        "invalid scroll direction",
-                    ));
-                }
-            };
+        PreparedAction::Scroll {
+            point: (x, y),
+            amount,
+            wheel,
+        } => {
             let mut writes = 0;
             for _ in 0..amount {
-                writes += send_mouse_move_with_button(x, y, 0x00, wheel)?;
-                writes += send_mouse_move_with_button(x, y, 0x00, 0)?;
-                thread::sleep(DEFAULT_SCROLL_STEP);
+                writes += send_mouse_move_with_button(owner, x, y, 0x00, i32::from(wheel), call)?;
+                writes += owner.settle_absolute().map_err(hid_owner_error)?;
+                call.wait(DEFAULT_SCROLL_STEP)?;
             }
             Ok(writes)
         }
-        "type" => {
-            if action.text.is_empty() {
-                return Err(PicoclawErrorData::new(
-                    CODE_INVALID_ACTION,
-                    "type requires text",
-                ));
-            }
-            hid::type_text_blocking(&action.text, "")
-                .map_err(|err| PicoclawErrorData::new(CODE_INVALID_ACTION, err.to_string()))
-        }
-        "hotkey" => {
-            let keys = normalize_hotkey_keys(action.keys.as_ref())?;
-            let report = build_hotkey_report(&keys)?;
+        PreparedAction::Type(ref reports) => {
             let mut writes = 0;
-            writes += send_keyboard_report(&report)?;
-            thread::sleep(DEFAULT_CLICK_HOLD);
-            writes += send_keyboard_report(&[0; 8])?;
+            for report in reports {
+                writes += send_keyboard_report(owner, report, call)?;
+                writes += owner.settle_keyboard().map_err(hid_owner_error)?;
+                call.wait(hid::PASTE_KEY_DELAY)?;
+            }
             Ok(writes)
         }
-        _ => Err(PicoclawErrorData::new(
-            CODE_INVALID_ACTION,
-            "unknown or invalid action",
-        )),
+        PreparedAction::Hotkey(report) => {
+            let mut writes = 0;
+            writes += send_keyboard_report(owner, &report, call)?;
+            call.wait(DEFAULT_CLICK_HOLD)?;
+            writes += owner.settle_keyboard().map_err(hid_owner_error)?;
+            Ok(writes)
+        }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn execute_reports_fixture<Output: hid_ws::HidReports>(
+    owner: &Output,
+    raw: &[u8],
+) -> std::result::Result<usize, String> {
+    // Real parser/preflight and actual action executor; no session/worker or
+    // device-runtime acceptance is inferred from this report-only seam.
+    let batch = normalize_actions(raw)
+        .and_then(PreparedBatch::prepare)
+        .map_err(|error| error.message)?;
+    let call = Call::new(0, None);
+    call.start().map_err(|error| error.message)?;
+    execute_prepared(owner, None, &batch, &call)
+        .result
+        .map(|result| result.hid_writes)
+        .map_err(|error| error.message)
+}
+
+#[cfg(test)]
+pub(crate) fn execute_controlled_reports_fixture<Output: hid_ws::HidReports>(
+    owner: &Output,
+    call: &Call,
+    raw: &[u8],
+) -> (std::result::Result<usize, String>, bool) {
+    let batch = normalize_actions(raw)
+        .and_then(PreparedBatch::prepare)
+        .unwrap();
+    let completion = execute_prepared(owner, None, &batch, call);
+    (
+        completion
+            .result
+            .map(|result| result.hid_writes)
+            .map_err(|error| error.code.to_string()),
+        completion.clean,
+    )
 }
 
 fn normalized_point(
@@ -1592,12 +1841,15 @@ fn mouse_button(button: &str) -> std::result::Result<u8, PicoclawErrorData> {
     }
 }
 
-fn send_mouse_move_with_button(
+fn send_mouse_move_with_button<Output: hid_ws::HidReports>(
+    owner: &Output,
     x: f64,
     y: f64,
     buttons: u8,
     wheel: i32,
+    call: &Call,
 ) -> std::result::Result<usize, PicoclawErrorData> {
+    call.check()?;
     let absolute_x = to_absolute_hid_coord(x);
     let absolute_y = to_absolute_hid_coord(y);
     let report = [
@@ -1608,23 +1860,26 @@ fn send_mouse_move_with_button(
         (absolute_y >> 8) as u8,
         (wheel as i8) as u8,
     ];
-    hid_ws::write_absolute_mouse_report(&report).map_err(|err| {
+    owner.absolute(&report).map_err(|err| {
         PicoclawErrorData::new(
             CODE_HID_WRITE_FAILED,
             format!("failed to write HID mouse report: {err}"),
         )
-    })?;
-    Ok(1)
+    })
 }
 
-fn send_keyboard_report(report: &[u8; 8]) -> std::result::Result<usize, PicoclawErrorData> {
-    hid_ws::write_keyboard_report(report).map_err(|err| {
+fn send_keyboard_report<Output: hid_ws::HidReports>(
+    owner: &Output,
+    report: &[u8; 8],
+    call: &Call,
+) -> std::result::Result<usize, PicoclawErrorData> {
+    call.check()?;
+    owner.keyboard(report).map_err(|err| {
         PicoclawErrorData::new(
             CODE_HID_WRITE_FAILED,
             format!("failed to write HID keyboard report: {err}"),
         )
-    })?;
-    Ok(1)
+    })
 }
 
 fn to_absolute_hid_coord(normalized: f64) -> u16 {
@@ -1632,10 +1887,11 @@ fn to_absolute_hid_coord(normalized: f64) -> u16 {
     (f64::from(0x7fff) * normalized).floor() as u16 + 1
 }
 
-fn release_all_hid_state() {
-    let _ = hid_ws::write_keyboard_report(&[0; 8]);
-    let _ = hid_ws::write_relative_mouse_report(&[0; 4]);
-    let _ = hid_ws::write_absolute_mouse_report(&[0; 6]);
+fn hid_owner_error(error: io::Error) -> PicoclawErrorData {
+    PicoclawErrorData::new(
+        CODE_HID_WRITE_FAILED,
+        format!("HID owner operation failed: {error}"),
+    )
 }
 
 fn normalize_hotkey_keys(
@@ -1973,7 +2229,11 @@ fn key_code(key: &str) -> Option<u8> {
     }
 }
 
-fn mcp_tools_call(headers: &HeaderMap, req: JsonRpcRequest) -> JsonRpcResponse {
+async fn mcp_tools_call(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
     let Some(params) = req.params.as_ref() else {
         return json_rpc_error(req.id, -32602, "invalid params");
     };
@@ -1984,13 +2244,13 @@ fn mcp_tools_call(headers: &HeaderMap, req: JsonRpcRequest) -> JsonRpcResponse {
     let arguments = params.get("arguments").cloned().unwrap_or(JsonValue::Null);
 
     match name {
-        "kvm_screenshot" => mcp_screenshot(req.id, arguments),
-        "kvm_actions" => mcp_actions(headers, req.id, arguments),
+        "kvm_screenshot" => mcp_screenshot(state, req.id, arguments).await,
+        "kvm_actions" => mcp_actions(state, headers, req.id, arguments).await,
         _ => json_rpc_error(req.id, -32602, format!("unknown tool: {name}")),
     }
 }
 
-fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+async fn mcp_screenshot(state: &AppState, id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct ScreenshotArgs {
@@ -2007,7 +2267,7 @@ fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
         quality: args.quality,
     };
 
-    match capture_screenshot_blocking(query) {
+    match state.picoclaw_worker.screenshot(None, query).await {
         Ok((data, meta)) => {
             let b64 = BASE64_STANDARD.encode(data);
             json_rpc_result(
@@ -2030,10 +2290,19 @@ fn mcp_screenshot(id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
     }
 }
 
-fn mcp_actions(headers: &HeaderMap, id: JsonValue, arguments: JsonValue) -> JsonRpcResponse {
+async fn mcp_actions(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: JsonValue,
+    arguments: JsonValue,
+) -> JsonRpcResponse {
     let batch = match serde_json::from_value::<ActionBatch>(arguments) {
         Ok(batch) if !batch.actions.is_empty() => batch,
         _ => return mcp_tool_error(id, "invalid actions payload"),
+    };
+    let batch = match PreparedBatch::prepare(batch.actions) {
+        Ok(batch) => batch,
+        Err(error) => return mcp_tool_error(id, error.message),
     };
 
     let session_id = headers
@@ -2044,7 +2313,7 @@ fn mcp_actions(headers: &HeaderMap, id: JsonValue, arguments: JsonValue) -> Json
         .map(ToOwned::to_owned)
         .unwrap_or_else(session_lock_owner);
 
-    match execute_actions_blocking(&session_id, &batch.actions) {
+    match state.picoclaw_worker.actions(session_id, batch).await {
         Ok(result) => {
             let text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             json_rpc_result(id, json!({ "content": [{ "type": "text", "text": text }] }))
@@ -2069,25 +2338,27 @@ fn mcp_tool_definitions() -> JsonValue {
         },
         {
             "name": "kvm_actions",
-            "description": "Send one or more HID actions (click, type, hotkey, scroll, drag, move, wait) to the downstream remote host. Use normalized [0,1] coordinates for mouse actions.",
+            "description": "Send an ordered batch of 1-64 HID actions to the downstream remote host. Use normalized [0,1] mouse coordinates. Per call: wait <=5000 ms/action, scroll <=100 ticks/action, typing <=4096 UTF-8 bytes total, scheduled delays <=30 s total. Continue long tasks in sequential bounded calls; oversized calls are rejected, never truncated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "actions": {
                         "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
                         "description": "Array of action objects. Each requires an 'action' field (click, move, type, hotkey, scroll, drag, wait).",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "action": { "type": "string" },
+                                "action": { "type": "string", "enum": ["click", "move", "type", "hotkey", "scroll", "drag", "wait"] },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
                                 "button": { "type": "string" },
-                                "text": { "type": "string" },
-                                "keys": { "type": "array", "items": { "type": "string" } },
+                                "text": { "type": "string", "description": "At most 4096 UTF-8 bytes across all type actions in this call; typing delay also consumes the aggregate scheduled-time budget." },
+                                "keys": { "type": "array", "maxItems": 14, "items": { "type": "string" } },
                                 "direction": { "type": "string" },
-                                "amount": { "type": "integer" },
-                                "duration_ms": { "type": "integer" },
+                                "amount": { "type": "integer", "minimum": 0, "maximum": 100 },
+                                "duration_ms": { "type": "integer", "minimum": 0, "maximum": 5000 },
                                 "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
                                 "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } }
                             },
@@ -2157,6 +2428,38 @@ fn runtime_status() -> RuntimeStatus {
         .unwrap_or_else(|_| RuntimeStatus::checking())
 }
 
+/// Mark an installation as running unless one is, in which case the running
+/// one's status comes back for the caller to report. The check and the mark
+/// happen under the same lock.
+fn begin_install() -> Option<RuntimeStatus> {
+    // Prepared outside the lock: the profile detector reads the workspace.
+    let preparing = RuntimeStatus {
+        ready: false,
+        installed: false,
+        installing: true,
+        install_progress: Some(0),
+        install_stage: Some("preparing".to_string()),
+        install_path: Some(PICOCLAW_BINARY_PATH.to_string()),
+        agent_profile: Some(detect_agent_profile()),
+        model_configured: false,
+        model_name: None,
+        status: "installing".to_string(),
+        config_error: None,
+        last_error: None,
+        checked_at: Some(now_string()),
+        current_session: None,
+    }
+    .with_checked_at();
+    let Ok(mut current) = RUNTIME_STATUS.write() else {
+        return Some(RuntimeStatus::checking());
+    };
+    if current.installing {
+        return Some(current.clone());
+    }
+    *current = preparing;
+    None
+}
+
 fn set_runtime_status(status: RuntimeStatus) {
     if let Ok(mut current) = RUNTIME_STATUS.write() {
         *current = status.with_checked_at();
@@ -2196,15 +2499,17 @@ async fn ensure_runtime_ready() -> std::result::Result<RuntimeStatus, RuntimeSta
         });
     }
 
-    if resolve_config_path()
+    let prepared = if resolve_config_path()
         .ok()
         .filter(|path| path.exists())
         .is_none()
     {
-        let _ = run_script("onboard", PICOCLAW_ONBOARD_TIMEOUT).await;
-    }
+        onboard_runtime_config().await
+    } else {
+        Ok(())
+    };
 
-    let settings = match load_gateway_settings() {
+    let settings = match prepared.and_then(|()| load_gateway_settings()) {
         Ok(settings) => settings,
         Err(err) => {
             return Err(RuntimeStatus {
@@ -2320,8 +2625,13 @@ async fn start_runtime_inner() -> std::result::Result<(String, String), String> 
         return Err("picoclaw is not installed".to_string());
     }
 
-    ensure_startup_defaults().map_err(|err| err.to_string())?;
-    let (command, output) = run_script("start", PICOCLAW_START_TIMEOUT)
+    let support = native_control_ready()
+        .await
+        .map_err(|err| err.to_string())?;
+    ensure_startup_defaults()
+        .await
+        .map_err(|err| err.to_string())?;
+    let (command, output) = run_native_control(PicoControl::Ensure, support)
         .await
         .map_err(|err| err.to_string())?;
     time::sleep(Duration::from_millis(1500)).await;
@@ -2336,10 +2646,12 @@ async fn start_runtime_inner() -> std::result::Result<(String, String), String> 
 }
 
 async fn stop_runtime_inner() -> std::result::Result<(String, String), String> {
-    let (command, output) = run_script("stop", PICOCLAW_STOP_TIMEOUT)
+    let support = native_control_ready()
         .await
         .map_err(|err| err.to_string())?;
-    time::sleep(Duration::from_millis(500)).await;
+    let (command, output) = run_native_control(PicoControl::Stop, support)
+        .await
+        .map_err(|err| err.to_string())?;
 
     let settings = load_gateway_settings().ok();
     set_runtime_status(RuntimeStatus {
@@ -2376,23 +2688,9 @@ async fn run_install_runtime() -> Result<()> {
     let _ = fs::remove_dir_all(cache);
     fs::create_dir_all(cache)?;
 
-    set_install_progress("downloading", 5, None);
-    let checksum_path = cache.join("sha512.txt");
-    download_to(PICOCLAW_CHECKSUM_URL, &checksum_path).await?;
-    let expected_digest = parse_sha512_digest(
-        &fs::read_to_string(&checksum_path)?,
-        Path::new(PICOCLAW_DOWNLOAD_URL)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(""),
-    )?;
-
     set_install_progress("downloading", 10, None);
     let archive_path = cache.join("picoclaw.tar.gz");
-    download_to(PICOCLAW_DOWNLOAD_URL, &archive_path).await?;
-
-    set_install_progress("verifying", 82, None);
-    verify_sha512(&archive_path, &expected_digest)?;
+    package_download::fetch(&PACKAGE, &archive_path, PICOCLAW_DOWNLOAD_TIMEOUT).await?;
 
     set_install_progress("extracting", 85, None);
     let extracted = {
@@ -2404,7 +2702,16 @@ async fn run_install_runtime() -> Result<()> {
     };
 
     set_install_progress("installing", 95, None);
-    install_binary(&extracted, Path::new(PICOCLAW_BINARY_PATH))?;
+    // The broker installs exactly this verified staged executable as one job,
+    // stopping and relaunching a live runtime; this handler never writes the
+    // rootfs runtime itself.
+    let digest = task::spawn_blocking(move || sha512_file(&extracted))
+        .await
+        .map_err(|_| AppError::Internal("picoclaw digest task failed".into()))??;
+    run_config_job(INSTALL_JOB_KIND, move || {
+        crate::native_owner::broker::ipc::run_install_job(digest, CONFIG_JOB_TIMEOUT)
+    })
+    .await?;
 
     let _ = fs::remove_dir_all(cache);
     set_runtime_status(RuntimeStatus {
@@ -2445,79 +2752,6 @@ fn set_install_progress(stage: &str, progress: i32, last_error: Option<String>) 
     });
 }
 
-async fn download_to(url: &str, target: &Path) -> Result<()> {
-    let args = vec![
-        OsString::from("-f"),
-        OsString::from("-L"),
-        OsString::from("-sS"),
-        OsString::from("--connect-timeout"),
-        OsString::from("20"),
-        OsString::from("--max-time"),
-        OsString::from("600"),
-        OsString::from("--output"),
-        target.as_os_str().to_os_string(),
-        OsString::from(url),
-    ];
-    let curl = command::run_allowed(AllowedCommand::Curl, args, PICOCLAW_DOWNLOAD_TIMEOUT).await;
-    if let Ok(output) = curl {
-        if output.status == 0 {
-            return Ok(());
-        }
-    }
-
-    let args = vec![
-        OsString::from("-q"),
-        OsString::from("-O"),
-        target.as_os_str().to_os_string(),
-        OsString::from(url),
-    ];
-    let output =
-        command::run_allowed(AllowedCommand::Wget, args, PICOCLAW_DOWNLOAD_TIMEOUT).await?;
-    if output.status == 0 {
-        Ok(())
-    } else {
-        Err(AppError::Internal(command_error(
-            "download picoclaw",
-            output,
-        )))
-    }
-}
-
-fn parse_sha512_digest(raw: &str, expected_name: &str) -> Result<String> {
-    let mut fallback = None;
-    for line in raw.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.is_empty() || !is_sha512_digest(fields[0]) {
-            continue;
-        }
-        if fields.len() == 1 {
-            fallback.get_or_insert_with(|| fields[0].to_ascii_lowercase());
-            continue;
-        }
-        let name = fields[fields.len() - 1].trim_start_matches('*');
-        if expected_name.is_empty() || name == expected_name {
-            return Ok(fields[0].to_ascii_lowercase());
-        }
-    }
-    fallback.ok_or_else(|| AppError::Internal("failed to parse sha512 digest".to_string()))
-}
-
-fn is_sha512_digest(value: &str) -> bool {
-    value.len() == 128 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn verify_sha512(path: &Path, expected: &str) -> Result<()> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha512::new();
-    io::copy(&mut file, &mut hasher)?;
-    let actual = format!("{:x}", hasher.finalize());
-    if actual == expected.to_ascii_lowercase() {
-        Ok(())
-    } else {
-        Err(AppError::Internal(format!("sha512 mismatch: got {actual}")))
-    }
-}
-
 fn extract_picoclaw_binary(archive_path: &Path, destination: &Path) -> Result<PathBuf> {
     let file = fs::File::open(archive_path)?;
     let gz = GzDecoder::new(file);
@@ -2546,41 +2780,69 @@ fn extract_picoclaw_binary(archive_path: &Path, destination: &Path) -> Result<Pa
     ))
 }
 
-fn install_binary(src: &Path, target: &Path) -> Result<()> {
-    let tmp = target.with_extension("tmp");
-    fs::copy(src, &tmp)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, target)?;
-    Ok(())
+fn sha512_file(path: &Path) -> Result<[u8; 64]> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha512::new();
+    io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().into())
 }
 
-async fn run_script(action: &'static str, timeout: Duration) -> Result<(String, String)> {
-    let (command, display) = if Path::new(ETC_INIT_PICOCLAW_SCRIPT).exists() {
-        (
-            AllowedCommand::ServicePicoclawEtc,
-            format!("{ETC_INIT_PICOCLAW_SCRIPT} {action}"),
-        )
-    } else if Path::new(KVMAPP_PICOCLAW_SCRIPT).exists() {
-        (
-            AllowedCommand::ServicePicoclawKvmapp,
-            format!("{KVMAPP_PICOCLAW_SCRIPT} {action}"),
-        )
-    } else {
-        return Err(AppError::Internal(format!(
-            "picoclaw start script not found: {ETC_INIT_PICOCLAW_SCRIPT} or {KVMAPP_PICOCLAW_SCRIPT}"
-        )));
-    };
+enum PicoControl {
+    Ensure,
+    Stop,
+}
 
-    let output = command::run_allowed(command, [action], timeout).await?;
-    let trimmed = command_output_text(&output);
+async fn native_control_ready() -> Result<crate::native_owner::broker::boot::Permit> {
+    // Admit before queuing a blocking callback, not inside it. Contenders fail
+    // immediately instead of growing a queue of helper-hashing/fsync tasks.
+    let admission = crate::update::operation_lock::ProcessLock::acquire()
+        .map_err(|_| AppError::Conflict("picoclaw native control admission unavailable".into()))?;
+    task::spawn_blocking(move || {
+        // Management may remain available when boot-support publication fails.
+        // Never let an old ctl/broker's empty scope stand in for a stopped
+        // legacy gateway. Check this backend's exact helpers under admission,
+        // then retain its current fresh-boot consumer profile through control.
+        let _admission = admission;
+        crate::update::native_bootstrap::check_installed().map_err(|_| {
+            AppError::Conflict("picoclaw requires matching current native support".into())
+        })?;
+        crate::native_owner::broker::boot::require_ready().map_err(|_| {
+            AppError::Conflict(
+                "picoclaw requires a fresh enrolled boot with current scripts".into(),
+            )
+        })
+    })
+    .await
+    .map_err(|_| AppError::Internal("picoclaw native preflight task failed".into()))?
+}
+
+async fn run_native_control(
+    control: PicoControl,
+    support: crate::native_owner::broker::boot::Permit,
+) -> Result<(String, String)> {
+    let (argument, timeout) = match control {
+        PicoControl::Ensure => ("ensure-picoclaw", PICOCLAW_START_TIMEOUT),
+        PicoControl::Stop => ("stop-picoclaw", PICOCLAW_STOP_TIMEOUT),
+    };
+    // The command owner retains the boot proof through cancellation, capture
+    // cleanup and direct-child reap. Broker Stop independently retains its
+    // Update exclusion and owned tree until receipt/reap/EOF, even if ctl dies.
+    let output = command::run_allowed_owned(
+        AllowedCommand::NativePicoclawControl,
+        [argument],
+        timeout,
+        support,
+    )
+    .await?;
     if output.status == 0 {
-        Ok((display, trimmed))
+        Ok((
+            format!("/usr/libexec/nanokvm-native-ctl {argument}"),
+            command_output_text(&output),
+        ))
     } else {
-        Err(AppError::Internal(if trimmed.is_empty() {
-            format!("picoclaw script {action} failed")
-        } else {
-            trimmed
-        }))
+        Err(AppError::Conflict(
+            "picoclaw native operation did not confirm completion; no fallback attempted".into(),
+        ))
     }
 }
 
@@ -2711,46 +2973,45 @@ fn seconds_to_millis_i32(seconds: i64) -> Option<i32> {
 }
 
 struct ConfigDocument {
-    config_path: PathBuf,
-    security_path: PathBuf,
     raw: JsonValue,
     security: serde_yaml::Value,
 }
 
 fn load_config_document() -> Result<ConfigDocument> {
     let config_path = resolve_config_path()?;
-    let data = fs::read(&config_path)?;
-    let raw: JsonValue = serde_json::from_slice(&data)
-        .map_err(|err| AppError::Internal(format!("failed to parse picoclaw config: {err}")))?;
-    let security_path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("/root/.picoclaw"))
-        .join(".security.yml");
-    let security = match fs::read(&security_path) {
-        Ok(data) => serde_yaml::from_slice(&data).map_err(|err| {
-            AppError::Internal(format!("failed to parse picoclaw security config: {err}"))
-        })?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-        }
-        Err(err) => return Err(err.into()),
-    };
+    load_config_document_at(config_path)
+}
 
-    Ok(ConfigDocument {
-        config_path,
-        security_path,
-        raw,
+fn load_config_document_at(config_path: PathBuf) -> Result<ConfigDocument> {
+    let crate::update::picoclaw_config::RawDocuments {
+        config: data,
+        security: security_data,
+    } = crate::update::picoclaw_config::read_pair(&config_path)?;
+    let startup::Documents {
+        config: raw,
         security,
+    } = startup::decode(
+        &data,
+        security_data.as_deref().map(|bytes| bytes.as_slice()),
+    )?;
+
+    Ok(ConfigDocument { raw, security })
+}
+
+async fn onboard_runtime_config() -> Result<()> {
+    // A broker-owned Onboard job runs the one-shot, imports its stage with the
+    // pair last and retires the stage; this handler holds no admission itself.
+    run_config_job(ONBOARD_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_onboard_job(ONBOARD_JOB_TIMEOUT)
     })
+    .await?;
+    task::spawn_blocking(|| load_config_document().map(|_| ()))
+        .await
+        .map_err(|_| AppError::Internal("picoclaw onboarding validation task failed".into()))?
 }
 
 fn resolve_config_path() -> Result<PathBuf> {
-    let home = std::env::var("PICOCLAW_HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/root/.picoclaw"));
-    Ok(home.join("config.json"))
+    Ok(crate::native_owner::picoclaw_home::resolve()?.join("config.json"))
 }
 
 fn is_model_configured(config: &JsonValue, security: &serde_yaml::Value, model_name: &str) -> bool {
@@ -2821,368 +3082,143 @@ fn security_has_model_key(security: &serde_yaml::Value, model_name: &str, index:
     })
 }
 
-fn update_model_config_file(api_base: &str, api_key: &str, model: &str) -> Result<String> {
-    let mut doc = load_config_document()?;
-    let model_name = extract_model_name(model)
-        .ok_or_else(|| AppError::Internal("model identifier is required".to_string()))?;
-    let raw = doc
-        .raw
-        .as_object_mut()
-        .ok_or_else(|| AppError::Internal("picoclaw config root is not an object".to_string()))?;
-
-    let models = raw
-        .entry("model_list".to_string())
-        .or_insert_with(|| JsonValue::Array(Vec::new()));
-    if !models.is_array() {
-        *models = JsonValue::Array(Vec::new());
-    }
-    let models = models.as_array_mut().expect("model_list array");
-    let mut updated_index = None;
-    for (idx, item) in models.iter_mut().enumerate() {
-        let Some(item) = item.as_object_mut() else {
-            continue;
-        };
-        if item
-            .get("model_name")
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            == Some(model_name.as_str())
-        {
-            item.insert(
-                "model_name".to_string(),
-                JsonValue::String(model_name.clone()),
-            );
-            item.insert("model".to_string(), JsonValue::String(model.to_string()));
-            item.insert(
-                "api_base".to_string(),
-                JsonValue::String(api_base.to_string()),
-            );
-            item.remove("api_key");
-            item.remove("api_keys");
-            updated_index = Some(idx);
-            break;
-        }
-    }
-    let updated_index = match updated_index {
-        Some(idx) => idx,
-        None => {
-            let mut item = JsonMap::new();
-            item.insert(
-                "model_name".to_string(),
-                JsonValue::String(model_name.clone()),
-            );
-            item.insert("model".to_string(), JsonValue::String(model.to_string()));
-            item.insert(
-                "api_base".to_string(),
-                JsonValue::String(api_base.to_string()),
-            );
-            models.push(JsonValue::Object(item));
-            models.len() - 1
-        }
-    };
-
-    let agents = raw
-        .entry("agents".to_string())
-        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-    if !agents.is_object() {
-        *agents = JsonValue::Object(JsonMap::new());
-    }
-    let defaults = agents
-        .as_object_mut()
-        .expect("agents object")
-        .entry("defaults".to_string())
-        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-    if !defaults.is_object() {
-        *defaults = JsonValue::Object(JsonMap::new());
-    }
-    let defaults = defaults.as_object_mut().expect("defaults object");
-    defaults.insert(
-        "model_name".to_string(),
-        JsonValue::String(model_name.clone()),
-    );
-    defaults.remove("model");
-
-    save_json(&doc.config_path, &doc.raw)?;
-    save_model_secret(
-        &mut doc.security,
-        &doc.security_path,
-        &model_name,
-        updated_index,
-        api_key,
-    )?;
-    Ok(model_name)
-}
-
-fn extract_model_name(model: &str) -> Option<String> {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(
-        trimmed
-            .rsplit('/')
-            .next()
-            .unwrap_or(trimmed)
-            .trim()
-            .to_string(),
+/// Fixture writer for the pair publication and cut tests. Production pair
+/// changes run as broker-owned jobs; no handler writes the pair.
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+fn save_config_document(
+    permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
+    doc: &ConfigDocument,
+) -> Result<()> {
+    let encoded = startup::encode(&doc.raw, &doc.security)?;
+    crate::update::picoclaw_config::replace_pair(
+        permit,
+        path,
+        &encoded.config,
+        Some(encoded.security.as_bytes()),
     )
 }
 
-fn save_json(path: &Path, value: &JsonValue) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let data = serde_json::to_vec_pretty(value)
-        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw config: {err}")))?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+fn save_json(
+    permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
+    value: &JsonValue,
+) -> Result<()> {
+    let data =
+        zeroize::Zeroizing::new(serde_json::to_vec_pretty(value).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw config: {err}"))
+        })?);
+    crate::update::picoclaw_config::replace(permit, path, &data)
 }
 
-fn save_yaml(path: &Path, value: &serde_yaml::Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let data = serde_yaml::to_string(value)
-        .map_err(|err| AppError::Internal(format!("failed to encode picoclaw security: {err}")))?;
-    fs::write(path, data)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+fn save_yaml(
+    permit: &crate::update::state_writers::ConfigPermit,
+    path: &Path,
+    value: &serde_yaml::Value,
+) -> Result<()> {
+    let data =
+        zeroize::Zeroizing::new(serde_yaml::to_string(value).map_err(|err| {
+            AppError::Internal(format!("failed to encode picoclaw security: {err}"))
+        })?);
+    crate::update::picoclaw_config::replace(permit, path, data.as_bytes())
 }
 
 fn resolved_pico_token(config: &JsonValue, security: &serde_yaml::Value) -> String {
-    let security_token = security
-        .get("channel_list")
-        .and_then(|channels| channels.get("pico"))
-        .and_then(|pico| {
-            pico.get("settings")
-                .and_then(|settings| settings.get("token"))
-                .or_else(|| pico.get("token"))
-        })
-        .and_then(serde_yaml::Value::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty());
-    if let Some(token) = security_token {
-        return token.to_string();
-    }
-
-    config
-        .pointer("/channel_list/pico/settings/token")
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .unwrap_or("")
-        .to_string()
+    startup::existing_gateway_token(config, security).unwrap_or_default()
 }
 
-fn ensure_pico_security_token(doc: &mut ConfigDocument) -> Result<String> {
-    let token = {
-        let current = resolved_pico_token(&doc.raw, &doc.security);
-        if current.is_empty() {
-            random_token(36)
-        } else {
-            current
+/// One broker-owned configuration job, including a live gateway's quiescence
+/// and relaunch, ends within this bound.
+const CONFIG_JOB_TIMEOUT: Duration = Duration::from_secs(60);
+const ONBOARD_JOB_KIND: u8 = 1;
+const MODEL_JOB_KIND: u8 = 2;
+/// The one-shot itself is bounded at 60 s by the broker.
+const ONBOARD_JOB_TIMEOUT: Duration = Duration::from_secs(90);
+const STARTUP_JOB_KIND: u8 = 3;
+const PROFILE_JOB_KIND: u8 = 4;
+const INSTALL_JOB_KIND: u8 = 5;
+const REMOVE_JOB_KIND: u8 = 6;
+
+enum JobDone {
+    Done,
+    /// A concurrent writer changed the pair before apply; nothing applied.
+    Superseded,
+}
+
+// Receipt codes: the job's kind, Completed, then outcome and runtime. Error
+// text is fixed: never documents, credentials or broker detail.
+fn job_outcome(reply: crate::native_owner::broker::ipc::JobReply, kind: u8) -> Result<JobDone> {
+    use crate::native_owner::broker::ipc::JobCode;
+    match (reply.code, reply.receipt) {
+        // Changed or Noop.
+        (JobCode::Ok, [code, 8, 1 | 2, _]) if code == kind => Ok(JobDone::Done),
+        // A failed one-shot is final: nothing to settle again.
+        (JobCode::Ok, [ONBOARD_JOB_KIND, 8, 3, _]) if kind == ONBOARD_JOB_KIND => Err(
+            AppError::Config("picoclaw onboarding did not complete; nothing was changed".into()),
+        ),
+        (JobCode::Ok, [code, 8, 3, 2]) if code == kind => Ok(JobDone::Superseded),
+        (JobCode::Ok, [code, 8, 3, _]) if code == kind => Err(AppError::Config(
+            match kind {
+                PROFILE_JOB_KIND => {
+                    "the workspace AGENT.md is customized or unavailable and was kept"
+                }
+                INSTALL_JOB_KIND => "the staged picoclaw executable is missing or does not match",
+                _ => "picoclaw configuration cannot take this change",
+            }
+            .into(),
+        )),
+        (JobCode::Busy, _) => Err(AppError::Conflict(
+            "configuration change already in progress".into(),
+        )),
+        (JobCode::RecoveryRequired, _) => Err(AppError::Conflict(
+            "Pico mutation requires checked settlement".into(),
+        )),
+        _ => Err(AppError::Internal(
+            "picoclaw configuration job did not complete".into(),
+        )),
+    }
+}
+
+/// Run one broker-owned configuration job. The broker settles a canonical
+/// pair as a no-op, or quiesces a live gateway, applies the change through
+/// the pair journal and resumes it; a superseded change is retried once. A
+/// lost reply re-observes the same job instead of starting another.
+async fn run_config_job<F>(kind: u8, job: F) -> Result<()>
+where
+    F: Fn() -> std::io::Result<crate::native_owner::broker::ipc::JobReply> + Clone + Send + 'static,
+{
+    for _ in 0..2 {
+        let run = job.clone();
+        let reply = task::spawn_blocking(run)
+            .await
+            .map_err(|_| AppError::Internal("picoclaw configuration job worker failed".into()))?
+            .map_err(|_| AppError::Conflict("picoclaw configuration job unavailable".into()))?;
+        if let JobDone::Done = job_outcome(reply, kind)? {
+            return Ok(());
         }
-    };
-
-    set_pico_security_token(&mut doc.security, &token);
-    Ok(token)
+    }
+    Err(AppError::Conflict(
+        "picoclaw configuration changed during the job".into(),
+    ))
 }
 
-fn set_pico_security_token(security: &mut serde_yaml::Value, token: &str) {
-    if !security.is_mapping() {
-        *security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let root = security.as_mapping_mut().expect("security mapping");
-    let channel_list_key = serde_yaml::Value::String("channel_list".to_string());
-    root.entry(channel_list_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !root[&channel_list_key].is_mapping() {
-        root.insert(
-            channel_list_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let channel_list = root
-        .get_mut(&channel_list_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("channel_list mapping");
-    let pico_key = serde_yaml::Value::String("pico".to_string());
-    channel_list
-        .entry(pico_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !channel_list[&pico_key].is_mapping() {
-        channel_list.insert(
-            pico_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let pico = channel_list
-        .get_mut(&pico_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("pico mapping");
-    let settings_key = serde_yaml::Value::String("settings".to_string());
-    pico.entry(settings_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !pico[&settings_key].is_mapping() {
-        pico.insert(
-            settings_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-
-    let settings = pico
-        .get_mut(&settings_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("pico settings mapping");
-    settings.insert(
-        serde_yaml::Value::String("token".to_string()),
-        serde_yaml::Value::String(token.to_string()),
-    );
+/// Startup defaults are a broker-owned job; this handler never writes them.
+async fn ensure_startup_defaults() -> Result<()> {
+    run_config_job(STARTUP_JOB_KIND, || {
+        crate::native_owner::broker::ipc::run_startup_job(CONFIG_JOB_TIMEOUT)
+    })
+    .await
 }
 
-fn save_model_secret(
-    security: &mut serde_yaml::Value,
-    path: &Path,
-    model_name: &str,
-    index: usize,
-    api_key: &str,
-) -> Result<()> {
-    if !security.is_mapping() {
-        *security = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    let root = security.as_mapping_mut().expect("security mapping");
-    let model_list_key = serde_yaml::Value::String("model_list".to_string());
-    root.entry(model_list_key.clone())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !root[&model_list_key].is_mapping() {
-        root.insert(
-            model_list_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    let model_list = root
-        .get_mut(&model_list_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .expect("model_list mapping");
-    let mut entry = serde_yaml::Mapping::new();
-    entry.insert(
-        serde_yaml::Value::String("api_keys".to_string()),
-        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(api_key.to_string())]),
-    );
-    model_list.insert(
-        serde_yaml::Value::String(format!("{model_name}:{index}")),
-        serde_yaml::Value::Mapping(entry),
-    );
+#[cfg(test)]
+#[path = "picoclaw_config_job_tests.rs"]
+mod config_job_tests;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    save_yaml(path, security)
-}
-
-fn ensure_startup_defaults() -> Result<()> {
-    let mut doc = load_config_document()?;
-    let _ = ensure_pico_security_token(&mut doc)?;
-    let raw = doc
-        .raw
-        .as_object_mut()
-        .ok_or_else(|| AppError::Internal("picoclaw config root is not an object".to_string()))?;
-    ensure_object_path(raw, &["agents", "defaults"])
-        .insert("restrict_to_workspace".to_string(), JsonValue::Bool(false));
-    ensure_object_path(raw, &["agents", "defaults"]).insert(
-        "allow_read_outside_workspace".to_string(),
-        JsonValue::Bool(true),
-    );
-    ensure_object_path(raw, &["gateway"]).insert(
-        "host".to_string(),
-        JsonValue::String(DEFAULT_GATEWAY_HOST.to_string()),
-    );
-    ensure_object_path(raw, &["gateway"]).insert(
-        "port".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_GATEWAY_PORT)),
-    );
-    let pico = ensure_object_path(raw, &["channel_list", "pico"]);
-    pico.insert("type".to_string(), JsonValue::String("pico".to_string()));
-    pico.insert("enabled".to_string(), JsonValue::Bool(true));
-    let settings = ensure_object_path(raw, &["channel_list", "pico", "settings"]);
-    settings.insert("allow_token_query".to_string(), JsonValue::Bool(false));
-    settings.insert(
-        "ping_interval".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_PING_INTERVAL_MS / 1000)),
-    );
-    settings.insert(
-        "read_timeout".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_READ_TIMEOUT_MS / 1000)),
-    );
-    settings.insert(
-        "write_timeout".to_string(),
-        JsonValue::Number(serde_json::Number::from(DEFAULT_WRITE_TIMEOUT_MS / 1000)),
-    );
-    ensure_object_path(raw, &["tools", "mcp"]).insert("enabled".to_string(), JsonValue::Bool(true));
-    let token = internal_token()?;
-    let server = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm"]);
-    server.insert("enabled".to_string(), JsonValue::Bool(true));
-    server.insert("type".to_string(), JsonValue::String("http".to_string()));
-    server.insert(
-        "url".to_string(),
-        JsonValue::String("http://127.0.0.1:80/api/picoclaw/mcp".to_string()),
-    );
-    let headers = ensure_object_path(raw, &["tools", "mcp", "servers", "nanokvm", "headers"]);
-    headers.insert(INTERNAL_TOKEN_HEADER.to_string(), JsonValue::String(token));
-    save_json(&doc.config_path, &doc.raw)?;
-    save_yaml(&doc.security_path, &doc.security)
-}
-
-fn ensure_object_path<'a>(
-    root: &'a mut JsonMap<String, JsonValue>,
-    path: &[&str],
-) -> &'a mut JsonMap<String, JsonValue> {
-    let mut current = root;
-    for key in path {
-        let entry = current
-            .entry((*key).to_string())
-            .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-        if !entry.is_object() {
-            *entry = JsonValue::Object(JsonMap::new());
-        }
-        current = entry.as_object_mut().expect("object path");
-    }
-    current
-}
-
-fn apply_agent_profile(profile: &str) -> Result<()> {
-    let source = resolve_agent_profile_source(profile)?;
-    let workspace = resolve_workspace_path()?;
-    fs::create_dir_all(&workspace)?;
-    let content = fs::read(source)?;
-    fs::write(workspace.join("AGENT.md"), content)?;
-    Ok(())
-}
-
-fn resolve_agent_profile_source(profile: &str) -> Result<PathBuf> {
-    let filename = match profile {
-        "default" => "AGENT.md",
-        "kvm" => "AGENT_KVM.md",
-        _ => return Err(AppError::BadRequest("invalid agent profile".to_string())),
-    };
-    let candidates = [
-        PathBuf::from("/kvmapp/picoclaw").join(filename),
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.parent()
-                    .map(|parent| parent.join("../picoclaw").join(filename))
-            })
-            .unwrap_or_else(|| PathBuf::from("/nonexistent")),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .ok_or_else(|| AppError::Internal(format!("agent profile source not found: {filename}")))
-}
+#[cfg(all(test, feature = "sandbox-test-fixture"))]
+#[path = "picoclaw_config_publication_tests.rs"]
+mod config_publication_tests;
 
 fn detect_agent_profile() -> String {
     let Ok(workspace) = resolve_workspace_path() else {
@@ -3290,34 +3326,6 @@ fn picoclaw_error_with_session(
         .into_response()
 }
 
-fn internal_token() -> Result<String> {
-    if let Ok(guard) = INTERNAL_TOKEN_CACHE.read() {
-        if let Some(token) = guard.as_ref() {
-            return Ok(token.clone());
-        }
-    }
-
-    let path = Path::new(INTERNAL_TOKEN_FILE);
-    let token = match fs::read_to_string(path) {
-        Ok(value) => value.trim().to_string(),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let token = random_token(32);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, format!("{token}\n"))?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            token
-        }
-        Err(err) => return Err(err.into()),
-    };
-
-    if let Ok(mut guard) = INTERNAL_TOKEN_CACHE.write() {
-        *guard = Some(token.clone());
-    }
-    Ok(token)
-}
-
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -3345,37 +3353,69 @@ fn command_output_text(output: &crate::system::command::CommandOutput) -> String
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn command_error(message: &str, output: crate::system::command::CommandOutput) -> String {
-    let detail = command_output_text(&output);
-    if detail.is_empty() {
-        message.to_string()
-    } else {
-        format!("{message}: {detail}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[test]
+    fn only_one_installation_begins_at_a_time() {
+        use super::{RuntimeStatus, begin_install, runtime_status, set_runtime_status};
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let before = runtime_status();
+        set_runtime_status(RuntimeStatus {
+            installing: false,
+            ..before.clone()
+        });
+        assert!(begin_install().is_none());
+        let running = begin_install().expect("a second start while one runs");
+        assert!(running.installing);
+        assert_eq!(running.status, "installing");
+        // Requests arriving together: exactly one of them starts, every time.
+        for _ in 0..50 {
+            set_runtime_status(RuntimeStatus {
+                installing: false,
+                ..before.clone()
+            });
+            let barrier = Barrier::new(8);
+            let started = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        if begin_install().is_none() {
+                            started.fetch_add(1, Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+        }
+        set_runtime_status(before);
+    }
 
     #[test]
-    fn parses_sha512_for_named_archive() {
-        let digest = "a".repeat(128);
-        let raw = format!("{digest}  picoclaw_Linux_riscv64.tar.gz\n");
+    fn a_screenshot_comes_from_the_cache_then_the_mjpeg_capture_never_from_h264() {
+        use super::{ScreenshotSource, screenshot_source};
+        assert_eq!(screenshot_source(true, true), ScreenshotSource::Cached);
+        assert_eq!(screenshot_source(true, false), ScreenshotSource::Cached);
+        assert_eq!(screenshot_source(false, true), ScreenshotSource::Capture);
         assert_eq!(
-            parse_sha512_digest(&raw, "picoclaw_Linux_riscv64.tar.gz").unwrap(),
-            digest
+            screenshot_source(false, false),
+            ScreenshotSource::Unavailable
         );
     }
+
+    use super::*;
 
     #[test]
     fn extracts_model_name_from_provider_path() {
         assert_eq!(
-            extract_model_name("openai/gpt-4.1").unwrap(),
+            crate::update::picoclaw_model::model_name("openai/gpt-4.1").unwrap(),
             "gpt-4.1".to_string()
         );
         assert_eq!(
-            extract_model_name("gpt-4.1").unwrap(),
+            crate::update::picoclaw_model::model_name("gpt-4.1").unwrap(),
             "gpt-4.1".to_string()
         );
     }

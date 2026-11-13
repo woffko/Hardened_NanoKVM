@@ -1,9 +1,16 @@
 #!/bin/sh
+set -f
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 
 RESERVE_INET="192.168.90.1/22"
 ETH_MAC_FILE="/boot/eth.mac"
 IPV6_MODE_FILE="/boot/eth.ipv6.mode"
 IPV6_CONFIG_FILE="/boot/eth.ipv6"
+BOOT_RESOLV_FILE="${BOOT_RESOLV_FILE:-/boot/resolv.conf}"
+ETC_RESOLV_FILE="${ETC_RESOLV_FILE:-/etc/resolv.conf}"
 UDHCPC6_PID_FILE="/run/udhcpc6.eth0.pid"
 UDHCPC6_SCRIPT="/kvmapp/system/network/udhcpc6.script"
 
@@ -13,6 +20,64 @@ clean_line() {
 
 is_valid_mac() {
     echo "$1" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'
+}
+
+is_ipv4_addr() {
+    value="$1"
+    case "$value" in
+        ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+    esac
+    old_ifs="$IFS"
+    IFS=.
+    set -- $value
+    IFS="$old_ifs"
+    [ "$#" -eq 4 ] || return 1
+    for octet in "$@"; do
+        [ -n "$octet" ] || return 1
+        [ "${#octet}" -le 3 ] || return 1
+        case "$octet" in
+            0) ;;
+            0*) return 1 ;;
+        esac
+        [ "$octet" -le 255 ] 2>/dev/null || return 1
+    done
+    return 0
+}
+
+is_ipv4_netid() {
+    case "$1" in
+        ''|*[!0-9]*|0*) return 1 ;;
+    esac
+    [ "${#1}" -le 2 ] || return 1
+    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 32 ] 2>/dev/null
+}
+
+is_ipv6_addr() {
+    value="$1"
+    [ -n "$value" ] || return 1
+    [ "${#value}" -le 45 ] || return 1
+    case "$value" in
+        *:*) ;;
+        *) return 1 ;;
+    esac
+    case "$value" in
+        *[!0-9A-Fa-f:.]*) return 1 ;;
+    esac
+    return 0
+}
+
+is_ipv6_cidr() {
+    value="$1"
+    case "$value" in
+        */*) addr="${value%/*}"; prefix="${value#*/}" ;;
+        *) return 1 ;;
+    esac
+    is_ipv6_addr "$addr" || return 1
+    case "$prefix" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#prefix}" -le 3 ] || return 1
+    [ "$prefix" -ge 0 ] 2>/dev/null && [ "$prefix" -le 128 ] 2>/dev/null
 }
 
 stable_eth_mac_seed() {
@@ -158,6 +223,7 @@ apply_ipv6_slaac() {
 }
 
 apply_ipv6_dhcpv6() {
+    /usr/libexec/nanokvm-app-recovery gate >/dev/null || return 1
     stop_dhcpv6
     enable_ipv6_base || return 0
     write_ipv6_conf accept_ra 2
@@ -194,6 +260,10 @@ apply_ipv6_manual() {
             */*) ;;
             *) inet="$inet/64" ;;
         esac
+        is_ipv6_cidr "$inet" || continue
+        if [ -n "$gw" ]; then
+            is_ipv6_addr "$gw" || continue
+        fi
         ip -6 addr add "$inet" dev eth0 2>/dev/null || true
         if [ -n "$gw" ]; then
             ip -6 route replace default via "$gw" dev eth0 2>/dev/null || true
@@ -214,6 +284,8 @@ apply_ipv6() {
 calc_gw() {
     addr="$1"
     netid="$2"
+    is_ipv4_addr "$addr" || return 1
+    is_ipv4_netid "$netid" || return 1
     IFS=. read a b c d <<EOF
 $addr
 EOF
@@ -227,6 +299,74 @@ EOF
     echo "$(( (gwnum>>24)&255 )).$(( (gwnum>>16)&255 )).$(( (gwnum>>8)&255 )).$(( gwnum&255 ))"
 }
 
+render_static_dns() {
+    fallback_server="$1"
+    tmp="${ETC_RESOLV_FILE}.tmp.$$"
+    : > "$tmp" || return 1
+
+    if [ -s "$BOOT_RESOLV_FILE" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line=$(clean_line "$line")
+            [ -z "$line" ] && continue
+            set -- $line
+            case "$1" in
+                nameserver)
+                    [ "$#" -eq 2 ] || continue
+                    if is_ipv4_addr "$2" || is_ipv6_addr "$2"; then
+                        printf 'nameserver %s\n' "$2" >>"$tmp" || { rm -f "$tmp"; return 1; }
+                    fi
+                    ;;
+                search|domain)
+                    [ "$#" -ge 2 ] || continue
+                    safe=1
+                    for name in "$@"; do
+                        [ "$name" = "$1" ] && continue
+                        case "$name" in
+                            ''|*[!A-Za-z0-9._-]*) safe=0 ;;
+                        esac
+                    done
+                    if [ "$safe" -eq 1 ]; then
+                        printf '%s\n' "$line" >>"$tmp" || { rm -f "$tmp"; return 1; }
+                    fi
+                    ;;
+                options)
+                    [ "$#" -ge 2 ] || continue
+                    safe=1
+                    for option in "$@"; do
+                        [ "$option" = "$1" ] && continue
+                        case "$option" in
+                            ndots:[0-9]|ndots:[0-9][0-9]|timeout:[0-9]|timeout:[0-9][0-9]|attempts:[0-9]|rotate|single-request|single-request-reopen|no-tld-query) ;;
+                            *) safe=0 ;;
+                        esac
+                    done
+                    if [ "$safe" -eq 1 ]; then
+                        printf '%s\n' "$line" >>"$tmp" || { rm -f "$tmp"; return 1; }
+                    fi
+                    ;;
+            esac
+        done < "$BOOT_RESOLV_FILE"
+    fi
+
+    if [ -s "$tmp" ]; then
+        dedup="${tmp}.dedup"
+        awk '
+            $1 == "nameserver" {
+                if (!seen[$2]++) print "nameserver " $2
+                next
+            }
+            { print }
+        ' "$tmp" >"$dedup" || { rm -f "$dedup" "$tmp"; return 1; }
+        mv "$dedup" "$tmp" || { rm -f "$dedup" "$tmp"; return 1; }
+    fi
+
+    if ! grep -q '^nameserver ' "$tmp" 2>/dev/null; then
+        printf 'nameserver %s\n' "$fallback_server" >>"$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$ETC_RESOLV_FILE"
+}
+
 start() {
     ensure_eth_mac
     ip -4 addr flush dev eth0
@@ -237,33 +377,35 @@ start() {
             set -- $line
             inet="$1"
             gw="$2"
-            [ -z "$inet" ] && continue
-            # Check if inet contains a valid netmask, if not, add default /16
+            [ -n "$inet" ] || continue
             case "$inet" in
                 */*)
-                    # Already has netmask, check if valid (1-32)
-                    netid_check=${inet#*/}
-                    if ! echo "$netid_check" | grep -qE '^[0-9]+$' || [ $netid_check -lt 1 ] 2>/dev/null || [ $netid_check -gt 32 ] 2>/dev/null; then
-                        inet="${inet%/*}/16"
-                    fi
+                    netid_check="${inet#*/}"
+                    is_ipv4_netid "$netid_check" || inet="${inet%/*}/16"
                     ;;
                 *)
-                    # No netmask, add default /16
                     inet="$inet/16"
                     ;;
             esac
-            addr=${inet%/*}
-            netid=${inet#*/}
-            [ -z "$gw" ] && gw=$(calc_gw "$addr" "$netid")
+            addr="${inet%/*}"
+            netid="${inet#*/}"
+            is_ipv4_addr "$addr" || continue
+            is_ipv4_netid "$netid" || continue
+            if [ -n "$gw" ]; then
+                is_ipv4_addr "$gw" || continue
+            else
+                gw=$(calc_gw "$addr" "$netid") || continue
+            fi
+            [ -n "$gw" ] || continue
             arping -Dqc2 -Ieth0 "$addr" || continue
             ip a add "$inet" brd + dev eth0
             ip r add default via "$gw" dev eth0
-            echo -e "nameserver $gw" >> /etc/resolv.conf
+            render_static_dns "$gw"
             break
         done < /boot/eth.nodhcp
 
         ip a show dev eth0 | grep 'inet ' > /dev/null || {
-            udhcpc -i eth0 -t 3 -T 1 -A 5 -b -p /run/udhcpc.eth0.pid &>/dev/null
+            udhcpc -i eth0 -t 3 -T 1 -A 5 -b -p /run/udhcpc.eth0.pid >/dev/null 2>&1
             ip a show dev eth0 | grep 'inet ' > /dev/null
         } || {
             inet=$RESERVE_INET
@@ -284,6 +426,10 @@ stop() {
     fi
     stop_dhcpv6
 }
+
+if [ "${S30ETH_TEST_ONLY:-}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 case "$1" in
     start) start ;;

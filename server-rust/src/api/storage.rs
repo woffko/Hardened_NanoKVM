@@ -4,17 +4,18 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::LazyLock,
     time::Duration,
 };
-use tokio::{sync::Mutex, time};
+use tokio::time;
 
 use crate::{
-    AppError, Result, error::ApiResponse, state::AppState, system::files::clean_relative_path,
+    AppError, Result,
+    error::ApiResponse,
+    state::AppState,
+    system::{files::clean_relative_path, media, usb},
     ws::hid as hid_ws,
 };
 
-const IMAGE_NONE: &str = "/dev/mmcblk0p3";
 const CDROM_FLAG: &str =
     "/sys/kernel/config/usb_gadget/g0/functions/mass_storage.disk0/lun.0/cdrom";
 const MOUNT_DEVICE: &str =
@@ -25,8 +26,6 @@ const RO_FLAG: &str = "/sys/kernel/config/usb_gadget/g0/functions/mass_storage.d
 const UDC_FILE: &str = "/sys/kernel/config/usb_gadget/g0/UDC";
 const UDC_CLASS_DIR: &str = "/sys/class/udc";
 const MEDIA_SETTLE_DELAY: Duration = Duration::from_millis(100);
-
-static STORAGE_GADGET_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Serialize)]
 pub struct GetImagesRsp {
@@ -58,6 +57,9 @@ pub struct DeleteImageReq {
 
 pub async fn get_images(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let mut files = Vec::new();
+    if state.config.paths.image_directory.exists() {
+        media::checked_media_root(&state.config.paths.image_directory)?;
+    }
     collect_images(&state.config.paths.image_directory, &mut files)?;
     files.sort();
 
@@ -65,10 +67,7 @@ pub async fn get_images(State(state): State<AppState>) -> Result<impl IntoRespon
 }
 
 pub async fn get_mounted_image() -> Result<impl IntoResponse> {
-    let mut image = read_trimmed(MOUNT_DEVICE)?;
-    if image == IMAGE_NONE {
-        image.clear();
-    }
+    let image = read_trimmed(MOUNT_DEVICE)?;
 
     Ok(Json(ApiResponse::ok(GetMountedImageRsp { file: image })))
 }
@@ -86,7 +85,11 @@ pub async fn mount_image(
     State(state): State<AppState>,
     Json(req): Json<MountImageReq>,
 ) -> Result<impl IntoResponse> {
-    let _guard = STORAGE_GADGET_LOCK.lock().await;
+    usb::run_exclusive(async move { mount_image_locked(&state, req).await }).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+async fn mount_image_locked(state: &AppState, req: MountImageReq) -> Result<()> {
     let previous_cdrom = read_cdrom_flag().unwrap_or(false);
 
     let image = if req.file.trim().is_empty() {
@@ -94,6 +97,7 @@ pub async fn mount_image(
     } else {
         let image = valid_image_path(req.file.trim(), &state.config.paths.image_directory)?;
         validate_mount_mode(&image, req.cdrom)?;
+        media::ensure_not_loop_backed(&image, Path::new("/sys/block"))?;
         Some(image)
     };
 
@@ -106,19 +110,22 @@ pub async fn mount_image(
     let mount_target = image
         .as_ref()
         .map(|path| path_to_string(path))
-        .unwrap_or_else(|| IMAGE_NONE.to_string());
-    write_lun_file(mount_target.as_bytes())?;
+        .unwrap_or_default();
+    // An empty request ejects the media. Never export the data partition as a
+    // fallback: it contains private update state and is mounted by NanoKVM.
+    if !mount_target.is_empty() {
+        write_lun_file(mount_target.as_bytes())?;
+    }
     time::sleep(MEDIA_SETTLE_DELAY).await;
     if previous_cdrom != mode.cdrom {
         reset_usb_gadget().await?;
     }
 
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn reconnect_usb_gadget() -> Result<impl IntoResponse> {
-    let _guard = STORAGE_GADGET_LOCK.lock().await;
-    reset_usb_gadget().await?;
+    usb::run_exclusive(reset_usb_gadget()).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -126,13 +133,13 @@ pub async fn delete_image(
     State(state): State<AppState>,
     Json(req): Json<DeleteImageReq>,
 ) -> Result<impl IntoResponse> {
-    let image = valid_image_path(req.file.trim(), &state.config.paths.image_directory)?;
-    if mounted_image_matches(&image) {
-        return Err(AppError::Conflict(
-            "cannot delete the currently mounted image".to_string(),
-        ));
-    }
-    fs::remove_file(image)?;
+    usb::run_exclusive(async move {
+        let image = valid_image_path(req.file.trim(), &state.config.paths.image_directory)?;
+        ensure_image_not_in_use(&image)?;
+        fs::remove_file(image)?;
+        Ok(())
+    })
+    .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -158,6 +165,7 @@ fn collect_images(root: &Path, out: &mut Vec<String>) -> Result<()> {
 }
 
 fn valid_image_path(input: &str, root: &Path) -> Result<PathBuf> {
+    media::checked_media_root(root)?;
     if input.is_empty() {
         return Err(AppError::BadRequest("invalid image path".to_string()));
     }
@@ -178,10 +186,7 @@ fn valid_image_path(input: &str, root: &Path) -> Result<PathBuf> {
         ));
     }
 
-    let metadata = fs::symlink_metadata(&candidate)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(AppError::BadRequest("invalid image file".to_string()));
-    }
+    media::check_file(&candidate, root)?;
 
     let root = fs::canonicalize(root)?;
     let candidate = fs::canonicalize(candidate)?;
@@ -194,16 +199,63 @@ fn valid_image_path(input: &str, root: &Path) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-fn mounted_image_matches(image: &Path) -> bool {
-    let Ok(mounted) = read_trimmed(MOUNT_DEVICE) else {
-        return false;
+fn mounted_image_matches(image: &Path) -> Result<bool> {
+    let mounted = match read_trimmed(MOUNT_DEVICE) {
+        Ok(mounted) => mounted,
+        Err(AppError::Io(err)) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
     };
-    if mounted.is_empty() || mounted == IMAGE_NONE {
-        return false;
+    if mounted.is_empty() {
+        return Ok(false);
     }
-    fs::canonicalize(mounted)
-        .map(|mounted| mounted == image)
-        .unwrap_or(false)
+    if Path::new(&mounted) == image {
+        return Ok(true);
+    }
+    match fs::canonicalize(mounted) {
+        Ok(mounted) => Ok(mounted == image),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub(super) fn ensure_image_not_in_use(image: &Path) -> Result<()> {
+    if mounted_image_matches(image)? {
+        return Err(AppError::Conflict(
+            "cannot replace or delete the currently mounted image".to_string(),
+        ));
+    }
+    media::ensure_not_loop_backed(image, Path::new("/sys/block"))?;
+    Ok(())
+}
+
+// Called before opening management listeners. App-only migration must close an
+// already-active legacy raw LUN, not merely replace next-boot scripts.
+pub fn secure_existing_storage() -> Result<()> {
+    secure_storage_at(Path::new(MOUNT_DEVICE), Path::new(UDC_FILE))
+}
+
+fn secure_storage_at(lun: &Path, udc: &Path) -> Result<()> {
+    match fs::symlink_metadata(lun) {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    }
+    let close_result = fs::write(lun, b"\n").and_then(|()| {
+        if fs::read_to_string(lun)?.trim().is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("USB medium did not close"))
+        }
+    });
+    if let Err(err) = close_result {
+        // Vendor 5.10 has no forced_eject. A target can prevent removal. In
+        // that case disconnect the whole gadget and refuse API startup.
+        fs::write(udc, b"\n")?;
+        return Err(AppError::Internal(format!(
+            "legacy USB storage migration failed; gadget disconnected: {err}"
+        )));
+    }
+    Ok(())
 }
 
 struct MountMode {
@@ -273,14 +325,16 @@ fn read_cdrom_flag() -> Result<bool> {
 }
 
 async fn reset_usb_gadget() -> Result<()> {
-    if let Err(err) = hid_ws::close_cached_hid_devices() {
+    if let Err(err) = hid_ws::close_cached_hid_devices().await {
         tracing::warn!(error = %err, "failed to close cached HID devices before USB gadget reset");
     }
 
+    // Resolve before disconnecting: failure to find a controller must leave
+    // the existing gadget connected.
+    let udc = first_udc()?;
     fs::write(UDC_FILE, b"\n")?;
     time::sleep(Duration::from_secs(1)).await;
 
-    let udc = first_udc()?;
     fs::write(UDC_FILE, format!("{udc}\n").as_bytes())?;
     time::sleep(Duration::from_millis(300)).await;
     Ok(())
@@ -384,6 +438,76 @@ mod tests {
 
         let err = valid_image_path("link.iso", dir.path()).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn rejects_parent_alias_even_when_it_resolves_inside_media() {
+        let dir = tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        fs::create_dir(&actual).unwrap();
+        File::create(actual.join("disk.img")).unwrap();
+        unix_fs::symlink(&actual, dir.path().join("alias")).unwrap();
+        assert!(valid_image_path("alias/disk.img", dir.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_private_raw_payload_despite_img_extension() {
+        let dir = tempdir().unwrap();
+        let media_root = dir.path().join("media");
+        let private_root = dir.path().join(".hardened-kvmcache");
+        fs::create_dir(&media_root).unwrap();
+        fs::create_dir(&private_root).unwrap();
+        let payload = private_root.join("rootfs.img");
+        File::create(&payload).unwrap();
+        assert!(valid_image_path(payload.to_str().unwrap(), &media_root).is_err());
+        assert!(valid_image_path("../.hardened-kvmcache/rootfs.img", &media_root).is_err());
+        unix_fs::symlink(&private_root, media_root.join("alias")).unwrap();
+        assert!(valid_image_path("alias/rootfs.img", &media_root).is_err());
+    }
+
+    #[test]
+    fn local_loop_backing_cannot_be_exported_or_replaced() {
+        let dir = tempdir().unwrap();
+        let image = dir.path().join("disk.img");
+        File::create(&image).unwrap();
+        let block = dir.path().join("block");
+        let sys_loop = block.join("loop0/loop");
+        fs::create_dir_all(&sys_loop).unwrap();
+        fs::write(
+            sys_loop.join("backing_file"),
+            format!("{}\n", image.display()),
+        )
+        .unwrap();
+        assert!(matches!(
+            media::ensure_not_loop_backed(&image, &block),
+            Err(AppError::Conflict(_))
+        ));
+        fs::write(sys_loop.join("backing_file"), "").unwrap();
+        assert!(media::ensure_not_loop_backed(&image, &block).is_ok());
+    }
+
+    #[test]
+    fn startup_closes_existing_raw_lun() {
+        let dir = tempdir().unwrap();
+        let lun = dir.path().join("file");
+        let udc = dir.path().join("UDC");
+        fs::write(&lun, "/dev/mmcblk0p3\n").unwrap();
+        fs::write(&udc, "controller\n").unwrap();
+        secure_storage_at(&lun, &udc).unwrap();
+        assert!(fs::read_to_string(&lun).unwrap().trim().is_empty());
+        assert_eq!(fs::read_to_string(&udc).unwrap(), "controller\n");
+    }
+
+    #[test]
+    fn failed_startup_lun_close_disconnects_gadget_and_refuses_startup() {
+        let dir = tempdir().unwrap();
+        let lun = dir.path().join("file");
+        let udc = dir.path().join("UDC");
+        // A directory makes the write fail deterministically, including root.
+        fs::create_dir(&lun).unwrap();
+        fs::write(&udc, "controller\n").unwrap();
+        assert!(secure_storage_at(&lun, &udc).is_err());
+        assert!(fs::read_to_string(&udc).unwrap().trim().is_empty());
     }
 
     #[test]

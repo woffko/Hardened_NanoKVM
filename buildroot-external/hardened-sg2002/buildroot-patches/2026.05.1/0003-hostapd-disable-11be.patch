@@ -1,0 +1,11 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/hostapd: disable unused IEEE 802.11be support
+
+The generated NanoKVM access point configuration only enables 802.11n. Avoid
+compiling the unused 802.11be/MLO parser and its associated attack surface.
+
+diff --git a/package/hostapd/hostapd.mk b/package/hostapd/hostapd.mk
+--- a/package/hostapd/hostapd.mk
++++ b/package/hostapd/hostapd.mk
+@@ -56 +55,0 @@ HOSTAPD_CONFIG_ENABLE += \
+-	CONFIG_IEEE80211BE \

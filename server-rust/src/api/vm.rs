@@ -33,8 +33,11 @@ use tracing::{debug, info, warn};
 
 use crate::{
     AppError, Result,
-    api::{stream, system_firewall},
-    auth::compat_crypto::decode_frontend_password,
+    api::stream,
+    auth::{
+        compat_crypto::decode_frontend_password,
+        session::{SessionEnd, SessionLifetime},
+    },
     config::Config,
     error::ApiResponse,
     ffi::kvm,
@@ -44,7 +47,11 @@ use crate::{
         tls,
     },
     state::{AppState, is_allowed_session_lock_duration},
-    system::command::{AllowedCommand, run_allowed},
+    system::{
+        command::{AllowedCommand, run_allowed},
+        files, usb,
+    },
+    update::state_writers::ConfigPermit,
     ws::{hid as hid_ws, origin::validate_ws_origin},
 };
 
@@ -65,7 +72,6 @@ const OLED_SLEEP_FILE: &str = "/etc/kvm/oled_sleep";
 const GO_MEM_LIMIT_FILE: &str = "/etc/kvm/GOMEMLIMIT";
 const SWAP_FILE: &str = "/swapfile";
 const INITTAB_PATH: &str = "/etc/inittab";
-const TEMP_INITTAB_PATH: &str = "/etc/.inittab.tmp";
 const SWAP_INITTAB_LINE: &str = "si11::sysinit:/sbin/swapon /swapfile";
 const AVAHI_DAEMON_PID: &str = "/run/avahi-daemon/pid";
 const AVAHI_DAEMON_SCRIPT: &str = "/etc/init.d/S50avahi-daemon";
@@ -121,6 +127,9 @@ struct TerminalPty {
     master: File,
     child: Pid,
 }
+
+/// Queued terminal input messages before the websocket loop waits.
+const TERMINAL_INPUT_QUEUE: usize = 16;
 
 #[derive(Debug, Deserialize)]
 pub struct SetHostnameReq {
@@ -293,30 +302,89 @@ pub async fn get_hostname() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_hostname(Json(req): Json<SetHostnameReq>) -> Result<impl IntoResponse> {
+pub async fn set_hostname(
+    State(state): State<AppState>,
+    Json(req): Json<SetHostnameReq>,
+) -> Result<impl IntoResponse> {
     validate_hostname(&req.hostname)?;
-    let old_hostname = read_trimmed(ETC_HOSTNAME_FILE).unwrap_or_default();
-
-    if old_hostname != req.hostname {
-        if let Ok(hosts) = fs::read_to_string(ETC_HOSTS_FILE) {
-            fs::write(ETC_HOSTS_FILE, hosts.replace(&old_hostname, &req.hostname))?;
-        }
-    }
-
-    fs::write(BOOT_HOSTNAME_FILE, req.hostname.as_bytes())?;
-    fs::write(ETC_HOSTNAME_FILE, req.hostname.as_bytes())?;
-    let _ = run_allowed(
-        AllowedCommand::Hostname,
-        ["-F", ETC_HOSTNAME_FILE],
-        Duration::from_secs(2),
-    )
-    .await;
+    let permit = state.writers.configuration()?;
+    let hostname = req.hostname;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |_| {
+                    let old_hostname = read_trimmed(ETC_HOSTNAME_FILE).unwrap_or_default();
+                    if old_hostname != hostname
+                        && let Ok(hosts) = fs::read_to_string(ETC_HOSTS_FILE)
+                        && let Some(hosts) = rename_host_entries(&hosts, &old_hostname, &hostname)
+                    {
+                        files::write_atomic(Path::new(ETC_HOSTS_FILE), hosts.as_bytes(), 0o644)?;
+                    }
+                    files::write_atomic(Path::new(BOOT_HOSTNAME_FILE), hostname.as_bytes(), 0o644)?;
+                    files::write_atomic(Path::new(ETC_HOSTNAME_FILE), hostname.as_bytes(), 0o644)
+                })
+                .await?;
+            let _ = writer
+                .command(
+                    AllowedCommand::Hostname,
+                    ["-F", ETC_HOSTNAME_FILE],
+                    Duration::from_secs(2),
+                )
+                .await;
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn set_screen(Json(req): Json<SetScreenReq>) -> Result<impl IntoResponse> {
-    stream::set_screen_value(&req.kind, req.value)?;
+/// Rename `old` where it is a whole host name on an `/etc/hosts` entry: never
+/// inside another name, in the address field or in a comment. `None` when
+/// nothing changes, which includes an empty `old`.
+fn rename_host_entries(hosts: &str, old: &str, new: &str) -> Option<String> {
+    if old.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(hosts.len() + new.len());
+    let mut changed = false;
+    for line in hosts.split_inclusive('\n') {
+        let (entry, comment) = line.split_at(line.find('#').unwrap_or(line.len()));
+        let mut field = 0;
+        let mut start = None;
+        let mut push = |token: &str, field: usize, out: &mut String| {
+            if field > 0 && token == old {
+                out.push_str(new);
+                changed = true;
+            } else {
+                out.push_str(token);
+            }
+        };
+        for (index, character) in entry.char_indices() {
+            if character.is_whitespace() {
+                if let Some(begin) = start.take() {
+                    push(&entry[begin..index], field, &mut out);
+                    field += 1;
+                }
+                out.push(character);
+            } else if start.is_none() {
+                start = Some(index);
+            }
+        }
+        if let Some(begin) = start {
+            push(&entry[begin..], field, &mut out);
+        }
+        out.push_str(comment);
+    }
+    changed.then_some(out)
+}
+
+pub async fn set_screen(
+    State(state): State<AppState>,
+    Json(req): Json<SetScreenReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    let (kind, value) = (req.kind.clone(), req.value);
+    stream::libkvm(move || stream::set_screen_value(&kind, value)).await?;
     info!(kind = %req.kind, value = req.value, "updated screen setting");
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -327,18 +395,19 @@ pub async fn get_web_title() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_web_title(Json(req): Json<SetWebTitleReq>) -> Result<impl IntoResponse> {
+pub async fn set_web_title(
+    State(state): State<AppState>,
+    Json(req): Json<SetWebTitleReq>,
+) -> Result<impl IntoResponse> {
     if req.title.is_empty() || req.title == "NanoKVM" {
-        match fs::remove_file(WEB_TITLE_FILE) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
+        let _writer = state.writers.configuration()?;
+        files::remove_file(Path::new(WEB_TITLE_FILE))?;
     } else {
         if req.title.len() > 128 || req.title.contains(['\n', '\r']) {
             return Err(AppError::BadRequest("invalid web title".to_string()));
         }
-        fs::write(WEB_TITLE_FILE, req.title.as_bytes())?;
+        let _writer = state.writers.configuration()?;
+        files::write_atomic(Path::new(WEB_TITLE_FILE), req.title.as_bytes(), 0o644)?;
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -380,24 +449,40 @@ pub async fn get_hdmi_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(true)?;
+pub async fn enable_hdmi(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    stream::libkvm(|| kvm::set_hdmi(true)).await?;
     persist_hdmi_enabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn disable_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(false)?;
+pub async fn disable_hdmi(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    stream::libkvm(|| kvm::set_hdmi(false)).await?;
     persist_hdmi_disabled()?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn reset_hdmi() -> Result<impl IntoResponse> {
-    kvm::set_hdmi(false)?;
-    time::sleep(Duration::from_secs(1)).await;
-    kvm::set_hdmi(true)?;
-    persist_hdmi_enabled()?;
+    reset_hdmi_capture(Path::new(HDMI_DISABLE_FILE).exists()).await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+/// Off, 1 s, on, for a capture that is on. A capture the user disabled is
+/// refused by name and stays disabled: a reset pulses, it does not persist a
+/// setting. A lost client must not leave HDMI capture switched off.
+async fn reset_hdmi_capture(disabled: bool) -> Result<()> {
+    if disabled {
+        return Err(AppError::BadRequest(
+            "HDMI capture is disabled; enable it before a reset".to_string(),
+        ));
+    }
+    stream::owned_interval(
+        || kvm::set_hdmi(false).map(drop),
+        Duration::from_secs(1),
+        || kvm::set_hdmi(true).map(drop),
+    )
+    .await
 }
 
 pub async fn get_ssh_state() -> Result<impl IntoResponse> {
@@ -406,11 +491,12 @@ pub async fn get_ssh_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_ssh() -> Result<impl IntoResponse> {
+pub async fn enable_ssh(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if ssh_enabled().await {
         return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: true })));
     }
 
+    let _writer = state.writers.configuration()?;
     let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_on"],
@@ -428,11 +514,12 @@ pub async fn enable_ssh() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(EnabledRsp { enabled })))
 }
 
-pub async fn disable_ssh() -> Result<impl IntoResponse> {
+pub async fn disable_ssh(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if ssh_stop_requested() && !sshd_is_running().await {
         return Ok(Json(ApiResponse::ok(EnabledRsp { enabled: false })));
     }
 
+    let _writer = state.writers.configuration()?;
     let result = run_checked(
         AllowedCommand::ServiceSshd,
         ["permanent_off"],
@@ -493,11 +580,12 @@ pub async fn get_mdns_state() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn enable_mdns() -> Result<impl IntoResponse> {
+pub async fn enable_mdns(State(state): State<AppState>) -> Result<impl IntoResponse> {
     if avahi_daemon_pid().is_some() {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
+    let _writer = state.writers.configuration()?;
     if Path::new(AVAHI_DAEMON_BACKUP_SCRIPT).exists() {
         fs::copy(AVAHI_DAEMON_BACKUP_SCRIPT, AVAHI_DAEMON_SCRIPT)?;
     }
@@ -511,7 +599,7 @@ pub async fn enable_mdns() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn disable_mdns() -> Result<impl IntoResponse> {
+pub async fn disable_mdns(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let Some(pid) = avahi_daemon_pid() else {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     };
@@ -519,6 +607,7 @@ pub async fn disable_mdns() -> Result<impl IntoResponse> {
         return Err(AppError::Internal("invalid avahi pid".to_string()));
     }
 
+    let _writer = state.writers.configuration()?;
     run_checked(
         AllowedCommand::Kill,
         ["-9", pid.as_str()],
@@ -526,8 +615,8 @@ pub async fn disable_mdns() -> Result<impl IntoResponse> {
         "disable mdns failed",
     )
     .await?;
-    remove_file_if_exists(AVAHI_DAEMON_PID)?;
-    remove_file_if_exists(AVAHI_DAEMON_SCRIPT)?;
+    files::remove_file(Path::new(AVAHI_DAEMON_PID))?;
+    files::remove_file(Path::new(AVAHI_DAEMON_SCRIPT))?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -545,11 +634,19 @@ pub async fn get_oled() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(OledRsp { exist: true, sleep })))
 }
 
-pub async fn set_oled(Json(req): Json<SetOledReq>) -> Result<impl IntoResponse> {
+pub async fn set_oled(
+    State(state): State<AppState>,
+    Json(req): Json<SetOledReq>,
+) -> Result<impl IntoResponse> {
     if req.sleep < 0 || req.sleep > 24 * 60 * 60 {
         return Err(AppError::BadRequest("invalid OLED sleep".to_string()));
     }
-    fs::write(OLED_SLEEP_FILE, req.sleep.to_string().as_bytes())?;
+    let _writer = state.writers.configuration()?;
+    files::write_atomic(
+        Path::new(OLED_SLEEP_FILE),
+        req.sleep.to_string().as_bytes(),
+        0o644,
+    )?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -562,27 +659,65 @@ pub async fn get_virtual_device() -> Result<impl IntoResponse> {
 }
 
 pub async fn update_virtual_device(
+    State(state): State<AppState>,
     Json(req): Json<UpdateVirtualDeviceReq>,
 ) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
+    let on = usb::run_exclusive(update_virtual_device_locked(req)).await?;
+    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp { on })))
+}
+
+async fn update_virtual_device_locked(req: UpdateVirtualDeviceReq) -> Result<bool> {
     let (flag, config_dir) = match req.device.as_str() {
         "network" => (VIRTUAL_NETWORK_FLAG, VIRTUAL_NETWORK_CONFIG),
         "disk" => (VIRTUAL_DISK_FLAG, VIRTUAL_DISK_CONFIG),
         _ => return Err(AppError::BadRequest("invalid virtual device".to_string())),
     };
 
-    let exists = Path::new(flag).exists();
-    run_usbdev("stop").await?;
-    if exists {
-        remove_dir_if_exists(config_dir)?;
-        remove_file_if_exists(flag)?;
-    } else {
-        fs::write(flag, b"")?;
+    let old_flag = match fs::read(flag) {
+        Ok(contents) => Some(contents),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.into()),
+    };
+    hid_ws::close_cached_hid_devices().await?;
+    if let Err(stop_error) = run_usbdev("stop").await {
+        // stop may already have disconnected UDC before its later failure.
+        // Attempt recovery even though no configuration change was made.
+        run_usbdev("start").await?;
+        return Err(stop_error);
     }
-    run_usbdev("start").await?;
-
-    Ok(Json(ApiResponse::ok(UpdateVirtualDeviceRsp {
-        on: Path::new(flag).exists(),
-    })))
+    let change = (|| -> Result<()> {
+        if old_flag.is_some() {
+            // A configfs function link is a symlink, not a directory tree.
+            files::remove_file(Path::new(config_dir))?;
+            files::remove_file(Path::new(flag))?;
+        } else {
+            files::write_atomic(Path::new(flag), b"", 0o644)?;
+        }
+        Ok(())
+    })();
+    // Always try to reconnect, including after a failed flag/config change.
+    let restart = run_usbdev("start").await;
+    if change.is_err() || restart.is_err() {
+        // A failed start may have partly linked/rebound functions. Disconnect
+        // again before restoring flags and retrying, rather than editing a
+        // live composite gadget.
+        let restop = run_usbdev("stop").await;
+        let restore = match old_flag {
+            Some(contents) => files::write_atomic(Path::new(flag), &contents, 0o644),
+            None => {
+                files::remove_file(Path::new(flag))?;
+                files::remove_file(Path::new(config_dir))
+            }
+        };
+        let recovery = run_usbdev("start").await;
+        restore?;
+        restop?;
+        recovery?;
+        change?;
+        restart?;
+    }
+    Ok(Path::new(flag).exists())
 }
 
 pub async fn reboot() -> Result<impl IntoResponse> {
@@ -621,11 +756,13 @@ pub async fn terminal(
 
     Ok(ws
         .max_message_size(TERMINAL_MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_terminal_socket(socket, session.expires_at))
+        .on_upgrade(move |socket| handle_terminal_socket(socket, session.lifetime()))
         .into_response())
 }
 
-async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
+// The root shell lives only as long as the session that unlocked it: logout,
+// a password change or expiry end it, while a renewal keeps it open.
+async fn handle_terminal_socket(mut socket: WebSocket, lifetime: SessionLifetime) {
     let terminal = match spawn_terminal_pty() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -649,7 +786,15 @@ async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
             return;
         }
     };
-    let mut pty_writer = master;
+    let pty_winsize = match master.try_clone() {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(error = ?err, "failed to clone terminal pty");
+            cleanup_terminal_process_blocking(child);
+            return;
+        }
+    };
+    let (pty_writer, writer_task) = spawn_pty_writer(master);
     let (pty_tx, mut pty_rx) = mpsc::channel::<Vec<u8>>(16);
     let reader_task = task::spawn_blocking(move || {
         let mut buffer = [0_u8; TERMINAL_MAX_MESSAGE_SIZE];
@@ -668,15 +813,15 @@ async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     debug!("terminal websocket connected");
-    let session_deadline = time::sleep(expires_at.saturating_duration_since(StdInstant::now()));
-    tokio::pin!(session_deadline);
+    let session_end = lifetime.ended();
+    tokio::pin!(session_end);
 
     loop {
         tokio::select! {
-            _ = &mut session_deadline => {
+            end = &mut session_end => {
                 let _ = ws_tx.send(Message::Close(Some(CloseFrame {
                     code: 1008,
-                    reason: "terminal session expired".into(),
+                    reason: terminal_session_end_reason(end).into(),
                 }))).await;
                 break;
             }
@@ -700,13 +845,29 @@ async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
 
                 match message {
                     Message::Text(text) => {
-                        if pty_writer.write_all(text.as_bytes()).is_err() {
-                            break;
+                        // A shell that stopped reading fills the queue and then
+                        // holds this loop, never a runtime worker; the session
+                        // end still wins over the wait.
+                        let delivered = tokio::select! {
+                            biased;
+                            end = &mut session_end => Err(end),
+                            sent = pty_writer.send(text.as_bytes().to_vec()) => Ok(sent.is_ok()),
+                        };
+                        match delivered {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(end) => {
+                                let _ = ws_tx.send(Message::Close(Some(CloseFrame {
+                                    code: 1008,
+                                    reason: terminal_session_end_reason(end).into(),
+                                }))).await;
+                                break;
+                            }
                         }
                     }
                     Message::Binary(data) => {
                         if let Some(size) = parse_terminal_winsize(&data) {
-                            set_terminal_winsize(&pty_writer, &size);
+                            set_terminal_winsize(&pty_winsize, &size);
                         }
                     }
                     Message::Ping(data) => {
@@ -722,8 +883,10 @@ async fn handle_terminal_socket(mut socket: WebSocket, expires_at: StdInstant) {
     }
 
     drop(pty_writer);
+    drop(pty_winsize);
     let _ = task::spawn_blocking(move || cleanup_terminal_process_blocking(child)).await;
     let _ = reader_task.await;
+    let _ = writer_task.await;
     debug!("terminal websocket disconnected");
 }
 
@@ -740,32 +903,36 @@ pub async fn unlock_terminal(
         return Err(AppError::InvalidCredentials);
     }
 
-    let source_ip = addr.0.ip().to_string();
+    let source = addr.0.ip();
+    let source_ip = source.to_string();
     let limiter_username = format!("terminal:{}", session.username);
     {
         let mut limiter = state.login_limiter.write().await;
-        if limiter.check(&source_ip, &limiter_username) {
+        if limiter.check(source, &limiter_username) {
             return Err(AppError::RateLimited(
                 "terminal unlock locked due to too many failed attempts".to_string(),
             ));
         }
     }
 
-    let password = decode_frontend_password(&req.password)?;
-    if !state.accounts.verify(&session.username, &password)? {
+    let password = zeroize::Zeroizing::new(decode_frontend_password(&req.password)?);
+    if !crate::api::account::verify_bounded(
+        &state,
+        source,
+        &limiter_username,
+        &session.username,
+        password,
+    )
+    .await?
+    {
         let mut limiter = state.login_limiter.write().await;
-        let locked = limiter.record_failure(&source_ip, &limiter_username);
+        let locked = limiter.check(source, &limiter_username);
         if locked {
-            warn!(source_ip, username = %session.username, "terminal unlock lockout threshold reached");
+            warn!(source_ip, username = ?session.username, "terminal unlock lockout threshold reached");
         }
         return Err(AppError::InvalidCredentials);
     }
 
-    state
-        .login_limiter
-        .write()
-        .await
-        .record_success(&source_ip, &limiter_username);
     let ticket = state
         .terminal_tickets
         .issue(&session, TERMINAL_TICKET_TTL_SECS)
@@ -787,10 +954,20 @@ pub async fn set_terminal_enabled(
     State(state): State<AppState>,
     Json(req): Json<SetTerminalReq>,
 ) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_terminal = req.enabled;
-    config.write()?;
-    state.set_terminal_enabled(req.enabled);
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_terminal = req.enabled;
+                    config.write(permit)?;
+                    state.set_terminal_enabled(req.enabled);
+                    Ok(())
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -812,30 +989,63 @@ pub async fn set_session_lock(
         ));
     }
 
-    let mut config = Config::read()?;
-    config.security.access_token_duration = req.duration;
-    config.write()?;
-    state.set_session_lock_duration(req.duration);
-    let session = state.sessions.retime(&session.token, req.duration).await;
-    let mut headers = HeaderMap::new();
-    if let Some(session) = &session {
-        headers.insert(
-            axum::http::header::SET_COOKIE,
-            session_cookie(
-                &session.token,
-                req.duration,
-                session_cookie_secure(&state.config.proto),
-            )?,
-        );
-    }
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            let runtime = state.clone();
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.access_token_duration = req.duration;
+                    config.write(permit)?;
+                    runtime.set_session_lock_duration(req.duration);
+                    Ok(())
+                })
+                .await?;
+            let session = state.sessions.retime(&session.token, req.duration).await;
+            let mut headers = HeaderMap::new();
+            if let Some(session) = &session {
+                headers.insert(
+                    axum::http::header::SET_COOKIE,
+                    session_cookie(
+                        &session.token,
+                        req.duration,
+                        session_cookie_secure(&state.config.proto),
+                    )?,
+                );
+            }
+            Ok((
+                headers,
+                Json(ApiResponse::ok(SessionLockRsp {
+                    duration: req.duration,
+                    expires_at: session.map(|session| session.expires_at_unix),
+                })),
+            ))
+        })
+        .await
+}
 
-    Ok((
-        headers,
-        Json(ApiResponse::ok(SessionLockRsp {
-            duration: req.duration,
-            expires_at: session.map(|session| session.expires_at_unix),
-        })),
-    ))
+fn terminal_session_end_reason(end: SessionEnd) -> &'static str {
+    match end {
+        SessionEnd::Revoked => "terminal session revoked",
+        SessionEnd::Expired => "terminal session expired",
+        SessionEnd::Uncertain => "terminal session ended",
+    }
+}
+
+/// PTY input goes through a thread of its own. A shell that stopped reading
+/// (flow control, a stuck foreground job) blocks the write, and that must
+/// stall this terminal only, not a runtime worker and every request on it.
+fn spawn_pty_writer(mut pty: File) -> (mpsc::Sender<Vec<u8>>, task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(TERMINAL_INPUT_QUEUE);
+    let task = task::spawn_blocking(move || {
+        while let Some(data) = rx.blocking_recv() {
+            if pty.write_all(&data).is_err() {
+                break;
+            }
+        }
+    });
+    (tx, task)
 }
 
 fn spawn_terminal_pty() -> std::io::Result<TerminalPty> {
@@ -892,11 +1102,56 @@ fn set_terminal_winsize(pty: &File, winsize: &Winsize) {
     }
 }
 
+// The shell leads its own session (forkpty). Until it is reaped its pid cannot
+// be reused, so every live process with that session ID was started from this
+// terminal: end them all, not only the shell. A process that called setsid()
+// itself is beyond this reach; there are no cgroups on this kernel.
 fn cleanup_terminal_process_blocking(child: Pid) {
-    let _ = kill(child, Signal::SIGTERM);
+    signal_terminal_session(child, Signal::SIGTERM);
     std::thread::sleep(Duration::from_millis(50));
-    let _ = kill(child, Signal::SIGKILL);
+    signal_terminal_session(child, Signal::SIGKILL);
     let _ = waitpid(child, None);
+}
+
+/// Bound on the /proc entries scanned for one terminal's session.
+const MAX_PROC_ENTRIES: usize = 4096;
+
+fn signal_terminal_session(session: Pid, signal: Signal) {
+    let _ = kill(session, signal);
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten().take(MAX_PROC_ENTRIES) {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        // Pin the process before reading its session: a pid reused after
+        // this open names another process, and the pidfd signal then fails.
+        let Ok(process) = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        else {
+            continue;
+        };
+        if session_of(pid.as_raw_nonzero().get()) == Some(session.as_raw()) {
+            let _ = rustix::process::pidfd_send_signal(
+                &process,
+                rustix::process::Signal::from_named_raw(signal as i32)
+                    .unwrap_or(rustix::process::Signal::KILL),
+            );
+        }
+    }
+}
+
+// Field 6 of /proc/<pid>/stat. The command name may hold spaces and ')', so
+// fields are counted after its last ')': state, ppid, pgrp, session.
+fn session_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(3)?.parse().ok()
 }
 
 pub async fn get_memory_limit() -> Result<impl IntoResponse> {
@@ -914,12 +1169,20 @@ pub async fn get_memory_limit() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_memory_limit(Json(req): Json<SetMemoryLimitReq>) -> Result<impl IntoResponse> {
+pub async fn set_memory_limit(
+    State(state): State<AppState>,
+    Json(req): Json<SetMemoryLimitReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     if req.enabled {
         let limit = normalize_memory_limit(req.limit)?;
-        fs::write(GO_MEM_LIMIT_FILE, limit.to_string().as_bytes())?;
+        files::write_atomic(
+            Path::new(GO_MEM_LIMIT_FILE),
+            limit.to_string().as_bytes(),
+            0o644,
+        )?;
     } else {
-        remove_file_if_exists(GO_MEM_LIMIT_FILE)?;
+        files::remove_file(Path::new(GO_MEM_LIMIT_FILE))?;
     }
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
@@ -931,13 +1194,17 @@ pub async fn get_swap() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_swap(Json(req): Json<SetSwapReq>) -> Result<impl IntoResponse> {
+pub async fn set_swap(
+    State(state): State<AppState>,
+    Json(req): Json<SetSwapReq>,
+) -> Result<impl IntoResponse> {
     validate_swap_size(req.size)?;
     let current = get_swap_size();
     if req.size == current {
         return Ok(Json(ApiResponse::<()>::ok_empty()));
     }
 
+    let _writer = state.writers.configuration()?;
     if req.size == 0 {
         disable_swap().await?;
         disable_swap_inittab()?;
@@ -954,38 +1221,77 @@ pub async fn get_mouse_jiggler() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(MouseJigglerRsp { enabled, mode })))
 }
 
-pub async fn set_mouse_jiggler(Json(req): Json<SetMouseJigglerReq>) -> Result<impl IntoResponse> {
+pub async fn set_mouse_jiggler(
+    State(state): State<AppState>,
+    Json(req): Json<SetMouseJigglerReq>,
+) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     hid_ws::set_mouse_jiggler(req.enabled, &req.mode)?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn set_tls(Json(req): Json<SetTlsReq>) -> Result<Json<ApiResponse<()>>> {
-    let mut config = Config::read()?;
-    if req.enabled {
-        tls::generate_self_signed_cert(TLS_CERT_FILE, TLS_KEY_FILE)?;
-        config.proto = "https".to_string();
-        config.cert.crt = TLS_CERT_FILE.to_string();
-        config.cert.key = TLS_KEY_FILE.to_string();
-    } else {
-        system_firewall::force_moderate_mode().await?;
-        config.proto = "http".to_string();
-    }
-    config.write()?;
-
-    schedule_device_reboot("TLS protocol update");
+pub async fn set_tls(
+    State(state): State<AppState>,
+    Json(req): Json<SetTlsReq>,
+) -> Result<Json<ApiResponse<()>>> {
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            let mut config = writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    if req.enabled {
+                        tls::prepare_server_cert(TLS_CERT_FILE, TLS_KEY_FILE, tls_names())?;
+                        config.proto = "https".to_string();
+                        config.cert.crt = TLS_CERT_FILE.to_string();
+                        config.cert.key = TLS_KEY_FILE.to_string();
+                    }
+                    Ok(config)
+                })
+                .await?;
+            if !req.enabled {
+                state
+                    .firewall
+                    .force_moderate_mode(&state.writers, &writer)
+                    .await?;
+                config.proto = "http".to_string();
+            }
+            writer.blocking(move |permit| config.write(permit)).await?;
+            schedule_device_reboot(writer, "TLS protocol update");
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-fn schedule_device_reboot(reason: &'static str) {
+/// Names for a new self-signed certificate: loopback, and the device's host
+/// name with its mDNS name when the name is a valid host label.
+pub fn tls_names() -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if let Some(hostname) = read_trimmed(ETC_HOSTNAME_FILE)
+        && validate_hostname(&hostname).is_ok()
+    {
+        names.push(format!("{hostname}.local"));
+        names.push(hostname);
+    }
+    names
+}
+
+fn schedule_device_reboot(writer: ConfigPermit, reason: &'static str) {
     tokio::spawn(async move {
         time::sleep(Duration::from_millis(1000)).await;
-        match run_allowed(
-            AllowedCommand::Reboot,
-            std::iter::empty::<&str>(),
-            Duration::from_secs(2),
-        )
-        .await
+        match writer
+            .command(
+                AllowedCommand::Reboot,
+                std::iter::empty::<&str>(),
+                Duration::from_secs(2),
+            )
+            .await
         {
             Ok(output) if output.status == 0 => {
                 tracing::info!(reason, "scheduled device reboot completed")
@@ -1000,6 +1306,7 @@ fn schedule_device_reboot(reason: &'static str) {
                 tracing::warn!(reason, error = ?err, "failed to reboot device")
             }
         }
+        drop(writer);
     });
 }
 
@@ -1201,7 +1508,7 @@ async fn disable_swap() -> Result<()> {
         )
         .await?;
     }
-    remove_file_if_exists(SWAP_FILE)
+    files::remove_file(Path::new(SWAP_FILE))
 }
 
 fn is_swap_active() -> bool {
@@ -1243,9 +1550,7 @@ fn remove_swap_inittab_lines(input: &str) -> String {
 }
 
 fn write_inittab(content: &str) -> Result<()> {
-    fs::write(TEMP_INITTAB_PATH, content.as_bytes())?;
-    fs::rename(TEMP_INITTAB_PATH, INITTAB_PATH)?;
-    Ok(())
+    files::write_atomic(Path::new(INITTAB_PATH), content.as_bytes(), 0o644)
 }
 
 #[derive(Debug, Clone)]
@@ -1284,20 +1589,98 @@ fn read_gpio(path: &str) -> Result<bool> {
     Ok(value == 0)
 }
 
+/// Lines with a pulse in progress. A second pulse on the same line would cut
+/// the first one short, or turn one long press into two.
+static PULSING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Press a power or reset line for `duration`, then release it. The pulse runs
+/// in its own task, so a lost client cannot leave the button pressed. If that
+/// task is dropped, as at backend shutdown, its guard still releases the line.
 async fn write_gpio_pulse(path: &str, duration: Duration) -> Result<()> {
-    fs::write(path, b"1")?;
+    let line = PulseLine::claim(path)?;
+    let (reply, done) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        drop(reply.send(pulse(line, duration).await));
+    });
+    done.await
+        .map_err(|_| AppError::Internal("gpio pulse ended without a result".to_string()))?
+}
+
+async fn pulse(line: PulseLine, duration: Duration) -> Result<()> {
+    let pressed = Pressed::press(line)?;
     time::sleep(duration).await;
-    fs::write(path, b"0")?;
-    Ok(())
+    pressed.release()
+}
+
+/// Exclusive use of one GPIO line until dropped.
+struct PulseLine(String);
+
+impl PulseLine {
+    fn claim(path: &str) -> Result<Self> {
+        let mut pulsing = PULSING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pulsing.iter().any(|line| line == path) {
+            return Err(AppError::Conflict(
+                "a power or reset pulse is already in progress".to_string(),
+            ));
+        }
+        pulsing.push(path.to_string());
+        Ok(Self(path.to_string()))
+    }
+}
+
+impl Drop for PulseLine {
+    fn drop(&mut self) {
+        let mut pulsing = PULSING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pulsing.retain(|line| line != &self.0);
+    }
+}
+
+/// A pressed line. Dropped without `release`, it still writes 0.
+struct Pressed(Option<PulseLine>);
+
+impl Pressed {
+    fn press(line: PulseLine) -> Result<Self> {
+        if let Err(error) = fs::write(&line.0, b"1") {
+            // The line state is unknown after a failed write: release it.
+            let _ = fs::write(&line.0, b"0");
+            return Err(error.into());
+        }
+        Ok(Self(Some(line)))
+    }
+
+    fn release(mut self) -> Result<()> {
+        match self.0.take() {
+            Some(line) => release(&line.0),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Pressed {
+    fn drop(&mut self) {
+        if let Some(line) = self.0.take() {
+            let _ = release(&line.0);
+        }
+    }
+}
+
+fn release(path: &str) -> Result<()> {
+    fs::write(path, b"0").map_err(|error| {
+        tracing::error!(%error, "gpio line release failed; the button may stay pressed");
+        AppError::from(error)
+    })
 }
 
 fn persist_hdmi_enabled() -> Result<()> {
-    remove_file_if_exists(HDMI_DISABLE_FILE)
+    files::remove_file(Path::new(HDMI_DISABLE_FILE))
 }
 
 fn persist_hdmi_disabled() -> Result<()> {
-    fs::write(HDMI_DISABLE_FILE, b"")?;
-    Ok(())
+    files::write_atomic(Path::new(HDMI_DISABLE_FILE), b"", 0o644)
 }
 
 fn avahi_daemon_pid() -> Option<String> {
@@ -1338,25 +1721,152 @@ where
     Ok(())
 }
 
-fn remove_file_if_exists(path: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn remove_dir_if_exists(path: &str) -> Result<()> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reset_keeps_a_disabled_capture_disabled() {
+        // Refused by name before any libkvm call; on this host libkvm cannot be
+        // loaded, so reaching it would be a different error.
+        match reset_hdmi_capture(true).await {
+            Err(AppError::BadRequest(message)) => {
+                assert!(message.contains("disabled"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_pty_blocks_only_the_terminal_writer_thread() {
+        let (read_end, write_end) = nix::unistd::pipe().unwrap();
+        let (writer, task) = spawn_pty_writer(File::from(write_end));
+        // More than the pipe buffer, with a reader that never reads: the
+        // writer thread blocks in write_all.
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut queued = 0;
+        while writer.try_send(chunk.clone()).is_ok() {
+            queued += 1;
+        }
+        assert!(queued >= 2, "{queued}");
+        // This is the only runtime thread: a timer firing shows no write ran
+        // on it.
+        time::timeout(
+            Duration::from_millis(300),
+            time::sleep(Duration::from_millis(50)),
+        )
+        .await
+        .expect("the runtime kept running while the pty writer was stuck");
+        assert!(!task.is_finished());
+        drop(writer);
+        drop(read_end);
+        time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the writer ends once its reader is gone")
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_hostname_replaces_only_whole_host_names() {
+        let hosts = "127.0.0.1\tlocalhost\n127.0.1.1\tkvm-1234 kvm-1234.local nanokvm\n# kvm-1234 was here\n10.0.0.2 kvm-1234";
+        assert_eq!(
+            rename_host_entries(hosts, "kvm-1234", "desk").as_deref(),
+            Some(
+                "127.0.0.1\tlocalhost\n127.0.1.1\tdesk kvm-1234.local nanokvm\n# kvm-1234 was here\n10.0.0.2 desk"
+            )
+        );
+        // RC12 replaced substrings, and an empty old name everywhere.
+        assert_eq!(rename_host_entries(hosts, "kvm", "desk"), None);
+        assert_eq!(rename_host_entries(hosts, "", "desk"), None);
+        // An address field is never rewritten.
+        assert_eq!(rename_host_entries("kvm 127.0.0.1\n", "kvm", "desk"), None);
+    }
+
+    fn gpio_line(dir: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, String) {
+        let line = dir.path().join(name);
+        fs::write(&line, b"0").unwrap();
+        let path = line.to_str().unwrap().to_string();
+        (line, path)
+    }
+
+    async fn pressed_within(line: &Path, limit: Duration) -> bool {
+        let started = StdInstant::now();
+        while started.elapsed() < limit {
+            if fs::read(line).unwrap() == b"1" {
+                return true;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pulse_is_released_even_when_its_client_goes_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let (line, path) = gpio_line(&dir, "power");
+        let request = tokio::spawn({
+            let path = path.clone();
+            async move { write_gpio_pulse(&path, Duration::from_millis(300)).await }
+        });
+        assert!(pressed_within(&line, Duration::from_secs(1)).await);
+        // An overlapping pulse on the same line is refused, not queued.
+        assert!(matches!(
+            write_gpio_pulse(&path, Duration::from_millis(50)).await,
+            Err(AppError::Conflict(_))
+        ));
+        // The HTTP handler's future is dropped when its client goes away.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+        // The line is free again once the pulse has ended.
+        write_gpio_pulse(&path, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pulses_on_different_lines_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (power, power_path) = gpio_line(&dir, "power");
+        let (reset, reset_path) = gpio_line(&dir, "reset");
+        let first =
+            tokio::spawn(
+                async move { write_gpio_pulse(&power_path, Duration::from_millis(300)).await },
+            );
+        assert!(pressed_within(&power, Duration::from_secs(1)).await);
+        write_gpio_pulse(&reset_path, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&reset).unwrap(), b"0");
+        first.await.unwrap().unwrap();
+        assert_eq!(fs::read(&power).unwrap(), b"0");
+    }
+
+    #[test]
+    fn a_pulse_dropped_at_shutdown_still_releases_its_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (line, path) = gpio_line(&dir, "reset");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.spawn({
+            let path = path.clone();
+            async move { write_gpio_pulse(&path, Duration::from_secs(30)).await }
+        });
+        let started = StdInstant::now();
+        while fs::read(&line).unwrap() != b"1" {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Dropping the runtime drops the pulse task in the middle of its press.
+        drop(runtime);
+        assert_eq!(fs::read(&line).unwrap(), b"0");
+        drop(PulseLine::claim(&path).unwrap());
+    }
 
     #[test]
     fn validates_numeric_pids_only() {
@@ -1407,5 +1917,106 @@ mod tests {
     fn removes_swap_inittab_lines() {
         let input = "tty::respawn:/bin/login\nsi11::sysinit:/sbin/swapon /swapfile\n";
         assert_eq!(remove_swap_inittab_lines(input), "tty::respawn:/bin/login");
+    }
+
+    // A real listener and PTY: logout ends the unlocked terminal and every
+    // process started from it, including a job that ignores SIGHUP.
+    #[tokio::test]
+    async fn logout_closes_the_terminal_and_ends_its_whole_pty_session() {
+        use crate::http::middleware::protected;
+        use axum::{Router, middleware::from_fn_with_state, routing::get};
+        use tokio_tungstenite::tungstenite::{
+            Message as WsMessage, client::IntoClientRequest, protocol::frame::coding::CloseCode,
+        };
+
+        let mut config = Config {
+            stun: "disable".into(),
+            ..Config::default()
+        };
+        config.security.allow_terminal = true;
+        let state = AppState::new(config).await.unwrap();
+        let login = state.sessions.issue("admin", 60).await;
+        let ticket = state.terminal_tickets.issue(&login, 120).await;
+        let router = Router::new()
+            .route("/api/vm/terminal", get(terminal))
+            .route_layer(from_fn_with_state(state.clone(), protected))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/api/vm/terminal?ticket={}", ticket.token)
+            .into_client_request()
+            .unwrap();
+        let headers = request.headers_mut();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", login.token).parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            format!("http://{address}").parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                "(trap '' HUP; exec sleep 300) & echo \"JOB:$!:END\"\n".into(),
+            ))
+            .await
+            .unwrap();
+        let mut output = String::new();
+        let job: i32 = time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(WsMessage::Binary(bytes)) =
+                    socket.next().await.map(|message| message.unwrap())
+                {
+                    output.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                if let Some(pid) = output
+                    .split("JOB:")
+                    .skip(1)
+                    .find_map(|rest| rest.split(":END").next()?.parse().ok())
+                {
+                    return pid;
+                }
+            }
+        })
+        .await
+        .expect("the job announced its pid");
+        assert!(Path::new(&format!("/proc/{job}")).exists());
+        state.sessions.revoke(&login.token).await;
+        let closed = time::timeout(Duration::from_secs(5), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(WsMessage::Close(frame))) => return frame,
+                    Some(Ok(_)) => continue,
+                    other => panic!("terminal ended without a close frame: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("logout closes the terminal")
+        .expect("a close frame");
+        assert_eq!(closed.code, CloseCode::Policy);
+        assert_eq!(closed.reason.as_str(), "terminal session revoked");
+        // The job ignored SIGHUP; only the session-wide cleanup ends it.
+        time::timeout(Duration::from_secs(5), async {
+            while session_of(job).is_some() && !zombie(job) {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the terminal's background job is gone");
+        server.abort();
+    }
+
+    // A killed orphan may linger unreaped under a non-reaping parent.
+    fn zombie(pid: i32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let rest = &stat[stat.rfind(')')? + 1..];
+                rest.split_whitespace().next().map(|state| state == "Z")
+            })
+            .unwrap_or(true)
     }
 }

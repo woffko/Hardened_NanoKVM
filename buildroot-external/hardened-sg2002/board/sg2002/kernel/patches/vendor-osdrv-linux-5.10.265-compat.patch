@@ -1,0 +1,37 @@
+diff --git a/interdrv/v2/vi/common/vi_common.h b/interdrv/v2/vi/common/vi_common.h
+--- a/interdrv/v2/vi/common/vi_common.h
++++ b/interdrv/v2/vi/common/vi_common.h
+@@ -33,2 +33,6 @@
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b))?(a):(b))
++#endif
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b))?(a):(b))
++#endif
+diff --git a/interdrv/v2/vpss/common/vpss_common.h b/interdrv/v2/vpss/common/vpss_common.h
+--- a/interdrv/v2/vpss/common/vpss_common.h
++++ b/interdrv/v2/vpss/common/vpss_common.h
+@@ -7,2 +7,6 @@
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b))?(a):(b))
++#endif
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b))?(a):(b))
++#endif
+diff --git a/interdrv/v2/rgn/common/rgn_common.h b/interdrv/v2/rgn/common/rgn_common.h
+--- a/interdrv/v2/rgn/common/rgn_common.h
++++ b/interdrv/v2/rgn/common/rgn_common.h
+@@ -13,2 +13,6 @@
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b))?(a):(b))
++#endif
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b))?(a):(b))
++#endif
+diff --git a/interdrv/v2/dwa/common/dwa_platform.c b/interdrv/v2/dwa/common/dwa_platform.c
+--- a/interdrv/v2/dwa/common/dwa_platform.c
++++ b/interdrv/v2/dwa/common/dwa_platform.c
+@@ -96,1 +96,2 @@
+-	ksize = max(max(in_size, out_size), drv_size);
++	ksize = max_t(unsigned int, max_t(unsigned int, in_size, out_size),
++		      drv_size);

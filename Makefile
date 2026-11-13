@@ -9,7 +9,7 @@ PWD := $(shell pwd)
 # Docker run common parameters
 DOCKER_RUN_BASE := docker run -e UID=$(UID) -e GID=$(GID) -v $(PWD):/home/build/NanoKVM --rm
 RUST_TARGET ?=
-RUST_BUILD_ARGS := --manifest-path server-rust/Cargo.toml --release
+RUST_BUILD_ARGS := --manifest-path server-rust/Cargo.toml --release --locked
 ifneq ($(strip $(RUST_TARGET)),)
 RUST_BUILD_ARGS += --target $(RUST_TARGET)
 endif
@@ -33,7 +33,7 @@ VENDOR_SDK_INSPECTION ?= build/vendor-upgrade-inspection.json
 RAW_SYSTEM_UPDATE_BOOT ?= $(RAW_SYSTEM_UPDATE_IMAGE_DIR)/boot.vfat
 RAW_SYSTEM_UPDATE_ROOTFS ?= $(RAW_SYSTEM_UPDATE_IMAGE_DIR)/rootfs.sd
 
-.PHONY: help check-root builder-image rebuild-image check-image shell rust-app web-app rust-kvmapp sd-image raw-system-update-images vendor-sdk vendor-sdk-stock vendor-sdk-inspect system-update-bundle raw-system-update-bundle system-update-metadata support all clean
+.PHONY: help check-root builder-image rebuild-image check-image shell rust-app web-app rust-kvmapp sd-image raw-system-update-images vendor-sdk vendor-sdk-stock vendor-sdk-inspect latest-buildroot-bootstrap latest-buildroot-security-source latest-buildroot-config-probe latest-buildroot-sg2002-configure latest-buildroot-sg2002-rootfs latest-buildroot-sg2002-sd-image latest-buildroot-sg2002-raw-update system-update-bundle raw-system-update-bundle system-update-metadata test-system-update-v2 test-latest-buildroot-security-policy support all clean
 
 # Default target
 all: rust-kvmapp support
@@ -56,9 +56,18 @@ help:
 	@echo "  vendor-sdk    - Bootstrap the pinned Sipeed LicheeRV Nano vendor SDK checkout"
 	@echo "  vendor-sdk-stock - Build the stock SDK image with a Buildroot-safe PATH"
 	@echo "  vendor-sdk-inspect - Validate vendor upgrade.zip and write JSON inspection"
+	@echo "  latest-buildroot-bootstrap - Fetch the isolated upstream Buildroot 2026.05.1 port probe"
+	@echo "  latest-buildroot-security-source - Prepare the pinned raw.11 security-backport source"
+	@echo "  latest-buildroot-config-probe - Convert the vendor Buildroot config without building or flashing"
+	@echo "  latest-buildroot-sg2002-configure - Configure the tracked SG2002 BR2_EXTERNAL port skeleton"
+	@echo "  latest-buildroot-sg2002-rootfs - Build the SG2002 Buildroot 2026.05.1 rootfs candidate"
+	@echo "  latest-buildroot-sg2002-sd-image - Assemble a validated recoverable-media SG2002 boot candidate"
+	@echo "  latest-buildroot-sg2002-raw-update - Build and sign the validated SG2002 raw-update candidate"
 	@echo "  system-update-bundle   - Package a staged system-update payload"
 	@echo "  raw-system-update-bundle - Package experimental raw boot/rootfs images"
 	@echo "  system-update-metadata - Generate GitHub latest JSON for the system bundle"
+	@echo "  test-system-update-v2 - Test metadata/manifest v2 and minimum-app enforcement artifacts"
+	@echo "  test-latest-buildroot-security-policy - Verify the tracked raw.11 security policy"
 	@echo "  support       - Build hardware support libraries"
 	@echo "  all           - Build Rust kvmapp and support (default)"
 	@echo "  clean         - Clean build artifacts"
@@ -103,7 +112,11 @@ shell: check-root builder-image
 # Build Rust application locally
 rust-app:
 	@echo "Building Rust app..."
+ifeq ($(strip $(RUST_TARGET)),riscv64gc-unknown-linux-musl)
+	@server-rust/scripts/build-linked-libkvm.sh --locked --offline
+else
 	@cargo build $(RUST_BUILD_ARGS)
+endif
 
 # Build frontend assets
 web-app:
@@ -141,6 +154,29 @@ vendor-sdk-stock:
 vendor-sdk-inspect:
 	@scripts/inspect-vendor-upgrade.py "$(VENDOR_SDK_UPGRADE)" "$(VENDOR_SDK_INSPECTION)"
 
+# Experimental official-Buildroot port probe. It never changes the vendor SDK,
+# produces no release artifact, and must not be used to flash a device.
+latest-buildroot-bootstrap:
+	@scripts/bootstrap-latest-buildroot-probe.sh
+
+latest-buildroot-security-source: latest-buildroot-bootstrap
+	@scripts/prepare-buildroot-2026.05.1-security-source.sh
+
+latest-buildroot-config-probe: latest-buildroot-bootstrap
+	@scripts/probe-latest-buildroot-config.sh
+
+latest-buildroot-sg2002-configure: latest-buildroot-bootstrap
+	@scripts/configure-latest-buildroot-sg2002.sh
+
+latest-buildroot-sg2002-rootfs:
+	@scripts/build-latest-buildroot-sg2002-rootfs.sh
+
+latest-buildroot-sg2002-sd-image:
+	@scripts/assemble-latest-buildroot-sg2002-sd-image.sh
+
+latest-buildroot-sg2002-raw-update:
+	@scripts/package-latest-buildroot-sg2002-raw-update.sh
+
 # Package a staged system-update payload.
 # Expected payload layout:
 #   $(SYSTEM_UPDATE_PAYLOAD)/boot/<file>    -> /boot/<file>
@@ -153,6 +189,25 @@ raw-system-update-bundle: raw-system-update-images
 
 system-update-metadata:
 	@scripts/create-system-update-metadata.sh "$(SYSTEM_UPDATE_VERSION)" "$(SYSTEM_UPDATE_TAG)" "$(SYSTEM_UPDATE_OUT)/hardened-nanokvm-system-$(SYSTEM_UPDATE_VERSION).tar.gz" "$(SYSTEM_UPDATE_OUT)/system-latest.json"
+
+test-system-update-v2:
+	@scripts/test-system-update-v2.sh
+
+test-latest-buildroot-security-policy:
+	@scripts/test-latest-buildroot-security-policy.sh
+
+.PHONY: test-state-writer-inventory
+test-state-writer-inventory:
+	@python3 scripts/validate-state-writer-inventory.py
+	@python3 scripts/test-state-writer-inventory.py
+
+.PHONY: test-picoclaw-bridge-boundary
+test-picoclaw-bridge-boundary:
+	@node scripts/test-picoclaw-bridge-boundary.cjs
+
+.PHONY: test-picoclaw-native-routing
+test-picoclaw-native-routing:
+	@python3 -B scripts/test-picoclaw-native-routing.py
 
 # Build hardware support libraries
 support: check-root builder-image

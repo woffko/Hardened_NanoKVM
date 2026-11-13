@@ -1,0 +1,37 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/hostapd: update to 2.12
+
+Backport the hostapd 2.12 version/hash from upstream Buildroot 2026.08-rc1.
+
+diff --git a/package/hostapd/hostapd.hash b/package/hostapd/hostapd.hash
+--- a/package/hostapd/hostapd.hash
++++ b/package/hostapd/hostapd.hash
+@@ -1,3 +1,3 @@
+ # Locally calculated
+-sha256  2b3facb632fd4f65e32f4bf82a76b4b72c501f995a4f62e330219fe7aed1747a  hostapd-2.11.tar.gz
+-sha256  f1b5992bbdd015c3ccb7faaadd62ef58ed821e15b9329bf2ceb27511ccc3f562  README
++sha256  f43502561c28ba47ab77e18e1a973d07361c68cc8b14178e619bd5796b70eabd  hostapd-2.12.tar.gz
++sha256  83be1b142c59ccf0d6c5dde0695d8f84dfba109bea058e78ec2942389ccf327f  README
+diff --git a/package/hostapd/hostapd.mk b/package/hostapd/hostapd.mk
+--- a/package/hostapd/hostapd.mk
++++ b/package/hostapd/hostapd.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-HOSTAPD_VERSION = 2.11
++HOSTAPD_VERSION = 2.12
+ HOSTAPD_SITE = http://w1.fi/releases
+ HOSTAPD_SUBDIR = hostapd
+ HOSTAPD_CONFIG = $(HOSTAPD_DIR)/$(HOSTAPD_SUBDIR)/.config
+@@ -16,10 +16,6 @@ HOSTAPD_LICENSE_FILES = README
+ HOSTAPD_CPE_ID_VENDOR = w1.fi
+ HOSTAPD_SELINUX_MODULES = hostapd
+ 
+-# 0001-RADIUS-Drop-pending-request-only-when-accepting-the-response.patch
+-# 0002-RADIUS-Fix-pending-request-dropping.patch
+-HOSTAPD_IGNORE_CVES += CVE-2025-24912
+-
+ HOSTAPD_CONFIG_ENABLE = \
+ 	CONFIG_INTERNAL_LIBTOMMATH \
+ 	CONFIG_DEBUG_FILE \

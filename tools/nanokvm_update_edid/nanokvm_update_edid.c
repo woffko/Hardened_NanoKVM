@@ -16,7 +16,41 @@
 #include <time.h>
 
 #include "nanokvm_update_edid.h"
+#include "i2c_bus_lock.h"
 
+#ifdef EDID_FAKE_BUS
+// Host test build: a model of the chip stands in for /dev/i2c-*.
+int bus_open(void);
+int bus_lock(int fd);
+ssize_t bus_write(int fd, const void *buf, size_t len);
+ssize_t bus_read(int fd, void *buf, size_t len);
+int bus_close(int fd);
+#else
+static int bus_open(void)
+{
+    int fd = open(I2C_DEVICE, O_RDWR);
+    if (fd < 0) {
+        perror("Failed to open the i2c bus");
+        return -1;
+    }
+    if (ioctl(fd, I2C_SLAVE, I2C_ADDRESS) < 0) {
+        perror("Failed to acquire bus access and/or talk to slave");
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+// The whole update runs under the shared bus lock (i2c_bus_lock.h); libkvm
+// waits or skips its poll meanwhile. The lock goes with the descriptor, so
+// bus_close releases it.
+static int bus_lock(int fd)
+{
+    return i2c_bus_lock_acquire(fd, 10000);
+}
+#define bus_write write
+#define bus_read read
+#define bus_close close
+#endif
 
 int client;
 // old offset set to 0xff first
@@ -115,7 +149,7 @@ int i2c_write_byte(uint8_t offset, uint8_t reg, uint8_t data)
     if (offset != old_offset) {
         reg_buf[0] = LT6911_REG_OFFSET; // Set the offset register
         reg_buf[1] = offset;    // Set the register to read
-        if (write(client, reg_buf, 2) != 2) {
+        if (bus_write(client, reg_buf, 2) != 2) {
             perror("Failed to write offset to the i2c bus");
             return -1;
         }
@@ -125,7 +159,7 @@ int i2c_write_byte(uint8_t offset, uint8_t reg, uint8_t data)
     // write the data to the i2c bus
     reg_buf[0] = reg; // Set the register to write
     reg_buf[1] = data; // Set the data to write
-    if (write(client, reg_buf, 2) != 2) {
+    if (bus_write(client, reg_buf, 2) != 2) {
         perror("Failed to write to the i2c bus");
         return -1;
     }
@@ -147,7 +181,7 @@ int i2c_write_bytes(uint8_t offset, uint8_t reg, const uint8_t *data, size_t len
     if (offset != old_offset) {
         reg_buf[0] = LT6911_REG_OFFSET; // Set the offset register
         reg_buf[1] = offset;    // Set the register to read
-        if (write(client, reg_buf, 2) != 2) {
+        if (bus_write(client, reg_buf, 2) != 2) {
             perror("Failed to write offset to the i2c bus");
             return -1;
         }
@@ -161,7 +195,7 @@ int i2c_write_bytes(uint8_t offset, uint8_t reg, const uint8_t *data, size_t len
     }
 
     // write to the I2C bus
-    if (write(client, reg_buf, 1 + len) != (ssize_t)(1 + len)) {
+    if (bus_write(client, reg_buf, 1 + len) != (ssize_t)(1 + len)) {
         perror("Failed to write to the i2c bus");
         return -1;
     }
@@ -179,7 +213,7 @@ int i2c_read_byte(uint8_t offset, uint8_t reg, uint8_t *data)
     if (offset != old_offset) {
         reg_buf[0] = LT6911_REG_OFFSET; // Set the offset register
         reg_buf[1] = offset;    // Set the register to read
-        if (write(client, reg_buf, 2) != 2) {
+        if (bus_write(client, reg_buf, 2) != 2) {
             perror("Failed to write offset to the i2c bus");
             return -1;
         }
@@ -188,13 +222,13 @@ int i2c_read_byte(uint8_t offset, uint8_t reg, uint8_t *data)
 
     // write the register address to read
     reg_buf[0] = reg; // Set the register to read
-    if (write(client, reg_buf, 1) != 1) {
+    if (bus_write(client, reg_buf, 1) != 1) {
         perror("Failed to write register address to the i2c bus");
         return -1;
     }
 
     // read the data from the i2c bus
-    if (read(client, data, 1) != 1 ) {
+    if (bus_read(client, data, 1) != 1 ) {
         perror("Failed to read from the i2c bus");
         return -1;
     }
@@ -216,7 +250,7 @@ int i2c_read_bytes(uint8_t offset, uint8_t reg, uint8_t *data, size_t len)
     if (offset != old_offset) {
         reg_buf[0] = LT6911_REG_OFFSET; // 设置偏移寄存器
         reg_buf[1] = offset; // 设置偏移值
-        if (write(client, reg_buf, 2) != 2) {
+        if (bus_write(client, reg_buf, 2) != 2) {
             perror("Failed to write offset to the i2c bus");
             return -1;
         }
@@ -225,13 +259,13 @@ int i2c_read_bytes(uint8_t offset, uint8_t reg, uint8_t *data, size_t len)
 
     // 写入要读取的寄存器地址
     reg_buf[0] = reg; // 设置要读取的寄存器
-    if (write(client, reg_buf, 1) != 1) {
+    if (bus_write(client, reg_buf, 1) != 1) {
         perror("Failed to write register address to the i2c bus");
         return -1;
     }
 
     // 从 I2C 总线读取数据
-    if (read(client, data, len) != (ssize_t)len) {
+    if (bus_read(client, data, len) != (ssize_t)len) {
         perror("Failed to read from the i2c bus");
         return -1;
     }
@@ -645,49 +679,29 @@ int lt6911d_edid_read(uint8_t *edid_data, uint16_t edid_size)
 
 // =======================================================================================================
 
-int lt6911_edid_config(chip_version_t chip_version, uint8_t *edid_data, uint16_t edid_size)
+static int edid_write(chip_version_t chip_version, uint8_t *edid_data, uint16_t edid_size)
 {
-    if (chip_version == CHIP_UNKNOWN)
-    {
-        fprintf(stderr, "Unknown chip version\n");
-        return -1;
-    }
+    if (chip_version == CHIP_LT6911UXC) return lt6911uxc_edid_write(edid_data, edid_size);
+    if (chip_version == CHIP_LT6911C) return lt6911c_edid_write(edid_data, edid_size);
+    if (chip_version == CHIP_LT6911D) return lt6911d_edid_write(edid_data, edid_size);
+    fprintf(stderr, "Unknown chip version\n");
+    return -1;
+}
 
-    // open i2c device
-    if ((client = open(I2C_DEVICE, O_RDWR)) < 0) {
-        perror("Failed to open the i2c bus");
-        return -1;
-    }
+static int edid_read(chip_version_t chip_version, uint8_t *edid_data)
+{
+    if (chip_version == CHIP_LT6911UXC) return lt6911uxc_edid_read(edid_data, EDID_BUFFER_SIZE);
+    if (chip_version == CHIP_LT6911C) return lt6911c_edid_read(edid_data, EDID_BUFFER_SIZE);
+    if (chip_version == CHIP_LT6911D) return lt6911d_edid_read(edid_data, EDID_BUFFER_SIZE);
+    fprintf(stderr, "Unknown chip version\n");
+    return -1;
+}
 
-    // // set the lt6911uxc address
-    if (ioctl(client, I2C_SLAVE, I2C_ADDRESS) < 0) {
-        perror("Failed to acquire bus access and/or talk to slave");
-        close(client);
-        return -1;
-    }
-
-    // edid write
-    if (chip_version == CHIP_LT6911UXC) {
-        if (lt6911uxc_edid_write(edid_data, edid_size) != 0) {
-            fprintf(stderr, "Failed to write EDID data to LT6911UXC\n");
-            close(client);
-            return -1;
-        }
-    } else if (chip_version == CHIP_LT6911C) {
-        if (lt6911c_edid_write(edid_data, edid_size) != 0) {
-            fprintf(stderr, "Failed to write EDID data to LT6911C\n");
-            close(client);
-            return -1;
-        }
-    } else if (chip_version == CHIP_LT6911D) {
-        if (lt6911d_edid_write(edid_data, edid_size) != 0) {
-            fprintf(stderr, "Failed to write EDID data to LT6911D\n");
-            close(client);
-            return -1;
-        }
-    } else {
-        fprintf(stderr, "Unknown chip version\n");
-        close(client);
+// Writes the EDID, then reads it back: 0 only when the chip holds exactly it.
+static int edid_write_verified(chip_version_t chip_version, uint8_t *edid_data, uint16_t edid_size)
+{
+    if (edid_write(chip_version, edid_data, edid_size) != 0) {
+        fprintf(stderr, "Failed to write EDID data\n");
         return -1;
     }
     // sleep 1s
@@ -695,27 +709,8 @@ int lt6911_edid_config(chip_version_t chip_version, uint8_t *edid_data, uint16_t
 
     // read edid data back
     uint8_t edid_read_data[EDID_BUFFER_SIZE] = {0};
-    if (chip_version == CHIP_LT6911UXC) {
-        if (lt6911uxc_edid_read(edid_read_data, EDID_BUFFER_SIZE) != 0) {
-            fprintf(stderr, "Failed to read EDID data from LT6911UXC\n");
-            close(client);
-            return -1;
-        }
-    } else if (chip_version == CHIP_LT6911C) {
-        if (lt6911c_edid_read(edid_read_data, EDID_BUFFER_SIZE) != 0) {
-            fprintf(stderr, "Failed to read EDID data from LT6911C\n");
-            close(client);
-            return -1;
-        }
-    } else if (chip_version == CHIP_LT6911D) {
-        if (lt6911d_edid_read(edid_read_data, EDID_BUFFER_SIZE) != 0) {
-            fprintf(stderr, "Failed to read EDID data from LT6911D\n");
-            close(client);
-            return -1;
-        }
-    } else {
-        fprintf(stderr, "Unknown chip version\n");
-        close(client);
+    if (edid_read(chip_version, edid_read_data) != 0) {
+        fprintf(stderr, "Failed to read EDID data back\n");
         return -1;
     }
 
@@ -737,14 +732,109 @@ int lt6911_edid_config(chip_version_t chip_version, uint8_t *edid_data, uint16_t
                 fprintf(stderr, "\n");
             }
         }
-        close(client);
+        return -1;
+    }
+    fprintf(stdout, "EDID data verified successfully\n");
+    return 0;
+}
+
+static int all_bytes(const uint8_t *data, uint8_t value)
+{
+    for (int i = 0; i < EDID_BUFFER_SIZE; i++) {
+        if (data[i] != value) return 0;
+    }
+    return 1;
+}
+
+// The EDID header and the checksum of its first block: the chip answered as
+// the configured version and holds an EDID. Extension blocks may be absent.
+static int edid_base_block_valid(const uint8_t *data)
+{
+    static const uint8_t header[8] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+    uint8_t sum = 0;
+    if (memcmp(data, header, sizeof(header)) != 0) return 0;
+    for (int i = 0; i < 128; i++) {
+        sum += data[i];
+    }
+    return sum == 0;
+}
+
+// Saves the current EDID to a new file under EDID_BACKUP_DIR.
+static int save_backup(const uint8_t *data, char *path, size_t path_size)
+{
+    snprintf(path, path_size, "%s/edid-backup-%ld.bin", EDID_BACKUP_DIR, (long)time(NULL));
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        perror("Failed to create the EDID backup");
+        return -1;
+    }
+    if (write(fd, data, EDID_BUFFER_SIZE) != EDID_BUFFER_SIZE || fsync(fd) != 0) {
+        perror("Failed to write the EDID backup");
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    return close(fd);
+}
+
+int lt6911_edid_config(chip_version_t chip_version, uint8_t *edid_data, uint16_t edid_size)
+{
+    if (chip_version == CHIP_UNKNOWN)
+    {
+        fprintf(stderr, "Unknown chip version\n");
+        return -1;
+    }
+
+    // open i2c device and set the lt6911 address
+    if ((client = bus_open()) < 0) {
+        return -1;
+    }
+    if (bus_lock(client) != 0) {
+        fprintf(stderr, "The I2C bus is in use (the video backend reads the HDMI chip); nothing was changed. Retry, or stop the backend first\n");
+        bus_close(client);
+        return -1;
+    }
+
+    // Read what the chip holds before anything is erased. A chip that does
+    // not answer like the configured version is never erased, and what it
+    // held is saved first. An erased chip has nothing to keep.
+    uint8_t current[EDID_BUFFER_SIZE] = {0};
+    char backup[256] = {0};
+    if (edid_read(chip_version, current) != 0) {
+        fprintf(stderr, "Could not read the current EDID; nothing was erased\n");
+        bus_close(client);
+        return -1;
+    }
+    int blank = all_bytes(current, 0xFF) || all_bytes(current, 0x00);
+    if (blank) {
+        fprintf(stdout, "The chip holds no EDID now\n");
+    } else if (!edid_base_block_valid(current)) {
+        fprintf(stderr, "The chip did not return an EDID; check %s. Nothing was erased\n", VERSION_PATH);
+        bus_close(client);
+        return -1;
+    } else if (save_backup(current, backup, sizeof(backup)) != 0) {
+        fprintf(stderr, "Could not save the current EDID; nothing was erased\n");
+        bus_close(client);
         return -1;
     } else {
-        fprintf(stdout, "EDID data verified successfully\n");
+        fprintf(stdout, "Saved the current EDID to %s\n", backup);
+    }
+
+    if (edid_write_verified(chip_version, edid_data, edid_size) != 0) {
+        if (!blank) {
+            fprintf(stderr, "Writing the new EDID failed; restoring the previous one\n");
+            if (edid_write_verified(chip_version, current, EDID_BUFFER_SIZE) == 0) {
+                fprintf(stderr, "The previous EDID is restored\n");
+            } else {
+                fprintf(stderr, "Restoring failed too. Before any reboot, write %s with this tool again\n", backup);
+            }
+        }
+        bus_close(client);
+        return -1;
     }
 
     // close client
-    close(client);
+    bus_close(client);
     return 0;
 }
 

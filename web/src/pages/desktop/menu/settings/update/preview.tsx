@@ -6,10 +6,10 @@ import { useTranslation } from 'react-i18next';
 import * as api from '@/api/application.ts';
 
 interface PreviewProps {
-  checkForUpdates: () => void;
+  refreshUpdates: () => void;
 }
 
-export const Preview = ({ checkForUpdates }: PreviewProps) => {
+export const Preview = ({ refreshUpdates }: PreviewProps) => {
   const { t } = useTranslation();
 
   const [isLoading, setIsLoading] = useState(false);
@@ -52,7 +52,7 @@ export const Preview = ({ checkForUpdates }: PreviewProps) => {
         }
 
         setIsEnabled(enable);
-        checkForUpdates();
+        refreshUpdates();
       })
       .finally(() => {
         setIsLoading(false);
@@ -75,7 +75,11 @@ export const Preview = ({ checkForUpdates }: PreviewProps) => {
           </Tooltip>
         </div>
 
-        <span className="text-xs text-neutral-500">{t('settings.update.previewDesc')}</span>
+        <span className="text-xs text-neutral-500">
+          {t('settings.update.previewChannels', {
+            defaultValue: 'Controls both application and system preview channels'
+          })}
+        </span>
       </div>
 
       <Switch checked={isEnabled} loading={isLoading} onChange={setPreviewUpdates} />

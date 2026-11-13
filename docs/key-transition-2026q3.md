@@ -23,7 +23,9 @@ remote acceptance report SHA-256 is
 - production public-key DER SHA-256:
   `97ddb5600accf0e431c74f82b03acf249668bf75fe0de2e41724c91720516f75`;
 - historical IDs retained during the bridge window:
-  `hardened-system-dev` and `hardened-system-test`.
+  `hardened-system-dev` and `hardened-system-test`. The window closed with
+  application `2.1.3`: its policy lists the production key ID alone, and a
+  device that runs it refuses metadata signed with a historical ID.
 
 The production private key is stored outside the repository. It must never be
 placed in Git, Project Memory, build archives, command arguments, logs or

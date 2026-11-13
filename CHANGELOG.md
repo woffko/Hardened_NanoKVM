@@ -1,5 +1,49 @@
 # Changelog
 
+From RC11 on, each release has its own notes file under `docs/releases/`; the
+entries below summarise them.
+
+## Hardened NanoKVM 2.1.7 RC16 + System 0.4.0-raw.6 (2026-11-12)
+
+Replaces RC15. Full notes: [docs/releases/rc16-2.1.7-raw.6.md](docs/releases/rc16-2.1.7-raw.6.md).
+
+- Video works again on a device with an HDMI source: the size of a captured
+  frame is computed without rounding its bytes-per-pixel factor.
+- Installing the application locks the SSH service accounts within seconds,
+  without a reboot.
+- SSH is started again after an application update on a device that serves the
+  web interface without TLS.
+
+## Hardened NanoKVM 2.1.5 RC15 + System 0.4.0-raw.4 (2026-11-11)
+
+Superseded by RC16 and not to be installed. Full notes: [docs/releases/rc15-2.1.5-raw.4.md](docs/releases/rc15-2.1.5-raw.4.md).
+
+- Fixes the SSH authentication bypass CVE-2026-123158: OpenSSH 10.6p2, locked
+  service accounts, and `sshd` barriers for accounts without a password hash.
+- Only the production update key is trusted; the stable system channel carries
+  the current release.
+- `/tmp` and `/dev/shm` are mounted `nosuid,nodev,noexec`; script uploads need a
+  fresh terminal unlock; the login limiter counts failures per source address.
+- Known defects, corrected in RC16: the backend ends on the first video frame
+  on a device with an HDMI source, and an application-only update does not lock
+  the service accounts until the next boot.
+
+## Hardened NanoKVM 2.1.0 RC13 + System 0.4.0-raw.1 (2026-11-01)
+
+Full notes: [docs/releases/rc13-2.1.0-raw.1.md](docs/releases/rc13-2.1.0-raw.1.md).
+
+- Fixes what a full security audit of RC12 found and moves the kernel to Linux
+  5.10.272.
+- Affected by CVE-2026-123158 while SSH is enabled; update to RC16.
+
+## Hardened NanoKVM 2.0.42 RC12 + System 0.3.0-raw.12 (2026-08-28)
+
+Full notes: [docs/releases/rc12-2.0.42-raw.12.md](docs/releases/rc12-2.0.42-raw.12.md) and
+[docs/releases/2.0.42-key-transition.md](docs/releases/2.0.42-key-transition.md).
+
+- Production update key and the manual trust bridge for existing installations.
+- Buildroot 2026.05.1 and the reviewed SG2002 port of Linux 5.10.265.
+
 ## Hardened NanoKVM 2.0.33 RC9.1 (2026-07-11)
 
 Application-only update for the RC9 raw/system baseline. Raw system-update

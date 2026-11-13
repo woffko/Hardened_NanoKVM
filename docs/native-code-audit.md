@@ -244,6 +244,139 @@ Still required before release: repeated HDMI hotplug and resolution changes,
 physical OLED/button behavior, fault injection for vendor failure paths, and a
 long-running dmesg/syslog soak.
 
+### EDID utility: read and save before erasing (2026-10-23)
+
+`nanokvm_update_edid` used to erase the LT6911 flash before it checked the
+chip, kept no copy of the EDID it replaced, and stopped after a failed write
+with the flash erased. It now:
+
+- reads the current EDID with the chip's own read sequence before anything is
+  erased, and stops unless the result is an erased flash or an EDID header
+  whose base block checksum is valid, which a wrong `hdmi_version` would not
+  return;
+- saves that EDID to a new file `/data/edid-backup-<seconds>.bin` (mode 0600,
+  fsynced) and stops if it cannot;
+- writes the new EDID and reads it back; on any failure it writes the saved
+  EDID again, verifies it, and otherwise names the backup to write before a
+  reboot.
+
+The chip-specific register sequences are unchanged. `scripts/test-nanokvm-update-edid.sh`
+builds the utility for the host against a model of the LT6911UXC registers
+(`tools/nanokvm_update_edid/test-fake-bus.c`) and covers an update, a chip
+without an EDID, an erased chip, a write that fails after the erase, and a
+missing backup directory.
+
+The committed RISC-V binary was the vendor build: neither the current source
+nor the upstream 413cdd9 source reproduces it, and it lacked the earlier input
+and page-offset fixes. It is now built from this source with the MaixCDK
+Xuantie GCC 10.2.0 toolchain (`riscv64-unknown-linux-musl-gcc
+-I<toolchain>/sysroot/usr/include -march=rv64gc`), which gives the same bytes
+from any directory: sha256
+`cfdda07b503d22ce47f56ea926bfedc243a911935c74121522f17ba61597e347`. It has not
+been run on hardware. Flashing a real device is a destructive check that
+needs its own approval and a recovery path. The tool takes the shared bus lock
+described below before its first read.
+
+### libkvm: no C++ exception past the C interface (2026-10-23)
+
+The vendor camera, encoder and I2C wrappers report failures as C++
+exceptions: `err::check_raise` in the H.264 encoder setup, and
+`cam->restart`, `cam->set_resolution`, `cam->hmirror` and `cam->close`. One
+thrown inside `kvmv_read_img`, `kvmv_init`, `kvmv_deinit` or a worker thread
+reached `std::terminate` and could leave `vi_mutex` held. Now:
+
+- every lock of `vi_mutex` goes through a scoped guard that releases it on any
+  exit, including an exception;
+- `kvmv_read_img` returns `IMG_VENC_ERROR` with no data;
+- a throwing camera setup in `kvmv_init` leaves video stopped and both locks
+  free;
+- a throwing camera close in `kvmv_deinit` is reported as an incomplete
+  shutdown, the same as a worker that does not stop: the camera and MMF
+  state stay as they are, and a later `kvmv_init` refuses;
+- the HDMI detection and watchdog threads end with a log line instead of
+  terminating the backend, and a throwing restart from the detection thread
+  only fails that restart.
+
+`scripts/test-kvm-vision-exceptions.sh` builds the real `kvm_vision.cpp` for
+the host against stand-ins for the vendor API that throw on request (under
+`support/sg2002/kvm_vision_host_test/`, outside the MaixCDK component, whose
+directory the Docker context admits file by file). The stand-ins also replace `system()`,
+so no shell command of the code under test runs on the host. Six cases cover
+both workers, a resolution change, the encoder setup, the camera setup and
+the camera close. The previous source, and each fix taken out alone, end the
+test with `std::terminate` or a held `vi_mutex`.
+
+MaixCDK compiles the copy in `MaixCDK/components/kvm`, which must equal this
+source. Rebuilding the unchanged source reproduced the committed library
+byte for byte (sha256 `4f86642e…`). The new `server-rust/native/dl_lib/libkvm.so`,
+sha256 `1f32d768f6f4dd7e7221d9c191589499b127b2793b65e55be17cb3386f4af105`,
+has the same exported and imported symbols, NEEDED libraries and SONAME, and
+no RPATH. It has not run on hardware. Still open: the global `camera::Camera`
+is constructed when the library loads, outside any boundary; an image already
+read is leaked when a later step throws; the camera state after a vendor
+exception is left to the existing restart path. Device acceptance needs
+MJPEG, H.264, resolution changes, HDMI hotplug and a backend restart.
+
+### Shared LT6911 bus lock (2026-10-23)
+
+Three programs talk to the HDMI chip on `/dev/i2c-4` with no coordination:
+libkvm's detection thread after every chip interrupt, `nanokvm_update_edid`
+for a whole erase-and-program sequence, and `S15kvmhwd`'s `i2cdetect` probes
+(run at boot and again by libkvm through `get_hdmi_version`). A poll in the
+middle of an EDID write could read garbage or disturb the write. They now
+share `flock(2)` on the bus device node
+(`support/sg2002/additional/kvm/include/i2c_bus_lock.h`, header-only, so the
+C tool and the C++ library use the same code):
+
+- libkvm's three per-chip polls became one `poll_lt6911` that takes the lock
+  for up to 1 s and skips the poll when the bus stays busy (the next interrupt
+  or retry comes back to it); the unused `lt6911_write_edid`, `_read_edid`
+  and `_read_fw` helpers take it too. The lock descriptor is opened once by
+  the detection thread.
+- the EDID tool locks its own bus descriptor for up to 10 s before the first
+  read and refuses with "The I2C bus is in use" otherwise; the lock ends with
+  the descriptor, so a crash releases it.
+- `S15kvmhwd` wraps each bus-4 `i2cdetect` in `flock /dev/i2c-4` (BusyBox has
+  the applet).
+
+The lock covers these user-space programs only, not the kernel's own sensor
+driver. `scripts/test-i2c-bus-lock.sh` checks the header with two processes
+on a temporary file (a short wait is refused while the lock is held, a longer
+one is admitted when the holder exits without releasing) and checks
+statically that each of the three users takes the lock.
+`scripts/test-nanokvm-update-edid.sh` adds a busy-bus case: the tool stops
+before any read and runs once the bus is free. `libkvm.so` and the RISC-V
+`nanokvm_update_edid` are rebuilt; neither has run on hardware since.
+
+### Three small native faults (L-B12, 2026-10-23)
+
+- `mmf_enc_jpg_init` returned early after a failed pool creation, pool
+  attach or `CVI_VENC_StartRecvFrame` with the VENC channel, the VPSS binding
+  or the first pool still allocated, and `enc_jpg_is_init` clear. Every later
+  init then failed at `CVI_VENC_CreateChn` on the existing channel, so MJPEG
+  never came back. It now records what it created and, on any failure after
+  the channel exists, undoes it in the order `mmf_enc_jpg_deinit` uses
+  (unbind, VPSS deinit, pools, channel). `mmf_enc_jpg_deinit` reset the output
+  pool id twice and never the input one; fixed. `libkvm_mmf.so` is rebuilt
+  (`9ade400e…`, same exports, imports and no RPATH). This is a vendor-SDK
+  sequence with no host harness: the change is reviewed and compiled, not
+  host-tested. Device gate: MJPEG after a forced encoder failure.
+- `S15kvmhwd get_hdmi_version` wrote `ue` (unknown) after one silent probe,
+  and libkvm asks for it at every start, while the video pipeline may still
+  hold the chip in reset. The probe now repeats up to five times 200 ms apart,
+  and a silent chip never replaces a version detected earlier; `ue` is written
+  only when nothing was ever detected, and a later answer replaces it.
+  `scripts/test-s15-hdmi-version.sh` runs the functions under sh and BusyBox
+  sh with a scripted probe.
+- `oled_exist` in `kvm_system` read `/etc/kvm/hw` with unchecked `fopen` and
+  `fread`: an unreadable file dereferenced NULL, an empty one left the buffer
+  uninitialized. The read is now `hw_version_read` (header-only
+  `lib/oled_ctrl/hw_version.h`): any failure or unknown letter means alpha, as
+  before. `scripts/test-kvm-system-hw-version.sh` builds it as C and C++ and
+  runs it against a missing, empty, unreadable and each known file.
+  `kvm_system` is rebuilt; the previous binary stays beside it as
+  `kvm_system.pre-lb12-20261023` in the (ignored) build directory.
+
 ## Recommended Repair Order
 
 1. Introduce explicit native lifecycle ownership: retain thread handles, stop

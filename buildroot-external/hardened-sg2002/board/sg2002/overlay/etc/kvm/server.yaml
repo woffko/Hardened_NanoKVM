@@ -1,0 +1,6 @@
+# A new installation serves HTTPS. A raw update replaces this file with the
+# settings of the device, and a device without the file stays on HTTP.
+proto: https
+cert:
+  crt: /etc/kvm/server.crt
+  key: /etc/kvm/server.key

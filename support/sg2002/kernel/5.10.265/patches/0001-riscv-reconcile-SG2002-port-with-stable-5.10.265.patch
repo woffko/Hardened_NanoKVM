@@ -1,0 +1,735 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:37:26 +0300
+Subject: [PATCH 1/9] riscv: reconcile SG2002 port with stable 5.10.265
+
+Preserve CVITEK ISA, compat, uprobe, firmware reservation and large-zone requirements while incorporating stable RISC-V fixes for toolchains, page faults, topology and patching.
+---
+ arch/riscv/Kconfig                   | 56 +++++++++++++++++++++++++---
+ arch/riscv/Makefile                  | 37 +++++++++++++++++-
+ arch/riscv/configs/defconfig         |  4 +-
+ arch/riscv/include/asm/pgtable-64.h  |  4 +-
+ arch/riscv/include/asm/thread_info.h | 15 ++++++--
+ arch/riscv/kernel/entry.S            | 20 +++++++---
+ arch/riscv/kernel/patch.c            | 30 +++++++++++++--
+ arch/riscv/kernel/stacktrace.c       |  4 +-
+ arch/riscv/kernel/vdso/Makefile      | 20 ++++++++--
+ arch/riscv/mm/fault.c                | 23 +++++++-----
+ arch/riscv/mm/init.c                 | 52 +++++++++++++++-----------
+ 11 files changed, 205 insertions(+), 60 deletions(-)
+
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+index c82f7afd9b..6c7fcf2bc9 100644
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -23,6 +23,7 @@ config RISCV
+ 	select ARCH_HAS_GIGANTIC_PAGE
+ 	select ARCH_HAS_KCOV
+ 	select ARCH_HAS_MMIOWB
++	select ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
+ 	select ARCH_HAS_PTE_SPECIAL
+ 	select ARCH_HAS_SET_DIRECT_MAP
+ 	select ARCH_HAS_SET_MEMORY
+@@ -44,7 +45,7 @@ config RISCV
+ 	select EDAC_SUPPORT
+ 	select DMA_DIRECT_REMAP
+ 	select GENERIC_ALLOCATOR
+-	select GENERIC_ARCH_TOPOLOGY if SMP
++	select GENERIC_ARCH_TOPOLOGY
+ 	select GENERIC_ATOMIC64 if !64BIT
+ 	select GENERIC_CLOCKEVENTS
+ 	select GENERIC_EARLY_IOREMAP
+@@ -99,7 +100,6 @@ config RISCV
+ 	select PCI_MSI if PCI
+ 	select RISCV_INTC
+ 	select RISCV_TIMER if RISCV_SBI
+-	select SPARSEMEM_STATIC if 32BIT
+ 	select SPARSE_IRQ
+ 	select SYSCTL_EXCEPTION_TRACE
+ 	select THREAD_INFO_IN_TASK
+@@ -156,7 +156,7 @@ config PA_BITS
+ 
+ config PAGE_OFFSET
+ 	hex
+-	default 0xC0000000 if 32BIT && MAXPHYSMEM_2GB
++	default 0xC0000000 if 32BIT && MAXPHYSMEM_1GB
+ 	default 0x80000000 if 64BIT && !MMU
+ 	default 0xffffffff80000000 if 64BIT && MAXPHYSMEM_2GB
+ 	default 0xffffffe000000000 if 64BIT && MAXPHYSMEM_128GB
+@@ -175,13 +175,20 @@ config FORCE_MAX_ZONEORDER
+ 	  This config option is actually maximum order plus one. For example,
+ 	  a value of 13 means that the largest free memory block is 2^12 pages.
+ 
++config KASAN_SHADOW_OFFSET
++	hex
++	depends on KASAN_GENERIC
++	default 0xdfffffc800000000 if 64BIT
++	default 0xffffffff if 32BIT
++
+ config ARCH_FLATMEM_ENABLE
+ 	def_bool y
+ 
+ config ARCH_SPARSEMEM_ENABLE
+ 	def_bool y
+ 	depends on MMU
+-	select SPARSEMEM_VMEMMAP_ENABLE
++	select SPARSEMEM_STATIC if 32BIT && SPARSEMEM
++	select SPARSEMEM_VMEMMAP_ENABLE if 64BIT
+ 
+ config ARCH_SELECT_MEMORY_MODEL
+ 	def_bool ARCH_SPARSEMEM_ENABLE
+@@ -225,6 +232,11 @@ config GENERIC_HWEIGHT
+ config FIX_EARLYCON_MEM
+ 	def_bool MMU
+ 
++config ILLEGAL_POINTER_VALUE
++	hex
++	default 0 if 32BIT
++	default 0xdead000000000000 if 64BIT
++
+ config PGTABLE_LEVELS
+ 	int
+ 	default 3 if 64BIT
+@@ -286,11 +298,15 @@ config MODULE_SECTIONS
+ 
+ choice
+ 	prompt "Maximum Physical Memory"
+-	default MAXPHYSMEM_2GB if 32BIT
++	default MAXPHYSMEM_1GB if 32BIT
+ 	default MAXPHYSMEM_2GB if 64BIT && CMODEL_MEDLOW
+ 	default MAXPHYSMEM_128GB if 64BIT && CMODEL_MEDANY
+ 
++	config MAXPHYSMEM_1GB
++		depends on 32BIT
++		bool "1GiB"
+ 	config MAXPHYSMEM_2GB
++		depends on 64BIT && CMODEL_MEDLOW
+ 		bool "2GiB"
+ 	config MAXPHYSMEM_128GB
+ 		depends on 64BIT && CMODEL_MEDANY
+@@ -370,6 +386,28 @@ config RISCV_BASE_PMU
+ 
+ endmenu
+ 
++config TOOLCHAIN_NEEDS_EXPLICIT_ZICSR_ZIFENCEI
++	def_bool y
++	# https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=aed44286efa8ae8717a77d94b51ac3614e2ca6dc
++	depends on AS_IS_GNU && AS_VERSION >= 23800
++	help
++	  Newer binutils versions default to ISA spec version 20191213 which
++	  moves some instructions from the I extension to the Zicsr and Zifencei
++	  extensions.
++
++config TOOLCHAIN_NEEDS_OLD_ISA_SPEC
++	def_bool y
++	depends on TOOLCHAIN_NEEDS_EXPLICIT_ZICSR_ZIFENCEI
++	# https://github.com/llvm/llvm-project/commit/22e199e6afb1263c943c0c0d4498694e15bf8a16
++	depends on CC_IS_CLANG && CLANG_VERSION < 170000
++	help
++	  Certain versions of clang do not support zicsr and zifencei via -march
++	  but newer versions of binutils require it for the reasons noted in the
++	  help text of CONFIG_TOOLCHAIN_NEEDS_EXPLICIT_ZICSR_ZIFENCEI. This
++	  option causes an older ISA spec compatible with these older versions
++	  of clang to be passed to GAS, which has the same result as passing zicsr
++	  and zifencei to -march.
++
+ config FPU
+ 	bool "FPU support"
+ 	default y
+@@ -510,6 +548,14 @@ config EFI
+ 	  allow the kernel to be booted as an EFI application. This
+ 	  is only useful on systems that have UEFI firmware.
+ 
++config CC_HAVE_STACKPROTECTOR_TLS
++	def_bool $(cc-option,-mstack-protector-guard=tls -mstack-protector-guard-reg=tp -mstack-protector-guard-offset=0)
++
++config STACKPROTECTOR_PER_TASK
++	def_bool y
++	depends on !GCC_PLUGIN_RANDSTRUCT
++	depends on STACKPROTECTOR && CC_HAVE_STACKPROTECTOR_TLS
++
+ endmenu
+ 
+ config BUILTIN_DTB
+diff --git a/arch/riscv/Makefile b/arch/riscv/Makefile
+index 0889f9f47a..ee253770bf 100644
+--- a/arch/riscv/Makefile
++++ b/arch/riscv/Makefile
+@@ -16,7 +16,7 @@ ifeq ($(CONFIG_DYNAMIC_FTRACE),y)
+ 	CC_FLAGS_FTRACE := -fpatchable-function-entry=8
+ endif
+ 
+-ifeq ($(CONFIG_64BIT)$(CONFIG_CMODEL_MEDLOW),yy)
++ifeq ($(CONFIG_CMODEL_MEDLOW),y)
+ KBUILD_CFLAGS_MODULE += -mcmodel=medany
+ endif
+ 
+@@ -43,6 +43,17 @@ else
+ 	KBUILD_LDFLAGS += -melf32lriscv
+ endif
+ 
++ifeq ($(CONFIG_LD_IS_LLD),y)
++ifeq ($(shell test $(CONFIG_LLD_VERSION) -lt 150000; echo $$?),0)
++	KBUILD_CFLAGS += -mno-relax
++	KBUILD_AFLAGS += -mno-relax
++ifndef CONFIG_AS_IS_LLVM
++	KBUILD_CFLAGS += -Wa,-mno-relax
++	KBUILD_AFLAGS += -Wa,-mno-relax
++endif
++endif
++endif
++
+ # ISA string setting
+ riscv-march-cflags-$(CONFIG_ARCH_RV32I)		:= rv32ima
+ riscv-march-cflags-$(CONFIG_ARCH_RV64I)		:= rv64ima
+@@ -56,7 +67,15 @@ riscv-march-aflags-$(CONFIG_VECTOR_1_0)		:= $(riscv-march-aflags-y)v
+ riscv-march-aflags-$(CONFIG_VECTOR_0_7)		:= $(riscv-march-aflags-y)v0p7
+ riscv-march-aflags-$(CONFIG_RISCV_ISA_THEAD)	:= $(riscv-march-aflags-y)xthead
+ 
+-KBUILD_CFLAGS += -march=$(riscv-march-cflags-y) -Wa,-march=$(riscv-march-aflags-y)
++ifdef CONFIG_TOOLCHAIN_NEEDS_OLD_ISA_SPEC
++KBUILD_CFLAGS += -Wa,-misa-spec=2.2
++KBUILD_AFLAGS += -Wa,-misa-spec=2.2
++else
++riscv-march-cflags-$(CONFIG_TOOLCHAIN_NEEDS_EXPLICIT_ZICSR_ZIFENCEI) := $(riscv-march-cflags-y)_zicsr_zifencei
++riscv-march-aflags-$(CONFIG_TOOLCHAIN_NEEDS_EXPLICIT_ZICSR_ZIFENCEI) := $(riscv-march-aflags-y)_zicsr_zifencei
++endif
++
++KBUILD_CFLAGS += -march=$(subst fd,,$(riscv-march-cflags-y)) -Wa,-march=$(riscv-march-aflags-y)
+ KBUILD_AFLAGS += -march=$(riscv-march-aflags-y)
+ 
+ KBUILD_CFLAGS += -mno-save-restore
+@@ -74,7 +93,11 @@ ifeq ($(CONFIG_PERF_EVENTS),y)
+         KBUILD_CFLAGS += -fno-omit-frame-pointer
+ endif
+ 
++# Avoid generating .eh_frame sections.
++KBUILD_CFLAGS += -fno-asynchronous-unwind-tables -fno-unwind-tables
++
+ KBUILD_CFLAGS_MODULE += $(call cc-option,-mno-relax)
++KBUILD_AFLAGS_MODULE += $(call as-option,-Wa$(comma)-mno-relax)
+ 
+ # GCC versions that support the "-mstrict-align" option default to allowing
+ # unaligned accesses.  While unaligned accesses are explicitly allowed in the
+@@ -82,6 +105,16 @@ KBUILD_CFLAGS_MODULE += $(call cc-option,-mno-relax)
+ # architectures.  It's faster to have GCC emit only aligned accesses.
+ KBUILD_CFLAGS += $(call cc-option,-mstrict-align)
+ 
++ifeq ($(CONFIG_STACKPROTECTOR_PER_TASK),y)
++prepare: stack_protector_prepare
++stack_protector_prepare: prepare0
++	$(eval KBUILD_CFLAGS += -mstack-protector-guard=tls		  \
++				-mstack-protector-guard-reg=tp		  \
++				-mstack-protector-guard-offset=$(shell	  \
++			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}' \
++					include/generated/asm-offsets.h))
++endif
++
+ # arch specific predefines for sparse
+ CHECKFLAGS += -D__riscv -D__riscv_xlen=$(BITS)
+ 
+diff --git a/arch/riscv/configs/defconfig b/arch/riscv/configs/defconfig
+index 0dff1709ad..55d13eec86 100644
+--- a/arch/riscv/configs/defconfig
++++ b/arch/riscv/configs/defconfig
+@@ -103,8 +103,10 @@ CONFIG_I2C_DESIGNWARE_ICE=y
+ CONFIG_SPI=y
+ CONFIG_SPI_DESIGNWARE=y
+ CONFIG_SPI_DW_MMIO=y
+-# CONFIG_PTP_1588_CLOCK is not set
++CONFIG_SPI_SIFIVE=y
+ CONFIG_GPIOLIB=y
++CONFIG_GPIO_SIFIVE=y
++# CONFIG_PTP_1588_CLOCK is not set
+ CONFIG_DEBUG_GPIO=y
+ CONFIG_GPIO_SYSFS=y
+ CONFIG_GPIO_DWAPB=y
+diff --git a/arch/riscv/include/asm/pgtable-64.h b/arch/riscv/include/asm/pgtable-64.h
+index c4c6384099..182bf96177 100644
+--- a/arch/riscv/include/asm/pgtable-64.h
++++ b/arch/riscv/include/asm/pgtable-64.h
+@@ -60,9 +60,9 @@ static inline void pud_clear(pud_t *pudp)
+ 	set_pud(pudp, __pud(0));
+ }
+ 
+-static inline unsigned long pud_page_vaddr(pud_t pud)
++static inline pmd_t *pud_pgtable(pud_t pud)
+ {
+-	return (unsigned long)pfn_to_virt((pud_val(pud) & _PAGE_CHG_MASK) >> _PAGE_PFN_SHIFT);
++	return (pmd_t *)pfn_to_virt((pud_val(pud) & _PAGE_CHG_MASK) >> _PAGE_PFN_SHIFT);
+ }
+ 
+ static inline struct page *pud_page(pud_t pud)
+diff --git a/arch/riscv/include/asm/thread_info.h b/arch/riscv/include/asm/thread_info.h
+index a87080600d..cc678e626e 100644
+--- a/arch/riscv/include/asm/thread_info.h
++++ b/arch/riscv/include/asm/thread_info.h
+@@ -11,11 +11,17 @@
+ #include <asm/page.h>
+ #include <linux/const.h>
+ 
++#ifdef CONFIG_KASAN
++#define KASAN_STACK_ORDER 1
++#else
++#define KASAN_STACK_ORDER 0
++#endif
++
+ /* thread information allocation */
+ #ifdef CONFIG_64BIT
+-#define THREAD_SIZE_ORDER	(2)
++#define THREAD_SIZE_ORDER	(2 + KASAN_STACK_ORDER)
+ #else
+-#define THREAD_SIZE_ORDER	(1)
++#define THREAD_SIZE_ORDER	(1 + KASAN_STACK_ORDER)
+ #endif
+ #define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
+ 
+@@ -91,6 +97,7 @@ struct thread_info {
+ #define TIF_SYSCALL_AUDIT	7	/* syscall auditing */
+ #define TIF_SECCOMP		8	/* syscall secure computing */
+ #define TIF_UPROBE		9	/* uprobe breakpoint or singlestep */
++#define TIF_NOTIFY_SIGNAL	10	/* signal notifications exist */
+ #define TIF_32BIT		11	/* 32bit process */
+ 
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+@@ -101,9 +108,11 @@ struct thread_info {
+ #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+ #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
+ #define _TIF_UPROBE		(1 << TIF_UPROBE)
++#define _TIF_NOTIFY_SIGNAL	(1 << TIF_NOTIFY_SIGNAL)
+ 
+ #define _TIF_WORK_MASK \
+-	(_TIF_NOTIFY_RESUME | _TIF_SIGPENDING | _TIF_NEED_RESCHED | _TIF_UPROBE)
++	(_TIF_NOTIFY_RESUME | _TIF_SIGPENDING | _TIF_NEED_RESCHED | \
++	 _TIF_UPROBE | _TIF_NOTIFY_SIGNAL)
+ 
+ #define _TIF_SYSCALL_WORK \
+ 	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_TRACEPOINT | _TIF_SYSCALL_AUDIT | \
+diff --git a/arch/riscv/kernel/entry.S b/arch/riscv/kernel/entry.S
+index 946d19dfd4..77a64fc960 100644
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -98,7 +98,7 @@ _save_context:
+ .option pop
+ 
+ #ifdef CONFIG_TRACE_IRQFLAGS
+-	call trace_hardirqs_off
++	call __trace_hardirqs_off
+ #endif
+ 
+ #ifdef CONFIG_CONTEXT_TRACKING
+@@ -131,7 +131,7 @@ skip_context_tracking:
+ 	andi t0, s1, SR_PIE
+ 	beqz t0, 1f
+ #ifdef CONFIG_TRACE_IRQFLAGS
+-	call trace_hardirqs_on
++	call __trace_hardirqs_on
+ 
+ 	REG_L s1, PT_STATUS(sp)
+ #endif
+@@ -171,6 +171,15 @@ skip_context_tracking:
+ 	tail do_trap_unknown
+ 
+ handle_syscall:
++#ifdef CONFIG_RISCV_M_MODE
++	/*
++	 * When running is M-Mode (no MMU config), MPIE does not get set.
++	 * As a result, we need to force enable interrupts here because
++	 * handle_exception did not do set SR_IE as it always sees SR_PIE
++	 * being cleared.
++	 */
++	csrs CSR_STATUS, SR_IE
++#endif
+ #if defined(CONFIG_TRACE_IRQFLAGS) || defined(CONFIG_CONTEXT_TRACKING)
+ 	/* Recover a0 - a7 for system calls */
+ 	REG_L a0, PT_A0(sp)
+@@ -246,7 +255,7 @@ ret_from_exception:
+ 	REG_L s0, PT_STATUS(sp)
+ 	csrc CSR_STATUS, SR_IE
+ #ifdef CONFIG_TRACE_IRQFLAGS
+-	call trace_hardirqs_off
++	call __trace_hardirqs_off
+ #endif
+ #ifdef CONFIG_RISCV_M_MODE
+ 	/* the MPP value is too large to be used as an immediate arg for addi */
+@@ -282,10 +291,10 @@ restore_all:
+ 	REG_L s1, PT_STATUS(sp)
+ 	andi t0, s1, SR_PIE
+ 	beqz t0, 1f
+-	call trace_hardirqs_on
++	call __trace_hardirqs_on
+ 	j 2f
+ 1:
+-	call trace_hardirqs_off
++	call __trace_hardirqs_off
+ 2:
+ #endif
+ 	REG_L a0, PT_STATUS(sp)
+@@ -471,6 +480,7 @@ ENDPROC(__switch_to)
+ #endif
+ 
+ 	.section ".rodata"
++	.align LGREG
+ 	/* Exception vector table */
+ ENTRY(excp_vect_table)
+ 	RISCV_PTR do_trap_insn_misaligned
+diff --git a/arch/riscv/kernel/patch.c b/arch/riscv/kernel/patch.c
+index 778c5086d8..e099961453 100644
+--- a/arch/riscv/kernel/patch.c
++++ b/arch/riscv/kernel/patch.c
+@@ -11,6 +11,7 @@
+ #include <asm/kprobes.h>
+ #include <asm/cacheflush.h>
+ #include <asm/fixmap.h>
++#include <asm/ftrace.h>
+ #include <asm/patch.h>
+ 
+ struct patch_insn {
+@@ -19,6 +20,8 @@ struct patch_insn {
+ 	atomic_t cpu_count;
+ };
+ 
++int riscv_patch_in_stop_machine = false;
++
+ #ifdef CONFIG_MMU
+ /*
+  * The fix_to_virt(, idx) needs a const value (not a dynamic variable of
+@@ -59,8 +62,15 @@ static int patch_insn_write(void *addr, const void *insn, size_t len)
+ 	 * Before reaching here, it was expected to lock the text_mutex
+ 	 * already, so we don't need to give another lock here and could
+ 	 * ensure that it was safe between each cores.
++	 *
++	 * We're currently using stop_machine() for ftrace & kprobes, and while
++	 * that ensures text_mutex is held before installing the mappings it
++	 * does not ensure text_mutex is held by the calling thread.  That's
++	 * safe but triggers a lockdep failure, so just elide it for that
++	 * specific case.
+ 	 */
+-	//lockdep_assert_held(&text_mutex);
++	if (!riscv_patch_in_stop_machine)
++		lockdep_assert_held(&text_mutex);
+ 
+ 	if (across_pages)
+ 		patch_map(addr + len, FIX_TEXT_POKE1);
+@@ -104,7 +114,7 @@ static int patch_text_cb(void *data)
+ 	struct patch_insn *patch = data;
+ 	int ret = 0;
+ 
+-	if (atomic_inc_return(&patch->cpu_count) == 1) {
++	if (atomic_inc_return(&patch->cpu_count) == num_online_cpus()) {
+ 		ret =
+ 		    patch_text_nosync(patch->addr, &patch->insn,
+ 					    GET_INSN_LENGTH(patch->insn));
+@@ -121,13 +131,25 @@ NOKPROBE_SYMBOL(patch_text_cb);
+ 
+ int patch_text(void *addr, u32 insn)
+ {
++	int ret;
+ 	struct patch_insn patch = {
+ 		.addr = addr,
+ 		.insn = insn,
+ 		.cpu_count = ATOMIC_INIT(0),
+ 	};
+ 
+-	return stop_machine_cpuslocked(patch_text_cb,
+-				       &patch, cpu_online_mask);
++	/*
++	 * kprobes takes text_mutex, before calling patch_text(), but as we call
++	 * calls stop_machine(), the lockdep assertion in patch_insn_write()
++	 * gets confused by the context in which the lock is taken.
++	 * Instead, ensure the lock is held before calling stop_machine(), and
++	 * set riscv_patch_in_stop_machine to skip the check in
++	 * patch_insn_write().
++	 */
++	lockdep_assert_held(&text_mutex);
++	riscv_patch_in_stop_machine = true;
++	ret = stop_machine_cpuslocked(patch_text_cb, &patch, cpu_online_mask);
++	riscv_patch_in_stop_machine = false;
++	return ret;
+ }
+ NOKPROBE_SYMBOL(patch_text);
+diff --git a/arch/riscv/kernel/stacktrace.c b/arch/riscv/kernel/stacktrace.c
+index 6675131972..680281c660 100644
+--- a/arch/riscv/kernel/stacktrace.c
++++ b/arch/riscv/kernel/stacktrace.c
+@@ -61,7 +61,7 @@ void notrace walk_stackframe(struct task_struct *task, struct pt_regs *regs,
+ 		} else {
+ 			fp = frame->fp;
+ 			pc = ftrace_graph_ret_addr(current, NULL, frame->ra,
+-						   (unsigned long *)(fp - 8));
++						   &frame->ra);
+ 		}
+ 
+ 	}
+@@ -94,7 +94,7 @@ void notrace walk_stackframe(struct task_struct *task,
+ 	while (!kstack_end(ksp)) {
+ 		if (__kernel_text_address(pc) && unlikely(!fn(arg, pc)))
+ 			break;
+-		pc = (*ksp++) - 0x4;
++		pc = READ_ONCE_NOCHECK(*ksp++);
+ 	}
+ }
+ 
+diff --git a/arch/riscv/kernel/vdso/Makefile b/arch/riscv/kernel/vdso/Makefile
+index a56cd9211c..63822d0aab 100644
+--- a/arch/riscv/kernel/vdso/Makefile
++++ b/arch/riscv/kernel/vdso/Makefile
+@@ -17,27 +17,33 @@ vdso-syms += flush_icache
+ obj-vdso = $(patsubst %, %.o, $(vdso-syms)) note.o
+ 
+ ccflags-y := -fno-stack-protector
++ccflags-y += -DDISABLE_BRANCH_PROFILING
++ccflags-y += -fno-builtin
+ 
+ ifneq ($(c-gettimeofday-y),)
+   CFLAGS_vgettimeofday.o += -fPIC -include $(c-gettimeofday-y)
+ endif
+ 
+ # Build rules
+-targets := $(obj-vdso) vdso.so vdso.so.dbg vdso.lds
++targets := $(obj-vdso) vdso.so vdso.so.dbg vdso.lds vdso-syms.S
+ obj-vdso := $(addprefix $(obj)/, $(obj-vdso))
+ 
+ obj-y += vdso.o
+ CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
++ifneq ($(filter vgettimeofday, $(vdso-syms)),)
++CPPFLAGS_vdso.lds += -DHAS_VGETTIMEOFDAY
++endif
+ 
+ # Disable -pg to prevent insert call site
+-CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE) -Os
++CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE)
+ 
+ # Kernel must build with -Ox
+ CFLAGS_vgettimeofday.o += -O2
+ 
+-# Disable gcov profiling for VDSO code
++# Disable profiling and instrumentation for VDSO code
+ GCOV_PROFILE := n
+ KCOV_INSTRUMENT := n
++KASAN_SANITIZE := n
+ 
+ # Force dependency
+ $(obj)/vdso.o: $(obj)/vdso.so
+@@ -45,9 +51,15 @@ $(obj)/vdso.o: $(obj)/vdso.so
+ # link rule for the .so file, .lds has to be first
+ $(obj)/vdso.so.dbg: $(obj)/vdso.lds $(obj-vdso) FORCE
+ 	$(call if_changed,vdsold)
+-LDFLAGS_vdso.so.dbg = -shared -S -soname=linux-vdso.so.1 \
++LDFLAGS_vdso.so.dbg = -shared -s -soname=linux-vdso.so.1 \
+ 	--build-id=sha1 --hash-style=both --eh-frame-hdr
+ 
++# We also create a special relocatable object that should mirror the symbol
++# table and layout of the linked DSO. With ld --just-symbols we can then
++# refer to these symbols in the kernel code rather than hand-coded addresses.
++$(obj)/vdso-syms.S: $(obj)/vdso.so FORCE
++	$(call if_changed,so2s)
++
+ # strip rule for the .so file
+ $(obj)/%.so: OBJCOPYFLAGS := -S
+ $(obj)/%.so: $(obj)/%.so.dbg FORCE
+diff --git a/arch/riscv/mm/fault.c b/arch/riscv/mm/fault.c
+index b23c206af3..82d03ca8ac 100644
+--- a/arch/riscv/mm/fault.c
++++ b/arch/riscv/mm/fault.c
+@@ -35,31 +35,32 @@ static inline void no_context(struct pt_regs *regs, unsigned long addr)
+ 		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
+ 		"paging request", addr);
+ 	die(regs, "Oops");
+-	do_exit(SIGKILL);
++	make_task_dead(SIGKILL);
+ }
+ 
+ static inline void mm_fault_error(struct pt_regs *regs, unsigned long addr, vm_fault_t fault)
+ {
++	if (!user_mode(regs)) {
++		no_context(regs, addr);
++		return;
++	}
++
+ 	if (fault & VM_FAULT_OOM) {
+ 		/*
+ 		 * We ran out of memory, call the OOM killer, and return the userspace
+ 		 * (which will retry the fault, or kill us if we got oom-killed).
+ 		 */
+-		if (!user_mode(regs)) {
+-			no_context(regs, addr);
+-			return;
+-		}
+ 		pagefault_out_of_memory();
+ 		return;
+ 	} else if (fault & VM_FAULT_SIGBUS) {
+ 		/* Kernel mode? Handle exceptions or die */
+-		if (!user_mode(regs)) {
+-			no_context(regs, addr);
+-			return;
+-		}
+ 		do_trap(regs, SIGBUS, BUS_ADRERR, addr);
+ 		return;
++	} else if (fault & VM_FAULT_SIGSEGV) {
++		do_trap(regs, SIGSEGV, SEGV_MAPERR, addr);
++		return;
+ 	}
++
+ 	BUG();
+ }
+ 
+@@ -167,8 +168,10 @@ static inline bool access_error(unsigned long cause, struct vm_area_struct *vma)
+ 			return true;
+ 		break;
+ 	case EXC_LOAD_PAGE_FAULT:
+-		if (!(vma->vm_flags & VM_READ))
++		/* Write implies read */
++		if (!(vma->vm_flags & (VM_READ | VM_WRITE))) {
+ 			return true;
++		}
+ 		break;
+ 	case EXC_STORE_PAGE_FAULT:
+ 		if (!(vma->vm_flags & VM_WRITE))
+diff --git a/arch/riscv/mm/init.c b/arch/riscv/mm/init.c
+index d3850ee8b3..6fe0b69e16 100644
+--- a/arch/riscv/mm/init.c
++++ b/arch/riscv/mm/init.c
+@@ -13,6 +13,7 @@
+ #include <linux/of_fdt.h>
+ #include <linux/libfdt.h>
+ #include <linux/set_memory.h>
++#include <linux/dma-map-ops.h>
+ 
+ #include <asm/fixmap.h>
+ #include <asm/tlbflush.h>
+@@ -41,13 +42,14 @@ struct pt_alloc_ops {
+ #endif
+ };
+ 
++static phys_addr_t dma32_phys_limit __ro_after_init;
++
+ static void __init zone_sizes_init(void)
+ {
+ 	unsigned long max_zone_pfns[MAX_NR_ZONES] = { 0, };
+ 
+ #ifdef CONFIG_ZONE_DMA32
+-	max_zone_pfns[ZONE_DMA32] = PFN_DOWN(min(4UL * SZ_1G,
+-			(unsigned long) PFN_PHYS(max_low_pfn)));
++	max_zone_pfns[ZONE_DMA32] = PFN_DOWN(dma32_phys_limit);
+ #endif
+ 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
+ 
+@@ -163,9 +165,10 @@ early_param("riscv.fwsz", early_get_firmware_size);
+ void __init setup_bootmem(void)
+ {
+ 	phys_addr_t mem_start = 0;
+-	phys_addr_t start, end = 0;
++	phys_addr_t start, dram_end, end = 0;
+ 	phys_addr_t vmlinux_end = __pa_symbol(&_end);
+ 	phys_addr_t vmlinux_start = __pa_symbol(&_start);
++	phys_addr_t max_mapped_addr = __pa(~(ulong)0);
+ 	u64 i;
+ 
+ 	/* Find the memory region containing the kernel */
+@@ -188,8 +191,20 @@ void __init setup_bootmem(void)
+ 	/* Reserve from the start of the kernel to the end of the kernel */
+ 	memblock_reserve(vmlinux_start, vmlinux_end - vmlinux_start);
+ 
+-	max_pfn = PFN_DOWN(memblock_end_of_DRAM());
++	dram_end = memblock_end_of_DRAM();
++
++	/*
++	 * memblock allocator is not aware of the fact that last 4K bytes of
++	 * the addressable memory can not be mapped because of IS_ERR_VALUE
++	 * macro. Make sure that last 4k bytes are not usable by memblock
++	 * if end of dram is equal to maximum addressable memory.
++	 */
++	if (max_mapped_addr == (dram_end - 1))
++		memblock_set_current_limit(max_mapped_addr - 4096);
++
++	max_pfn = PFN_DOWN(dram_end);
+ 	max_low_pfn = max_pfn;
++	dma32_phys_limit = min(4UL * SZ_1G, (unsigned long)PFN_PHYS(max_low_pfn));
+ 	set_max_mapnr(max_low_pfn);
+ 
+ #ifdef CONFIG_BLK_DEV_INITRD
+@@ -207,7 +222,7 @@ void __init setup_bootmem(void)
+ 	else
+ 		memblock_reserve(__pa(PAGE_OFFSET), LOAD_OFFSET);
+ 
+-	early_init_fdt_scan_reserved_mem();
++	dma_contiguous_reserve(dma32_phys_limit);
+ 	memblock_allow_resize();
+ 	memblock_dump_all();
+ }
+@@ -224,8 +239,6 @@ pgd_t swapper_pg_dir[PTRS_PER_PGD] __page_aligned_bss;
+ pgd_t trampoline_pg_dir[PTRS_PER_PGD] __page_aligned_bss;
+ pte_t fixmap_pte[PTRS_PER_PTE] __page_aligned_bss;
+ 
+-#define MAX_EARLY_MAPPING_SIZE	SZ_128M
+-
+ pgd_t early_pg_dir[PTRS_PER_PGD] __initdata __aligned(PAGE_SIZE);
+ 
+ void __set_fixmap(enum fixed_addresses idx, phys_addr_t phys, pgprot_t prot)
+@@ -300,13 +313,7 @@ static void __init create_pte_mapping(pte_t *ptep,
+ 
+ pmd_t trampoline_pmd[PTRS_PER_PMD] __page_aligned_bss;
+ pmd_t fixmap_pmd[PTRS_PER_PMD] __page_aligned_bss;
+-
+-#if MAX_EARLY_MAPPING_SIZE < PGDIR_SIZE
+-#define NUM_EARLY_PMDS		1UL
+-#else
+-#define NUM_EARLY_PMDS		(1UL + MAX_EARLY_MAPPING_SIZE / PGDIR_SIZE)
+-#endif
+-pmd_t early_pmd[PTRS_PER_PMD * NUM_EARLY_PMDS] __initdata __aligned(PAGE_SIZE);
++pmd_t early_pmd[PTRS_PER_PMD] __initdata __aligned(PAGE_SIZE);
+ pmd_t early_dtb_pmd[PTRS_PER_PMD] __initdata __aligned(PAGE_SIZE);
+ 
+ static pmd_t *__init get_pmd_virt_early(phys_addr_t pa)
+@@ -328,11 +335,9 @@ static pmd_t *get_pmd_virt_late(phys_addr_t pa)
+ 
+ static phys_addr_t __init alloc_pmd_early(uintptr_t va)
+ {
+-	uintptr_t pmd_num;
++	BUG_ON((va - PAGE_OFFSET) >> PGDIR_SHIFT);
+ 
+-	pmd_num = (va - PAGE_OFFSET) >> PGDIR_SHIFT;
+-	BUG_ON(pmd_num >= NUM_EARLY_PMDS);
+-	return (uintptr_t)&early_pmd[pmd_num * PTRS_PER_PMD];
++	return (uintptr_t)early_pmd;
+ }
+ 
+ static phys_addr_t __init alloc_pmd_fixmap(uintptr_t va)
+@@ -450,7 +455,7 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
+ 	uintptr_t va, pa, end_va;
+ 	uintptr_t load_pa = (uintptr_t)(&_start) - LOAD_OFFSET;
+ 	uintptr_t load_sz = (uintptr_t)(&_end) - load_pa;
+-	uintptr_t map_size = best_map_size(load_pa, MAX_EARLY_MAPPING_SIZE);
++	uintptr_t map_size;
+ #ifndef __PAGETABLE_PMD_FOLDED
+ 	pmd_t fix_bmap_spmd, fix_bmap_epmd;
+ #endif
+@@ -462,12 +467,11 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
+ 	 * Enforce boot alignment requirements of RV32 and
+ 	 * RV64 by only allowing PMD or PGD mappings.
+ 	 */
+-	BUG_ON(map_size == PAGE_SIZE);
++	map_size = PMD_SIZE;
+ 
+ 	/* Sanity check alignment and size */
+ 	BUG_ON((PAGE_OFFSET % PGDIR_SIZE) != 0);
+ 	BUG_ON((load_pa % map_size) != 0);
+-	BUG_ON(load_sz > MAX_EARLY_MAPPING_SIZE);
+ 
+ 	pt_ops.alloc_pte = alloc_pte_early;
+ 	pt_ops.get_pte_virt = get_pte_virt_early;
+@@ -678,8 +682,12 @@ static void __init resource_init(void)
+ void __init paging_init(void)
+ {
+ 	setup_vm_final();
+-	sparse_init();
+ 	setup_zero_page();
++}
++
++void __init misc_mem_init(void)
++{
++	sparse_init();
+ 	zone_sizes_init();
+ 	resource_init();
+ }

@@ -14,7 +14,9 @@ This document maps the current Rust backend surface in `server-rust/`.
 - Default HTTP bind: `host: ""`, port `80`, effectively all interfaces.
 - Optional HTTPS: `proto: https`, `port.https`, and configured cert/key.
 - HTTPS mode keeps a restricted loopback HTTP surface for PicoClaw internal
-  routes and redirects normal HTTP clients to HTTPS.
+  routes and redirects normal HTTP clients to HTTPS. The redirect target is
+  taken from `Host` only when it is a host name, an IPv4 address or a bracketed
+  IPv6 address with an optional numeric port; any other value gets `400`.
 
 ## Response Envelope
 
@@ -34,8 +36,13 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET      | `/api/health`              | Implemented; returns Rust backend health.                                                                                                             |
 | POST     | `/api/auth/login`          | Implemented with opaque session token, CSRF token, login lockout, and configurable session duration.                                                  |
 | GET/POST | `/api/auth/setup`          | Implemented for first-account setup flow; GET reports whether setup is required, POST creates the first account only while `/etc/kvm/pwd` is missing. |
-| POST     | `/api/network/wifi`        | Implemented for AP-mode no-auth Wi-Fi flow with AP key verification.                                                                                  |
-| POST     | `/api/network/wifi/verify` | Implemented for AP-mode verification.                                                                                                                 |
+| POST     | `/api/network/wifi`        | AP-mode no-auth Wi-Fi flow with AP key verification; lockout of 5 failures per source and 20 shared, for 10 minutes.                                  |
+| POST     | `/api/network/wifi/verify` | AP-mode verification under the same AP key lockout.                                                                                                   |
+
+On these routes an I/O, configuration or internal failure is reported as
+`{"code": -500, "msg": "internal error"}`; the text, which may name paths or
+configuration detail, goes only to the backend log. `/api/application/current-version`
+is handled the same way. Authenticated routes keep the detailed message.
 
 ## Authenticated REST Routes
 
@@ -45,7 +52,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | -------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
 | POST     | `/api/auth/logout`   | Implemented; revokes current session.                                                                          |
 | GET      | `/api/auth/account`  | Implemented.                                                                                                   |
-| GET/POST | `/api/auth/password` | Implemented; Argon2id writes, legacy verification, password-change session revocation, and root password sync. |
+| GET/POST | `/api/auth/password` | Implemented; the current password is required under the login lockout; root's SHA-512 hash and the Argon2id web account change through one journal, restored at once or at the next start after a failure; legacy verification; password-change session revocation. |
 
 ### Application Updates
 
@@ -53,8 +60,9 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | -------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET      | `/api/application/current-version` | Implemented as an unauthenticated lightweight endpoint for the login screen; reads only the local `/kvmapp/version` and does not query GitHub release metadata.                                                                                                                                         |
 | GET      | `/api/application/version`         | Implemented; reads `/kvmapp/version` and validates signed Hardened GitHub release `latest.json` metadata. When Paranoid firewall mode is active, returns the current version with a blocked update message instead of opening outbound GitHub traffic.                                                  |
-| POST     | `/api/application/update`          | Implemented release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and unexpected backend artifacts, installs `/kvmapp`, and restarts service. Blocked while Paranoid firewall mode is active. |
-| POST     | `/api/application/update/offline`  | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction.                                                                                                                                                                                                         |
+| POST     | `/api/application/update`          | Implemented release path; verifies signed metadata, downloads the Hardened GitHub release archive, validates source URL, verifies sha512, safely extracts, rejects symlinks and unexpected backend artifacts, and hands the verified candidate to the independent installer in the native broker, which publishes it through a frozen backend trial; it replies with the installer's `transactionId` before that broker stops this backend. Refuses metadata that is not newer than the installed version, before the download and again after reauthentication; signed metadata has no expiry or sequence yet. Blocked while Paranoid firewall mode is active. |
+| POST     | `/api/application/update/offline`  | Implemented for `nanokvm_*.tar.gz` and `hardened-nanokvm-kvmapp-*.tar.gz` with safe extraction; hands the candidate to the same installer and replies with its `transactionId`. Both POSTs refuse with no durable record when the installer is not listening. |
+| GET      | `/api/application/update/jobs/{transactionId}` | Authenticated read-only status of one installer transaction: `observed` with its phase (`prepared` to `committed` or `rolled-back`) and whether it is archived, `busy`, or `unknownOrExpired`. The web UI polls it after a submission and again after the login that follows the backend restart. Not an installation health check. |
 | GET/POST | `/api/application/preview`         | Implemented; selects stable latest metadata or preview tag metadata with stable fallback.                                                                                                                                                                                                               |
 
 ### System Updates
@@ -67,21 +75,21 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST   | `/api/system-update/download` | Implemented staging-only; downloads the GitHub release asset, checks size, sha256, sha512, extracts it safely, verifies `manifest.json`, verifies every payload file hash/size/path, and writes `staged.json`. It does not install or reboot. Blocked while Paranoid firewall mode is active.                                                   |
 | POST   | `/api/system-update/install`  | Implemented guarded install; re-verifies staged archive, backs up each target file, applies payload files atomically, writes `/etc/kvm/system-version.json`, writes pending/backup markers, generates `/etc/kvm/system-update-rollback.sh` for init-time recovery, and returns without rebooting.                                               |
 | POST   | `/api/system-update/rollback` | Implemented manual rollback; restores files from the latest backup marker, clears pending/boot-good/rollback-attempt markers, and returns without rebooting.                                                                                                                                                                                    |
-| POST   | `/api/system-update/confirm`  | Implemented manual boot-good confirmation; validates pending version/target against current system identity and basic boot/web-root markers, writes `/etc/kvm/system-update-boot-good.json`, and clears pending marker.                                                                                                                         |
+| POST   | `/api/system-update/confirm`  | Implemented manual boot-good confirmation; validates pending version/target against current system identity and basic boot/web-root markers, writes `/etc/kvm/system-update-boot-good.json`, and clears pending marker. An update that requires a reboot is confirmed only in a later boot: the pending record carries the kernel boot ID of the install (`installBootId`), and the S95 watchdog applies the same check before it auto-confirms.                                                                                                                         |
 
 ### System Log
 
 | Method   | Path                       | Rust Status                                                                                                                                                                                                                                                         |
 | -------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET/POST | `/api/system-log/config`   | Implemented in app `2.0.20`; persists `/etc/kvm/syslog.json`, renders `/etc/default/syslogd` and `/etc/default/klogd`, restarts BusyBox `syslogd`/`klogd`, keeps local logs in tmpfs at `/tmp/hardened-syslog/messages`, and supports UDP remote syslog forwarding. |
-| GET      | `/api/system-log/messages` | Implemented; GUI uses the unified `kind=system` tmpfs syslog tail. Hidden/debug reads remain for `kind=kernel` from the current `dmesg` ring buffer and `kind=backend` from `/tmp/nanokvm-server.log`. Line count is clamped to 1-1000.                             |
+| GET/POST | `/api/system-log/config`   | Implemented in app `2.0.20`; persists `/etc/kvm/syslog.json`, renders `/etc/default/syslogd` and `/etc/default/klogd`, restarts BusyBox `syslogd`/`klogd`, keeps local logs in tmpfs at `/run/hardened-syslog/messages`, and supports UDP remote syslog forwarding. |
+| GET      | `/api/system-log/messages` | Implemented; GUI uses the unified `kind=system` tmpfs syslog tail. Hidden/debug reads remain for `kind=kernel` from the current `dmesg` ring buffer and `kind=backend` from the shared native runtime log `/run/nanokvm-native.log`. Line count is clamped to 1-1000.                             |
 | POST     | `/api/system-log/test`     | Implemented; emits a test syslog message through `/dev/log` so local and remote forwarding paths can be verified.                                                                                                                                                   |
 
 ### System Time
 
 | Method   | Path                    | Rust Status                                                                                                                                                                                                                                                                     |
 | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET/POST | `/api/system/time`      | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo`, writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
+| GET/POST | `/api/system/time`      | Implemented in app `2.0.20`; persists `/etc/kvm/time.json`, validates timezone names against `/usr/share/zoneinfo` (a compiled TZif zone only, never a text table such as `leapseconds`), writes `/etc/localtime`, writes `/etc/ntp.conf`, and starts/stops the managed `S49ntp` service. NTP defaults to enabled with public `pool.ntp.org` servers. |
 | POST     | `/api/system/time/sync` | Implemented; runs `ntpdate -u` against the first configured NTP server, then restarts `ntpd`.                                                                                                                                                                                   |
 
 ### System Firewall
@@ -89,8 +97,8 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | Method | Path                           | Rust Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET    | `/api/system/firewall`         | Implemented in app `2.0.20`; reports persisted firewall mode, effective mode, HTTPS readiness, backend tool availability, local-source policy state, whether H.264 WebRTC is blocked by firewall policy, and current `iptables-save`, `ip6tables-save`, and `nft list ruleset` output.                                                                                                                                                                                                                                                                                                  |
-| POST   | `/api/system/firewall`         | Implemented; accepts `baseline`, `moderate`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Moderate is the default profile and keeps baseline services reachable only from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, and IPv6 loopback sources. Restricted allows local-only HTTPS/SSH plus needed outbound DNS/NTP/syslog/update traffic; H.264 WebRTC UDP is not opened. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. |
-| POST   | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores moderate/previous mode if Restricted or Paranoid is enabled but not confirmed.                                                                                                                                                                                                                                                                                                                                                                      |
+| POST   | `/api/system/firewall`         | Implemented; accepts `baseline`, `moderate`, `restricted`, or `paranoid`, persists `/etc/kvm/firewall.json`, and restarts managed `S40firewall`. Moderate is the default profile and keeps baseline services reachable only from private IPv4, IPv4 link-local/loopback, IPv6 ULA, IPv6 link-local, and IPv6 loopback sources. Restricted allows local-only HTTPS/SSH plus needed outbound DNS/NTP/syslog/update traffic; H.264 WebRTC UDP is not opened. Restricted and Paranoid modes require HTTPS configuration and a successful local HTTPS health check before rules are applied. `S40firewall` replaces each address family in one `iptables-restore` commit into its own `NKVM-INPUT`/`NKVM-OUTPUT` chains, keeps chains that other software owns (such as Tailscale's `ts-*`) together with their jumps, and fails the request when a family is not committed and read back; that family keeps its previous rules. |
+| POST   | `/api/system/firewall/confirm` | Implemented; clears the pending restricted-mode confirmation marker after the GUI remains reachable. A short rollback task restores moderate/previous mode if Restricted or Paranoid is enabled but not confirmed. If the backend stops before that task runs, the next start rolls the unconfirmed change back from its durable record before serving; an unsafe record is kept and still requires recovery.                                                                                                                                                                                                                                                                                                                                                                      |
 
 ### VM, Device, And Settings
 
@@ -98,14 +106,14 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | --------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | GET             | `/api/vm/info`             | Implemented; includes image version, application version, hostname, IP, mDNS, and uptime.                          |
 | GET             | `/api/vm/hardware`         | Implemented.                                                                                                       |
-| GET/POST        | `/api/vm/hostname`         | Implemented.                                                                                                       |
+| GET/POST        | `/api/vm/hostname`         | Implemented. In `/etc/hosts` only whole host names equal to the old hostname are renamed (an empty old name changes nothing); `/etc/hosts` and `/etc/hostname` are replaced atomically under the configuration writer permit. |
 | GET/POST        | `/api/vm/web-title`        | Implemented.                                                                                                       |
-| GET/POST        | `/api/vm/gpio`             | Implemented.                                                                                                       |
+| GET/POST        | `/api/vm/gpio`             | Implemented. A power or reset pulse (50 ms to 5 s) runs in its own task and always releases the line, even after a lost client or at shutdown; an overlapping pulse on the same line is refused (-409). |
 | POST            | `/api/vm/screen`           | Implemented; writes legacy-compatible video mode/resolution/quality/FPS files and coordinates stream mode changes. |
 | GET/POST        | `/api/vm/device/virtual`   | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/oled`             | Implemented.                                                                                                       |
 | GET             | `/api/vm/hdmi`             | Implemented.                                                                                                       |
-| POST            | `/api/vm/hdmi/reset`       | Implemented.                                                                                                       |
+| POST            | `/api/vm/hdmi/reset`       | Implemented. Off, 1 s, on, in a task of its own: a lost client cannot leave HDMI capture off. A capture the user disabled is refused by name and stays disabled; a reset persists no setting. libkvm calls run on a blocking thread. |
 | POST            | `/api/vm/hdmi/enable`      | Implemented.                                                                                                       |
 | POST            | `/api/vm/hdmi/disable`     | Implemented.                                                                                                       |
 | GET             | `/api/vm/ssh`              | Implemented.                                                                                                       |
@@ -119,10 +127,10 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST        | `/api/vm/session-lock`     | Implemented; supports 5, 15, 30, and 60 minute durations and retimes current session.                              |
 | GET/POST        | `/api/vm/memory/limit`     | Implemented.                                                                                                       |
 | GET/POST        | `/api/vm/swap`             | Implemented.                                                                                                       |
-| GET/POST        | `/api/vm/mouse-jiggler`    | Implemented.                                                                                                       |
-| POST            | `/api/vm/tls`              | Implemented; generates self-signed certs when needed and restarts service.                                         |
+| GET/POST        | `/api/vm/mouse-jiggler`    | Implemented. An enabled jiggler resumes when the backend starts; the frozen app trial never starts it.             |
+| POST            | `/api/vm/tls`              | Implemented; enabling keeps `/etc/kvm/server.crt` and `server.key` when either exists (an earlier certificate or the administrator's own) and refuses if they do not load as a matching pair, otherwise publishes a new self-signed pair for loopback, the host name and its `.local` name, key first and each file atomically, and loads it back before switching to HTTPS; then reboots the device. |
 | GET/POST/DELETE | `/api/vm/autostart*`       | Implemented with basename/path validation and size limits.                                                         |
-| GET/POST/DELETE | `/api/vm/script*`          | Implemented with basename/path validation and allowlisted execution.                                               |
+| GET/POST/DELETE | `/api/vm/script*`          | Basename/path validation; upload and run need terminal access and a fresh terminal unlock ticket. A foreground run survives a lost client, ends its process group after 60 s, and keeps 64 KiB per stream while draining the rest. |
 
 ### Video And HID
 
@@ -131,7 +139,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET         | `/api/ws`                       | Implemented HID keyboard/mouse WebSocket plus capture-status events.                                                                                                         |
 | GET         | `/api/stream/mjpeg`             | Implemented through `libkvm` with shared fanout.                                                                                                                             |
 | POST        | `/api/stream/mjpeg/detect`      | Implemented.                                                                                                                                                                 |
-| POST        | `/api/stream/mjpeg/detect/stop` | Implemented.                                                                                                                                                                 |
+| POST        | `/api/stream/mjpeg/detect/stop` | Implemented. Frame detection is paused for the given seconds in a task of its own, so a lost client cannot leave it off. The pause ends at the user's setting (`/detect`), not at a constant; a setting changed during a pause takes effect when the last pause ends. libkvm calls run on a blocking thread. |
 | GET         | `/api/stream/h264/direct`       | Implemented NanoKVM-compatible direct H.264 binary frame WebSocket.                                                                                                          |
 | GET         | `/api/stream/h264`              | Implemented H.264 WebRTC signaling and RTP sample streaming for Baseline/Moderate firewall modes; returns forbidden while Restricted or Paranoid firewall mode is effective. |
 | GET         | `/api/hid/shortcuts`            | Implemented.                                                                                                                                                                 |
@@ -139,7 +147,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET/POST    | `/api/hid/shortcut/leader-key`  | Implemented.                                                                                                                                                                 |
 | GET/POST    | `/api/hid/mode`                 | Implemented.                                                                                                                                                                 |
 | POST        | `/api/hid/reset`                | Implemented.                                                                                                                                                                 |
-| POST        | `/api/hid/paste`                | Implemented.                                                                                                                                                                 |
+| POST        | `/api/hid/paste`                | Implemented. The text is checked against the chosen layout before any key is sent; characters the layout has no key for are refused by name (a carriage return is dropped). German `=` and French `<`/`>` use their own keys. |
 
 ### Storage And Image Download
 
@@ -155,7 +163,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | GET      | `/api/download/image/status`         | Implemented.                                                                                                                                                              |
 | POST     | `/api/download/file`                 | Implemented browser ISO upload with size and path validation.                                                                                                             |
 | GET/POST | `/api/download/image/remote/enabled` | Implemented disabled-by-default remote ISO toggle.                                                                                                                        |
-| POST     | `/api/download/image`                | Implemented guarded remote ISO download with protocol, filename, destination, size, redirect, and ISO signature checks.                                                   |
+| POST     | `/api/download/image`                | Implemented guarded remote ISO download with protocol, filename, destination, size, redirect, and ISO signature checks. The backend follows up to five redirects itself: each hop's host is resolved, every address must be outside loopback, `0.0.0.0/8`, link-local (including cloud metadata) and multicast, and curl connects only to the checked address (`--resolve`). LAN servers stay allowed. curl's `--max-filesize` stops a transfer at 8 GiB also without a Content-Length (curl 8.4.0 or later; the rootfs ships 8.21.0). |
 
 ### Network And Tailscale
 
@@ -164,11 +172,11 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST       | `/api/network/wol`             | Implemented.                                                                  |
 | GET/DELETE | `/api/network/wol/mac`         | Implemented.                                                                  |
 | POST       | `/api/network/wol/mac/name`    | Implemented.                                                                  |
-| GET/POST   | `/api/network/dns`             | Implemented.                                                                  |
+| GET/POST   | `/api/network/dns`             | Implemented. A manual IPv4 address and its router must be hosts of their subnet (not its network or broadcast address), must differ, and a subnet mask must match an address prefix given with it. |
 | GET        | `/api/network/wifi`            | Implemented.                                                                  |
 | POST       | `/api/network/wifi/connect`    | Implemented.                                                                  |
 | POST       | `/api/network/wifi/disconnect` | Implemented.                                                                  |
-| GET/POST   | `/api/extensions/tailscale/*`  | Implemented lifecycle/status/login/install flow with safer command execution. |
+| GET/POST   | `/api/extensions/tailscale/*`  | Implemented lifecycle/status/login/install flow with safer command execution. Install fetches only the pinned Tailscale 1.104.2 static riscv64 archive over HTTPS and keeps it only when its SHA-256 matches the pin ([optional package pins](security-optional-packages.md)). |
 
 ### PicoClaw
 
@@ -178,7 +186,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | POST            | `/api/picoclaw/agent/profile` | Implemented compatibility route.                                                 |
 | GET             | `/api/picoclaw/sessions`      | Implemented session list compatibility; full real-history validation remains.    |
 | GET/DELETE      | `/api/picoclaw/sessions/{id}` | Implemented compatibility shape; real session history behavior needs validation. |
-| GET/POST/DELETE | `/api/picoclaw/runtime/*`     | Implemented runtime status/session/install/uninstall/start/stop flows.           |
+| GET/POST/DELETE | `/api/picoclaw/runtime/*`     | Implemented runtime status/session/install/uninstall/start/stop flows. Install fetches only the pinned v0.2.8 archive over HTTPS (size and SHA-256 in source). |
 | GET             | `/api/picoclaw/gateway/ws`    | Implemented gateway WebSocket relay.                                             |
 | GET             | `/api/picoclaw/screenshot`    | Implemented loopback-only internal route.                                        |
 | POST            | `/api/picoclaw/actions`       | Implemented loopback-only HID action route.                                      |
@@ -193,7 +201,7 @@ as authentication, CSRF, origin, malformed uploads, or internal errors.
 | `/api/vm/terminal`         | PTY shell                                     | Disabled by default, controlled by Terminal menu toggle, authenticated session, Origin validation.              |
 | `/api/stream/h264`         | WebRTC H.264 signaling                        | Authenticated session, Origin validation, slow-client handling, and firewall-mode block in Restricted/Paranoid. |
 | `/api/stream/h264/direct`  | Direct H.264 stream                           | Authenticated session, Origin validation, shared producer/fanout.                                               |
-| `/api/picoclaw/gateway/ws` | PicoClaw runtime gateway                      | Authenticated session, session lock, upstream timeout/message limits.                                           |
+| `/api/picoclaw/gateway/ws` | PicoClaw runtime gateway                      | Authenticated session, Origin validation, session lock, upstream timeout/message limits.                        |
 
 ## Config Fields
 

@@ -5,6 +5,10 @@
 #include <sys/ioctl.h>
 #include <ctype.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <string>
 
 using namespace maix;
@@ -14,7 +18,7 @@ extern kvm_sys_state_t kvm_sys_state;
 extern kvm_oled_state_t kvm_oled_state;
 
 #define RUST_HWMON_FLAG_PATH "/etc/kvm/rust_hwmon_enabled"
-#define RUST_HWMON_STATE_PATH "/tmp/nanokvm-hwmon-state.json"
+#define RUST_HWMON_STATE_PATH "/run/nanokvm-hwmon-state.json"
 #define RUST_HWMON_MAX_AGE_SEC 20
 #define RUST_HWMON_MAX_BYTES 8192
 
@@ -28,16 +32,37 @@ static void rust_hwmon_report_mode(int active)
 	rust_hwmon_mode_reported = active;
 }
 
-static int rust_hwmon_state_is_fresh(void)
+static int read_hwmon_snapshot_file(const char *path, char *buf, size_t buf_len)
 {
 	struct stat st;
-	time_t now;
-
-	if(stat(RUST_HWMON_STATE_PATH, &st) != 0) return 0;
-	now = ::time(NULL);
-	if(now == (time_t)-1) return 1;
-	if(st.st_mtime > now) return 1;
-	return (now - st.st_mtime) <= RUST_HWMON_MAX_AGE_SEC;
+	if(buf_len < 2) return 0;
+	buf[0] = 0;
+	const int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+	if(fd < 0) return 0;
+	const time_t now = ::time(NULL);
+	if(fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+	   (st.st_mode & 0022) != 0 || st.st_size <= 0 ||
+	   st.st_size >= static_cast<off_t>(buf_len) || st.st_size > RUST_HWMON_MAX_BYTES ||
+	   now == static_cast<time_t>(-1) || st.st_mtime > now ||
+	   now - st.st_mtime > RUST_HWMON_MAX_AGE_SEC){
+		close(fd);
+		return 0;
+	}
+	size_t used = 0;
+	const size_t expected = static_cast<size_t>(st.st_size);
+	while(used < expected){
+		const ssize_t got = read(fd, buf + used, expected - used);
+		if(got < 0 && errno == EINTR) continue;
+		if(got <= 0){
+			close(fd);
+			buf[0] = 0;
+			return 0;
+		}
+		used += static_cast<size_t>(got);
+	}
+	close(fd);
+	buf[used] = 0;
+	return memchr(buf, 0, used) == NULL;
 }
 
 static int read_text_file(const char *path, char *buf, size_t buf_len)
@@ -64,11 +89,7 @@ static int load_rust_hwmon_snapshot(char *buf, size_t buf_len)
 		rust_hwmon_mode_reported = -1;
 		return 0;
 	}
-	if(!rust_hwmon_state_is_fresh()){
-		rust_hwmon_report_mode(0);
-		return 0;
-	}
-	if(!read_text_file(RUST_HWMON_STATE_PATH, buf, buf_len)){
+	if(!read_hwmon_snapshot_file(RUST_HWMON_STATE_PATH, buf, buf_len)){
 		rust_hwmon_report_mode(0);
 		return 0;
 	}
@@ -377,7 +398,7 @@ int get_nic_state(const char* interface_name)
 	int sock;
 	struct ifreq ifr;
 	int ret = NIC_STATE_NO_EXIST;
-	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+	if ((sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
 		return ret;
 	}
 	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface_name);

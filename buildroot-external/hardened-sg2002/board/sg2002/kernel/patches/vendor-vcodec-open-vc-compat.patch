@@ -1,0 +1,58 @@
+diff --git a/osdrv/interdrv/v2/vcodec/cvi_vcodec.c b/osdrv/interdrv/v2/vcodec/cvi_vcodec.c
+index edfca1f..2a2a4bc 100644
+--- a/osdrv/interdrv/v2/vcodec/cvi_vcodec.c
++++ b/osdrv/interdrv/v2/vcodec/cvi_vcodec.c
+@@ -16,6 +16,7 @@
+ #include <linux/list.h>
+ #include <linux/mm.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of_address.h>
+ #include <linux/of_graph.h>
+ #include <linux/of_device.h>
+@@ -622,5 +623,12 @@ int vpu_get_common_memory(vpudrv_buffer_t *p_vdb)
+ }
+ EXPORT_SYMBOL(vpu_get_common_memory);
++#else
++void vpu_set_common_memory(unsigned long core, vpudrv_buffer_t *p_vdb)
++{
++	(void)core;
++	memcpy(&vcodec_dev.s_common_memory, p_vdb, sizeof(vpudrv_buffer_t));
++}
++EXPORT_SYMBOL(vpu_set_common_memory);
+ #endif
+ 
+ // VDI_IOCTL_OPEN_INSTANCE
+@@ -1600,6 +1609,32 @@ static int vpu_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++static DEFINE_MUTEX(vcodec_mutex);
++
++void vcodec_lock(void)
++{
++	mutex_lock(&vcodec_mutex);
++}
++EXPORT_SYMBOL(vcodec_lock);
++
++void vcodec_unlock(void)
++{
++	mutex_unlock(&vcodec_mutex);
++}
++EXPORT_SYMBOL(vcodec_unlock);
++
++int vcodec_trylock(void)
++{
++	return mutex_trylock(&vcodec_mutex);
++}
++EXPORT_SYMBOL(vcodec_trylock);
++
++int vcodec_is_locked(void)
++{
++	return mutex_is_locked(&vcodec_mutex);
++}
++EXPORT_SYMBOL(vcodec_is_locked);
++
+ #ifdef CONFIG_PM
+ #define W4_MAX_CODE_BUF_SIZE (512 * 1024)
+ #define W4_CMD_INIT_VPU (0x0001)

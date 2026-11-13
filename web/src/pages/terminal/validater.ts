@@ -44,77 +44,62 @@ const ALLOWED_FLOW_CONTROLS = ['n', 'h', 's', 'x', 'none', 'soft', 'hard'];
 const ALLOWED_DATA_BITS = ['5', '6', '7', '8'];
 const ALLOWED_STOP_BITS = ['1', '2'];
 
-const PROHIBITED_PORT_CHARS_REGEX = /[;&|`$()<>!*?"'\s\\]/;
+const PORT_REGEX = /^\/dev\/[A-Za-z0-9._-]+$/;
 
-export function validatePicocomParameters(params: PicocomParameters) {
-  if (!params.port || params.port.trim() === '') {
-    return false;
+function hasControlChar(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
   }
+  return false;
+}
 
-  const port = params.port.trim();
-  if (!port.startsWith('/')) {
-    return false;
-  }
-  if (port.includes('..')) {
-    return false;
-  }
-  if (PROHIBITED_PORT_CHARS_REGEX.test(port)) {
-    return false;
-  }
-  if (!/^\/dev\/[a-zA-Z0-9.-_]+$/.test(port)) {
-    return false;
-  }
+function canonicalValue(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  if (value === '' || hasControlChar(value)) return null;
+  if (value !== value.trim()) return null;
+  return value;
+}
 
-  if (params.baud !== undefined && params.baud !== null && String(params.baud).trim() !== '') {
-    const baudStr = String(params.baud).trim();
-    if (!ALLOWED_BAUD_RATES.includes(baudStr)) {
-      return false;
-    }
-  }
+function optionalValue(
+  value: string | null | undefined,
+  allowed: readonly string[],
+  fallback: string
+): string | null {
+  if (value === null || value === undefined || value === '') return fallback;
+  const canonical = canonicalValue(value);
+  if (canonical === null) return null;
+  const normalized = canonical.toLowerCase();
+  return allowed.includes(normalized) ? normalized : null;
+}
 
+export function buildPicocomCommand(params: PicocomParameters): string | null {
+  const port = canonicalValue(params.port);
   if (
-    params.parity !== undefined &&
-    params.parity !== null &&
-    String(params.parity).trim() !== ''
+    port === null ||
+    !port.startsWith('/dev/') ||
+    port.includes('..') ||
+    !PORT_REGEX.test(port)
   ) {
-    const parityStr = String(params.parity).trim().toLowerCase();
-    if (!ALLOWED_PARITIES.includes(parityStr)) {
-      return false;
-    }
+    return null;
   }
 
-  if (
-    params.flowControl !== undefined &&
-    params.flowControl !== null &&
-    String(params.flowControl).trim() !== ''
-  ) {
-    const flowStr = String(params.flowControl).trim().toLowerCase();
-    if (!ALLOWED_FLOW_CONTROLS.includes(flowStr)) {
-      return false;
-    }
+  const baud = canonicalValue(params.baud);
+  if (baud === null || !ALLOWED_BAUD_RATES.includes(baud)) {
+    return null;
   }
 
-  if (
-    params.dataBits !== undefined &&
-    params.dataBits !== null &&
-    String(params.dataBits).trim() !== ''
-  ) {
-    const dataBitsStr = String(params.dataBits).trim();
-    if (!ALLOWED_DATA_BITS.includes(dataBitsStr)) {
-      return false;
-    }
+  const parity = optionalValue(params.parity, ALLOWED_PARITIES, 'none');
+  const flowControl = optionalValue(params.flowControl, ALLOWED_FLOW_CONTROLS, 'none');
+  const dataBits = optionalValue(params.dataBits, ALLOWED_DATA_BITS, '8');
+  const stopBits = optionalValue(params.stopBits, ALLOWED_STOP_BITS, '1');
+  if (parity === null || flowControl === null || dataBits === null || stopBits === null) {
+    return null;
   }
 
-  if (
-    params.stopBits !== undefined &&
-    params.stopBits !== null &&
-    String(params.stopBits).trim() !== ''
-  ) {
-    const stopBitsStr = String(params.stopBits).trim();
-    if (!ALLOWED_STOP_BITS.includes(stopBitsStr)) {
-      return false;
-    }
-  }
+  return `picocom ${port} --baud ${baud} --parity ${parity} --flow ${flowControl} --databits ${dataBits} --stopbits ${stopBits}`;
+}
 
-  return true;
+export function validatePicocomParameters(params: PicocomParameters): boolean {
+  return buildPicocomCommand(params) !== null;
 }

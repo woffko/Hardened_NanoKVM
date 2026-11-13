@@ -3,9 +3,14 @@
 # avahi-daemon init script
 
 DAEMON=/usr/sbin/avahi-daemon
+SOCKET=/run/avahi-daemon/socket
 case "$1" in
     start)
 	$DAEMON -c || $DAEMON -D
+	# CVE-2025-59529 affects the local simple-protocol socket. NanoKVM has
+	# no unprivileged consumer, so restrict the socket to root even when the
+	# daemon's internal client limit is bypassed.
+	[ ! -S "$SOCKET" ] || chmod 0600 "$SOCKET"
 	;;
     stop)
 	$DAEMON -c && $DAEMON -k

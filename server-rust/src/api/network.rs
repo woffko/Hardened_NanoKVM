@@ -1,30 +1,46 @@
-use axum::{Json, http::HeaderMap, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{ConnectInfo, State},
+    http::HeaderMap,
+    response::IntoResponse,
+};
 use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::http::tls::ClientAddr;
 use crate::{
     AppError, Result,
     error::ApiResponse,
+    state::AppState,
     system::command::{AllowedCommand, run_allowed},
+    update::state_writers::ConfigPermit,
 };
 
 const WOL_MAC_FILE: &str = "/etc/kvm/cache/wol";
 const WIFI_EXIST_FILE: &str = "/etc/kvm/wifi_exist";
-const WIFI_AP_MODE_FILE: &str = "/tmp/wifiap";
+/// Present while the setup access point runs. It opens the Wi-Fi routes that
+/// need no login, so it lives where only root can create it: in `/tmp`, any
+/// local account could.
+const WIFI_AP_MODE_FILE: &str = "/run/nanokvm-wifiap";
 const WIFI_SSID_FILE: &str = "/etc/kvm/wifi.ssid";
 const WIFI_PASSWORD_FILE: &str = "/etc/kvm/wifi.pass";
 const WIFI_CONNECT_FILE: &str = "/kvmapp/kvm/wifi_try_connect";
 const WIFI_STATE_FILE: &str = "/kvmapp/kvm/wifi_state";
 const WIFI_AP_PASS_FILE: &str = "/kvmapp/kvm/ap.pass";
-const MAX_WIFI_SSID_BYTES: usize = 128;
-const MAX_WIFI_PASSWORD_BYTES: usize = 256;
+/// 802.11 limits an SSID to 32 bytes.
+const MAX_WIFI_SSID_BYTES: usize = 32;
+/// A WPA2 passphrase, as `wpa_passphrase` accepts it: 8 to 63 bytes.
+const MIN_WIFI_PASSWORD_BYTES: usize = 8;
+const MAX_WIFI_PASSWORD_BYTES: usize = 63;
 
 const DNS_MODE_MANUAL: &str = "manual";
 const DNS_MODE_DHCP: &str = "dhcp";
@@ -55,6 +71,46 @@ const DHCPV6_CLIENT_PATHS: &[&str] = &[
     "/usr/bin/udhcpc6",
     "/bin/udhcpc6",
 ];
+
+#[derive(Default)]
+struct NetworkPaths {
+    #[cfg(test)]
+    root: Option<PathBuf>,
+}
+
+impl NetworkPaths {
+    fn for_writer(_writer: &ConfigPermit) -> Self {
+        #[cfg(test)]
+        if let Some(root) = _writer.fixture_config_path().and_then(Path::parent) {
+            return Self {
+                root: Some(root.to_path_buf()),
+            };
+        }
+        Self::default()
+    }
+
+    // Every caller supplies a fixed source constant, never a request path.
+    fn path(&self, fixed: &str) -> PathBuf {
+        #[cfg(test)]
+        if let Some(root) = &self.root {
+            return root.join(fixed.trim_start_matches('/'));
+        }
+        fixed.into()
+    }
+}
+
+fn writer_command(_writer: &ConfigPermit, production: AllowedCommand) -> AllowedCommand {
+    #[cfg(test)]
+    if let Some(root) = _writer.fixture_config_path().and_then(Path::parent) {
+        let name = match production {
+            AllowedCommand::ServiceEth => "network-eth",
+            AllowedCommand::ServiceWifi => "network-wifi",
+            _ => unreachable!("network writer command"),
+        };
+        return AllowedCommand::CustomForTest(root.join(name));
+    }
+    production
+}
 
 #[derive(Debug, Deserialize)]
 pub struct WolReq {
@@ -185,14 +241,19 @@ struct ResolvConfig {
     search_domains: Vec<String>,
 }
 
-pub async fn wake_on_lan(Json(req): Json<WolReq>) -> Result<impl IntoResponse> {
+pub async fn wake_on_lan(
+    State(state): State<AppState>,
+    Json(req): Json<WolReq>,
+) -> Result<impl IntoResponse> {
     let mac = parse_mac(&req.mac)?;
-    let output = run_allowed(
-        AllowedCommand::EtherWake,
-        ["-b", mac.as_str()],
-        Duration::from_secs(5),
-    )
-    .await?;
+    dispatch_wol(state, mac, AllowedCommand::EtherWake).await?;
+    Ok(Json(ApiResponse::<()>::ok_empty()))
+}
+
+// The target action does not require local configuration admission. Only its
+// optional history is a preserved-state writer; a paused cache must not gate WOL.
+async fn dispatch_wol(state: AppState, mac: String, command: AllowedCommand) -> Result<()> {
+    let output = run_allowed(command, ["-b", mac.as_str()], Duration::from_secs(5)).await?;
     if output.status != 0 {
         return Err(AppError::Internal(command_error(
             "wake on lan failed",
@@ -200,78 +261,116 @@ pub async fn wake_on_lan(Json(req): Json<WolReq>) -> Result<impl IntoResponse> {
         )));
     }
 
-    if let Err(err) = save_mac(&mac) {
+    let saved = match state.writers.configuration() {
+        Ok(writer) => {
+            writer
+                .run(move |writer| async move {
+                    writer
+                        .blocking(move |writer| save_mac(&NetworkPaths::for_writer(writer), &mac))
+                        .await
+                })
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(err) = saved {
         tracing::warn!(error = %err, "failed to persist WOL MAC");
     }
-
-    Ok(Json(ApiResponse::<()>::ok_empty()))
+    Ok(())
 }
 
 pub async fn get_wol_macs() -> Result<impl IntoResponse> {
     Ok(Json(ApiResponse::ok(WolMacsRsp {
-        macs: read_wol_macs().unwrap_or_default(),
+        macs: read_wol_macs(&NetworkPaths::default()).unwrap_or_default(),
     })))
 }
 
-pub async fn delete_wol_mac(Json(req): Json<WolReq>) -> Result<impl IntoResponse> {
+pub async fn delete_wol_mac(
+    State(state): State<AppState>,
+    Json(req): Json<WolReq>,
+) -> Result<impl IntoResponse> {
     let mac = parse_mac(&req.mac)?;
-    let macs = read_wol_macs().unwrap_or_default();
-    let mut next = Vec::new();
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    let macs = read_wol_macs(&paths)?;
+                    let mut next = Vec::new();
 
-    for line in macs {
-        let Some((item_mac, item_name)) = split_wol_mac_line(&line) else {
-            continue;
-        };
-        let normalized = parse_mac(&item_mac).unwrap_or(item_mac);
-        if normalized != mac {
-            next.push(format_wol_mac_line(&normalized, &item_name));
-        }
-    }
+                    for line in macs {
+                        let Some((item_mac, item_name)) = split_wol_mac_line(&line) else {
+                            continue;
+                        };
+                        let normalized = parse_mac(&item_mac).unwrap_or(item_mac);
+                        if normalized != mac {
+                            next.push(format_wol_mac_line(&normalized, &item_name));
+                        }
+                    }
 
-    write_wol_macs(&next)?;
+                    write_wol_macs(&paths, &next)
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn set_wol_mac_name(Json(req): Json<SetWolMacNameReq>) -> Result<impl IntoResponse> {
+pub async fn set_wol_mac_name(
+    State(state): State<AppState>,
+    Json(req): Json<SetWolMacNameReq>,
+) -> Result<impl IntoResponse> {
     let mac = parse_mac(&req.mac)?;
     let name = sanitize_wol_mac_name(&req.name);
     if name.is_empty() {
         return Err(AppError::BadRequest("invalid arguments".to_string()));
     }
 
-    let macs = read_wol_macs()?;
-    let mut next = Vec::new();
-    let mut found = false;
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    let macs = read_wol_macs(&paths)?;
+                    let mut next = Vec::new();
+                    let mut found = false;
 
-    for line in macs {
-        let Some((item_mac, item_name)) = split_wol_mac_line(&line) else {
-            continue;
-        };
-        let normalized = parse_mac(&item_mac).unwrap_or(item_mac);
-        if normalized == mac {
-            next.push(format_wol_mac_line(&normalized, &name));
-            found = true;
-        } else {
-            next.push(format_wol_mac_line(&normalized, &item_name));
-        }
-    }
+                    for line in macs {
+                        let Some((item_mac, item_name)) = split_wol_mac_line(&line) else {
+                            continue;
+                        };
+                        let normalized = parse_mac(&item_mac).unwrap_or(item_mac);
+                        if normalized == mac {
+                            next.push(format_wol_mac_line(&normalized, &name));
+                            found = true;
+                        } else {
+                            next.push(format_wol_mac_line(&normalized, &item_name));
+                        }
+                    }
 
-    if !found {
-        return Err(AppError::BadRequest("write failed".to_string()));
-    }
+                    if !found {
+                        return Err(AppError::BadRequest("write failed".to_string()));
+                    }
 
-    write_wol_macs(&next)?;
+                    write_wol_macs(&paths, &next)
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
 pub async fn get_dns() -> Result<impl IntoResponse> {
+    let paths = NetworkPaths::default();
     let static_config = read_static_network_config().unwrap_or_default();
     let mode = if static_config.is_some() {
         DNS_MODE_MANUAL.to_string()
     } else {
-        current_dns_mode()
+        current_dns_mode(&paths)
     };
-    let mut servers = read_manual_dns_servers();
+    let mut servers = read_manual_dns_servers(&paths);
     if servers.is_empty() {
         servers = parse_resolv_conf(BOOT_RESOLV_FILE).unwrap_or_default();
     }
@@ -280,7 +379,7 @@ pub async fn get_dns() -> Result<impl IntoResponse> {
     }
 
     let effective = parse_resolv_conf(ETC_RESOLV_FILE).unwrap_or_default();
-    let dhcp_config = read_dhcp_resolv_config(can_fallback_effective_for_dhcp())
+    let dhcp_config = read_dhcp_resolv_config(&paths, can_fallback_effective_for_dhcp(&paths))
         .unwrap_or_else(|_| ResolvConfig::default());
 
     Ok(Json(ApiResponse::ok(DnsRsp {
@@ -293,12 +392,21 @@ pub async fn get_dns() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_dns(Json(req): Json<SetDnsReq>) -> Result<impl IntoResponse> {
-    match req.mode.as_str() {
-        DNS_MODE_MANUAL => set_manual_network(&req).await?,
-        DNS_MODE_DHCP => set_dhcp_network().await?,
-        _ => return Err(AppError::BadRequest("invalid dns mode".to_string())),
-    }
+pub async fn set_dns(
+    State(state): State<AppState>,
+    Json(req): Json<SetDnsReq>,
+) -> Result<impl IntoResponse> {
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            match req.mode.as_str() {
+                DNS_MODE_MANUAL => set_manual_network(&writer, req).await?,
+                DNS_MODE_DHCP => set_dhcp_network(&writer).await?,
+                _ => return Err(AppError::BadRequest("invalid dns mode".to_string())),
+            }
+            Ok(())
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -307,7 +415,7 @@ pub async fn get_ipv6() -> Result<impl IntoResponse> {
     let mode = current_ipv6_mode();
     let addresses = get_ipv6_addresses(DEFAULT_ETH_INTERFACE);
     let active = ipv6_interface_enabled(DEFAULT_ETH_INTERFACE) && !addresses.is_empty();
-    let (client_available, client_path) = dhcpv6_client_status();
+    let (client_available, client_path) = dhcpv6_client_status(&NetworkPaths::default());
     let gateway = get_default_ipv6_gateway(DEFAULT_ETH_INTERFACE).await;
     let config = read_ipv6_static_config().unwrap_or_default();
     let message = ipv6_status_message(&mode, active, client_available);
@@ -326,35 +434,48 @@ pub async fn get_ipv6() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_ipv6(Json(req): Json<SetIpv6Req>) -> Result<impl IntoResponse> {
+pub async fn set_ipv6(
+    State(state): State<AppState>,
+    Json(req): Json<SetIpv6Req>,
+) -> Result<impl IntoResponse> {
     let mode = normalize_ipv6_mode(&req.mode)?;
-
-    match mode.as_str() {
-        IPV6_MODE_DISABLED | IPV6_MODE_SLAAC => {
-            remove_file_if_exists(IPV6_CONFIG_FILE)?;
-        }
-        IPV6_MODE_DHCPV6 => {
-            if !dhcpv6_client_status().0 {
-                return Err(AppError::BadRequest(
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    match mode.as_str() {
+                        IPV6_MODE_DISABLED | IPV6_MODE_SLAAC => {
+                            remove_file_if_exists(paths.path(IPV6_CONFIG_FILE))?;
+                        }
+                        IPV6_MODE_DHCPV6 => {
+                            if !dhcpv6_client_status(&paths).0 {
+                                return Err(AppError::BadRequest(
                     "DHCPv6 client is not installed; install the matching raw system update first"
                         .to_string(),
                 ));
-            }
-            remove_file_if_exists(IPV6_CONFIG_FILE)?;
-        }
-        IPV6_MODE_MANUAL => {
-            let config = validate_ipv6_static_config(&req)?;
-            write_ipv6_static_config(&config)?;
-        }
-        _ => unreachable!("validated IPv6 mode"),
-    }
+                            }
+                            remove_file_if_exists(paths.path(IPV6_CONFIG_FILE))?;
+                        }
+                        IPV6_MODE_MANUAL => {
+                            let config = validate_ipv6_static_config(&req)?;
+                            write_ipv6_static_config(&paths, &config)?;
+                        }
+                        _ => unreachable!("validated IPv6 mode"),
+                    }
 
-    write_file(
-        Path::new(IPV6_MODE_FILE),
-        format!("{mode}\n").as_bytes(),
-        0o644,
-    )?;
-    restart_ethernet().await?;
+                    write_file(
+                        &paths.path(IPV6_MODE_FILE),
+                        format!("{mode}\n").as_bytes(),
+                        0o644,
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            restart_ethernet(&writer).await
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -390,26 +511,69 @@ pub async fn get_wifi() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn connect_wifi(Json(req): Json<ConnectWifiReq>) -> Result<impl IntoResponse> {
-    if !path_exists(WIFI_EXIST_FILE) {
-        return Err(AppError::BadRequest("wifi is not supported".to_string()));
-    }
-    if path_exists(WIFI_AP_MODE_FILE) {
-        return Err(AppError::BadRequest("wifi is in AP setup mode".to_string()));
-    }
-    let ssid = validate_wifi_ssid(&req.ssid)?;
-    let password = validate_wifi_password(&req.password)?;
+pub async fn connect_wifi(
+    State(state): State<AppState>,
+    Json(req): Json<ConnectWifiReq>,
+) -> Result<impl IntoResponse> {
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    if !paths.path(WIFI_EXIST_FILE).exists() {
+                        return Err(AppError::BadRequest("wifi is not supported".to_string()));
+                    }
+                    if paths.path(WIFI_AP_MODE_FILE).exists() {
+                        return Err(AppError::BadRequest("wifi is in AP setup mode".to_string()));
+                    }
+                    let ssid = validate_wifi_ssid(&req.ssid)?;
+                    let password = validate_wifi_password(&req.password)?;
 
-    write_wifi_credentials(&ssid, &password)?;
-    remove_file_if_exists(WIFI_CONNECT_FILE)?;
-    restart_wifi_after_web_config().await?;
+                    write_wifi_credentials(&paths, &ssid, &password)?;
+                    remove_file_if_exists(paths.path(WIFI_CONNECT_FILE))
+                })
+                .await?;
+            restart_wifi_after_web_config(&writer).await
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn verify_ap_login(headers: HeaderMap) -> Result<impl IntoResponse> {
-    ensure_wifi_ap_mode()?;
-    if !verify_ap_key(&headers) {
+// The AP key gates unauthenticated provisioning and has few possible values;
+// a locked source or an exhausted shared budget is refused before checking it.
+async fn ap_key_locked(state: &AppState, source: IpAddr) -> Result<()> {
+    if state.ap_key_limiter.write().await.check(source) {
+        return Err(AppError::RateLimited(
+            "too many AP key attempts; try again later".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn record_ap_key(state: &AppState, source: IpAddr, accepted: bool) {
+    let mut limiter = state.ap_key_limiter.write().await;
+    if accepted {
+        limiter.record_success(source);
+    } else {
+        limiter.record_failure(source);
+    }
+}
+
+pub async fn verify_ap_login(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    let paths = NetworkPaths::default();
+    ensure_wifi_ap_mode(&paths)?;
+    ensure_wifi_ap_context(&paths, addr)?;
+    let source = addr.0.ip();
+    ap_key_locked(&state, source).await?;
+    let accepted = verify_ap_key(&paths, &headers);
+    record_ap_key(&state, source, accepted).await;
+    if !accepted {
         return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
     }
 
@@ -417,57 +581,145 @@ pub async fn verify_ap_login(headers: HeaderMap) -> Result<impl IntoResponse> {
 }
 
 pub async fn connect_wifi_no_auth(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<ClientAddr>,
     headers: HeaderMap,
     Json(req): Json<ConnectWifiReq>,
 ) -> Result<impl IntoResponse> {
-    ensure_wifi_ap_mode()?;
-    if !verify_ap_key(&headers) {
+    let source = addr.0.ip();
+    ap_key_locked(&state, source).await?;
+    let writer = state.writers.configuration()?;
+    let accepted = writer
+        .run(move |writer| async move {
+            writer
+                .blocking(move |writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    ensure_wifi_ap_mode(&paths)?;
+                    ensure_wifi_ap_context(&paths, addr)?;
+                    if !verify_ap_key(&paths, &headers) {
+                        return Ok(false);
+                    }
+                    let ssid = validate_wifi_ssid(&req.ssid)?;
+                    let password = validate_wifi_password(&req.password)?;
+                    // This publishes a request for the independent native state machine. It
+                    // does not own that consumer or assert association/IP completion.
+                    write_wifi_connect_files(&paths, &ssid, &password)?;
+                    Ok(true)
+                })
+                .await
+        })
+        .await?;
+    record_ap_key(&state, source, accepted).await;
+    if !accepted {
         return Ok(Json(ApiResponse::<()>::err(-4, "unauthorized")));
     }
 
-    let ssid = validate_wifi_ssid(&req.ssid)?;
-    let password = validate_wifi_password(&req.password)?;
-    write_wifi_connect_files(&ssid, &password)?;
-
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-pub async fn disconnect_wifi() -> Result<impl IntoResponse> {
-    if !path_exists(WIFI_EXIST_FILE) {
-        return Err(AppError::BadRequest("wifi is not supported".to_string()));
-    }
+pub async fn disconnect_wifi(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let writer = state.writers.configuration()?;
+    writer
+        .run(move |writer| async move {
+            writer
+                .blocking(|writer| {
+                    if !NetworkPaths::for_writer(writer)
+                        .path(WIFI_EXIST_FILE)
+                        .exists()
+                    {
+                        return Err(AppError::BadRequest("wifi is not supported".to_string()));
+                    }
+                    Ok(())
+                })
+                .await?;
+            let output = writer
+                .command(
+                    writer_command(&writer, AllowedCommand::ServiceWifi),
+                    ["stop"],
+                    Duration::from_secs(15),
+                )
+                .await?;
+            if output.status != 0 {
+                return Err(AppError::Internal(command_error(
+                    "failed to stop wifi",
+                    output,
+                )));
+            }
 
-    let output = run_allowed(
-        AllowedCommand::ServiceWifi,
-        ["stop"],
-        Duration::from_secs(15),
-    )
-    .await?;
-    if output.status != 0 {
-        return Err(AppError::Internal(command_error(
-            "failed to stop wifi",
-            output,
-        )));
-    }
-
-    remove_file_if_exists(WIFI_SSID_FILE)?;
-    remove_file_if_exists(WIFI_PASSWORD_FILE)?;
+            writer
+                .blocking(|writer| {
+                    let paths = NetworkPaths::for_writer(writer);
+                    remove_file_if_exists(paths.path(WIFI_SSID_FILE))?;
+                    remove_file_if_exists(paths.path(WIFI_PASSWORD_FILE))
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
-fn ensure_wifi_ap_mode() -> Result<()> {
-    if !path_exists(WIFI_EXIST_FILE) || !path_exists(WIFI_AP_MODE_FILE) {
+fn ensure_wifi_ap_mode(paths: &NetworkPaths) -> Result<()> {
+    if !paths.path(WIFI_EXIST_FILE).exists() || !paths.path(WIFI_AP_MODE_FILE).exists() {
         return Err(AppError::BadRequest("invalid mode".to_string()));
     }
     Ok(())
 }
 
-fn verify_ap_key(headers: &HeaderMap) -> bool {
+fn ensure_wifi_ap_context(paths: &NetworkPaths, addr: ClientAddr) -> Result<()> {
+    let invalid = || AppError::BadRequest("invalid AP connection context".to_string());
+    let flag = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(paths.path(WIFI_AP_MODE_FILE))
+        .map_err(|_| invalid())?;
+    let metadata = flag.metadata().map_err(|_| invalid())?;
+    let owner = 0;
+    #[cfg(test)]
+    let owner = if paths.root.is_some() {
+        nix::unistd::geteuid().as_raw()
+    } else {
+        owner
+    };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > 16
+    {
+        return Err(invalid());
+    }
+    let mut value = String::new();
+    flag.take(17)
+        .read_to_string(&mut value)
+        .map_err(|_| invalid())?;
+    if value.len() > 16 {
+        return Err(invalid());
+    }
+    let ap: Ipv4Addr = value.trim().parse().map_err(|_| invalid())?;
+    let Some(local) = addr.1 else {
+        return Err(invalid());
+    };
+    let (IpAddr::V4(local), IpAddr::V4(peer)) = (local.ip(), addr.0.ip()) else {
+        return Err(invalid());
+    };
+    let ap_bytes = ap.octets();
+    let peer_bytes = peer.octets();
+    if ap_bytes[0] != 10
+        || ap_bytes[3] != 1
+        || local != ap
+        || peer_bytes[..3] != ap_bytes[..3]
+        || matches!(peer_bytes[3], 0 | 1 | 255)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn verify_ap_key(paths: &NetworkPaths, headers: &HeaderMap) -> bool {
     let provided = headers
         .get("x-ap-key")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let expected = fs::read_to_string(WIFI_AP_PASS_FILE)
+    let expected = fs::read_to_string(paths.path(WIFI_AP_PASS_FILE))
         .map(|value| normalize_wifi_secret(&value))
         .unwrap_or_default();
     !provided.is_empty() && !expected.is_empty() && constant_time_eq(provided, &expected)
@@ -524,8 +776,10 @@ fn validate_wifi_ssid(ssid: &str) -> Result<String> {
     Ok(ssid.to_string())
 }
 
+// Rejected before anything is written, so a value the supplicant would refuse
+// can no longer replace working credentials.
 fn validate_wifi_password(password: &str) -> Result<String> {
-    if password.is_empty()
+    if password.len() < MIN_WIFI_PASSWORD_BYTES
         || password.len() > MAX_WIFI_PASSWORD_BYTES
         || password.chars().any(char::is_control)
     {
@@ -534,27 +788,28 @@ fn validate_wifi_password(password: &str) -> Result<String> {
     Ok(password.to_string())
 }
 
-fn write_wifi_connect_files(ssid: &str, password: &str) -> Result<()> {
-    write_wifi_credentials(ssid, password)?;
-    write_wifi_connect_marker()
+fn write_wifi_connect_files(paths: &NetworkPaths, ssid: &str, password: &str) -> Result<()> {
+    write_wifi_credentials(paths, ssid, password)?;
+    write_wifi_connect_marker(paths)
 }
 
-fn write_wifi_credentials(ssid: &str, password: &str) -> Result<()> {
-    write_file(Path::new(WIFI_SSID_FILE), ssid.as_bytes(), 0o644)?;
-    write_file(Path::new(WIFI_PASSWORD_FILE), password.as_bytes(), 0o600)
+fn write_wifi_credentials(paths: &NetworkPaths, ssid: &str, password: &str) -> Result<()> {
+    write_file(&paths.path(WIFI_SSID_FILE), ssid.as_bytes(), 0o600)?;
+    write_file(&paths.path(WIFI_PASSWORD_FILE), password.as_bytes(), 0o600)
 }
 
-fn write_wifi_connect_marker() -> Result<()> {
-    write_file(Path::new(WIFI_CONNECT_FILE), &[], 0o644)
+fn write_wifi_connect_marker(paths: &NetworkPaths) -> Result<()> {
+    write_file(&paths.path(WIFI_CONNECT_FILE), &[], 0o644)
 }
 
-async fn restart_wifi_after_web_config() -> Result<()> {
-    let output = run_allowed(
-        AllowedCommand::ServiceWifi,
-        ["restart"],
-        Duration::from_secs(20),
-    )
-    .await?;
+async fn restart_wifi_after_web_config(writer: &ConfigPermit) -> Result<()> {
+    let output = writer
+        .command(
+            writer_command(writer, AllowedCommand::ServiceWifi),
+            ["restart"],
+            Duration::from_secs(20),
+        )
+        .await?;
     if output.status != 0 {
         return Err(AppError::Internal(command_error(
             "failed to restart wifi",
@@ -568,7 +823,7 @@ fn normalize_wifi_secret(content: &str) -> String {
     content.replace(['\r', '\n'], "")
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
     let max_len = a.len().max(b.len());
@@ -581,27 +836,22 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn save_mac(mac: &str) -> Result<()> {
-    if is_mac_saved(mac) {
-        return Ok(());
-    }
-
-    let mut macs = read_wol_macs().unwrap_or_default();
-    macs.push(mac.to_string());
-    write_wol_macs(&macs)
-}
-
-fn is_mac_saved(mac: &str) -> bool {
-    read_wol_macs()
-        .unwrap_or_default()
+fn save_mac(paths: &NetworkPaths, mac: &str) -> Result<()> {
+    let mut macs = read_wol_macs(paths)?;
+    if macs
         .iter()
         .filter_map(|line| split_wol_mac_line(line))
         .filter_map(|(item_mac, _)| parse_mac(&item_mac).ok())
         .any(|item_mac| item_mac == mac)
+    {
+        return Ok(());
+    }
+    macs.push(mac.to_string());
+    write_wol_macs(paths, &macs)
 }
 
-fn read_wol_macs() -> Result<Vec<String>> {
-    let content = match fs::read_to_string(WOL_MAC_FILE) {
+fn read_wol_macs(paths: &NetworkPaths) -> Result<Vec<String>> {
+    let content = match fs::read_to_string(paths.path(WOL_MAC_FILE)) {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err.into()),
@@ -614,13 +864,13 @@ fn read_wol_macs() -> Result<Vec<String>> {
         .collect())
 }
 
-fn write_wol_macs(macs: &[String]) -> Result<()> {
+fn write_wol_macs(paths: &NetworkPaths, macs: &[String]) -> Result<()> {
     let mut data = String::new();
     if !macs.is_empty() {
         data.push_str(&macs.join("\n"));
         data.push('\n');
     }
-    write_file(Path::new(WOL_MAC_FILE), data.as_bytes(), 0o644)
+    write_file(&paths.path(WOL_MAC_FILE), data.as_bytes(), 0o644)
 }
 
 fn split_wol_mac_line(line: &str) -> Option<(String, String)> {
@@ -646,43 +896,67 @@ fn sanitize_wol_mac_name(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn set_manual_network(req: &SetDnsReq) -> Result<()> {
-    let config = validate_static_network_config(req)?;
-    let normalized_dns = set_manual_dns(&req.servers)?;
-    write_static_network_config(&config)?;
-    restart_ethernet().await?;
+async fn set_manual_network(writer: &ConfigPermit, req: SetDnsReq) -> Result<()> {
+    let normalized_dns = writer
+        .blocking(move |writer| {
+            let paths = NetworkPaths::for_writer(writer);
+            let config = validate_static_network_config(&req)?;
+            let normalized_dns = set_manual_dns(&paths, &req.servers)?;
+            write_static_network_config(&paths, &config)?;
+            Ok(normalized_dns)
+        })
+        .await?;
+    restart_ethernet(writer).await?;
 
-    // S30eth writes the gateway as a resolver after applying static Ethernet.
-    // Restore the explicitly selected DNS servers after the link comes back.
-    render_resolv_conf(ETC_RESOLV_FILE, &normalized_dns)?;
-    Ok(())
+    // Preserve compatibility with older S30eth scripts that wrote a gateway
+    // resolver during restart, then restore the explicitly selected servers.
+    writer
+        .blocking(move |writer| {
+            render_resolv_conf(
+                NetworkPaths::for_writer(writer).path(ETC_RESOLV_FILE),
+                &normalized_dns,
+            )
+        })
+        .await
 }
 
-async fn set_dhcp_network() -> Result<()> {
-    fs::create_dir_all(DNS_CONFIG_DIR)?;
-    preserve_manual_dns_servers()?;
-    write_dns_mode(DNS_MODE_DHCP)?;
-    backup_and_remove_boot_resolv()?;
-    remove_file_if_exists(BOOT_ETH_NODHCP_FILE)?;
-    install_udhcpc_dns_hook()?;
-    restart_ethernet().await?;
+async fn set_dhcp_network(writer: &ConfigPermit) -> Result<()> {
+    writer
+        .blocking(|writer| {
+            let paths = NetworkPaths::for_writer(writer);
+            fs::create_dir_all(paths.path(DNS_CONFIG_DIR))?;
+            preserve_manual_dns_servers(&paths)?;
+            write_dns_mode(&paths, DNS_MODE_DHCP)?;
+            backup_and_remove_boot_resolv(&paths)?;
+            remove_file_if_exists(paths.path(BOOT_ETH_NODHCP_FILE))?;
+            install_udhcpc_dns_hook(&paths)
+        })
+        .await?;
+    restart_ethernet(writer).await?;
 
-    let dhcp_config = read_dhcp_resolv_config(true).unwrap_or_else(|_| ResolvConfig::default());
-    if !dhcp_config.servers.is_empty() {
-        render_resolv_config(DHCP_RESOLV_FILE, &dhcp_config)?;
-        render_resolv_config(ETC_RESOLV_FILE, &dhcp_config)?;
-    }
+    writer
+        .blocking(|writer| {
+            let paths = NetworkPaths::for_writer(writer);
+            let dhcp_config =
+                read_dhcp_resolv_config(&paths, true).unwrap_or_else(|_| ResolvConfig::default());
+            if !dhcp_config.servers.is_empty() {
+                render_resolv_config(paths.path(DHCP_RESOLV_FILE), &dhcp_config)?;
+                render_resolv_config(paths.path(ETC_RESOLV_FILE), &dhcp_config)?;
+            }
 
-    Ok(())
+            Ok(())
+        })
+        .await
 }
 
-async fn restart_ethernet() -> Result<()> {
-    let output = run_allowed(
-        AllowedCommand::ServiceEth,
-        ["restart"],
-        Duration::from_secs(20),
-    )
-    .await?;
+async fn restart_ethernet(writer: &ConfigPermit) -> Result<()> {
+    let output = writer
+        .command(
+            writer_command(writer, AllowedCommand::ServiceEth),
+            ["restart"],
+            Duration::from_secs(20),
+        )
+        .await?;
     if output.status != 0 {
         return Err(AppError::Internal(command_error(
             "failed to apply network settings",
@@ -693,37 +967,37 @@ async fn restart_ethernet() -> Result<()> {
     Ok(())
 }
 
-fn set_manual_dns(servers: &[String]) -> Result<Vec<String>> {
+fn set_manual_dns(paths: &NetworkPaths, servers: &[String]) -> Result<Vec<String>> {
     let normalized = validate_dns_servers(servers)?;
     if normalized.is_empty() {
         return Err(AppError::BadRequest("dns servers are required".to_string()));
     }
 
-    if current_dns_mode() == DNS_MODE_DHCP {
-        if let Err(err) = refresh_dhcp_resolv_cache_from_effective() {
+    if current_dns_mode(paths) == DNS_MODE_DHCP {
+        if let Err(err) = refresh_dhcp_resolv_cache_from_effective(paths) {
             tracing::warn!(error = %err, "failed to refresh DHCP DNS cache before manual mode");
         }
     }
 
-    fs::create_dir_all(DNS_CONFIG_DIR)?;
-    write_dns_mode(DNS_MODE_MANUAL)?;
+    fs::create_dir_all(paths.path(DNS_CONFIG_DIR))?;
+    write_dns_mode(paths, DNS_MODE_MANUAL)?;
     write_file(
-        Path::new(DNS_SERVERS_FILE),
+        &paths.path(DNS_SERVERS_FILE),
         format!("{}\n", normalized.join("\n")).as_bytes(),
         0o644,
     )?;
-    render_resolv_conf(BOOT_RESOLV_FILE, &normalized)?;
-    render_resolv_conf(ETC_RESOLV_FILE, &normalized)?;
-    install_udhcpc_dns_hook()?;
+    render_resolv_conf(paths.path(BOOT_RESOLV_FILE), &normalized)?;
+    render_resolv_conf(paths.path(ETC_RESOLV_FILE), &normalized)?;
+    install_udhcpc_dns_hook(paths)?;
     Ok(normalized)
 }
 
-fn current_dns_mode() -> String {
-    read_raw_dns_mode().unwrap_or_else(default_dns_mode)
+fn current_dns_mode(paths: &NetworkPaths) -> String {
+    read_raw_dns_mode(paths).unwrap_or_else(|| default_dns_mode(paths))
 }
 
-fn read_raw_dns_mode() -> Option<String> {
-    let mode = fs::read_to_string(DNS_MODE_FILE).ok()?;
+fn read_raw_dns_mode(paths: &NetworkPaths) -> Option<String> {
+    let mode = fs::read_to_string(paths.path(DNS_MODE_FILE)).ok()?;
     match mode.trim() {
         DNS_MODE_MANUAL => Some(DNS_MODE_MANUAL.to_string()),
         DNS_MODE_DHCP => Some(DNS_MODE_DHCP.to_string()),
@@ -731,16 +1005,16 @@ fn read_raw_dns_mode() -> Option<String> {
     }
 }
 
-fn can_fallback_effective_for_dhcp() -> bool {
-    match read_raw_dns_mode().as_deref() {
+fn can_fallback_effective_for_dhcp(paths: &NetworkPaths) -> bool {
+    match read_raw_dns_mode(paths).as_deref() {
         Some(DNS_MODE_DHCP) => true,
         Some(DNS_MODE_MANUAL) => false,
-        _ => !Path::new(BOOT_RESOLV_FILE).exists(),
+        _ => !paths.path(BOOT_RESOLV_FILE).exists(),
     }
 }
 
-fn default_dns_mode() -> String {
-    if Path::new(BOOT_RESOLV_FILE).exists() {
+fn default_dns_mode(paths: &NetworkPaths) -> String {
+    if paths.path(BOOT_RESOLV_FILE).exists() {
         DNS_MODE_MANUAL
     } else {
         DNS_MODE_DHCP
@@ -748,52 +1022,55 @@ fn default_dns_mode() -> String {
     .to_string()
 }
 
-fn write_dns_mode(mode: &str) -> Result<()> {
+fn write_dns_mode(paths: &NetworkPaths, mode: &str) -> Result<()> {
     write_file(
-        Path::new(DNS_MODE_FILE),
+        &paths.path(DNS_MODE_FILE),
         format!("{mode}\n").as_bytes(),
         0o644,
     )
 }
 
-fn read_manual_dns_servers() -> Vec<String> {
-    parse_plain_dns_servers(DNS_SERVERS_FILE).unwrap_or_default()
+fn read_manual_dns_servers(paths: &NetworkPaths) -> Vec<String> {
+    parse_plain_dns_servers(paths.path(DNS_SERVERS_FILE)).unwrap_or_default()
 }
 
-fn preserve_manual_dns_servers() -> Result<()> {
-    if !read_manual_dns_servers().is_empty() {
+fn preserve_manual_dns_servers(paths: &NetworkPaths) -> Result<()> {
+    if !read_manual_dns_servers(paths).is_empty() {
         return Ok(());
     }
 
-    let mut servers = parse_resolv_conf(BOOT_RESOLV_FILE).unwrap_or_default();
+    let mut servers = parse_resolv_conf(paths.path(BOOT_RESOLV_FILE)).unwrap_or_default();
     if servers.is_empty() {
-        servers = parse_resolv_conf(BOOT_RESOLV_BACKUP).unwrap_or_default();
+        servers = parse_resolv_conf(paths.path(BOOT_RESOLV_BACKUP)).unwrap_or_default();
     }
     if servers.is_empty() {
         return Ok(());
     }
 
     write_file(
-        Path::new(DNS_SERVERS_FILE),
+        &paths.path(DNS_SERVERS_FILE),
         format!("{}\n", servers.join("\n")).as_bytes(),
         0o644,
     )
 }
 
-fn parse_plain_dns_servers(path: &str) -> Result<Vec<String>> {
+fn parse_plain_dns_servers(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let content = fs::read_to_string(path)?;
     normalize_dns_servers(content.lines())
 }
 
-fn read_dhcp_resolv_config(allow_effective_fallback: bool) -> Result<ResolvConfig> {
-    let dhcp_result = parse_resolv_config(DHCP_RESOLV_FILE);
+fn read_dhcp_resolv_config(
+    paths: &NetworkPaths,
+    allow_effective_fallback: bool,
+) -> Result<ResolvConfig> {
+    let dhcp_result = parse_resolv_config(paths.path(DHCP_RESOLV_FILE));
     if let Ok(config) = &dhcp_result {
         if !config.servers.is_empty() {
             return Ok(config.clone());
         }
     }
 
-    let tmp_result = parse_resolv_config(TMP_RESOLV_FILE);
+    let tmp_result = parse_resolv_config(paths.path(TMP_RESOLV_FILE));
     if let Ok(config) = &tmp_result {
         if !config.servers.is_empty() {
             return Ok(config.clone());
@@ -801,7 +1078,7 @@ fn read_dhcp_resolv_config(allow_effective_fallback: bool) -> Result<ResolvConfi
     }
 
     if allow_effective_fallback {
-        let effective_result = parse_resolv_config(ETC_RESOLV_FILE);
+        let effective_result = parse_resolv_config(paths.path(ETC_RESOLV_FILE));
         if let Ok(config) = effective_result {
             if !config.servers.is_empty() {
                 return Ok(config);
@@ -823,8 +1100,8 @@ fn read_dhcp_resolv_config(allow_effective_fallback: bool) -> Result<ResolvConfi
     Ok(ResolvConfig::default())
 }
 
-fn refresh_dhcp_resolv_cache_from_effective() -> Result<()> {
-    let mut config = match parse_resolv_config(ETC_RESOLV_FILE) {
+fn refresh_dhcp_resolv_cache_from_effective(paths: &NetworkPaths) -> Result<()> {
+    let mut config = match parse_resolv_config(paths.path(ETC_RESOLV_FILE)) {
         Ok(config) => config,
         Err(AppError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
@@ -833,19 +1110,19 @@ fn refresh_dhcp_resolv_cache_from_effective() -> Result<()> {
         return Ok(());
     }
     if config.search_domains.is_empty() {
-        config.search_domains = parse_resolv_config(DHCP_RESOLV_FILE)
+        config.search_domains = parse_resolv_config(paths.path(DHCP_RESOLV_FILE))
             .map(|cached| cached.search_domains)
             .unwrap_or_default();
     }
 
-    render_resolv_config(DHCP_RESOLV_FILE, &config)
+    render_resolv_config(paths.path(DHCP_RESOLV_FILE), &config)
 }
 
-fn parse_resolv_conf(path: &str) -> Result<Vec<String>> {
+fn parse_resolv_conf(path: impl AsRef<Path>) -> Result<Vec<String>> {
     Ok(parse_resolv_config(path)?.servers)
 }
 
-fn parse_resolv_config(path: &str) -> Result<ResolvConfig> {
+fn parse_resolv_config(path: impl AsRef<Path>) -> Result<ResolvConfig> {
     let content = fs::read_to_string(path)?;
     parse_resolv_config_content(&content)
 }
@@ -881,7 +1158,8 @@ fn get_dns_info() -> DnsInfo {
         iface_name = get_fallback_ipv4_interface();
     }
 
-    let dhcp_config = read_dhcp_resolv_config(can_fallback_effective_for_dhcp())
+    let paths = NetworkPaths::default();
+    let dhcp_config = read_dhcp_resolv_config(&paths, can_fallback_effective_for_dhcp(&paths))
         .unwrap_or_else(|_| ResolvConfig::default());
 
     let mut info = DnsInfo {
@@ -1032,6 +1310,13 @@ fn validate_static_network_config(req: &SetDnsReq) -> Result<StaticNetworkConfig
     ensure_usable_host_address(address, "invalid ip address")?;
     ensure_usable_host_address(gateway, "invalid router address")?;
     ensure_same_subnet(address, gateway, subnet_mask)?;
+    ensure_host_of_subnet(address, prefix, "invalid ip address")?;
+    ensure_host_of_subnet(gateway, prefix, "invalid router address")?;
+    if address == gateway {
+        return Err(AppError::BadRequest(
+            "the router cannot have this device's address".to_string(),
+        ));
+    }
 
     Ok(StaticNetworkConfig {
         interface: interface.to_string(),
@@ -1085,7 +1370,7 @@ fn parse_static_network_line(line: &str) -> Result<StaticNetworkConfig> {
     })
 }
 
-fn write_static_network_config(config: &StaticNetworkConfig) -> Result<()> {
+fn write_static_network_config(paths: &NetworkPaths, config: &StaticNetworkConfig) -> Result<()> {
     let address: Ipv4Addr = config
         .address
         .parse()
@@ -1102,7 +1387,7 @@ fn write_static_network_config(config: &StaticNetworkConfig) -> Result<()> {
         .map_err(|_| AppError::BadRequest("invalid router address".to_string()))?;
 
     write_file(
-        Path::new(BOOT_ETH_NODHCP_FILE),
+        &paths.path(BOOT_ETH_NODHCP_FILE),
         format!("{address}/{prefix} {gateway}\n").as_bytes(),
         0o644,
     )
@@ -1136,7 +1421,7 @@ fn parse_static_address(value: &str) -> Result<(Ipv4Addr, Option<u8>)> {
 fn validate_subnet_mask(value: Option<&str>, prefix: Option<u8>) -> Result<(Ipv4Addr, u8)> {
     let value = value.map(str::trim).filter(|value| !value.is_empty());
     match (value, prefix) {
-        (Some(mask), _) => {
+        (Some(mask), address_prefix) => {
             let mask = mask
                 .parse::<Ipv4Addr>()
                 .map_err(|_| AppError::BadRequest("invalid subnet mask".to_string()))?;
@@ -1144,6 +1429,12 @@ fn validate_subnet_mask(value: Option<&str>, prefix: Option<u8>) -> Result<(Ipv4
                 .ok_or_else(|| AppError::BadRequest("invalid subnet mask".to_string()))?;
             if prefix == 0 {
                 return Err(AppError::BadRequest("invalid subnet mask".to_string()));
+            }
+            // A mask and an address prefix that disagree are a mistake, not a choice.
+            if address_prefix.is_some_and(|address_prefix| address_prefix != prefix) {
+                return Err(AppError::BadRequest(
+                    "subnet mask and address prefix disagree".to_string(),
+                ));
             }
             Ok((mask, prefix))
         }
@@ -1173,6 +1464,19 @@ fn ensure_usable_host_address(address: Ipv4Addr, message: &str) -> Result<()> {
         || address.octets() == [255, 255, 255, 255]
     {
         return Err(AppError::BadRequest(message.to_string()));
+    }
+    Ok(())
+}
+
+/// With host bits to spare (/30 or shorter), the all-zero and all-one host
+/// parts name the subnet itself and its broadcast, never a host.
+fn ensure_host_of_subnet(address: Ipv4Addr, prefix: u8, message: &str) -> Result<()> {
+    if prefix <= 30 {
+        let host_mask = !u32::from(prefix_to_netmask(prefix));
+        let host = u32::from(address) & host_mask;
+        if host == 0 || host == host_mask {
+            return Err(AppError::BadRequest(message.to_string()));
+        }
     }
     Ok(())
 }
@@ -1365,7 +1669,7 @@ fn parse_ipv6_static_line(line: &str) -> Result<Ipv6StaticConfig> {
     })
 }
 
-fn write_ipv6_static_config(config: &Ipv6StaticConfig) -> Result<()> {
+fn write_ipv6_static_config(paths: &NetworkPaths, config: &Ipv6StaticConfig) -> Result<()> {
     let address = config
         .address
         .parse::<Ipv6Addr>()
@@ -1376,7 +1680,7 @@ fn write_ipv6_static_config(config: &Ipv6StaticConfig) -> Result<()> {
         .map_err(|_| AppError::BadRequest("invalid IPv6 router address".to_string()))?;
 
     write_file(
-        Path::new(IPV6_CONFIG_FILE),
+        &paths.path(IPV6_CONFIG_FILE),
         format!("{address}/{} {gateway}\n", config.prefix).as_bytes(),
         0o644,
     )
@@ -1459,12 +1763,12 @@ fn ipv6_interface_enabled(interface: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn dhcpv6_client_status() -> (bool, String) {
-    if !path_exists(DHCPV6_SCRIPT_FILE) {
+fn dhcpv6_client_status(paths: &NetworkPaths) -> (bool, String) {
+    if !paths.path(DHCPV6_SCRIPT_FILE).exists() {
         return (false, String::new());
     }
     for path in DHCPV6_CLIENT_PATHS {
-        if path_exists(path) {
+        if paths.path(path).exists() {
             return (true, (*path).to_string());
         }
     }
@@ -1525,7 +1829,7 @@ fn ipv6_status_message(mode: &str, active: bool, client_available: bool) -> (Str
     }
 }
 
-fn render_resolv_conf(path: &str, servers: &[String]) -> Result<()> {
+fn render_resolv_conf(path: impl AsRef<Path>, servers: &[String]) -> Result<()> {
     render_resolv_config(
         path,
         &ResolvConfig {
@@ -1535,7 +1839,7 @@ fn render_resolv_conf(path: &str, servers: &[String]) -> Result<()> {
     )
 }
 
-fn render_resolv_config(path: &str, config: &ResolvConfig) -> Result<()> {
+fn render_resolv_config(path: impl AsRef<Path>, config: &ResolvConfig) -> Result<()> {
     let servers = validate_dns_servers(&config.servers)?;
     if servers.is_empty() {
         return Err(AppError::BadRequest("dns servers are required".to_string()));
@@ -1554,7 +1858,7 @@ fn render_resolv_config(path: &str, config: &ResolvConfig) -> Result<()> {
         content.push('\n');
     }
 
-    write_file(Path::new(path), content.as_bytes(), 0o644)
+    write_file(path.as_ref(), content.as_bytes(), 0o644)
 }
 
 fn validate_dns_servers<S, I>(servers: I) -> Result<Vec<String>>
@@ -1629,20 +1933,20 @@ fn strip_inline_comment(value: &str) -> &str {
     value.split_once('#').map(|(head, _)| head).unwrap_or(value)
 }
 
-fn backup_and_remove_boot_resolv() -> Result<()> {
-    let data = match fs::read(BOOT_RESOLV_FILE) {
+fn backup_and_remove_boot_resolv(paths: &NetworkPaths) -> Result<()> {
+    let data = match fs::read(paths.path(BOOT_RESOLV_FILE)) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err.into()),
     };
 
-    write_file(Path::new(BOOT_RESOLV_BACKUP), &data, 0o644)?;
-    remove_file_if_exists(BOOT_RESOLV_FILE)
+    write_file(&paths.path(BOOT_RESOLV_BACKUP), &data, 0o644)?;
+    remove_file_if_exists(paths.path(BOOT_RESOLV_FILE))
 }
 
-fn install_udhcpc_dns_hook() -> Result<()> {
+fn install_udhcpc_dns_hook(paths: &NetworkPaths) -> Result<()> {
     write_file(
-        Path::new(UDHCPC_HOOK_FILE),
+        &paths.path(UDHCPC_HOOK_FILE),
         UDHCPC_DNS_HOOK.as_bytes(),
         0o755,
     )
@@ -1653,12 +1957,26 @@ fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
+    // The file is created with its final mode, so a secret is never readable by
+    // others, not even between the write and a later chmod.
     let tmp = tmp_path_for(path);
-    fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    let written = (|| -> std::io::Result<()> {
+        use std::{
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&tmp)?;
+        file.write_all(content)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+    })();
+    if let Err(err) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
     }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
@@ -1679,7 +1997,7 @@ fn tmp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{filename}.{}.{}.tmp", std::process::id(), stamp))
 }
 
-fn remove_file_if_exists(path: &str) -> Result<()> {
+fn remove_file_if_exists(path: impl AsRef<Path>) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1706,6 +2024,10 @@ fn command_error(message: &str, output: crate::system::command::CommandOutput) -
         }
     }
 }
+
+#[cfg(test)]
+#[path = "network_writer_tests.rs"]
+mod writer_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1746,6 +2068,38 @@ mod tests {
         assert_eq!(normalize_ipv6_mode(" SLAAC\n").unwrap(), IPV6_MODE_SLAAC);
         assert_eq!(normalize_ipv6_mode("dhcpv6").unwrap(), IPV6_MODE_DHCPV6);
         assert!(normalize_ipv6_mode("router-advertisements").is_err());
+    }
+
+    #[test]
+    fn a_static_address_must_be_a_host_of_its_subnet() {
+        let request = |address: &str, mask: Option<&str>, gateway: &str| SetDnsReq {
+            mode: "manual".into(),
+            servers: Vec::new(),
+            interface: Some("eth0".into()),
+            address: Some(address.into()),
+            subnet_mask: mask.map(str::to_string),
+            gateway: Some(gateway.into()),
+        };
+        validate_static_network_config(&request("192.0.2.10/24", None, "192.0.2.1")).unwrap();
+        validate_static_network_config(&request("192.0.2.10", Some("255.255.255.0"), "192.0.2.1"))
+            .unwrap();
+        // /31 has no network or broadcast address to avoid.
+        validate_static_network_config(&request("192.0.2.0/31", None, "192.0.2.1")).unwrap();
+        for (address, mask, gateway) in [
+            ("192.0.2.0/24", None, "192.0.2.1"),
+            ("192.0.2.255/24", None, "192.0.2.1"),
+            ("192.0.2.10/24", None, "192.0.2.255"),
+            ("192.0.2.10/24", None, "192.0.2.10"),
+            ("192.0.2.10/24", Some("255.255.0.0"), "192.0.2.1"),
+        ] {
+            assert!(
+                matches!(
+                    validate_static_network_config(&request(address, mask, gateway)),
+                    Err(AppError::BadRequest(_))
+                ),
+                "{address} {mask:?} {gateway}"
+            );
+        }
     }
 
     #[test]
@@ -1797,6 +2151,15 @@ mod tests {
         assert!(validate_wifi_password("secret-password").is_ok());
         assert!(validate_wifi_password("").is_err());
         assert!(validate_wifi_password("bad\npassword").is_err());
+        // What the supplicant accepts: an SSID of up to 32 bytes and a
+        // passphrase of 8 to 63 bytes.
+        assert!(validate_wifi_ssid(&"s".repeat(32)).is_ok());
+        assert!(validate_wifi_ssid(&"s".repeat(33)).is_err());
+        assert!(validate_wifi_ssid(&"é".repeat(17)).is_err(), "34 bytes");
+        assert!(validate_wifi_password(&"p".repeat(7)).is_err());
+        assert!(validate_wifi_password(&"p".repeat(8)).is_ok());
+        assert!(validate_wifi_password(&"p".repeat(63)).is_ok());
+        assert!(validate_wifi_password(&"p".repeat(64)).is_err());
     }
 
     #[test]

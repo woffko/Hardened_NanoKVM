@@ -11,19 +11,23 @@ use std::{
     ffi::OsString,
     fs,
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
+    net::IpAddr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
-use url::Url;
+use url::{Host, Url};
 
 use crate::{
     AppError, Result,
     config::Config,
     error::ApiResponse,
     state::AppState,
-    system::command::{AllowedCommand, run_allowed},
+    system::{
+        command::{AllowedCommand, run_allowed},
+        media, usb,
+    },
 };
 
 pub const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024 * 1024;
@@ -39,6 +43,7 @@ const EXT_SUPERBLOCK_MAGIC_OFFSET: usize = 1024 + 56;
 const BTRFS_SUPERBLOCK_MAGIC_OFFSET: usize = 0x10040;
 const BTRFS_MAGIC: &[u8; 8] = b"_BHRfS_M";
 const REMOTE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const MAX_REMOTE_REDIRECTS: usize = 5;
 const UPLOAD_STATUS_STALE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const REMOTE_STATUS_STALE_TIMEOUT: Duration = Duration::from_secs((2 * 60 * 60) + (5 * 60));
 
@@ -87,10 +92,20 @@ pub async fn set_remote_image_download_enabled(
     State(state): State<AppState>,
     Json(req): Json<SetRemoteImageDownloadReq>,
 ) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_remote_image_download = req.enabled;
-    config.write()?;
-    state.set_remote_image_download_enabled(req.enabled);
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_remote_image_download = req.enabled;
+                    config.write(permit)?;
+                    state.set_remote_image_download_enabled(req.enabled);
+                    Ok(())
+                })
+                .await
+        })
+        .await?;
 
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
@@ -113,12 +128,12 @@ pub async fn download_image(
     }
 
     let remote = validate_remote_iso_url(&req.file)?;
-    let target = safe_upload_target(&state.config.paths.image_directory, &remote.filename)?;
+    safe_upload_target(&state.config.paths.image_directory, &remote.filename)?;
     let guard = DownloadGuard::acquire(&remote.url)?;
     let root = state.config.paths.image_directory.clone();
 
     tokio::spawn(async move {
-        if let Err(err) = download_remote_iso(remote, root, target, guard).await {
+        if let Err(err) = download_remote_iso(remote, root, guard).await {
             tracing::error!(error = %err, "remote ISO download failed");
         }
     });
@@ -166,7 +181,7 @@ pub async fn upload_image_file(
         let filename = valid_upload_filename(field.file_name().unwrap_or_default())?;
         guard.update(&filename, 0, content_length)?;
 
-        let target = safe_upload_target(&state.config.paths.image_directory, &filename)?;
+        safe_upload_target(&state.config.paths.image_directory, &filename)?;
         let mut temp = TempUpload::create(&state.config.paths.image_directory, &filename)?;
         let mut file = temp.open()?;
         let mut total = 0_usize;
@@ -189,9 +204,7 @@ pub async fn upload_image_file(
 
         validate_uploaded_image(temp.path(), &filename)?;
 
-        fs::rename(temp.path(), &target)?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
-        temp.keep();
+        publish_image(&mut temp, &state.config.paths.image_directory, &filename).await?;
         uploaded = true;
     }
 
@@ -218,16 +231,54 @@ struct RemoteIso {
 async fn download_remote_iso(
     remote: RemoteIso,
     root: PathBuf,
-    target: PathBuf,
     _guard: DownloadGuard,
 ) -> Result<()> {
-    let mut temp = TempUpload::create(&root, &remote.filename)?;
-    let output = download_remote_with_curl(&remote.url, temp.path()).await?;
-    if output.status != 0 {
-        return Err(AppError::Internal(command_error(
-            "download remote ISO failed",
-            output,
-        )));
+    fetch_remote_iso(remote, &root, remote_address_allowed).await
+}
+
+/// Follows redirects itself: every hop's host is resolved here, each address
+/// checked against `allowed`, and curl connects to the checked address only,
+/// so neither a redirect nor a second DNS answer can reach this device itself.
+async fn fetch_remote_iso(
+    remote: RemoteIso,
+    root: &Path,
+    allowed: fn(IpAddr) -> bool,
+) -> Result<()> {
+    let mut temp = TempUpload::create(root, &remote.filename)?;
+    let mut url =
+        Url::parse(&remote.url).map_err(|_| AppError::BadRequest("invalid url".to_string()))?;
+    let mut redirects = 0;
+    loop {
+        let pin = pinned_address(&url, allowed).await?;
+        let output = download_remote_with_curl(&url, pin.as_deref(), temp.path()).await?;
+        if output.status != 0 {
+            return Err(AppError::Internal(command_error(
+                "download remote ISO failed",
+                output,
+            )));
+        }
+        let written = String::from_utf8_lossy(&output.stdout);
+        let (code, location) = written
+            .trim()
+            .split_once(' ')
+            .unwrap_or((written.trim(), ""));
+        match code.parse::<u16>() {
+            Ok(200..=299) => break,
+            Ok(300..=399) if !location.is_empty() => {
+                redirects += 1;
+                if redirects > MAX_REMOTE_REDIRECTS {
+                    return Err(AppError::BadRequest(
+                        "remote ISO redirects too many times".to_string(),
+                    ));
+                }
+                url = validate_remote_redirect(location)?;
+            }
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "remote ISO server answered {code}"
+                )));
+            }
+        }
     }
 
     let size = fs::metadata(temp.path())?.len();
@@ -243,25 +294,102 @@ async fn download_remote_iso(
         ));
     }
 
-    fs::rename(temp.path(), &target)?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
-    temp.keep();
+    publish_image(&mut temp, root, &remote.filename).await?;
     Ok(())
 }
 
+/// A remote image may come from any address but this device's own, link-local
+/// ones (including cloud metadata) and multicast. LAN servers stay allowed.
+fn remote_address_allowed(ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_loopback()
+                || v4.octets()[0] == 0
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast())
+        }
+        IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast())
+        }
+    }
+}
+
+/// The `--resolve` entry that pins a host name to its checked address, or
+/// `None` for an address literal. Every resolved address must be allowed.
+async fn pinned_address(url: &Url, allowed: fn(IpAddr) -> bool) -> Result<Option<String>> {
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("invalid url".to_string()))?;
+    let (addresses, name) = match url.host() {
+        Some(Host::Ipv4(ip)) => (vec![IpAddr::V4(ip)], None),
+        Some(Host::Ipv6(ip)) => (vec![IpAddr::V6(ip)], None),
+        Some(Host::Domain(name)) => {
+            let resolved = tokio::net::lookup_host((name, port))
+                .await
+                .map_err(|_| {
+                    AppError::BadRequest("cannot resolve the remote ISO host".to_string())
+                })?
+                .map(|address| address.ip())
+                .collect::<Vec<_>>();
+            (resolved, Some(name))
+        }
+        None => return Err(AppError::BadRequest("invalid url".to_string())),
+    };
+    let Some(first) = addresses.first() else {
+        return Err(AppError::BadRequest(
+            "cannot resolve the remote ISO host".to_string(),
+        ));
+    };
+    if !addresses.iter().all(|ip| allowed(*ip)) {
+        return Err(AppError::BadRequest(
+            "the remote ISO host is not an allowed address".to_string(),
+        ));
+    }
+    Ok(name.map(|name| match first {
+        IpAddr::V4(ip) => format!("{name}:{port}:{ip}"),
+        IpAddr::V6(ip) => format!("{name}:{port}:[{ip}]"),
+    }))
+}
+
+fn validate_remote_redirect(location: &str) -> Result<Url> {
+    if location.len() > 2048 || location.chars().any(char::is_control) {
+        return Err(AppError::BadRequest("invalid redirect".to_string()));
+    }
+    let url =
+        Url::parse(location).map_err(|_| AppError::BadRequest("invalid redirect".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(AppError::BadRequest("invalid redirect".to_string()));
+    }
+    Ok(url)
+}
+
+/// One request, no redirect followed: curl prints the status code and, for a
+/// redirect, its absolute target.
 async fn download_remote_with_curl(
-    url: &str,
+    url: &Url,
+    pin: Option<&str>,
     target: &Path,
 ) -> Result<crate::system::command::CommandOutput> {
-    let args = vec![
+    let mut args = vec![
         OsString::from("--fail"),
-        OsString::from("--location"),
         OsString::from("--proto"),
         OsString::from("=http,https"),
-        OsString::from("--proto-redir"),
-        OsString::from("=http,https"),
         OsString::from("--max-redirs"),
-        OsString::from("5"),
+        OsString::from("0"),
+        OsString::from("--write-out"),
+        OsString::from("%{http_code} %{redirect_url}"),
         OsString::from("--connect-timeout"),
         OsString::from("20"),
         OsString::from("--max-time"),
@@ -274,8 +402,12 @@ async fn download_remote_with_curl(
         OsString::from(MAX_UPLOAD_BYTES.to_string()),
         OsString::from("--output"),
         target.as_os_str().to_os_string(),
-        OsString::from(url),
     ];
+    if let Some(pin) = pin {
+        args.push(OsString::from("--resolve"));
+        args.push(OsString::from(pin));
+    }
+    args.push(OsString::from(url.as_str()));
     run_allowed(AllowedCommand::Curl, args, REMOTE_DOWNLOAD_TIMEOUT).await
 }
 
@@ -424,6 +556,7 @@ struct TempUpload {
 
 impl TempUpload {
     fn create(root: &Path, filename: &str) -> Result<Self> {
+        media::checked_media_root(root)?;
         let path = root.join(format!(".{filename}.{}.upload", random_suffix()));
         Ok(Self { path, keep: false })
     }
@@ -455,6 +588,9 @@ impl Drop for TempUpload {
 }
 
 fn storage_writable(root: &Path) -> bool {
+    if media::checked_media_root(root).is_err() {
+        return false;
+    }
     let path = root.join(format!(".nanokvm-write-test-{}", random_suffix()));
     let result = fs::OpenOptions::new()
         .write(true)
@@ -496,7 +632,8 @@ fn upload_image_kind(filename: &str) -> Option<UploadImageKind> {
 }
 
 fn safe_upload_target(root: &Path, filename: &str) -> Result<PathBuf> {
-    let root = fs::canonicalize(root)?;
+    valid_upload_filename(filename)?;
+    let root = media::checked_media_root(root)?;
     let target = root.join(filename);
 
     if let Ok(metadata) = fs::symlink_metadata(&target) {
@@ -506,6 +643,26 @@ fn safe_upload_target(root: &Path, filename: &str) -> Result<PathBuf> {
     }
 
     Ok(target)
+}
+
+async fn publish_image(temp: &mut TempUpload, root: &Path, filename: &str) -> Result<()> {
+    let root = root.to_path_buf();
+    let filename = filename.to_string();
+    let source = temp.path().to_path_buf();
+    usb::run_exclusive(async move {
+        // Revalidate under the same lock used by mount/delete. Uploading a new
+        // file must not replace a backing image still owned by the target.
+        let target = safe_upload_target(&root, &filename)?;
+        if target.exists() {
+            super::storage::ensure_image_not_in_use(&target)?;
+        }
+        fs::rename(source, &target)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    })
+    .await?;
+    temp.keep();
+    Ok(())
 }
 
 fn is_iso9660(path: &Path) -> Result<bool> {
@@ -754,6 +911,19 @@ mod tests {
     }
 
     #[test]
+    fn upload_rejects_symlinked_media_root_and_path_names() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        unix_fs::symlink(&real, &alias).unwrap();
+        assert!(safe_upload_target(&alias, "disk.img").is_err());
+        assert!(TempUpload::create(&alias, "disk.img").is_err());
+        assert!(!storage_writable(&alias));
+        assert!(safe_upload_target(&real, "../private.img").is_err());
+    }
+
+    #[test]
     fn iso_magic_is_checked_at_primary_volume_descriptor_offset() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("valid.iso");
@@ -848,5 +1018,187 @@ mod tests {
         assert!(!is_mass_storage_image(&path).unwrap());
         let err = validate_uploaded_image(&path, "random.img").unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn remote_addresses_exclude_this_device_link_local_and_multicast() {
+        for refused in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "0.0.0.0",
+            "0.1.2.3",
+            "169.254.169.254",
+            "169.254.1.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(
+                !remote_address_allowed(refused.parse().unwrap()),
+                "{refused}"
+            );
+        }
+        for allowed in [
+            "10.0.87.5",
+            "172.16.0.10",
+            "192.168.1.20",
+            "100.64.0.1",
+            "203.0.113.7",
+            "2001:db8::1",
+            "fd00::5",
+            "::ffff:192.168.1.20",
+        ] {
+            assert!(
+                remote_address_allowed(allowed.parse().unwrap()),
+                "{allowed}"
+            );
+        }
+    }
+
+    fn any_address(_: IpAddr) -> bool {
+        true
+    }
+
+    fn only_ipv4_loopback(ip: IpAddr) -> bool {
+        ip == IpAddr::from([127, 0, 0, 1])
+    }
+
+    #[tokio::test]
+    async fn host_names_are_pinned_and_every_resolved_address_must_be_allowed() {
+        let literal = Url::parse("http://192.0.2.1/rescue.iso").unwrap();
+        assert_eq!(pinned_address(&literal, any_address).await.unwrap(), None);
+        let name = Url::parse("http://localhost:8080/rescue.iso").unwrap();
+        let pin = pinned_address(&name, any_address).await.unwrap().unwrap();
+        assert!(
+            pin == "localhost:8080:127.0.0.1" || pin == "localhost:8080:[::1]",
+            "{pin}"
+        );
+        assert!(pinned_address(&name, remote_address_allowed).await.is_err());
+        let refused = Url::parse("http://127.0.0.1/rescue.iso").unwrap();
+        assert!(
+            pinned_address(&refused, remote_address_allowed)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Answers each request from `route(path)` and records the paths asked for.
+    async fn serve(
+        address: &str,
+        route: impl Fn(&str) -> (u16, String, Vec<u8>) + Send + Sync + 'static,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let local = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let route = std::sync::Arc::new(route);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let record = std::sync::Arc::clone(&record);
+                let route = std::sync::Arc::clone(&route);
+                tokio::spawn(async move {
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                    loop {
+                        let mut header = String::new();
+                        if stream.read_line(&mut header).await.unwrap() == 0 || header == "\r\n" {
+                            break;
+                        }
+                    }
+                    record.lock().unwrap().push(path.clone());
+                    let (status, location, body) = route(&path);
+                    let head = format!(
+                        "HTTP/1.1 {status} X\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let stream = stream.get_mut();
+                    stream.write_all(head.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                });
+            }
+        });
+        (local, seen)
+    }
+
+    fn iso_image() -> Vec<u8> {
+        let mut image = vec![0; 0x8800];
+        image[0x8001..0x8006].copy_from_slice(ISO9660_MAGIC);
+        image
+    }
+
+    fn remote(url: &str) -> RemoteIso {
+        validate_remote_iso_url(url).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_refused_address_is_never_requested() {
+        let root = tempdir().unwrap();
+        let (refused, refused_seen) =
+            serve("127.0.0.2:0", |_| (200, String::new(), iso_image())).await;
+        let target = format!("http://{refused}/real.iso");
+        let (first, _) = serve("127.0.0.1:0", move |_| (302, target.clone(), Vec::new())).await;
+
+        let result = fetch_remote_iso(
+            remote(&format!("http://{first}/rescue.iso")),
+            root.path(),
+            only_ipv4_loopback,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(refused_seen.lock().unwrap().is_empty());
+        assert!(fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn redirects_to_allowed_addresses_are_followed_to_the_image() {
+        let root = tempdir().unwrap();
+        let (server, seen) = serve("127.0.0.1:0", |path| match path {
+            "/rescue.iso" => (302, "/mirror/real.iso".to_string(), Vec::new()),
+            _ => (200, String::new(), iso_image()),
+        })
+        .await;
+
+        fetch_remote_iso(
+            remote(&format!("http://{server}/rescue.iso")),
+            root.path(),
+            only_ipv4_loopback,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["/rescue.iso", "/mirror/real.iso"]);
+        assert_eq!(
+            fs::read(root.path().join("rescue.iso")).unwrap(),
+            iso_image()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sixth_redirect_is_not_followed() {
+        let root = tempdir().unwrap();
+        let (server, seen) = serve("127.0.0.1:0", |path| {
+            let next = path.trim_start_matches("/r").parse::<u32>().unwrap_or(0) + 1;
+            (302, format!("/r{next}"), Vec::new())
+        })
+        .await;
+
+        let result = fetch_remote_iso(
+            remote(&format!("http://{server}/rescue.iso")),
+            root.path(),
+            only_ipv4_loopback,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(seen.lock().unwrap().len(), MAX_REMOTE_REDIRECTS + 1);
     }
 }

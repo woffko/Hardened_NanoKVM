@@ -139,7 +139,7 @@ Initial shadow responsibilities:
 - Read `/kvmapp/kvm/*` stream state with the same semantics used by the OLED.
 - Read USB gadget state from sysfs.
 - Read HDMI capture status from `/proc/cvitek/vi_dbg`.
-- Write a debug snapshot such as `/tmp/nanokvm-hwmon-state.json`.
+- Write a debug snapshot such as `/run/nanokvm-hwmon-state.json`.
 
 Do not:
 
@@ -151,7 +151,7 @@ Do not:
 Initial slice:
 
 - `server-rust/src/bin/nanokvm-hwmon.rs` writes
-  `/tmp/nanokvm-hwmon-state.json`.
+  `/run/nanokvm-hwmon-state.json`.
 - `S95nanokvm` starts and stops the helper as a separate shadow process when the
   binary exists at `/kvmapp/hwmon/nanokvm-hwmon`.
 - Packaging and rootfs validation require the helper so test images and app
@@ -179,7 +179,7 @@ Validation on 133:
 - Compare Rust snapshot against visible OLED state and existing files.
 - Confirm no video stream regression for at least 15 minutes.
 - Confirm CPU/RAM/write rate is acceptable.
-- Keep `/tmp/hardened-syslog/messages` active during restart tests and enable
+- Keep `/run/hardened-syslog/messages` active during restart tests and enable
   remote syslog for any test that may require post-reboot failure evidence.
 
 ### Phase 2.5: Remove Legacy C++ Reboot Watchdog
@@ -216,7 +216,7 @@ normalization while C++ keeps OLED rendering.
 Completed first slice:
 
 1. Added feature-flagged C++ consumption of
-   `/tmp/nanokvm-hwmon-state.json` when `/etc/kvm/rust_hwmon_enabled` exists.
+   `/run/nanokvm-hwmon-state.json` when `/etc/kvm/rust_hwmon_enabled` exists.
 2. C++ OLED/state loop now takes USB gadget state, HID/mass-storage/RNDIS
    presence, HDMI active state, stream type, FPS, quality bucket, and resolution
    from the Rust snapshot when it is fresh and parseable.

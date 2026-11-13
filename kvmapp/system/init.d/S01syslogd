@@ -2,17 +2,27 @@
 
 DAEMON=/sbin/syslogd
 PIDFILE=/var/run/syslogd.pid
-LOG_DIR=/tmp/hardened-syslog
+LOG_DIR=/run/hardened-syslog
 
 SYSLOGD_ARGS=
 [ -r /etc/default/syslogd ] && . /etc/default/syslogd
-SYSLOGD_ARGS="${SYSLOGD_ARGS:--O /tmp/hardened-syslog/messages -s 200 -b 1 -l 8}"
+SYSLOGD_ARGS="${SYSLOGD_ARGS:--O /run/hardened-syslog/messages -s 200 -b 1 -l 8}"
 
 start() {
     printf 'Starting syslogd: '
-    mkdir -p "$LOG_DIR"
-    start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -n $SYSLOGD_ARGS
-    [ $? = 0 ] && echo OK || echo FAIL
+    umask 077
+    [ ! -L "$LOG_DIR" ] || return 1
+    mkdir -p "$LOG_DIR" || return 1
+    [ "$(stat -c %u "$LOG_DIR")" = 0 ] || return 1
+    chmod 0700 "$LOG_DIR" || return 1
+    # A preserved /etc/default/syslogd can still name the old shared path.
+    # BusyBox uses the last -O option; keep other settings but pin the log.
+    if start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -n $SYSLOGD_ARGS -O "$LOG_DIR/messages"; then
+        echo OK
+    else
+        echo FAIL
+        return 1
+    fi
 }
 
 stop() {

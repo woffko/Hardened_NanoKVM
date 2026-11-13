@@ -1,0 +1,11 @@
+config BR2_PACKAGE_HARDENED_NANOKVM_KVMAPP
+	bool "Hardened NanoKVM application payload"
+	depends on BR2_RISCV_64
+	help
+	  Install the locally built Hardened NanoKVM Rust application, native
+	  runtime libraries, web assets, hardware helper, init scripts, and
+	  system-update public key into the SG2002 rootfs.
+
+	  The package expects build/kvmapp-rust/kvmapp to exist in the parent
+	  project. It does not build the application or prove vendor multimedia
+	  ABI compatibility.

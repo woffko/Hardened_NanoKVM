@@ -368,8 +368,9 @@ Remediation status:
   zero kernel alerts. This remains valid kernel/device evidence, but the image
   does not contain the corrected bridge server and must not be published. The
   kernel scope is frozen; fresh app/rootfs/full-image A/B pipelines are next.
-- The superseded isolated unsigned raw.12 preflight passes
-  `scripts/verify-rc12-raw-bundle.sh`. Its 57,134,321-byte archive SHA-256 is
+- The superseded isolated unsigned raw.12 preflight passed the then-current
+  `scripts/verify-rc12-raw-bundle.sh`; this is a retained historical result, not
+  a PASS of today's signed-default verifier. Its 57,134,321-byte archive SHA-256 is
   `85f5a52be375456eef0acdc618a77219fc0de7d42675d05bc30ee82ec3969b1e`;
   the decompressed rootfs and boot payloads remain byte-exact to selected A at
   `a5254238d690cd963b2b0f663977211634c424d78fb5e30fa095d815ab5d7701`
@@ -379,6 +380,8 @@ Remediation status:
   requires the wrong bridge version and cannot be installed or published. The retained report SHA-256 is
   `5fa4a27dbdc93e2c429af0dd4d945d2adb6d659e1e50d9c9363b90fc17fe6358`.
   It is retained only as historical packaging evidence.
+  Current verifier scope, signed defaults and explicit unsigned-fixture limits
+  are documented in [historical raw verification](security-raw-bundle-verification.md).
 - A new RSA-4096 production key was created outside the repository with key ID
   `hardened-system-prod-2026q3`; its public DER SHA-256 is
   `97ddb5600accf0e431c74f82b03acf249668bf75fe0de2e41724c91720516f75`.
@@ -655,6 +658,13 @@ scripts/validate-nanokvm-rootfs.sh <rootfs>
   WebRTC UDP.
 - Paranoid permits local HTTPS only and intentionally blocks online updates.
 - Restricted and Paranoid require working HTTPS before activation.
+- The rules live in `NKVM-INPUT` and `NKVM-OUTPUT`. The built-in chains hold
+  the policies, one jump to each, and the jumps of other software, so
+  Tailscale's `ts-*` chains survive mode changes.
+- Each address family is replaced in one `iptables-restore` commit. A family
+  that fails keeps its previous rules and `S40firewall` exits non-zero, which
+  fails the API request. `scripts/test-s40firewall.sh` checks this against real
+  legacy iptables.
 
 ### Time and NTP
 
@@ -665,6 +675,28 @@ scripts/validate-nanokvm-rootfs.sh <rootfs>
   test received `no server suitable for synchronization found`. That was a
   server-side NTP suitability/configuration issue, not failure to consume the
   GUI setting.
+- `ntpd` is a client only. `restrict default ... noserve` gives no time
+  service, queries or peering to any address. In ntpd 4.2.8p18 `noserve` also
+  drops server replies, so `restrict source` gives each configured server its
+  own entry without it.
+- ntpd 4.2.8p18 dies with SIGSEGV when it cannot bind a local address, such as
+  a tentative IPv6 address while a network interface comes up.
+  `board/sg2002/patches/ntp/4.2.8p18/0001-...` fixes that in the next rootfs;
+  images built before it carry the crash. `scripts/test-s49ntp.sh` checks both
+  points against host builds of the patched ntpd.
+
+### SSH
+
+- Root password login stays. `S50sshd` starts sshd with password guessing
+  limits on its command line, which take precedence over
+  `/etc/ssh/sshd_config` (a raw restore keeps the device's own):
+  `MaxAuthTries 3`, `LoginGraceTime 60`,
+  `PerSourcePenalties authfail:60s invaliduser:60s` (up to the default
+  10-minute maximum) and `PerSourceNetBlockSize 32:64`, so an IPv6 /64 counts
+  as one source.
+- An sshd that refuses these options (before OpenSSH 9.8) still starts,
+  without them, and the start message says so. `scripts/test-s50sshd.sh`
+  checks both paths with a host build of OpenSSH 10.5p1.
 
 ### Mobile/tablet UI
 

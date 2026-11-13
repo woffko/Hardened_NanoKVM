@@ -3,7 +3,10 @@
 This branch tracks the feasibility work for building Hardened NanoKVM
 sysupgrade images on a newer Buildroot or newer Sipeed SDK baseline.
 
-Date checked: 2026-06-29.
+Date checked: 2026-06-29. The current experimental official-Buildroot port was
+started on 2026-08-20 on branch `latestbuilroot`; its evidence, gap inventory,
+and gated implementation plan are in
+[`latest-buildroot-port.md`](latest-buildroot-port.md).
 
 ## Question
 

@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:43:42 +0300
+Subject: [PATCH 6/9] riscv: restore stable native vDSO symbol linkage
+
+Use the stable absolute-symbol object for the native vDSO while retaining the vendor generated offsets only for the separate compat vDSO. Restore the upstream so2s helper removed by the vendor offset conversion.
+---
+ arch/riscv/include/asm/vdso.h   | 11 +++++++++--
+ arch/riscv/kernel/vdso/Makefile | 14 +++++---------
+ arch/riscv/kernel/vdso/so2s.sh  |  6 ++++++
+ 3 files changed, 20 insertions(+), 11 deletions(-)
+ create mode 100755 arch/riscv/kernel/vdso/so2s.sh
+
+diff --git a/arch/riscv/include/asm/vdso.h b/arch/riscv/include/asm/vdso.h
+index e3e888afd1..09220668bf 100644
+--- a/arch/riscv/include/asm/vdso.h
++++ b/arch/riscv/include/asm/vdso.h
+@@ -9,15 +9,22 @@
+ #define _ASM_RISCV_VDSO_H
+ 
+ #include <linux/types.h>
+-#include <generated/vdso-offsets.h>
+ 
+ #ifndef CONFIG_GENERIC_TIME_VSYSCALL
+ struct vdso_data {
+ };
+ #endif
+ 
++/*
++ * The native VDSO symbols are linked into the kernel as absolute offsets,
++ * matching the stable RISC-V implementation. The compat VDSO retains the
++ * vendor offset header below because it is a separate 32-bit image.
++ */
+ #define VDSO_SYMBOL(base, name)							\
+-	((void __user *)((unsigned long)(base) + __vdso_##name##_offset))
++({										\
++	extern const char __vdso_##name[];					\
++	(void __user *)((unsigned long)(base) + __vdso_##name);			\
++})
+ 
+ #ifdef CONFIG_COMPAT
+ #include <generated/compat_vdso-offsets.h>
+diff --git a/arch/riscv/kernel/vdso/Makefile b/arch/riscv/kernel/vdso/Makefile
+index 63822d0aab..8deb8db304 100644
+--- a/arch/riscv/kernel/vdso/Makefile
++++ b/arch/riscv/kernel/vdso/Makefile
+@@ -28,7 +28,7 @@ endif
+ targets := $(obj-vdso) vdso.so vdso.so.dbg vdso.lds vdso-syms.S
+ obj-vdso := $(addprefix $(obj)/, $(obj-vdso))
+ 
+-obj-y += vdso.o
++obj-y += vdso.o vdso-syms.o
+ CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
+ ifneq ($(filter vgettimeofday, $(vdso-syms)),)
+ CPPFLAGS_vdso.lds += -DHAS_VGETTIMEOFDAY
+@@ -60,19 +60,15 @@ LDFLAGS_vdso.so.dbg = -shared -s -soname=linux-vdso.so.1 \
+ $(obj)/vdso-syms.S: $(obj)/vdso.so FORCE
+ 	$(call if_changed,so2s)
+ 
++# Extract symbol offsets from the VDSO into an absolute-symbol assembly file.
++quiet_cmd_so2s = SO2S    $@
++      cmd_so2s = $(NM) -D $< | $(srctree)/$(src)/so2s.sh > $@
++
+ # strip rule for the .so file
+ $(obj)/%.so: OBJCOPYFLAGS := -S
+ $(obj)/%.so: $(obj)/%.so.dbg FORCE
+ 	$(call if_changed,objcopy)
+ 
+-# Generate VDSO offsets using helper script
+-gen-vdsosym := $(srctree)/$(src)/gen_vdso_offsets.sh
+-quiet_cmd_vdsosym = VDSOSYM $@
+-	cmd_vdsosym = $(NM) $< | $(gen-vdsosym) | LC_ALL=C sort > $@
+-
+-include/generated/vdso-offsets.h: $(obj)/vdso.so.dbg FORCE
+-	$(call if_changed,vdsosym)
+-
+ # actual build commands
+ # The DSO images are built using a special linker script
+ # Make sure only to export the intended __vdso_xxx symbol offsets.
+diff --git a/arch/riscv/kernel/vdso/so2s.sh b/arch/riscv/kernel/vdso/so2s.sh
+new file mode 100755
+index 0000000000..e64cb6d944
+--- /dev/null
++++ b/arch/riscv/kernel/vdso/so2s.sh
+@@ -0,0 +1,6 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0+
++# Copyright 2020 Palmer Dabbelt <palmerdabbelt@google.com>
++
++sed 's!\([0-9a-f]*\) T \([a-z0-9_]*\)\(@@LINUX_4.15\)*!.global \2\n.set \2,0x\1!' \
++| grep '^\.'

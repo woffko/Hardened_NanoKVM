@@ -3,10 +3,15 @@ set -eu
 
 usage() {
   echo "usage: $0 <rootfs.ext4>" >&2
+  echo "Current security-candidate protocol only (independent app recovery required)." >&2
+  echo "Historical RC12 raw assets: scripts/verify-rc12-raw-bundle.sh (fixed hashes)." >&2
   echo "" >&2
   echo "environment:" >&2
   echo "  EXPECTED_BACKEND=rust|any      default: rust" >&2
   echo "  EXPECTED_KVMAPP_VERSION=<version> optional" >&2
+  echo "  EXPECTED_UPDATE_KEY_ID=<id>    optional; needs EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256" >&2
+  echo "  EXPECTED_UPDATE_KEY_POLICY=<ids> key IDs the policy must hold, exactly;" >&2
+  echo "                                 default: EXPECTED_UPDATE_KEY_ID alone" >&2
   exit 1
 }
 
@@ -22,10 +27,17 @@ fi
 IMAGE="$1"
 EXPECTED_BACKEND="${EXPECTED_BACKEND:-rust}"
 EXPECTED_KVMAPP_VERSION="${EXPECTED_KVMAPP_VERSION:-}"
-BOOT_INIT_SCRIPTS="S00kmod S01fs S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S80dnsmasq S95nanokvm"
+EXPECTED_UPDATE_KEY_ID="${EXPECTED_UPDATE_KEY_ID:-}"
+EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256="${EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256:-}"
+# The legacy dev and test key IDs were retired after the 2026q3 key transition:
+# a current image trusts the release key alone. Only a build of a historical
+# release names its wider trust set here.
+EXPECTED_UPDATE_KEY_POLICY="${EXPECTED_UPDATE_KEY_POLICY:-$EXPECTED_UPDATE_KEY_ID}"
+BOOT_INIT_SCRIPTS="S00kmod S01fs S02apprecover S03usbdev S15kvmhwd S30eth S30wifi S50avahi-daemon S50sshd S95nanokvm"
 
 [ -f "$IMAGE" ] || die "rootfs image does not exist: $IMAGE"
 command -v debugfs >/dev/null 2>&1 || die "debugfs is required"
+command -v openssl >/dev/null 2>&1 || die "openssl is required"
 
 case "$EXPECTED_BACKEND" in
   rust | any) ;;
@@ -90,6 +102,38 @@ trim_file() {
   tr -d '\r' < "$1" | awk 'NF { value=$0 } END { print value }'
 }
 
+require_boot_state_boundary() {
+  s01=$(dump_file /kvmapp/system/init.d/S01fs no-legacy-S01fs) || return 1
+  s95=$(dump_file /kvmapp/system/init.d/S95nanokvm no-legacy-S95nanokvm) || return 1
+  installed_s01=$(dump_file /etc/init.d/S01fs installed-no-legacy-S01fs) || return 1
+  installed_s95=$(dump_file /etc/init.d/S95nanokvm installed-no-legacy-S95nanokvm) || return 1
+  cmp -s "$s01" "$installed_s01" || die "packaged and installed S01fs differ"
+  cmp -s "$s95" "$installed_s95" || die "packaged and installed S95nanokvm differ"
+  if grep -Eq 'RAW_RESTORE_|restore_raw_root_config|restore_preserved_path|fix_restored_permissions' "$s01"; then
+    die "S01fs contains legacy p3 restore authority"
+  else
+    [ "$?" -eq 1 ] || die "could not inspect S01fs boot authority"
+  fi
+  if grep -Fq 'SYSTEM_RAW_INSTALL_MARKER' "$s95"; then
+    die "S95nanokvm imports legacy p3 boot/rollback authority"
+  else
+    [ "$?" -eq 1 ] || die "could not inspect S95nanokvm boot authority"
+  fi
+}
+
+require_app_consumer_gates() {
+  for name in S02apprecover S30eth S30wifi S95nanokvm; do
+    bundled=$(dump_file "/kvmapp/system/init.d/$name" "app-gate-$name") || return 1
+    installed=$(dump_file "/etc/init.d/$name" "installed-app-gate-$name") || return 1
+    cmp -s "$bundled" "$installed" || die "independent app consumer gate differs: $name"
+    if grep -Fq '/usr/libexec/nanokvm-app-recovery gate' "$installed"; then
+      :
+    else
+      die "missing or unreadable independent app consumer gate: $name"
+    fi
+  done
+}
+
 debugfs_output "stats" >/dev/null || die "not a readable ext rootfs image: $IMAGE"
 
 require_dir /kvmapp
@@ -106,9 +150,20 @@ require_dir /mnt/data
 require_regular /kvmapp/version
 require_regular /kvmapp/server/NanoKVM-Server
 require_regular /kvmapp/backends/NanoKVM-Server.rust
+python3 "$(dirname "$0")/verify-app-recovery-rootfs.py" "$IMAGE" || \
+  die "independent app recovery is missing/unsafe/mismatched; this validator is for current candidates, not historical RC12"
+python3 -B "$(dirname "$0")/verify-native-runtime-rootfs.py" "$IMAGE" || \
+  die "independent native runtime is missing/unsafe/mismatched; use the historical verifier for older images"
 require_regular /kvmapp/hwmon/nanokvm-hwmon
 require_regular /kvmapp/kvm_system/kvm_system
 require_regular /kvmapp/system/keys/system-update-signing.pub.pem
+if [ -n "$EXPECTED_UPDATE_KEY_ID" ]; then
+  [ -n "$EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256" ] || \
+    die "EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256 is required with EXPECTED_UPDATE_KEY_ID"
+  require_dir /kvmapp/system/keys/update-keys
+  require_regular "/kvmapp/system/keys/update-keys/$EXPECTED_UPDATE_KEY_ID.pub.pem"
+  require_regular /kvmapp/system/keys/update-key-policy
+fi
 require_regular /kvmapp/system/mnt-data/sensor_cfg.ini.LT
 require_regular /kvmapp/server/web/index.html
 require_regular /etc/kvm/backend
@@ -119,6 +174,9 @@ for script in $BOOT_INIT_SCRIPTS; do
   require_regular "/kvmapp/system/init.d/$script"
   require_regular "/etc/init.d/$script"
 done
+
+require_boot_state_boundary || die "unsafe boot restore/rollback boundary"
+require_app_consumer_gates || die "unsafe independent app consumer boundary"
 
 reject_path /kvmapp/backends/NanoKVM-Server.go
 reject_path /kvmapp/server/NanoKVM-Server.go
@@ -143,6 +201,21 @@ if [ -n "$EXPECTED_KVMAPP_VERSION" ] && [ "$version" != "$EXPECTED_KVMAPP_VERSIO
   die "unexpected /kvmapp/version: $version, expected $EXPECTED_KVMAPP_VERSION"
 fi
 
+if [ -n "$EXPECTED_UPDATE_KEY_ID" ]; then
+  update_public_key=$(dump_file "/kvmapp/system/keys/update-keys/$EXPECTED_UPDATE_KEY_ID.pub.pem" update-public-key)
+  update_public_key_fingerprint="$(openssl pkey -pubin -in "$update_public_key" -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+  [ "$update_public_key_fingerprint" = "$EXPECTED_UPDATE_PUBLIC_KEY_DER_SHA256" ] || \
+    die "unexpected production update public key fingerprint"
+  update_key_policy=$(dump_file /kvmapp/system/keys/update-key-policy update-key-policy)
+  normalized_policy="$TMP_DIR/update-key-policy.normalized"
+  sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+    "$update_key_policy" | LC_ALL=C sort > "$normalized_policy"
+  # shellcheck disable=SC2086 # the list is split on purpose
+  printf '%s\n' $EXPECTED_UPDATE_KEY_POLICY | LC_ALL=C sort > "$TMP_DIR/update-key-policy.expected"
+  cmp -s "$normalized_policy" "$TMP_DIR/update-key-policy.expected" || \
+    die "unexpected update key policy: $(tr '\n' ' ' < "$normalized_policy")"
+fi
+
 backend_file=$(dump_file /etc/kvm/backend backend)
 backend=$(trim_file "$backend_file")
 case "$backend" in
@@ -152,6 +225,10 @@ esac
 
 if [ "$EXPECTED_BACKEND" != "any" ] && [ "$backend" != "$EXPECTED_BACKEND" ]; then
   die "unexpected /etc/kvm/backend: $backend, expected $EXPECTED_BACKEND"
+fi
+
+if debugfs_output "stat /etc/kvm/raw-restore-required" >/dev/null 2>&1; then
+  die "full-SD rootfs contains the raw restore discriminator"
 fi
 
 echo "validated Hardened NanoKVM rootfs: $IMAGE"

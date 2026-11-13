@@ -1,0 +1,54 @@
+diff --git a/interdrv/cvi_vc_drv/Makefile b/interdrv/cvi_vc_drv/Makefile
+index 80d8c4a..ceaff89 100644
+--- a/interdrv/cvi_vc_drv/Makefile
++++ b/interdrv/cvi_vc_drv/Makefile
+@@ -29,7 +29,7 @@ VCODEC_DRIVER_HEADER := -I$(PWD)/	\
+ 			-I$(PWD)/$(JPEG_DRIVER_PATH)/cvi_jpg_interface/inc/	\
+ 			-I$(PWD)/$(VCODEC_MODULE_PATH)/include/
+ 
+-cvi_vc_driver-objs :=	$(COMMON_PATH)/rcKernel/cvi_rc_kernel.o	\
++soph_vc_driver-objs :=	$(COMMON_PATH)/rcKernel/cvi_rc_kernel.o	\
+ 			$(COMMON_PATH)/rcKernel/cvi_float_point/cvi_float_point.o	\
+ 			$(COMMON_PATH)/rcKernel/cvi_float_point/cvi_soft_float.o	\
+ 			$(VCODEC_DRIVER_PATH)/sample/main_enc_cvitest.o	\
+@@ -80,7 +80,7 @@ cvi_vc_driver-objs :=	$(COMMON_PATH)/rcKernel/cvi_rc_kernel.o	\
+ 			cvi_vc_drv.o	\
+ 			cvi_vc_drv_proc.o
+ 
+-obj-m = cvi_vc_driver.o
++obj-m = soph_vc_driver.o
+ 
+ ccflags-y += -I$(PWD)/../include/common/uapi/ -I$(PWD)/../include/chip/$(CVIARCH_L)/uapi/
+ ccflags-y += -I$(PWD)/../include/common/kapi/
+diff --git a/interdrv/jpeg/Makefile b/interdrv/jpeg/Makefile
+index 7e53e09..c26abd9 100644
+--- a/interdrv/jpeg/Makefile
++++ b/interdrv/jpeg/Makefile
+@@ -17,8 +17,8 @@ ccflags-y += $(DEBFLAGS) -I$(PWD) -I$(LDDINCDIR) -D$(CHIP_TYPE) -D$(SUB_TYPE) -D
+ KBUILD_EXTRA_SYMBOLS += $(PWD)/../vcodec/Module.symvers
+ 
+ # PWD	:= $(shell pwd)
+-obj-m += $(CVIARCH_L)_jpeg.o
+-$(CVIARCH_L)_jpeg-y += cvi_jpeg.o jpeg_common.o jmm.o hal/$(CVIARCH_L)/cvi_jpeg_cfg.o
++obj-m += soph_jpeg.o
++soph_jpeg-y += cvi_jpeg.o jpeg_common.o jmm.o hal/$(CVIARCH_L)/cvi_jpeg_cfg.o
+ 
+ all:
+ 	$(MAKE) ARCH=${ARCH} -C $(KERNEL_DIR) M=$(PWD) modules
+diff --git a/interdrv/vcodec/Makefile b/interdrv/vcodec/Makefile
+index 87bc0dc..5a54c2c 100644
+--- a/interdrv/vcodec/Makefile
++++ b/interdrv/vcodec/Makefile
+@@ -7,9 +7,9 @@ ccflags-y += -I$(PWD)/../include/common/kapi/
+ ccflags-y += -I$(PWD) -I$(LDDINCDIR) -DCNM_FPGA_PLATFORM -DCNM_FPGA_PCI_INTERFACE -DCVI_H26X_USE_ION_FW_BUFFER -DUSE_KERNEL_MODE -Wno-date-time -Werror
+ 
+ PWD	:= $(shell pwd)
+-obj-m += $(CVIARCH_L)_vcodec.o
+-$(CVIARCH_L)_vcodec-y += cvi_vcodec.o vcodec_common.o
+-$(CVIARCH_L)_vcodec-y += hal/$(CVIARCH_L)/cvi_vcodec_cfg.o
++obj-m += soph_vcodec.o
++soph_vcodec-y += cvi_vcodec.o vcodec_common.o
++soph_vcodec-y += hal/$(CVIARCH_L)/cvi_vcodec_cfg.o
+ 
+ all:
+ 	$(MAKE) ARCH=${ARCH} -C $(KERNEL_DIR) M=$(PWD) modules

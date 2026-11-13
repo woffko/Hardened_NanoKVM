@@ -74,7 +74,13 @@ cd support/sg2002
 
 `./build update_lib` currently exits with status `1` after printing success;
 verify the copied component files instead of treating that status alone as a
-copy failure. The generated libraries are expected under:
+copy failure. The MaixCDK build compiles the copies under
+`$MAIXCDK_PATH/components/kvm` and `kvm_mmf`, not the files in this
+repository: after editing `support/sg2002/additional/kvm/...`, copy the changed
+file there (or run `update_lib`) and compare hashes before `make`, otherwise
+`make` rebuilds nothing and the old library passes for new. Rebuilding an
+unchanged source reproduces the committed `libkvm.so` byte for byte, which is
+a useful check that the tree is in sync. The generated libraries are expected under:
 
 ```text
 support/sg2002/kvm_vision_test/dist/kvm_vision_test_release/dl_lib/
@@ -207,6 +213,15 @@ Expected behavior:
 
 - HTTPS returns JSON with `backend: "rust"`.
 - HTTP returns `307 Temporary Redirect` to HTTPS when `proto: https`.
+
+Before packaging, the init scripts have host checks that need no device:
+`scripts/test-init-shell-portability.sh` (every script parses under sh and
+BusyBox sh and uses no bash-only `&>`), `scripts/test-s01fs.sh` (partition
+steps are re-runnable), `scripts/test-s30eth-static-dns.sh`,
+`scripts/test-s95-boot-health.sh`, `scripts/test-s15-hdmi-version.sh`,
+`scripts/test-i2c-bus-lock.sh` and `python3 -B scripts/test-app-boot-gates.py`.
+For the native pieces: `scripts/test-kvm-vision-exceptions.sh`,
+`scripts/test-kvm-system-hw-version.sh` and `scripts/test-nanokvm-update-edid.sh`.
 
 ## H.264 Hang Guard
 

@@ -1,18 +1,19 @@
 use std::{
     collections::BTreeSet,
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AppError, Result,
     error::ApiResponse,
+    state::AppState,
     system::command::{AllowedCommand, CommandOutput, run_allowed},
+    update::state_writers::ConfigPermit,
 };
 
 const CONFIG_FILE: &str = "/etc/kvm/time.json";
@@ -29,6 +30,50 @@ const DEFAULT_NTP_SERVERS: &[&str] = &[
 ];
 const NTP_SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 
+struct TimePaths {
+    config: PathBuf,
+    ntp_conf: PathBuf,
+    ntpd_default: PathBuf,
+    localtime: PathBuf,
+    zoneinfo: PathBuf,
+}
+
+impl Default for TimePaths {
+    fn default() -> Self {
+        Self {
+            config: CONFIG_FILE.into(),
+            ntp_conf: NTP_CONF_FILE.into(),
+            ntpd_default: NTPD_DEFAULT_FILE.into(),
+            localtime: LOCALTIME_FILE.into(),
+            zoneinfo: ZONEINFO_DIR.into(),
+        }
+    }
+}
+
+impl TimePaths {
+    fn for_writer(_writer: &ConfigPermit) -> Self {
+        #[cfg(test)]
+        if let Some(root) = _writer.fixture_config_path().and_then(Path::parent) {
+            return Self {
+                config: root.join(CONFIG_FILE.trim_start_matches('/')),
+                ntp_conf: root.join(NTP_CONF_FILE.trim_start_matches('/')),
+                ntpd_default: root.join(NTPD_DEFAULT_FILE.trim_start_matches('/')),
+                localtime: root.join(LOCALTIME_FILE.trim_start_matches('/')),
+                zoneinfo: root.join(ZONEINFO_DIR.trim_start_matches('/')),
+            };
+        }
+        Self::default()
+    }
+}
+
+fn writer_command(_writer: &ConfigPermit, production: AllowedCommand) -> AllowedCommand {
+    #[cfg(test)]
+    if let Some(root) = _writer.fixture_config_path().and_then(Path::parent) {
+        return AllowedCommand::CustomForTest(root.join("time-command"));
+    }
+    production
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TimeConfig {
@@ -41,8 +86,9 @@ impl Default for TimeConfig {
     fn default() -> Self {
         Self {
             ntp_enabled: true,
-            timezone: current_timezone().unwrap_or_else(|| DEFAULT_TIMEZONE.to_string()),
-            servers: current_ntp_servers(),
+            timezone: current_timezone(&TimePaths::default())
+                .unwrap_or_else(|| DEFAULT_TIMEZONE.to_string()),
+            servers: current_ntp_servers(Path::new(NTP_CONF_FILE)),
         }
     }
 }
@@ -57,78 +103,132 @@ pub struct TimeConfigRsp {
     timezone_options: Vec<String>,
 }
 
+/// A raw update keeps time.json but not /etc/localtime, which belongs to the
+/// image, and only an API call writes the link.
+pub fn apply_saved_timezone() {
+    if let Err(error) = apply_saved_timezone_in(&TimePaths::default()) {
+        tracing::warn!(%error, "the saved timezone was not applied");
+    }
+}
+
+fn apply_saved_timezone_in(paths: &TimePaths) -> Result<()> {
+    if !paths.config.exists() {
+        return Ok(());
+    }
+    let config = read_config(paths)?;
+    if current_timezone(paths).as_deref() != Some(config.timezone.as_str()) {
+        set_timezone(&config.timezone, paths)?;
+    }
+    Ok(())
+}
+
 pub async fn get_config() -> Result<impl IntoResponse> {
-    Ok(Json(ApiResponse::ok(build_response().await?)))
+    Ok(Json(ApiResponse::ok(
+        build_response(TimePaths::default()).await?,
+    )))
 }
 
-pub async fn set_config(Json(req): Json<TimeConfig>) -> Result<impl IntoResponse> {
-    let config = validate_config(req)?;
-
-    write_config(&config)?;
-    write_ntp_conf(&config.servers)?;
-    write_ntpd_default()?;
-    set_timezone(&config.timezone)?;
-    apply_ntp_state(config.ntp_enabled).await?;
-
-    Ok(Json(ApiResponse::ok(build_response().await?)))
+pub async fn set_config(
+    State(state): State<AppState>,
+    Json(req): Json<TimeConfig>,
+) -> Result<impl IntoResponse> {
+    let writer = state.writers.configuration()?;
+    let response = writer
+        .run(move |writer| async move {
+            let enabled = writer
+                .blocking(move |permit| {
+                    let paths = TimePaths::for_writer(permit);
+                    let config = validate_config(req, &paths)?;
+                    write_config(&config, &paths)?;
+                    write_ntp_conf(&config.servers, &paths.ntp_conf)?;
+                    write_ntpd_default(&paths.ntpd_default)?;
+                    set_timezone(&config.timezone, &paths)?;
+                    Ok(config.ntp_enabled)
+                })
+                .await?;
+            apply_ntp_state(&writer, enabled).await?;
+            build_response(TimePaths::for_writer(&writer)).await
+        })
+        .await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
-pub async fn sync_now() -> Result<impl IntoResponse> {
-    let config = read_config()?;
-    if !config.ntp_enabled {
-        return Err(AppError::BadRequest("NTP is disabled".to_string()));
-    }
-
-    let Some(server) = config.servers.first() else {
-        return Err(AppError::BadRequest(
-            "no NTP servers configured".to_string(),
-        ));
-    };
-
-    let output = run_allowed(
-        AllowedCommand::Ntpdate,
-        ["-u", server.as_str()],
-        Duration::from_secs(20),
-    )
-    .await?;
-    if output.status != 0 {
-        return Err(AppError::Internal(command_error(
-            "failed to synchronize time",
-            output,
-        )));
-    }
-
-    apply_ntp_state(true).await?;
-    Ok(Json(ApiResponse::ok(build_response().await?)))
+pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let writer = state.writers.configuration()?;
+    let response = writer
+        .run(move |writer| async move {
+            let config = writer
+                .blocking(|permit| read_config(&TimePaths::for_writer(permit)))
+                .await?;
+            if !config.ntp_enabled {
+                return Err(AppError::BadRequest("NTP is disabled".to_string()));
+            }
+            let Some(server) = config.servers.first() else {
+                return Err(AppError::BadRequest(
+                    "no NTP servers configured".to_string(),
+                ));
+            };
+            let output = writer
+                .command(
+                    writer_command(&writer, AllowedCommand::Ntpdate),
+                    ["-u", server.as_str()],
+                    Duration::from_secs(20),
+                )
+                .await?;
+            if output.status != 0 {
+                return Err(AppError::Internal(command_error(
+                    "failed to synchronize time",
+                    output,
+                )));
+            }
+            apply_ntp_state(&writer, true).await?;
+            build_response(TimePaths::for_writer(&writer)).await
+        })
+        .await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
-async fn build_response() -> Result<TimeConfigRsp> {
+async fn build_response(paths: TimePaths) -> Result<TimeConfigRsp> {
     Ok(TimeConfigRsp {
-        config: read_config()?,
+        config: read_config(&paths)?,
         current_time: current_time().await.unwrap_or_default(),
         gateway: default_ipv4_gateway().unwrap_or_default(),
         default_servers: DEFAULT_NTP_SERVERS
             .iter()
             .map(|value| value.to_string())
             .collect(),
-        timezone_options: timezone_options(),
+        timezone_options: timezone_options(&paths.zoneinfo),
     })
 }
 
-fn read_config() -> Result<TimeConfig> {
-    match fs::read_to_string(CONFIG_FILE) {
+fn read_config(paths: &TimePaths) -> Result<TimeConfig> {
+    match fs::read_to_string(&paths.config) {
         Ok(content) => {
-            let config: TimeConfig = serde_json::from_str(&content)
+            let mut config: TimeConfig = serde_json::from_str(&content)
                 .map_err(|err| AppError::Config(format!("invalid time config: {err}")))?;
-            validate_config(config)
+            // A zone this image lacks must not take the whole time API down.
+            config.timezone =
+                normalize_timezone(&config.timezone, &paths.zoneinfo).unwrap_or_else(|_| {
+                    tracing::warn!(zone = %config.timezone, "saved timezone is unknown; using UTC");
+                    DEFAULT_TIMEZONE.to_string()
+                });
+            with_usable_servers(config)
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(TimeConfig::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(TimeConfig {
+            ntp_enabled: true,
+            timezone: current_timezone(paths).unwrap_or_else(|| DEFAULT_TIMEZONE.to_string()),
+            servers: current_ntp_servers(&paths.ntp_conf),
+        }),
         Err(err) => Err(AppError::Io(err)),
     }
 }
 
-fn validate_config(mut config: TimeConfig) -> Result<TimeConfig> {
-    config.timezone = normalize_timezone(&config.timezone)?;
+fn validate_config(mut config: TimeConfig, paths: &TimePaths) -> Result<TimeConfig> {
+    config.timezone = normalize_timezone(&config.timezone, &paths.zoneinfo)?;
+    with_usable_servers(config)
+}
+
+fn with_usable_servers(mut config: TimeConfig) -> Result<TimeConfig> {
     config.servers = normalize_servers(config.servers.iter().map(String::as_str))?;
     if config.servers.is_empty() {
         config.servers = DEFAULT_NTP_SERVERS
@@ -140,7 +240,7 @@ fn validate_config(mut config: TimeConfig) -> Result<TimeConfig> {
     Ok(config)
 }
 
-fn normalize_timezone(value: &str) -> Result<String> {
+fn normalize_timezone(value: &str, zoneinfo: &Path) -> Result<String> {
     let timezone = value.trim().trim_start_matches('/').to_string();
     if timezone.is_empty() || timezone.len() > 128 {
         return Err(AppError::BadRequest("invalid timezone".to_string()));
@@ -155,13 +255,23 @@ fn normalize_timezone(value: &str) -> Result<String> {
         return Err(AppError::BadRequest("invalid timezone".to_string()));
     }
 
-    let path = Path::new(ZONEINFO_DIR).join(&timezone);
-    ensure_subpath(Path::new(ZONEINFO_DIR), &path)?;
-    if !path.is_file() {
+    let path = zoneinfo.join(&timezone);
+    ensure_subpath(zoneinfo, &path)?;
+    // zoneinfo also holds text files such as leapseconds; only a compiled
+    // zone may become /etc/localtime.
+    if !path.is_file() || !is_compiled_zone(&path) {
         return Err(AppError::BadRequest("unknown timezone".to_string()));
     }
 
     Ok(timezone)
+}
+
+fn is_compiled_zone(path: &Path) -> bool {
+    let mut magic = [0_u8; 4];
+    fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
+        .is_ok()
+        && &magic == b"TZif"
 }
 
 fn normalize_servers<'a, I>(servers: I) -> Result<Vec<String>>
@@ -209,8 +319,8 @@ fn valid_ntp_server(server: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | ':'))
 }
 
-fn current_ntp_servers() -> Vec<String> {
-    let servers = parse_ntp_servers(&fs::read_to_string(NTP_CONF_FILE).unwrap_or_default())
+fn current_ntp_servers(path: &Path) -> Vec<String> {
+    let servers = parse_ntp_servers(&fs::read_to_string(path).unwrap_or_default())
         .unwrap_or_else(|_| Vec::new())
         .into_iter()
         .take(6)
@@ -243,12 +353,12 @@ fn parse_ntp_servers(content: &str) -> Result<Vec<String>> {
     normalize_servers(servers)
 }
 
-fn current_timezone() -> Option<String> {
-    if let Ok(target) = fs::read_link(LOCALTIME_FILE) {
+fn current_timezone(paths: &TimePaths) -> Option<String> {
+    if let Ok(target) = fs::read_link(&paths.localtime) {
         if let Some(zone) = zone_from_path(&target) {
             return Some(zone);
         }
-        if let Ok(canonical) = Path::new("/etc").join(target).canonicalize() {
+        if let Ok(canonical) = paths.localtime.parent()?.join(target).canonicalize() {
             if let Some(zone) = zone_from_path(&canonical) {
                 return Some(zone);
             }
@@ -269,12 +379,12 @@ fn zone_from_path(path: &Path) -> Option<String> {
     Some(zone.to_string())
 }
 
-fn timezone_options() -> Vec<String> {
+fn timezone_options(zoneinfo: &Path) -> Vec<String> {
     let mut zones = BTreeSet::new();
     zones.insert(DEFAULT_TIMEZONE.to_string());
 
     for file in ["zone1970.tab", "zone.tab"] {
-        let path = Path::new(ZONEINFO_DIR).join(file);
+        let path = zoneinfo.join(file);
         if let Ok(content) = fs::read_to_string(path) {
             for line in content.lines() {
                 if line.starts_with('#') || line.trim().is_empty() {
@@ -288,7 +398,7 @@ fn timezone_options() -> Vec<String> {
     }
 
     if zones.len() <= 1 {
-        collect_zone_files(Path::new(ZONEINFO_DIR), "", &mut zones);
+        collect_zone_files(zoneinfo, "", &mut zones);
     }
 
     zones.into_iter().collect()
@@ -334,13 +444,13 @@ fn should_skip_zone_entry(name: &str) -> bool {
     )
 }
 
-fn write_config(config: &TimeConfig) -> Result<()> {
+fn write_config(config: &TimeConfig, paths: &TimePaths) -> Result<()> {
     let content = serde_json::to_vec_pretty(config)
         .map_err(|err| AppError::Internal(format!("encode time config: {err}")))?;
-    write_file_atomic(Path::new(CONFIG_FILE), &content, 0o644)
+    crate::system::files::write_atomic(&paths.config, &content, 0o644)
 }
 
-fn write_ntp_conf(servers: &[String]) -> Result<()> {
+fn write_ntp_conf(servers: &[String], path: &Path) -> Result<()> {
     let mut content = String::new();
     content.push_str("# Managed by Hardened NanoKVM.\n");
     content.push_str("driftfile /var/lib/ntp/ntp.drift\n\n");
@@ -349,29 +459,35 @@ fn write_ntp_conf(servers: &[String]) -> Result<()> {
         content.push_str(server);
         content.push_str(" iburst\n");
     }
-    content.push_str("\nrestrict default kod nomodify notrap nopeer noquery\n");
+    // The same restrictions as S49ntp, which renders this file again when it
+    // starts ntpd: a client only. noserve also drops server replies, so each
+    // configured server gets its own entry from "restrict source".
+    content.push_str("\nrestrict default nomodify notrap nopeer noquery noserve\n");
+    content.push_str("restrict source nomodify notrap noquery\n");
     content.push_str("restrict 127.0.0.1\n");
     content.push_str("restrict ::1\n");
-    write_file_atomic(Path::new(NTP_CONF_FILE), content.as_bytes(), 0o644)
+    crate::system::files::write_atomic(path, content.as_bytes(), 0o644)
 }
 
-fn write_ntpd_default() -> Result<()> {
-    write_file_atomic(Path::new(NTPD_DEFAULT_FILE), b"NTPD_ARGS=\" -g\"\n", 0o644)
+fn write_ntpd_default(path: &Path) -> Result<()> {
+    crate::system::files::write_atomic(path, b"NTPD_ARGS=\" -g\"\n", 0o644)
 }
 
-fn set_timezone(timezone: &str) -> Result<()> {
-    let timezone = normalize_timezone(timezone)?;
+fn set_timezone(timezone: &str, paths: &TimePaths) -> Result<()> {
+    let timezone = normalize_timezone(timezone, &paths.zoneinfo)?;
     let target = Path::new("../usr/share/zoneinfo").join(timezone);
-    let tmp = Path::new("/etc/.localtime.tmp");
-    let _ = fs::remove_file(tmp);
-    symlink(&target, tmp)?;
-    fs::rename(tmp, LOCALTIME_FILE)?;
-    Ok(())
+    crate::system::files::replace_symlink(&target, &paths.localtime)
 }
 
-async fn apply_ntp_state(enabled: bool) -> Result<()> {
+async fn apply_ntp_state(writer: &ConfigPermit, enabled: bool) -> Result<()> {
     let action = if enabled { "restart" } else { "stop" };
-    let output = run_allowed(AllowedCommand::ServiceNtp, [action], NTP_SERVICE_TIMEOUT).await?;
+    let output = writer
+        .command(
+            writer_command(writer, AllowedCommand::ServiceNtp),
+            [action],
+            NTP_SERVICE_TIMEOUT,
+        )
+        .await?;
     if output.status != 0 {
         return Err(AppError::Internal(command_error(
             "failed to apply NTP settings",
@@ -438,24 +554,6 @@ fn ensure_subpath(base: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_file_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Internal("path has no parent".to_string()))?;
-    fs::create_dir_all(parent)?;
-
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| AppError::Internal("path has invalid filename".to_string()))?
-    ));
-    fs::write(&tmp, content)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 fn command_error(message: &str, output: CommandOutput) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -501,6 +599,128 @@ mod tests {
             Some("10.0.87.5")
         );
         assert_eq!(parse_route_gateway("00000000"), None);
+    }
+
+    #[test]
+    fn only_a_compiled_zone_is_a_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Europe")).unwrap();
+        fs::write(dir.path().join("Europe/Tallinn"), b"TZif2 compiled zone").unwrap();
+        fs::write(dir.path().join("leapseconds"), b"# leap second table").unwrap();
+        assert_eq!(
+            normalize_timezone("Europe/Tallinn", dir.path()).unwrap(),
+            "Europe/Tallinn"
+        );
+        for value in ["leapseconds", "Europe", "Europe/Nowhere", "../etc/passwd"] {
+            assert!(normalize_timezone(value, dir.path()).is_err(), "{value}");
+        }
+    }
+
+    /// The layout Buildroot's tzdata package installs.
+    fn image_paths(dir: &Path) -> TimePaths {
+        let zoneinfo = dir.join("usr/share/zoneinfo");
+        for zone in ["posix/Etc/UTC", "posix/Europe/Berlin"] {
+            let path = zoneinfo.join(zone);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"TZif2 compiled zone").unwrap();
+        }
+        for name in ["Etc", "Europe"] {
+            std::os::unix::fs::symlink(format!("posix/{name}"), zoneinfo.join(name)).unwrap();
+        }
+        fs::write(
+            zoneinfo.join("zone1970.tab"),
+            "# comment\nDE\t+5230+01322\tEurope/Berlin\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("etc/kvm")).unwrap();
+        std::os::unix::fs::symlink("../usr/share/zoneinfo/Etc/UTC", dir.join("etc/localtime"))
+            .unwrap();
+        TimePaths {
+            config: dir.join("etc/kvm/time.json"),
+            ntp_conf: dir.join("etc/ntp.conf"),
+            ntpd_default: dir.join("etc/default/ntpd"),
+            localtime: dir.join("etc/localtime"),
+            zoneinfo,
+        }
+    }
+
+    fn saved(paths: &TimePaths, zone: &str) {
+        let json =
+            format!(r#"{{"ntpEnabled":true,"timezone":"{zone}","servers":["pool.ntp.org"]}}"#);
+        fs::write(&paths.config, json).unwrap();
+    }
+
+    fn link(paths: &TimePaths) -> PathBuf {
+        fs::read_link(&paths.localtime).unwrap()
+    }
+
+    #[test]
+    fn zones_of_the_image_layout_are_listed_and_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        assert_eq!(
+            normalize_timezone("Europe/Berlin", &paths.zoneinfo).unwrap(),
+            "Europe/Berlin"
+        );
+        assert!(timezone_options(&paths.zoneinfo).contains(&"Europe/Berlin".to_string()));
+        assert!(normalize_timezone("posix/Europe/Berlin", &paths.zoneinfo).is_err());
+    }
+
+    #[test]
+    fn a_saved_zone_the_image_lacks_reads_as_utc_and_a_request_for_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        saved(&paths, "Mars/Olympus");
+        let config = read_config(&paths).unwrap();
+        assert_eq!(config.timezone, DEFAULT_TIMEZONE);
+        assert_eq!(config.servers, ["pool.ntp.org"]);
+        assert!(validate_config(config.clone(), &paths).is_ok());
+        let request = TimeConfig {
+            timezone: "Mars/Olympus".to_string(),
+            ..config
+        };
+        assert!(validate_config(request, &paths).is_err());
+    }
+
+    #[test]
+    fn a_saved_zone_without_any_zone_data_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        fs::remove_dir_all(&paths.zoneinfo).unwrap();
+        saved(&paths, "Europe/Berlin");
+        assert_eq!(read_config(&paths).unwrap().timezone, DEFAULT_TIMEZONE);
+    }
+
+    #[test]
+    fn the_zone_a_raw_update_kept_reaches_the_new_image_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        saved(&paths, "Europe/Berlin");
+        apply_saved_timezone_in(&paths).unwrap();
+        assert_eq!(
+            link(&paths),
+            Path::new("../usr/share/zoneinfo/Europe/Berlin")
+        );
+        let linked = fs::symlink_metadata(&paths.localtime).unwrap();
+        apply_saved_timezone_in(&paths).unwrap();
+        let again = fs::symlink_metadata(&paths.localtime).unwrap();
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&linked),
+            std::os::unix::fs::MetadataExt::ino(&again)
+        );
+    }
+
+    #[test]
+    fn without_a_saved_zone_the_local_time_of_the_device_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = image_paths(dir.path());
+        apply_saved_timezone_in(&paths).unwrap();
+        assert_eq!(link(&paths), Path::new("../usr/share/zoneinfo/Etc/UTC"));
+        // An operator's copy, which no zone name describes.
+        fs::remove_file(&paths.localtime).unwrap();
+        fs::write(&paths.localtime, b"TZif2 compiled zone").unwrap();
+        apply_saved_timezone_in(&paths).unwrap();
+        assert!(fs::symlink_metadata(&paths.localtime).unwrap().is_file());
     }
 
     #[test]

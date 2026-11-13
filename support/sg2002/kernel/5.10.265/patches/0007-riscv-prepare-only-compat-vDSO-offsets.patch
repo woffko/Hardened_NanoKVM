@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:44:11 +0300
+Subject: [PATCH 7/9] riscv: prepare only compat vDSO offsets
+
+The native vDSO now uses the stable linked-symbol object; only the vendor compat image still requires a generated offsets header during prepare.
+---
+ arch/riscv/Makefile | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/riscv/Makefile b/arch/riscv/Makefile
+index ee253770bf..9169c1ba7d 100644
+--- a/arch/riscv/Makefile
++++ b/arch/riscv/Makefile
+@@ -138,7 +138,6 @@ vdso_install:
+ ifeq ($(CONFIG_MMU),y)
+ prepare: vdso_prepare
+ vdso_prepare: prepare0
+-	$(Q)$(MAKE) $(build)=arch/riscv/kernel/vdso include/generated/vdso-offsets.h
+ 	$(if $(CONFIG_COMPAT),$(Q)$(MAKE) \
+ 		$(build)=arch/riscv/kernel/compat_vdso include/generated/compat_vdso-offsets.h)
+ endif

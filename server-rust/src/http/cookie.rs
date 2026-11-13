@@ -13,7 +13,7 @@ pub fn expired_session_cookie(secure: bool) -> Result<HeaderValue> {
 }
 
 pub fn session_cookie_secure(proto: &str) -> bool {
-    proto.eq_ignore_ascii_case("https")
+    proto == "https"
 }
 
 fn build_session_cookie(
@@ -51,6 +51,13 @@ mod tests {
     fn secure_session_cookie_sets_secure_attribute() {
         let cookie = session_cookie("abc", 900, true).unwrap();
         assert!(cookie.to_str().unwrap().contains("Secure"));
+    }
+
+    #[test]
+    fn a_session_is_secure_exactly_when_the_server_serves_tls() {
+        assert!(session_cookie_secure("https"));
+        assert!(!session_cookie_secure("http"));
+        assert!(!session_cookie_secure("HTTPS"));
     }
 
     #[test]

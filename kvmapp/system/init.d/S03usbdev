@@ -1,4 +1,8 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 # kvmhwd Rev2.2
 
 stable_usb_mac_seed() {
@@ -56,6 +60,32 @@ usb_wakeup_enabled() {
     [ -e /boot/usb.wakeup ]
 }
 
+configure_empty_storage() {
+    [ -d functions/mass_storage.disk0 ] || mkdir functions/mass_storage.disk0 || return 1
+    # Close before changing mode/linking. If the target has locked its medium,
+    # do not reconnect the old backing file after a failed close.
+    echo '' > functions/mass_storage.disk0/lun.0/file || return 1
+    echo 1 > functions/mass_storage.disk0/lun.0/removable || return 1
+    echo 0 > functions/mass_storage.disk0/lun.0/ro || return 1
+    echo 0 > functions/mass_storage.disk0/lun.0/cdrom || return 1
+    echo "NanoKVM USB Mass Storage0520" > functions/mass_storage.disk0/lun.0/inquiry_string || return 1
+    [ -L configs/c.1/mass_storage.disk0 ] || ln -s functions/mass_storage.disk0 configs/c.1/ || return 1
+}
+
+# A vendor or product ID from /boot, or the default when the file does not hold
+# exactly one 16-bit hexadecimal number, with or without a DOS line ending.
+usb_id() {
+    value=""
+    if [ -f "$1" ]; then
+        IFS= read -r value < "$1" || true
+        value="${value%"$(printf '\r')"}"
+    fi
+    case "$value" in
+        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) printf '%s\n' "$value" ;;
+        *) printf '%s\n' "$2" ;;
+    esac
+}
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -66,18 +96,8 @@ start_usb_dev(){
 
     # echo 0x3346 > idVendor
     # echo 0x1009 > idProduct
-    if [ -e /boot/usb.vid ]
-    then
-        cat /boot/usb.vid > idVendor
-    else
-        echo 0x3346 > idVendor
-    fi
-    if [ -e /boot/usb.pid ]
-    then
-        cat /boot/usb.pid > idProduct
-    else
-        echo 0x1009 > idProduct
-    fi
+    usb_id /boot/usb.vid 0x3346 > idVendor
+    usb_id /boot/usb.pid 0x1009 > idProduct
 
     echo 0xEF > bDeviceClass
     echo 0x02 > bDeviceSubClass
@@ -173,27 +193,13 @@ start_usb_dev(){
 
     if [ -e /boot/usb.disk0 ]
     then
-            mkdir functions/mass_storage.disk0
-            ln -s functions/mass_storage.disk0 configs/c.1/
-            echo 1 > functions/mass_storage.disk0/lun.0/removable
-            if [ -e /boot/usb.disk0.ro ]
-            then
-                    echo 1 > functions/mass_storage.disk0/lun.0/ro
-                    echo 0 > functions/mass_storage.disk0/lun.0/cdrom
-            fi
-            echo "NanoKVM USB Mass Storage0520" > functions/mass_storage.disk0/lun.0/inquiry_string
-            disk=$(cat /boot/usb.disk0)
-            if [ -z "${disk}" ]
-            then
-                    # if [ ! -e /mnt/usbdisk.img ]
-                    # then
-                    #         fallocate -l 8G /mnt/usbdisk.img
-                    #         mkfs.vfat /mnt/usbdisk.img
-                    # fi
-                    echo /dev/mmcblk0p3 > functions/mass_storage.disk0/lun.0/file
-            else
-                    cat /boot/usb.disk0 > functions/mass_storage.disk0/lun.0/file
-            fi
+            # usb.disk0 enables the function, not a backing path. Historical
+            # empty/raw/custom flags are deliberately ignored. Only the API
+            # may select a validated file-backed ISO/IMG after startup.
+            configure_empty_storage || {
+                    start_usb_host
+                    return 1
+            }
     fi
 
     ls /sys/class/udc/ | cat > UDC

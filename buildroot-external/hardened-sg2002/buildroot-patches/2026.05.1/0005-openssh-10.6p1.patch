@@ -1,0 +1,32 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/openssh: update to 10.6p1
+
+OpenSSH 10.6 (2026-10-06) disables the LZ77 dictionary coder in transport
+compression, bounds inflated payloads, applies the authorized_keys "restrict"
+keyword to tunnel forwarding, fixes "none" overrides in Match blocks and the
+GSSAPI state reset. The hash is the release notes' base64 SHA256
+(qdyVZd/+hkD2TYY80poyvEo9vewFZqf8RMXW7nZ9Xzk=) in hex; it also equals the
+upstream Buildroot master pin and Fedora's sources file.
+
+diff --git a/package/openssh/openssh.hash b/package/openssh/openssh.hash
+--- a/package/openssh/openssh.hash
++++ b/package/openssh/openssh.hash
+@@ -1,4 +1,4 @@
+-# From https://www.openssh.com/txt/release-10.5
+-sha256  d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11  openssh-10.5p1.tar.gz
++# From https://www.openssh.com/txt/release-10.6 (base64 encoded)
++sha256  a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39  openssh-10.6p1.tar.gz
+ # Locally calculated
+ sha256  5bb5b160726ef5756e4f32fe95b35249c294962419650f48d05134b486d27ccb  LICENCE
+diff --git a/package/openssh/openssh.mk b/package/openssh/openssh.mk
+--- a/package/openssh/openssh.mk
++++ b/package/openssh/openssh.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-OPENSSH_VERSION_MAJOR = 10.5
++OPENSSH_VERSION_MAJOR = 10.6
+ OPENSSH_VERSION_MINOR = p1
+ OPENSSH_VERSION = $(OPENSSH_VERSION_MAJOR)$(OPENSSH_VERSION_MINOR)
+ OPENSSH_CPE_ID_VERSION = $(OPENSSH_VERSION_MAJOR)

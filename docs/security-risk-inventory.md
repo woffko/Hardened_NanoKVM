@@ -10,14 +10,16 @@ work for the Hardened Rust backend.
 | First boot auth          | No default production credential; require first-account setup when `/etc/kvm/pwd` is missing.                   | Implemented. `security.allow_default_admin=false` by default; isolated lab devices can opt into explicit seeded credentials.                                                             |
 | Password storage         | Argon2id for new writes, unique salt, no plaintext.                                                             | Implemented in `auth/password.rs`; existing bcrypt password files are still accepted for migration.                                                                                      |
 | Session revocation       | Opaque sessions, logout revokes the active session, password change revokes user sessions.                      | Implemented in memory. Persistent session policy remains a product decision.                                                                                                             |
+| Password change          | The current password is required; a failed or interrupted change restores both root and web passwords.          | Implemented: reauthentication under the login lockout; one journal for `/etc/shadow` and `/etc/kvm/pwd`, restored at once or at next start (`security-account-preflight.md`).            |
 | CSRF                     | State-changing browser endpoints require CSRF binding plus Origin/Referer checks.                               | Implemented for protected POST/PUT/PATCH/DELETE routes.                                                                                                                                  |
-| WebSocket Origin         | WebSockets must reject unexpected Origins.                                                                      | Implemented for HID, H.264 Direct, H.264 WebRTC, and terminal sockets.                                                                                                                   |
-| Login brute force        | Lockout enabled by default per IP and username.                                                                 | Implemented; default is 5 failures and 10 minute lockout.                                                                                                                                |
+| WebSocket Origin         | WebSockets must reject unexpected Origins.                                                                      | Implemented for HID, H.264 Direct, H.264 WebRTC, terminal and PicoClaw gateway sockets.                                                                                                  |
+| Login brute force        | Lockout enabled by default per source (IPv4 address or IPv6 /64) and username.                                  | Implemented; default is 5 failures and 10 minute lockout. One off-runtime verification at a time.                                                                                        |
 | Archive extraction       | No tar traversal, no symlink overwrite, bounded install paths.                                                  | Implemented for application, offline, and system-update archives.                                                                                                                        |
 | Update integrity         | Signed metadata plus archive hashes before install.                                                             | Implemented for application and system-update metadata with detached signatures.                                                                                                         |
 | Shell commands           | Privileged commands must use allowlisted argv-only wrappers with timeout and bounded output.                    | Implemented in `system/command.rs`; continued audit is required for new routes.                                                                                                          |
 | Storage paths            | Image operations must remain inside resolved `/data` inventory and reject unsupported media types.              | Implemented for upload, delete, and mount. ISO media can be mounted as CD-ROM or mass storage for hybrid images; IMG media is limited to mass storage.                                   |
 | Remote ISO download      | Disabled by default; validate protocol, redirects, filename, destination, size, and ISO signature.              | Implemented. Final production allowlist policy is still open.                                                                                                                            |
+| Optional packages        | Tailscale and picoclaw installs accept only release files pinned in the signed app; HTTPS only, no fallback client. | Implemented: Tailscale 1.104.2 and picoclaw v0.2.8 pinned by size and SHA-256. See [optional package pins](security-optional-packages.md). |
 | Firewall/WebRTC boundary | Restrictive firewall modes must not expose WebRTC/ICE UDP.                                                      | Implemented. Restricted and Paranoid block H.264 WebRTC in firewall rules, backend route guard, and UI mode selection.                                                                   |
 | System updates           | Signed bundles, staging, backup, rollback, boot health confirmation, and lab-only raw partition flashing guard. | Implemented for current lab raw channel. Production key custody and real kernel/rootfs payload validation are still pending.                                                             |
 | Native video lifecycle   | Native capture restart/read/deinit and encoder resources must have one synchronized owner with bounded cleanup. | Open, high priority. The 2026-07-11 audit found camera restart/deinit races, VENC lifetime errors, bounds bugs, and unchecked hardware failures in the Rust backend's native dependency. |
@@ -81,16 +83,71 @@ Known exceptions:
 
 - Account file: `/etc/kvm/pwd`, mode `0600`.
 - Session secret: `/etc/kvm/session_secret`, generated and written `0600`.
-- Update cache: `/data/.hardened-kvmcache`; application updates use
-  `application-update`, system updates use `system-update`.
+- System-update public cache: `/data/.hardened-kvmcache/system-update`.
+  Remediation source stages app updates in fresh private rootfs directories
+  under `/etc/kvm/application-update`, with anonymous readonly-bound archives;
+  it no longer trusts or cleans the old p3 application cache. This is not yet a
+  released/fully accepted app transaction: durable slot swap/recovery and C1
+  integration remain open. See [update ownership](security-update-ownership.md#private-application-staging).
 - System-update archives are constrained to declared payload roots and reject
   runtime/cache roots such as `/dev`, `/proc`, `/sys`, `/run`, `/tmp`, `/data`,
   `/kvmapp`, and `/root/.kvmcache`.
 - Image directory: `/data`, with resolved containment and symlink rejection.
 - Script directory: `/etc/kvm/scripts`, with basename inventory and explicit
-  execution only.
-- Autostart directory: `/etc/kvm/autostart`, with traversal rejection.
-- DNS/Wi-Fi files: strict value validation and atomic writes.
+  execution only: a run names `/bin/sh` or `python` and the file, so the file's
+  execute bit, which a raw update does not keep, gives it no effect.
+  Scripts run as root, so upload and run pass the terminal's
+  gate: terminal access is enabled, and each operation consumes a fresh unlock
+  ticket of the same session (header `X-NanoKVM-Terminal-Ticket`), issued after
+  its password was entered again. Listing and deleting need only the session.
+  The run's supervisor is a mode of the static `nanokvm-native-ctl`. The backend's
+  own binary cannot be it: starting that binary loads the vendor libraries, which
+  open the video devices of the running backend and keep the process from exiting.
+  A run that leaves a process the supervisor cannot stop ends with its own error.
+  A foreground run has its own task and process group. A closed browser tab
+  does not stop it; after 60 seconds its group gets SIGTERM and, 2 seconds
+  later, SIGKILL. Each output stream keeps its first 64 KiB and the rest is
+  read and discarded, so a chatty script no longer blocks on a full pipe. The
+  reply marks truncated output, and output still held by a process left
+  running after the script ended.
+- USB network: `usb0` leads to the computer under control. A new card does not bring
+  it up, and in every firewall mode the first rule of the NanoKVM chain stops its new
+  connections, ahead of any rule there that accepts by address. Turning USB network on does not open
+  management: that takes `/etc/kvm/usb_management` and a firewall restart, and a raw
+  update keeps the file. Traffic of a connection the device started is unaffected.
+- Firewall modes and Tailscale: the managed rules live in the chains
+  `NKVM-INPUT` and `NKVM-OUTPUT`, and chains that other software owns keep
+  their place ahead of them. Tailscale's `ts-input` accepts traffic on
+  `tailscale0` before the managed chain runs, so a tailnet peer reaches SSH and
+  the web interface in every mode, Restricted and Paranoid included. Tailscale
+  is installed by the owner and is not in the image; access from the tailnet is
+  governed by Tailscale ACLs, not by the firewall mode.
+- Moderate firewall mode filters by source address only. A new connection from
+  a private, link-local or loopback range reaches every port that a service
+  listens on, not only SSH and the web interface. It protects against sources
+  outside those ranges and gives no protection from a computer on the same
+  network. H.264 WebRTC needs it that way; Restricted and Paranoid list ports.
+- Autostart directory: `/etc/kvm/autostart`. The upload API is removed. Nothing
+  executes these files; historical autostart uploads are never activated.
+- Script directory: `/etc/kvm/scripts` holds at most 64 scripts of 256 KiB. An
+  upload takes only a name that a raw update carries, so a hidden name such as
+  `.x.sh` is refused; one that an earlier version stored can still be deleted.
+- Shared directories: `/tmp` and `/dev/shm` are mounted `nosuid,nodev,noexec`
+  by the image and remounted so by `S01fs` on an older image. Nothing on the
+  system runs a program from either. The kernel's protections for links,
+  hard links, files and FIFOs of other accounts there are on.
+- Settings files (syslog, time and timezone, firewall, inittab): replaced
+  through a temporary file whose name no other writer shares, created without
+  following links and fsynced, then renamed, with the directory fsynced.
+- DNS/Wi-Fi files: strict value validation and atomic writes. A Wi-Fi SSID is
+  1–32 bytes and a passphrase 8–63 bytes, as the supplicant accepts, and both
+  are rejected before anything is written.
+- AP provisioning key: each AP session gets a fresh 10-character key from the
+  kernel CSPRNG (about 49 bits), stored in `ap.pass` with mode 0600; without a
+  random source the AP is not started. The API allows 5 failed keys per source
+  and 20 shared by all sources, each for 10 minutes. hostapd's cipher choice,
+  the `hostapd.conf` mode and an AP timeout live in `S30wifi` and are still
+  open. See [security-wifi-ap-key.md](security-wifi-ap-key.md).
 
 ## Follow-Up For Hardening
 

@@ -1,6 +1,6 @@
 import { ChangeEvent, useRef, useState } from 'react';
 import { UploadOutlined } from '@ant-design/icons';
-import { Button, Divider, Popconfirm } from 'antd';
+import { Button, Divider, message, Popconfirm } from 'antd';
 import clsx from 'clsx';
 import { ChevronRightIcon, FileJsonIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,6 +9,13 @@ import * as api from '@/api/script.ts';
 import { MenuItem } from '@/components/menu-item.tsx';
 
 import { Run } from './run';
+import { Unlock } from './unlock';
+
+// What waits for a fresh terminal unlock: scripts run as root.
+type Pending =
+  | { kind: 'upload'; file: File }
+  | { kind: 'run'; type: string }
+  | { kind: 'delete' };
 
 export const Script = () => {
   const { t } = useTranslation();
@@ -16,6 +23,8 @@ export const Script = () => {
   const [scripts, setScripts] = useState<string[]>([]);
   const [currentScript, setCurrentScript] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [runTicket, setRunTicket] = useState('');
 
   const [isUploading, setIsUploading] = useState(false);
   const inputRef = useRef<any>(null);
@@ -36,27 +45,33 @@ export const Script = () => {
     inputRef.current?.click();
   }
 
+  // The file is chosen first, inside the click; the password is asked after.
   function uploadFile(e: ChangeEvent<HTMLInputElement>) {
     if (!e.target?.files?.length) return;
-    const file = e.target.files[0];
-
     if (isUploading) return;
+    setPending({ kind: 'upload', file: e.target.files[0] });
+  }
+
+  function upload(file: File, ticket: string) {
     setIsUploading(true);
 
     const formData = new FormData();
     formData.append('file', file);
 
     api
-      .uploadScript(formData)
+      .uploadScript(formData, ticket)
       .then((rsp) => {
         if (rsp.code !== 0) {
-          console.log(rsp.msg);
+          message.error(rsp.msg);
           return;
         }
 
         if (!scripts.includes(rsp.data.file)) {
           setScripts([...scripts, rsp.data.file]);
         }
+      })
+      .catch((err) => {
+        message.error(err?.response?.data?.msg || t('script.terminalRequired'));
       })
       .finally(() => {
         setIsUploading(false);
@@ -65,16 +80,45 @@ export const Script = () => {
 
   function runScript(type: string) {
     if (!currentScript) return;
+    setPending({ kind: 'run', type });
+  }
 
-    if (type === 'foreground') {
-      setIsRunning(true);
+  function unlocked(ticket: string) {
+    const action = pending;
+    setPending(null);
+    if (!action) return;
+
+    if (action.kind === 'upload') {
+      upload(action.file, ticket);
+    } else if (action.kind === 'run') {
+      if (action.type === 'foreground') {
+        setRunTicket(ticket);
+        setIsRunning(true);
+      } else {
+        api
+          .runScript(currentScript, action.type, ticket)
+          .then((rsp) => {
+            if (rsp.code !== 0) message.error(rsp.msg);
+          })
+          .catch((err) => {
+            message.error(err?.response?.data?.msg || t('script.runFailed'));
+          });
+      }
     } else {
-      api.runScript(currentScript, type).then((rsp) => {
-        if (rsp.code !== 0) {
-          console.log(rsp.msg);
-          return;
-        }
-      });
+      api
+        .deleteScript(currentScript, ticket)
+        .then((rsp) => {
+          if (rsp.code !== 0) {
+            message.error(rsp.msg);
+            return;
+          }
+
+          setScripts(scripts.filter((script) => script !== currentScript));
+          setCurrentScript('');
+        })
+        .catch((err) => {
+          message.error(err?.response?.data?.msg || t('script.terminalRequired'));
+        });
     }
   }
 
@@ -93,15 +137,7 @@ export const Script = () => {
 
   function deleteScript() {
     if (!currentScript) return;
-
-    api.deleteScript(currentScript).then((rsp) => {
-      if (rsp.code !== 0) {
-        console.log(rsp.msg);
-        return;
-      }
-
-      setScripts(scripts.filter((script) => script !== currentScript));
-    });
+    setPending({ kind: 'delete' });
   }
 
   function activate(script: string) {
@@ -189,7 +225,8 @@ export const Script = () => {
         onOpenChange={handleOpenChange}
       />
 
-      {isRunning && <Run script={currentScript} setIsRunning={setIsRunning} />}
+      {pending && <Unlock onUnlock={unlocked} onCancel={() => setPending(null)} />}
+      {isRunning && <Run script={currentScript} ticket={runTicket} setIsRunning={setIsRunning} />}
     </>
   );
 };

@@ -1,0 +1,31 @@
+schema_version = 1
+
+[project]
+workspaces = [
+  "server-rust",
+  "web",
+  "scripts",
+  "support/sg2002/kvm_system/main",
+  "support/sg2002/kvm_vision_test/main",
+  "support/sg2002/additional/kvm",
+  "support/sg2002/additional/kvm_mmf",
+  "support/sg2002/additional/vision",
+  "tools/nanokvm_update_edid",
+]
+
+[backends.rust]
+enabled = true
+required = false
+
+[backends.typescript]
+enabled = true
+required = false
+
+[backends.basedpyright]
+enabled = true
+required = false
+
+[backends.clangd]
+enabled = true
+required = false
+# Add a portable compile_commands path after the SG2002 build exports one.

@@ -1,9 +1,6 @@
-import CryptoJS from 'crypto-js';
-
-// This key is only used to prevent the data from being transmitted in plaintext.
-const SECRET_KEY = 'nanokvm-sipeed-2024';
-
+// Passwords are protected by the TLS transport; there is no static client-side
+// cipher. Encoding keeps the existing form/API boundary without pretending the
+// value is confidential on its own.
 export function encrypt(data: string) {
-  const dataEncrypt = CryptoJS.AES.encrypt(data, SECRET_KEY).toString();
-  return encodeURIComponent(dataEncrypt);
+  return encodeURIComponent(data);
 }

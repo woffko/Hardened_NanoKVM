@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { useAtom, useAtomValue } from 'jotai';
 
-import { stopFrameDetect } from '@/api/stream.ts';
+import { stopFrameDetect, updateFrameDetect } from '@/api/stream.ts';
 import { getFrameDetect } from '@/lib/localstorage.ts';
 import * as storage from '@/lib/localstorage.ts';
 import { getBaseUrl } from '@/lib/service.ts';
@@ -26,8 +26,10 @@ export const Mjpeg = () => {
   });
 
   useEffect(() => {
-    // stop frame detect for a while
+    // Announce the stored choice (the backend starts with detection off and
+    // returns to this value after a pause), then pause it for a while.
     const enabled = getFrameDetect();
+    updateFrameDetect(enabled);
     if (enabled) {
       stopFrameDetect(10);
     }

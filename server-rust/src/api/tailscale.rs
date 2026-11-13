@@ -1,7 +1,6 @@
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::OsString,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -13,12 +12,23 @@ use tokio::task;
 use crate::{
     AppError, Result,
     error::ApiResponse,
-    system::command::{self, AllowedCommand},
+    state::AppState,
+    system::{
+        command::{self, AllowedCommand},
+        package_download::{self, Pinned},
+    },
     update::archive::extract_tar_gz_safe,
 };
 
-const TAILSCALE_ORIGINAL_URL: &str =
-    "https://pkgs.tailscale.com/stable/tailscale_latest_riscv64.tgz";
+// Tailscale 1.104.2, static riscv64. Tailscale's own signature chain verified
+// these bytes when they were pinned: a root key from its source tree
+// (clientupdate/distsign/roots), the signing key bundle that root signs
+// (distsign.pub) and the package signature (.tgz.sig).
+pub(crate) const PACKAGE: Pinned = Pinned {
+    url: "https://pkgs.tailscale.com/stable/tailscale_1.104.2_riscv64.tgz",
+    size: 37_991_456,
+    sha256: "1f8065e0d966a607ec013c31da09ced55943e4de17cd2e520c9cb8e22f6d3f62",
+};
 const TAILSCALE_WORKSPACE: &str = "/root/.tailscale";
 const TAILSCALE_ARCHIVE_NAME: &str = "tailscale_riscv64.tgz";
 const TAILSCALE_PATH: &str = "/usr/bin/tailscale";
@@ -142,7 +152,8 @@ pub async fn start() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn restart() -> Result<impl IntoResponse> {
+pub async fn restart(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match restart_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -152,7 +163,8 @@ pub async fn restart() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn stop() -> Result<impl IntoResponse> {
+pub async fn stop(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match stop_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -162,7 +174,8 @@ pub async fn stop() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn up() -> Result<impl IntoResponse> {
+pub async fn up(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match up_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -172,7 +185,8 @@ pub async fn up() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn down() -> Result<impl IntoResponse> {
+pub async fn down(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match down_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -182,7 +196,8 @@ pub async fn down() -> Result<impl IntoResponse> {
     }
 }
 
-pub async fn login() -> Result<axum::response::Response> {
+pub async fn login(State(state): State<AppState>) -> Result<axum::response::Response> {
+    let _writer = state.writers.configuration()?;
     let mut status = raw_status().await;
     if status.is_err() {
         let _ = start_service().await;
@@ -212,7 +227,8 @@ pub async fn login() -> Result<axum::response::Response> {
     }
 }
 
-pub async fn logout() -> Result<impl IntoResponse> {
+pub async fn logout(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let _writer = state.writers.configuration()?;
     match logout_service().await {
         Ok(()) => Ok(Json(ApiResponse::<()>::ok_empty())),
         Err(err) => {
@@ -246,7 +262,7 @@ async fn install_tailscale() -> Result<()> {
     let _cleanup = WorkspaceCleanup;
 
     let archive_path = Path::new(TAILSCALE_WORKSPACE).join(TAILSCALE_ARCHIVE_NAME);
-    download_tailscale(&archive_path).await?;
+    package_download::fetch(&PACKAGE, &archive_path, TAILSCALE_INSTALL_TIMEOUT).await?;
 
     let workspace = PathBuf::from(TAILSCALE_WORKSPACE);
     let extract_archive = archive_path.clone();
@@ -344,62 +360,6 @@ struct WorkspaceCleanup;
 impl Drop for WorkspaceCleanup {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(TAILSCALE_WORKSPACE);
-    }
-}
-
-async fn download_tailscale(target: &Path) -> Result<()> {
-    match download_tailscale_with_curl(target).await {
-        Ok(()) => Ok(()),
-        Err(curl_err) => {
-            tracing::warn!(error = %curl_err, "curl tailscale download failed, trying wget");
-            let _ = remove_file_if_exists_path(target);
-            download_tailscale_with_wget(target)
-                .await
-                .map_err(|wget_err| {
-                    AppError::Internal(format!(
-                        "download tailscale failed; curl: {curl_err}; wget: {wget_err}"
-                    ))
-                })
-        }
-    }
-}
-
-async fn download_tailscale_with_curl(target: &Path) -> Result<()> {
-    let args = vec![
-        OsString::from("-f"),
-        OsString::from("-L"),
-        OsString::from("-sS"),
-        OsString::from("--connect-timeout"),
-        OsString::from("20"),
-        OsString::from("--max-time"),
-        OsString::from("600"),
-        OsString::from("--output"),
-        target.as_os_str().to_os_string(),
-        OsString::from(TAILSCALE_ORIGINAL_URL),
-    ];
-    run_download_command(AllowedCommand::Curl, args, "download tailscale with curl").await
-}
-
-async fn download_tailscale_with_wget(target: &Path) -> Result<()> {
-    let args = vec![
-        OsString::from("-q"),
-        OsString::from("-O"),
-        target.as_os_str().to_os_string(),
-        OsString::from(TAILSCALE_ORIGINAL_URL),
-    ];
-    run_download_command(AllowedCommand::Wget, args, "download tailscale with wget").await
-}
-
-async fn run_download_command(
-    command: AllowedCommand,
-    args: Vec<OsString>,
-    action: &str,
-) -> Result<()> {
-    let output = command::run_allowed(command, args, TAILSCALE_INSTALL_TIMEOUT).await?;
-    if output.status == 0 {
-        Ok(())
-    } else {
-        Err(AppError::Internal(command_error(action, output)))
     }
 }
 

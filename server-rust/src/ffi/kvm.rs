@@ -18,10 +18,7 @@ use crate::{AppError, Result};
 
 const HDMI_DISABLE_FILE: &str = "/etc/kvm/hdmi_disable";
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
-const DEFAULT_LIBKVM_PATHS: &[&str] = &[
-    "/tmp/server/dl_lib/libkvm.so",
-    "/kvmapp/server/dl_lib/libkvm.so",
-];
+const DEFAULT_LIBKVM_PATHS: &[&str] = &["/kvmapp/server/dl_lib/libkvm.so"];
 #[cfg(not(all(target_arch = "riscv64", feature = "linked-libkvm")))]
 const RTLD_NOW: c_int = 2;
 
@@ -203,6 +200,11 @@ impl KvmVision {
         kind: u8,
         quality_or_rate: u16,
     ) -> Result<(Vec<u8>, i32)> {
+        // A producer that outlives shutdown must not reach the deinitialized
+        // capture stack.
+        if self.deinitialized {
+            return Err(AppError::Internal("libkvm is shut down".to_string()));
+        }
         let mut ptr: *mut u8 = std::ptr::null_mut();
         let mut len: u32 = 0;
 
@@ -343,6 +345,11 @@ impl KvmVision {
         kind: u8,
         quality_or_rate: u16,
     ) -> Result<(Vec<u8>, i32)> {
+        // A producer that outlives shutdown must not reach the deinitialized
+        // capture stack.
+        if self.deinitialized {
+            return Err(AppError::Internal("libkvm is shut down".to_string()));
+        }
         let mut ptr: *mut u8 = std::ptr::null_mut();
         let mut len: u32 = 0;
 

@@ -1,0 +1,230 @@
+# PicoClaw credential-file pair publication
+
+Rust reads and publishes `config.json` and `.security.yml` through checked
+descriptor-relative rootfs I/O and a private pair journal. This gives enrolled
+Rust operations a recoverable, coherent pair; it is not the complete PicoClaw
+privilege/service boundary or a claim about independent native readers.
+
+## Supported storage and compatibility
+
+The selected `PICOCLAW_HOME` remains supported, including UTF-8 directory names,
+spaces and a relative home interpreted from the server's cwd. Every existing
+ancestor must be root-owned on the root filesystem, without group/world write
+or special permission bits. Symlinks, magic links, parent traversal and crossing
+mounts are rejected. A custom home on another mounted filesystem, including
+public USB storage, is not supported by this private-rootfs protocol. It fails
+before writes; it is not silently redirected to the default home.
+
+Rust, the fixed native role command and the new bundled S96 use the same lexical
+home selector. `nanokvm-native-ctl picoclaw-home` is a read-only path query: it
+does not connect to the broker, create directories, onboard or repair state.
+Unset/Unicode-whitespace-only values select `/root/.picoclaw`; relative values
+become absolute before S96 changes cwd. Spaces and UTF-8 names are retained;
+parent traversal, control characters, non-UTF-8 or overlong effective paths fail
+explicitly, without fallback. `HOME`/passwd do not select a second default.
+Existing non-root/passwd-selected layouts need an explicit compatible
+`PICOCLAW_HOME`, not discovery or reset. Missing/old ctl support refuses setup.
+The broker freezes one selected absolute home in its retained process group;
+backend, trial and optional Pico commands inherit that exact value. Absolute or
+default selection does not require a cwd lookup, so a later unavailable cwd
+cannot reinterpret it. The separate `picoclaw-home-check` ctl command compares
+the caller's full path fingerprint with the live broker and prints the caller's
+path only on a matching Running reply. It cannot set a home or submit a path.
+It is a point-in-time identity query, not a writer/native lease, configuration
+generation receipt or permission for a later start/capture on another connection.
+No filesystem trust check is supplied by this fingerprint. Current S96 start/
+stop/onboard probe `picoclaw-control-ready` and use fixed home-bound broker operations.
+API
+control additionally checks exact current support before default preparation.
+Independent legacy launchers and different service-user layouts remain
+un-migrated; complete all-writer/configuration handoff is still required.
+
+Existing credential files must be root-owned regular single-link files with
+mode 0600. Reads are bounded to 4 MiB per file and compare inode/metadata revision,
+including modification/change times, before and after reading. Malformed
+documents remain parse errors; valid YAML scalar/null compatibility is unchanged.
+Missing `config.json` is an error for reads;
+missing `.security.yml` remains an empty mapping for compatibility. Invalid
+contents/metadata are not automatically repaired, deleted or replaced.
+
+The limit applies to serialized file bytes; oversize updates fail rather than
+truncate a document. Other model/provider/custom fields remain intact. Existing
+unsafe paths/permissions need explicit administrative migration, not automatic
+adoption of potentially exposed credentials.
+
+## Publication and writer ownership
+
+Rust model/default updates serialize and size-check both JSON and YAML before
+changing either destination. Writes require a Config permit and exclusive
+nonblocking flock on the checked home directory. Rust readers use a shared
+directory lock and recheck both names around their bounded reads. A competing
+writer returns a busy error rather than exposing its intermediate pair.
+
+The destination and its parents are checked before publication. A random
+exclusive temporary file in the pinned directory is 0600 before plaintext is
+written. Its complete contents are synced,
+the destination revision is rechecked, then an atomic rename publishes the file
+and a directory sync fences success. First creation uses no-replace rename.
+Existing open readers keep the old inode instead of observing in-place truncation.
+Serialization/read buffers use zeroizing owners; this is not a claim that every
+parsed string or native-runtime copy is erased from memory.
+
+The private `.picoclaw-config-pair` journal contains the complete desired pair,
+presence flags and old content hashes. A versioned, length-bounded header and
+SHA-256 checksums reject corruption, unknown schemas, truncation and trailing
+bytes. Its maximum size is two 4 MiB documents plus a 192-byte header. It has
+the same root-owned, 0600, single-link/no-symlink/no-mount requirements. The
+checksums detect corruption; they are not authentication against a root writer.
+
+After syncing the journal file, no-replace rename and parent sync commit its
+intent. Each canonical file is then published and parent-synced. Recovery first
+requires BOTH canonical members to match their recorded old or desired content;
+foreign contents or unsafe metadata stop recovery without repair. Existing
+same-byte regular private inodes may be accepted: this is not arbitrary-root
+writer compare-and-swap. The complete canonical pair is rechecked before exact
+journal inode/revision validation, unlink and final parent sync.
+
+A reader seeing a valid pending journal returns its complete desired pair,
+after validating the canonical old/new states, without performing writes.
+Config-owned onboard preflight and subsequent pair writes roll that intent
+forward. Recovery first syncs the checked journal fd and directory again: a
+visible journal rename from a crashed process is not proof of its durability.
+A corrupt journal never falls back to the canonical files. No automatic
+rollback or blind retry is promised after an ambiguous I/O error.
+
+Temporary cleanup checks inode identity before unlinking its own name. Cleanup
+on failure is best-effort, not a durable orphan journal/GC protocol. A power loss
+can leave a private temporary. If the rename succeeds but the directory sync
+fails, the result is indeterminate durability: an error does not mean no bytes
+were changed. There is no automatic rollback or blind retry guarantee.
+
+## Owned first-run import
+
+API and current S96 submit one broker-owned Onboard job over the private job
+transport. The API does not hold Config while the broker acquires Update/Config
+for the job. An existing configuration is a no-op; a lone security file or a
+leftover stage refuses. The job retains both admissions until the one-shot has
+a valid completion receipt, owner reap and EOF, then imports its output and
+retires its stage. An abandoned API/ctl receiver does not release those
+admissions. The bound and Stop request native cleanup and never report import
+success; missing closure keeps the job fenced as recovery-required instead of
+authorizing another writer.
+
+After successful native closure, the checked import runs on the job's
+submission worker while the broker keeps supervising native cells. The worker
+retains the complete Update/Config permit and the checked stage. An import
+error, spawn failure or caught host-test unwind keeps the job fenced with both
+admissions instead of releasing a partially completed operation. A Stop after
+the import has started cannot abandon it. Process death or power loss is
+settled at a later boot, as described in
+[the mutation jobs](security-picoclaw-mutations.md#current-onboard-settlement);
+panic=abort is unchanged.
+
+The installed home/pair is not passed to upstream `onboard`. A fresh private
+`.nanokvm-onboard` scratch is built under the job's side name with an exclusive
+mkdir and renamed into place already carrying the job's marker; the command's
+home/config/cwd point there. Inspected upstream v0.2.8
+[onboard helpers](https://github.com/sipeed/picoclaw/blob/v0.2.8/cmd/picoclaw/internal/onboard/helpers.go)
+write workspace templates over existing files; running them in the scratch
+avoids resetting user workspace contents. This source inspection does not
+establish identity of the separately distributed NanoKVM optional binary.
+
+Completed import uses pinned no-follow/no-cross-mount descriptors, root-owned
+single-link regular files and bounded reads. It limits traversal to 256 entries
+(including directories), depth 12, 4 MiB/file and 8 MiB total input. Unknown
+scratch-root members, an unexpected configured workspace, unsafe files/mounts
+and symlink/hardlink aliases refuse before destination file publication.
+Existing user templates/data are retained. Three compiled app assets provide
+AGENT_KVM as AGENT.md, the kvm-control skill and its executable fallback bridge;
+unknown conflicting generated assets require explicit migration instead of being
+overwritten. Destination preflight is read-only, including missing parents.
+New files/parents are synced; JSON/YAML publication occurs last, with workspace
+rewritten to the installed home and restricted defaults for this new config.
+An existing valid config pair remains unchanged and does not launch upstream.
+
+This is not a whole-workspace transaction. A later I/O failure may leave newly
+published default files without a committed pair; a later onboarding treats
+them as existing files. The job retires only its own stage, after Committed or
+after a one-shot that did not succeed, and a later boot settles an interrupted
+job. Orphan scratch and dangling security are refused, not deleted, adopted or
+blindly retried. Actual optional-binary validation and installed-device
+acceptance remain open. The scratch is not a restore-schema member or proof of
+all-writer quiescence. The job protocol, store and recovery are described in
+[the mutation jobs](security-picoclaw-mutations.md). The legacy completion
+boolean and its query are gone.
+
+## Startup defaults and connection-time publication
+
+The ordinary API startup/default path first refuses an unresolved pair journal;
+it cannot roll forward a native reader's canonical files as a side effect of a
+gateway connection. It compares zeroizing canonical JSON/YAML encodings before
+and after preparing defaults. If the document values are unchanged, it does not
+publish either file: existing bytes, comments/formatting, inodes, timestamps and
+the exact installed-pair generation are retained. A real settings/token change
+still uses the checked pair publisher. This is not a native stop/join barrier;
+configuration changes and independent writers still need lifecycle integration.
+
+The defaults include the [local tool policy](security-picoclaw-local-tools.md).
+It is enforced over explicit values while the runtime runs as root, and it
+covers the workspace switches, shell, cron commands, hardware tools, path
+allowlists and local MCP commands. Malformed policy fields or containers, or a
+workspace outside `<Home>/workspace`, fail before pair publication or
+internal-token provisioning. Launch preparation refuses a pair without the
+policy. These upstream settings are not an operating-system boundary. Target
+GUI/HID/BIOS/terminal autonomy and the installed-runtime acceptance checks
+remain separate gates.
+
+## Remaining transaction/lifecycle work
+
+The two canonical names still change separately. Independent native readers
+that ignore the directory lock/journal can observe an intermediate pair.
+Native stop/join/enrollment and start-after-recovery integration therefore remain
+mandatory for every writer, beyond the new fixed API/S96 start/stop/onboard routing.
+Raw capture must settle or reject a pending journal under the effective
+home/service barrier before reading canonical files. The journal is not silently
+added to the preserved archive schema, nor is a Rust Config permit proof that
+native writers are stopped. All writers must be enrolled or stopped/joined.
+
+Profile/workspace/session/installer and independent service/local-tool writers,
+independent service-home/configuration-generation alignment and non-root service-user migration, stale-temporary recovery,
+fault-injected kernel I/O/fsync outcomes, native onboard acceptance, device tests
+and raw migration remain open. PicoClaw local tools still need H2 isolation.
+Target GUI/HID/BIOS/terminal autonomy is unchanged by this file protocol.
+
+## Host verification
+
+```sh
+cargo test --manifest-path server-rust/Cargo.toml --locked --offline --lib \
+  --features sandbox-test-fixture picoclaw -- --include-ignored --nocapture
+```
+
+The actual Rust load/save helpers run in disposable user/mount namespaces with
+a private chroot and synthetic data. Cases cover destination symlink/hardlink,
+inode replacement, first creation, missing YAML, malformed documents, unsafe
+modes/directories/FIFOs/ancestors, oversize refusal, private-home setup, relative
+cwd and a real private tmpfs mount boundary. This does not exercise an installed
+PicoClaw binary, authenticated router, actual device or physical power loss.
+
+Pair fixtures additionally kill and reap the real writer at ten publication
+boundaries across existing-pair, empty-home and absent-YAML states. They check
+read-only coherent journal views, busy readers during mixed canonical state,
+idempotent roll-forward, exact journal retirement, corrupt/unsafe/foreign-state
+refusal and preservation/non-adoption of private orphan temporaries. These are
+SIGKILL tests, not physical power-cut or kernel-fault-injection evidence.
+
+Connection/default cases additionally verify three repeated no-op preparations
+retain exact file bytes/metadata and generation even with user formatting/YAML
+comments; a real gateway-setting correction still publishes. Local policy cases
+cover missing/explicit booleans, retained custom fields/token/MCP enablement and
+malformed-policy refusal before provisioning. An actual interrupted-pair case
+refuses connection-time preparation without changing the canonical pair, then
+recovers only through stopped-launch preparation. These host fixtures do not
+execute the installed PicoClaw binary or prove OS-level tool isolation.
+
+Retained-import fixtures additionally combine a real checked scratch and actual
+Engine with a synthetic fixed one-shot's receipt/reap/EOF. A test-only error
+after the first synced workspace member keeps the pair unpublished and retains
+Update/Config/home ownership. Held-worker controls, Stop/caller loss, spawn and
+caught-unwind failures, preexisting uncertainty and joined singleton teardown
+are checked separately. The injected error is not a kernel-fault or power-loss
+test; durable whole-job recovery and scratch retirement are still unimplemented.

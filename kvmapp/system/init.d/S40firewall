@@ -1,12 +1,23 @@
 #!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
 
 CONFIG_FILE=/etc/kvm/firewall.json
 SERVER_CONFIG=/etc/kvm/server.yaml
+USB_MANAGEMENT=/etc/kvm/usb_management
 SYSLOG_CONFIG=/etc/kvm/syslog.json
 LOCAL_IPV4_CIDRS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
 LOCAL_IPV4_LOOPBACK_CIDRS="127.0.0.0/8"
 LOCAL_IPV6_CIDRS="fc00::/7 fe80::/10"
 LOCAL_IPV6_LOOPBACK_CIDRS="::1/128"
+# Managed rules live only in these chains. The built-in chains keep the
+# policies and one jump to each, so chains that other software owns (such as
+# Tailscale's ts-input) and their jumps survive every mode change.
+INPUT_CHAIN=NKVM-INPUT
+OUTPUT_CHAIN=NKVM-OUTPUT
+XTABLES_WAIT=2
 
 firewall_mode() {
     [ -r "$CONFIG_FILE" ] || {
@@ -24,8 +35,20 @@ firewall_mode() {
     esac
 }
 
+effective_mode() {
+    mode="$(firewall_mode)"
+    case "$mode" in
+        restricted|paranoid)
+            https_enabled || mode=moderate
+            ;;
+    esac
+    echo "$mode"
+}
+
+# Reads the value as the server does: no file is HTTP, quotes and a comment are
+# not part of it, and only the lower-case word is HTTPS.
 https_enabled() {
-    grep -q '^proto:[[:space:]]*https[[:space:]]*$' "$SERVER_CONFIG" 2>/dev/null
+    grep -Eq "^proto:[[:space:]]*[\"']?https[\"']?[[:space:]]*(#.*)?\$" "$SERVER_CONFIG" 2>/dev/null
 }
 
 https_port() {
@@ -56,228 +79,258 @@ local_ipv6_admin_cidrs() {
     printf '%s\n' $LOCAL_IPV6_CIDRS
 }
 
+# Rule builders only collect iptables-restore lines in RULES and choose
+# POLICIES (INPUT FORWARD OUTPUT); apply_table commits them.
+input_rule() {
+    RULES="$RULES-A $INPUT_CHAIN $*
+"
+}
+
+output_rule() {
+    RULES="$RULES-A $OUTPUT_CHAIN $*
+"
+}
+
 allow_local_ipv4_tcp_port() {
     port="$1"
     for cidr in $(local_ipv4_admin_cidrs); do
-        iptables -A INPUT -s "$cidr" -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+        input_rule -s "$cidr" -p tcp --dport "$port" -m state --state NEW -j ACCEPT
     done
 }
 
 allow_local_ipv4_new() {
     for cidr in $(local_ipv4_admin_cidrs); do
-        iptables -A INPUT -s "$cidr" -m state --state NEW -j ACCEPT
+        input_rule -s "$cidr" -m state --state NEW -j ACCEPT
     done
 }
 
 allow_local_ipv6_tcp_port() {
     port="$1"
     for cidr in $(local_ipv6_admin_cidrs); do
-        ip6tables -A INPUT -s "$cidr" -p tcp --dport "$port" -m state --state NEW -j ACCEPT
+        input_rule -s "$cidr" -p tcp --dport "$port" -m state --state NEW -j ACCEPT
     done
 }
 
 allow_local_ipv6_new() {
     for cidr in $(local_ipv6_admin_cidrs); do
-        ip6tables -A INPUT -s "$cidr" -m state --state NEW -j ACCEPT
+        input_rule -s "$cidr" -m state --state NEW -j ACCEPT
     done
-}
-
-reset_ipv4() {
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    iptables -P FORWARD ACCEPT 2>/dev/null || true
-    iptables -P OUTPUT ACCEPT 2>/dev/null || true
-    iptables -F 2>/dev/null || true
-}
-
-reset_ipv6() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
-    ip6tables -P INPUT ACCEPT 2>/dev/null || true
-    ip6tables -P FORWARD ACCEPT 2>/dev/null || true
-    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
-    ip6tables -F 2>/dev/null || true
-}
-
-apply_baseline_ipv4() {
-    reset_ipv4
-    iptables -A INPUT -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A INPUT -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP 2>/dev/null || true
-}
-
-apply_baseline_ipv6() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
-    reset_ipv6
-    ip6tables -A INPUT -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
-    ip6tables -A INPUT -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
-    ip6tables -A INPUT -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT 2>/dev/null || true
 }
 
 allow_ipv6_control() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
     for type in destination-unreachable packet-too-big time-exceeded parameter-problem router-solicitation router-advertisement neighbor-solicitation neighbor-advertisement; do
-        ip6tables -A INPUT -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT 2>/dev/null || true
-        ip6tables -A OUTPUT -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT 2>/dev/null || true
+        input_rule -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT
+        output_rule -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT
     done
 }
 
-apply_moderate_ipv4() {
-    reset_ipv4
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o lo -j ACCEPT
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# usb0 leads to the computer under control. In every mode its new connections
+# stop here, ahead of any rule that would take them by address, unless the
+# operator opened management to it.
+close_usb_management() {
+    [ -e "$USB_MANAGEMENT" ] || input_rule -i usb0 -m state --state NEW -j DROP
+}
+
+baseline_ipv4_rules() {
+    POLICIES="ACCEPT ACCEPT ACCEPT"
+    input_rule -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT
+    input_rule -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT
+    input_rule -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT
+}
+
+baseline_ipv6_rules() {
+    POLICIES="ACCEPT ACCEPT ACCEPT"
+    input_rule -i eth0 -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --sport 80 -m state --state ESTABLISHED -j ACCEPT
+    input_rule -i eth0 -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --sport 443 -m state --state ESTABLISHED -j ACCEPT
+    input_rule -i eth0 -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
+    output_rule -o eth0 -p tcp --dport 22 -m state --state ESTABLISHED -j ACCEPT
+}
+
+moderate_ipv4_rules() {
+    POLICIES="DROP DROP ACCEPT"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv4_new
-    iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP 2>/dev/null || true
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
+    input_rule -p udp --sport 67 --dport 68 -j ACCEPT
 }
 
-apply_moderate_ipv6() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
-    reset_ipv6
-    ip6tables -A INPUT -i lo -j ACCEPT
-    ip6tables -A OUTPUT -o lo -j ACCEPT
-    ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+moderate_ipv6_rules() {
+    POLICIES="DROP DROP ACCEPT"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv6_new
-    ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
+    input_rule -p udp --sport 547 --dport 546 -j ACCEPT
     allow_ipv6_control
-    ip6tables -P INPUT DROP
-    ip6tables -P FORWARD DROP
-    ip6tables -P OUTPUT ACCEPT
 }
 
-apply_paranoid_ipv4() {
+paranoid_ipv4_rules() {
     port="$(https_port)"
-    reset_ipv4
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o lo -j ACCEPT
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    POLICIES="DROP DROP DROP"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
+    output_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv4_tcp_port "$port"
-    iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT 2>/dev/null || true
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT DROP
+    input_rule -p udp --sport 67 --dport 68 -j ACCEPT
+    output_rule -p udp --sport 68 --dport 67 -j ACCEPT
 }
 
-apply_paranoid_ipv6() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
+paranoid_ipv6_rules() {
     port="$(https_port)"
-    reset_ipv6
-    ip6tables -A INPUT -i lo -j ACCEPT
-    ip6tables -A OUTPUT -o lo -j ACCEPT
-    ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    POLICIES="DROP DROP DROP"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
+    output_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv6_tcp_port "$port"
-    ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -p udp --sport 546 --dport 547 -j ACCEPT 2>/dev/null || true
+    input_rule -p udp --sport 547 --dport 546 -j ACCEPT
+    output_rule -p udp --sport 546 --dport 547 -j ACCEPT
     allow_ipv6_control
-    ip6tables -P INPUT DROP
-    ip6tables -P FORWARD DROP
-    ip6tables -P OUTPUT DROP
 }
 
-apply_restricted_ipv4() {
+restricted_ipv4_rules() {
     port="$(https_port)"
     log_port="$(syslog_port)"
-    reset_ipv4
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o lo -j ACCEPT
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    POLICIES="DROP DROP DROP"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
+    output_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv4_tcp_port "$port"
-    iptables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
+    output_rule -p tcp --dport 443 -m state --state NEW -j ACCEPT
     allow_local_ipv4_tcp_port 22
-    iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -p tcp --dport 53 -m state --state NEW -j ACCEPT
-    iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
-    iptables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
-    iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT 2>/dev/null || true
-    iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT 2>/dev/null || true
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT DROP
+    output_rule -p udp --dport 53 -j ACCEPT
+    output_rule -p tcp --dport 53 -m state --state NEW -j ACCEPT
+    output_rule -p udp --dport 123 -j ACCEPT
+    output_rule -p udp --dport "$log_port" -j ACCEPT
+    input_rule -p udp --sport 67 --dport 68 -j ACCEPT
+    output_rule -p udp --sport 68 --dport 67 -j ACCEPT
 }
 
-apply_restricted_ipv6() {
-    command -v ip6tables >/dev/null 2>&1 || return 0
+restricted_ipv6_rules() {
     port="$(https_port)"
     log_port="$(syslog_port)"
-    reset_ipv6
-    ip6tables -A INPUT -i lo -j ACCEPT
-    ip6tables -A OUTPUT -o lo -j ACCEPT
-    ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    POLICIES="DROP DROP DROP"
+    input_rule -i lo -j ACCEPT
+    output_rule -o lo -j ACCEPT
+    input_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
+    output_rule -m state --state ESTABLISHED,RELATED -j ACCEPT
     allow_local_ipv6_tcp_port "$port"
-    ip6tables -A OUTPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT
+    output_rule -p tcp --dport 443 -m state --state NEW -j ACCEPT
     allow_local_ipv6_tcp_port 22
-    ip6tables -A OUTPUT -p udp --dport 53 -j ACCEPT
-    ip6tables -A OUTPUT -p tcp --dport 53 -m state --state NEW -j ACCEPT
-    ip6tables -A OUTPUT -p udp --dport 123 -j ACCEPT
-    ip6tables -A OUTPUT -p udp --dport "$log_port" -j ACCEPT
-    ip6tables -A INPUT -p udp --sport 547 --dport 546 -j ACCEPT 2>/dev/null || true
-    ip6tables -A OUTPUT -p udp --sport 546 --dport 547 -j ACCEPT 2>/dev/null || true
+    output_rule -p udp --dport 53 -j ACCEPT
+    output_rule -p tcp --dport 53 -m state --state NEW -j ACCEPT
+    output_rule -p udp --dport 123 -j ACCEPT
+    output_rule -p udp --dport "$log_port" -j ACCEPT
+    input_rule -p udp --sport 547 --dport 546 -j ACCEPT
+    output_rule -p udp --sport 546 --dport 547 -j ACCEPT
     allow_ipv6_control
-    ip6tables -P INPUT DROP
-    ip6tables -P FORWARD DROP
-    ip6tables -P OUTPUT DROP
 }
 
-apply_baseline() {
-    apply_baseline_ipv4
-    apply_baseline_ipv6
+# Prints one iptables-restore --noflush transaction for the filter table of
+# $1 (the current iptables-save output). It deletes every rule of the built-in
+# chains except jumps to chains that other software owns, refills the managed
+# chains and hooks them in after those jumps.
+restore_payload() {
+    current="$1"
+    set -- $POLICIES
+    printf '%s\n' '*filter' ":INPUT $1 [0:0]" ":FORWARD $2 [0:0]" ":OUTPUT $3 [0:0]" \
+        ":$INPUT_CHAIN - [0:0]" ":$OUTPUT_CHAIN - [0:0]"
+    printf '%s\n' "$current" | awk '
+        /^:/ {
+            name = substr($1, 2)
+            if ($2 == "-" && name !~ /^NKVM-/)
+                foreign[name] = 1
+            next
+        }
+        $1 == "-A" && ($2 == "INPUT" || $2 == "FORWARD" || $2 == "OUTPUT") {
+            target = ""
+            for (i = 3; i < NF; i++)
+                if ($i == "-j" || $i == "-g")
+                    target = $(i + 1)
+            if (!(target in foreign)) {
+                sub(/^-A /, "-D ")
+                print
+            }
+        }
+    '
+    printf '%s\n' "-A INPUT -j $INPUT_CHAIN" "-A OUTPUT -j $OUTPUT_CHAIN"
+    printf '%s' "$RULES"
+    printf '%s\n' COMMIT
 }
 
-apply_moderate() {
-    apply_moderate_ipv4
-    apply_moderate_ipv6
+# Reads the committed table back: the chosen policies, exactly one jump to
+# each managed chain and as many managed rules as were requested.
+verify_table() {
+    current="$("$1" -w "$XTABLES_WAIT" -S)" || return 1
+    set -- $POLICIES
+    for expected in "-P INPUT $1" "-P FORWARD $2" "-P OUTPUT $3"; do
+        printf '%s\n' "$current" | grep -qxF -e "$expected" || return 1
+    done
+    [ "$(printf '%s\n' "$current" | grep -cxF -e "-A INPUT -j $INPUT_CHAIN")" = 1 ] || return 1
+    [ "$(printf '%s\n' "$current" | grep -cxF -e "-A OUTPUT -j $OUTPUT_CHAIN")" = 1 ] || return 1
+    [ "$(printf '%s\n' "$current" | grep -c -e '^-A NKVM-')" = "$(printf '%s' "$RULES" | grep -c -e '^-A NKVM-')" ]
 }
 
-apply_restricted() {
-    if ! https_enabled; then
-        apply_moderate
-        return 0
+# Applies one address family as a single commit: iptables-restore replaces
+# the whole table or leaves it as it was, so a failure or a kill never leaves
+# a flushed or half-built ruleset behind.
+apply_table() {
+    RULES=
+    close_usb_management
+    "$2"
+    current="$("$1"-save -t filter)" || return 1
+    payload="$(restore_payload "$current")"
+    if ! printf '%s\n' "$payload" | "$1"-restore -w "$XTABLES_WAIT" --noflush --test; then
+        echo "S40firewall: $1 rejected the new rules" >&2
+        return 1
     fi
-
-    apply_restricted_ipv4
-    apply_restricted_ipv6
+    if ! printf '%s\n' "$payload" | "$1"-restore -w "$XTABLES_WAIT" --noflush; then
+        echo "S40firewall: $1 could not commit the new rules" >&2
+        return 1
+    fi
+    if ! verify_table "$1"; then
+        echo "S40firewall: $1 rules read back differ from the new rules" >&2
+        return 1
+    fi
 }
 
-apply_paranoid() {
-    if ! https_enabled; then
-        apply_moderate
-        return 0
+# Both families are attempted so that a failure of one never leaves the other
+# open; any failure makes the command fail.
+apply_mode() {
+    status=0
+    apply_table iptables "$1_ipv4_rules" || status=1
+    if command -v ip6tables >/dev/null 2>&1; then
+        apply_table ip6tables "$1_ipv6_rules" || status=1
     fi
-
-    apply_paranoid_ipv4
-    apply_paranoid_ipv6
+    return "$status"
 }
 
 start() {
     printf 'Starting firewall: '
-    case "$(firewall_mode)" in
-        baseline) apply_baseline ;;
-        moderate) apply_moderate ;;
-        restricted) apply_restricted ;;
-        paranoid) apply_paranoid ;;
-        *) apply_moderate ;;
-    esac
-    echo OK
+    if apply_mode "$(effective_mode)"; then
+        echo OK
+    else
+        echo FAILED
+        return 1
+    fi
 }
 
 stop() {
     printf 'Stopping firewall: '
-    apply_baseline
-    echo 'baseline'
+    if apply_mode baseline; then
+        echo 'baseline'
+    else
+        echo FAILED
+        return 1
+    fi
 }
 
 restart() {
@@ -286,14 +339,7 @@ restart() {
 
 status() {
     mode="$(firewall_mode)"
-    effective="$mode"
-    case "$mode" in
-        restricted|paranoid)
-            if ! https_enabled; then
-                effective=moderate
-            fi
-            ;;
-    esac
+    effective="$(effective_mode)"
 
     local_ipv4="$(local_ipv4_cidrs | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
     local_ipv6="$(local_ipv6_cidrs | tr '\n' ' ' | sed 's/[[:space:]]*$//')"

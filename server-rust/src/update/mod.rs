@@ -1,1 +1,54 @@
+pub mod app_bootstrap;
+pub mod app_install_lease;
+pub mod app_slot;
+mod app_space;
+pub(crate) mod app_stage;
+pub mod app_trial;
 pub mod archive;
+pub(crate) mod boot_script_binding;
+pub mod boot_script_catalog;
+pub mod helper_family;
+pub mod keys;
+pub mod native_bootstrap;
+pub mod operation;
+pub(crate) mod operation_lock;
+pub(crate) mod picoclaw_config;
+pub(crate) mod picoclaw_model;
+pub(crate) mod picoclaw_policy;
+pub(crate) mod picoclaw_profile;
+pub(crate) mod picoclaw_runtime;
+pub(crate) mod picoclaw_startup;
+pub(crate) mod picoclaw_token;
+pub mod raw_capture;
+pub mod raw_install_lease;
+pub mod raw_restore;
+pub mod raw_transport;
+pub mod raw_writer;
+pub mod restore_accounts;
+pub mod restore_archive;
+pub(crate) mod restore_binding;
+pub mod restore_capsule;
+pub mod restore_effective;
+mod restore_fs;
+pub mod restore_identity;
+pub mod restore_job;
+pub mod restore_key;
+pub mod restore_native;
+mod restore_policy;
+
+/// Whether a raw update carries the file at `path`, relative to the root, onto
+/// the new system. A file the API stores under a carried directory must pass
+/// this, because the capture refuses a directory that holds anything else.
+pub(crate) fn restore_carries(path: &str) -> bool {
+    restore_policy::allowed(path)
+}
+pub mod restore_preflight;
+pub mod restore_rootfs;
+pub mod restore_runtime;
+pub mod restore_ssh;
+pub(crate) mod staged_archive;
+pub(crate) mod staged_metadata;
+pub(crate) mod staged_snapshot;
+pub mod state_writers;
+pub mod support_abi;
+pub mod support_abi_catalog;

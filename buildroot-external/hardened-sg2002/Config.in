@@ -1,0 +1,16 @@
+menu "Hardened NanoKVM SG2002 port options"
+
+config BR2_HARDENED_SG2002_VENDOR_ABI_READY
+	bool "allow the vendor multimedia ABI in a lab image"
+	help
+	  This acknowledgement does not prove compatibility. It only permits a
+	  non-release, recoverable-media image to carry the pinned vendor runtime
+	  so that loader and hardware compatibility can be tested on SG2002.
+
+source "$BR2_EXTERNAL_HARDENED_SG2002_PATH/package/hardened-sg2002-codec-firmware/Config.in"
+source "$BR2_EXTERNAL_HARDENED_SG2002_PATH/package/hardened-aic8800-sdio-firmware/Config.in"
+source "$BR2_EXTERNAL_HARDENED_SG2002_PATH/package/hardened-cvitek-riscv64-musl-sysroot/Config.in"
+source "$BR2_EXTERNAL_HARDENED_SG2002_PATH/package/hardened-nanokvm-kvmapp/Config.in"
+source "$BR2_EXTERNAL_HARDENED_SG2002_PATH/package/hardened-sg2002-vendor-runtime/Config.in"
+
+endmenu

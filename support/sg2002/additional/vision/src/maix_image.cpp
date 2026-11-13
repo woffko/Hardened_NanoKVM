@@ -6,6 +6,7 @@
  */
 
 #include "maix_image.hpp"
+#include "maix_image_size.hpp"
 #include "opencv2/opencv.hpp"
 #include "opencv2/freetype.hpp"
 #include <map>
@@ -13,6 +14,8 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <climits>
+#include <limits>
 #ifdef PLATFORM_MAIXCAM
 #include "kvm_mmf.hpp"
 #endif
@@ -279,6 +282,8 @@ namespace maix::image
         _format = format;
         _width = width;
         _height = height;
+        if (format < 0 || format >= Format::FMT_COMPRESSED_MAX)
+            throw err::Exception(err::ERR_ARGS, "image format is invalid");
         if (width <= 0 || height <= 0)
             throw err::Exception(err::ERR_ARGS, "image width and height should > 0");
 
@@ -287,8 +292,10 @@ namespace maix::image
                 throw err::Exception(err::ERR_ARGS,"image data and data_size are incorrect");
             _data_size = data_size;
         } else {
-            // not use data_size, uncompressed image only use fiexed size.
-            int size_calc = width * height * image::fmt_size[format];
+            // not use data_size, uncompressed image only use fixed size.
+            int size_calc = 0;
+            if (!uncompressed_bytes(width, height, image::fmt_size[format], &size_calc))
+                throw err::Exception(err::ERR_ARGS, "image dimensions overflow");
             if(data_size > 0 && data_size != size_calc)
             {
                 log::error("data_size not match image content size, data_size: %d, image content size: %d\n", data_size, size_calc);
@@ -296,10 +303,12 @@ namespace maix::image
             }
             _data_size = size_calc;
         }
+        if (_data_size > INT_MAX - 0x1000)
+            throw err::Exception(err::ERR_NO_MEM, "image is too large");
 
         if (!data)
         {
-            _actual_data = malloc(_data_size + 0x1000);
+            _actual_data = malloc(static_cast<size_t>(_data_size) + 0x1000);
             if (!_actual_data)
                 throw err::Exception(err::ERR_NO_MEM, "malloc image data failed");
             _data = (void *)(((uint64_t)_actual_data + 0x1000) & ~0xFFF);
@@ -316,7 +325,7 @@ namespace maix::image
             }
             else
             {
-                _actual_data = malloc(_data_size + 0x1000);
+                _actual_data = malloc(static_cast<size_t>(_data_size) + 0x1000);
                 if (!_actual_data)
                     throw std::bad_alloc();
                 _data = (void *)(((uint64_t)_actual_data + 0x1000) & ~0xFFF);
@@ -356,13 +365,35 @@ namespace maix::image
 
     void Image::operator=(const image::Image &img)
     {
+        if (this == &img)
+            return;
+        if (img._width <= 0 || img._height <= 0 || img._data_size <= 0 || img._data == nullptr ||
+            img._format < 0 || img._format >= Format::FMT_COMPRESSED_MAX)
+            throw err::Exception(err::ERR_ARGS, "source image is invalid");
+        const size_t size = static_cast<size_t>(img._data_size);
+        const size_t max_sz = std::numeric_limits<size_t>::max();
+        if (size > max_sz - 0x1000)
+            throw err::Exception(err::ERR_NO_MEM, "image is too large");
+        if (img._format <= Format::FMT_COMPRESSED_MIN) {
+            int expected = 0;
+            if (!uncompressed_bytes(img._width, img._height, image::fmt_size[img._format], &expected) ||
+                static_cast<size_t>(expected) != size)
+                throw err::Exception(err::ERR_ARGS, "image size mismatch");
+        }
+        void *actual = malloc(size + 0x1000);
+        if (!actual)
+            throw err::Exception(err::ERR_NO_MEM, "malloc image data failed");
+        void *data_aligned = (void *)(((uint64_t)actual + 0x1000) & ~0xFFF);
+        memcpy(data_aligned, img._data, size);
+        if (_is_malloc)
+            free(_actual_data);
         _format = img._format;
         _width = img._width;
         _height = img._height;
-        _data = malloc(_width * _height * image::fmt_size[_format]);
-        if (!_data)
-            throw std::bad_alloc();
-        memcpy(_data, img._data, _width * _height * image::fmt_size[_format]);
+        _data_size = img._data_size;
+        _data = data_aligned;
+        _actual_data = actual;
+        _is_malloc = true;
     }
 
     std::string Image::__str__()

@@ -546,6 +546,28 @@ CVI_S32 SAMPLE_COMM_SNS_GetSize(SAMPLE_SNS_TYPE_E enMode, PIC_SIZE_E *penSize)
 /*
  * Brief: get picture size(w*h), according enPicSize
  */
+/* A frame dimension that kvm_system wrote as decimal text. The file is read
+ * into a bounded buffer: the whole file used to be read into a 35-byte array on
+ * the stack, whatever its size. Zero is kept, as atoi() gave it. A file that is
+ * missing, unreadable or out of range gives the fallback. */
+static CVI_U32 SAMPLE_COMM_SNS_ReadDimension(const char *path, CVI_U32 fallback)
+{
+	char text[16];
+	size_t length;
+	long value;
+	FILE *fp = fopen(path, "r");
+
+	if (fp == NULL)
+		return fallback;
+	length = fread(text, sizeof(char), sizeof(text) - 1, fp);
+	fclose(fp);
+	text[length] = '\0';
+	value = strtol(text, NULL, 10);
+	if (value < 0 || value > 65535)
+		return fallback;
+	return (CVI_U32)value;
+}
+
 CVI_S32 SAMPLE_COMM_SNS_GetPicSize(PIC_SIZE_E enPicSize, SIZE_S *pstSize)
 {
 	switch (enPicSize) {
@@ -690,33 +712,8 @@ CVI_S32 SAMPLE_COMM_SNS_GetPicSize(PIC_SIZE_E enPicSize, SIZE_S *pstSize)
 		break;
 	case PIC_CUSTOMIZE:  /* env * env */
 	{
-		uint8_t RW_Data[35];
-		FILE *fp;
-		int file_size;
-		if(access("/kvmapp/kvm/width", F_OK) == 0){
-			fp = fopen("/kvmapp/kvm/width", "r");
-			fseek(fp, 0, SEEK_END);
-			file_size = ftell(fp); 
-			fseek(fp, 0, SEEK_SET);
-			fread(RW_Data, sizeof(char), file_size, fp);
-			fclose(fp);
-			RW_Data[file_size] = 0;
-			pstSize->u32Width = atoi((char*)RW_Data);
-		} else {
-			pstSize->u32Width = 1920;
-		}
-		if(access("/kvmapp/kvm/height", F_OK) == 0){
-			fp = fopen("/kvmapp/kvm/height", "r");
-			fseek(fp, 0, SEEK_END);
-			file_size = ftell(fp); 
-			fseek(fp, 0, SEEK_SET);
-			fread(RW_Data, sizeof(char), file_size, fp);
-			fclose(fp);
-			RW_Data[file_size] = 0;
-			pstSize->u32Height = atoi((char*)RW_Data);
-		} else {
-			pstSize->u32Height = 1080;
-		}
+		pstSize->u32Width = SAMPLE_COMM_SNS_ReadDimension("/kvmapp/kvm/width", 1920);
+		pstSize->u32Height = SAMPLE_COMM_SNS_ReadDimension("/kvmapp/kvm/height", 1080);
 
 		// if(getenv("KVM_CSI_HEIGHT") == NULL || getenv("KVM_CSI_WIDTH") == NULL){
 		// 	pstSize->u32Width  = 1920;

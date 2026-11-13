@@ -1,0 +1,10 @@
+# Service accounts of the image. A raw update moves a device to these numbers
+# whatever layout it had, and keeps root and the accounts people use; see
+# "Native account preflight" in docs/security-raw-restore-transaction.md.
+# Buildroot mkusers resolves explicit IDs before package auto-ID entries.
+# user uid group gid password home shell supplementary-groups comment
+avahi 100 avahi 101 * - /bin/false -
+sshd 101 sshd 102 * /var/empty /bin/false - SSH drop priv user
+- -1 input 103 - - - -
+- -1 kvm 104 - - - -
+- -1 sgx 105 - - - -

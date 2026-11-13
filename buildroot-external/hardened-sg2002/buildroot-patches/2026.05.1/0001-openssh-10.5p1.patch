@@ -1,0 +1,29 @@
+From: Hardened NanoKVM security maintenance
+Subject: [PATCH] package/openssh: update to 10.5p1
+
+Backport the OpenSSH version and verified source hash from upstream Buildroot
+2026.08-rc1. OpenSSH 10.4p1 fixed the July 2026 security issue set; 10.5p1 is
+the current upstream portable release selected by Buildroot.
+
+diff --git a/package/openssh/openssh.hash b/package/openssh/openssh.hash
+--- a/package/openssh/openssh.hash
++++ b/package/openssh/openssh.hash
+@@ -1,4 +1,4 @@
+-# From https://www.openssh.com/txt/release-10.3
+-sha256  56682a36bb92dcf4b4f016fd8ec8e74059b79a8de25c15d670d731e7d18e45f4  openssh-10.3p1.tar.gz
++# From https://www.openssh.com/txt/release-10.5
++sha256  d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11  openssh-10.5p1.tar.gz
+ # Locally calculated
+ sha256  5bb5b160726ef5756e4f32fe95b35249c294962419650f48d05134b486d27ccb  LICENCE
+diff --git a/package/openssh/openssh.mk b/package/openssh/openssh.mk
+--- a/package/openssh/openssh.mk
++++ b/package/openssh/openssh.mk
+@@ -4,7 +4,7 @@
+ #
+ ################################################################################
+ 
+-OPENSSH_VERSION_MAJOR = 10.3
++OPENSSH_VERSION_MAJOR = 10.5
+ OPENSSH_VERSION_MINOR = p1
+ OPENSSH_VERSION = $(OPENSSH_VERSION_MAJOR)$(OPENSSH_VERSION_MINOR)
+ OPENSSH_CPE_ID_VERSION = $(OPENSSH_VERSION_MAJOR)

@@ -1,36 +1,50 @@
+use crate::{
+    AppError, Result,
+    api::application::{compare_application_versions, current_app_version, is_preview_enabled},
+    api::system_firewall,
+    config::Config,
+    error::ApiResponse,
+    state::AppState,
+    system::command::{AllowedCommand, CommandOutput, run_allowed},
+    update::{
+        archive::extract_tar_gz_reader,
+        keys::verify_metadata_signature,
+        operation::{Kind, Snapshot as OperationSnapshot, UpdateOwner},
+        raw_capture::{self, CaptureRequest, TargetImage},
+        raw_install_lease::{RawImages, RawSender},
+        raw_restore,
+        raw_transport::TransferContext,
+        restore_capsule::ticket::{BootId, Phase, RestoreTicket, Store},
+        restore_job::PinnedSshHelper,
+        staged_archive::{StageDirectory, StagedDownload},
+        staged_metadata::{MAX_METADATA, MAX_SIGNATURE, MetadataReceipt, MetadataStore},
+        staged_snapshot::PublicSnapshot,
+    },
+};
 use axum::{Json, extract::State, response::IntoResponse};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::{
     cmp::Ordering,
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::CommandExt,
-    },
+    io::{self, Read, Seek},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{LazyLock, Mutex},
+    process::Stdio,
+    sync::atomic::AtomicBool,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::task;
 
-use crate::{
-    AppError, Result,
-    api::application::is_preview_enabled,
-    api::system_firewall,
-    config::Config,
-    error::ApiResponse,
-    state::AppState,
-    system::command::{AllowedCommand, CommandOutput, run_allowed},
-    update::archive::extract_tar_gz_safe,
-};
+#[path = "system_update_bundle.rs"]
+mod bundle;
 
 const SYSTEM_VERSION_FILE: &str = "/etc/kvm/system-version.json";
 const BOOT_VERSION_FILE: &str = "/boot/ver";
+const BOOT_ID_FILE: &str = "/proc/sys/kernel/random/boot_id";
+const PROC_STAT_FILE: &str = "/proc/stat";
 const KERNEL_RELEASE_FILE: &str = "/proc/sys/kernel/osrelease";
 const OS_RELEASE_FILE: &str = "/etc/os-release";
 const DEVICE_MODEL_FILE: &str = "/proc/device-tree/model";
@@ -45,6 +59,10 @@ const GITHUB_SYSTEM_CHANNEL_PREFIX: &str =
     "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-";
 const SYSTEM_UPDATE_SIGNATURE_ALGORITHM: &str = "sha256-rsa-pkcs1-v1_5";
 const SYSTEM_UPDATE_UNSIGNED_ALGORITHM: &str = "unsigned";
+const SYSTEM_UPDATE_METADATA_FORMAT_V1: u32 = 1;
+const SYSTEM_UPDATE_METADATA_FORMAT_V2: u32 = 2;
+const SYSTEM_UPDATE_MANIFEST_FORMAT_V1: &str = "hardened-nanokvm-system-update-v1";
+const SYSTEM_UPDATE_MANIFEST_FORMAT_V2: &str = "hardened-nanokvm-system-update-v2";
 const MAX_SYSTEM_UPDATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SYSTEM_UPDATE_PAYLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const METADATA_TIMEOUT: Duration = Duration::from_secs(45);
@@ -56,19 +74,22 @@ const SYSTEM_PROGRESS_RECORD: &str = "progress.json";
 const SYSTEM_BACKUPS_DIR_NAME: &str = "backups";
 const SYSTEM_BACKUP_RECORD: &str = "backup.json";
 const SYSTEM_PENDING_FILE: &str = "/etc/kvm/system-update-pending.json";
+const MAX_PENDING_UPDATE_BYTES: u64 = 4096;
 const SYSTEM_LAST_BACKUP_FILE: &str = "/etc/kvm/system-update-last-backup.json";
 const SYSTEM_BOOT_GOOD_FILE: &str = "/etc/kvm/system-update-boot-good.json";
 const SYSTEM_ROLLBACK_SCRIPT_FILE: &str = "/etc/kvm/system-update-rollback.sh";
 const SYSTEM_ROLLBACK_ATTEMPT_FILE: &str = "/etc/kvm/system-update-rollback-attempted";
 const SYSTEM_RAW_INSTALL_MARKER: &str = "/data/hardened-system-raw-update-pending.json";
 const SYSTEM_RAW_INSTALL_RUN_DIR: &str = "/tmp/hardened-system-raw-update";
+#[cfg(test)]
 const SYSTEM_RAW_INSTALL_LOG: &str = "/data/hardened-system-raw-update.log";
+#[cfg(test)]
 const SYSTEM_RAW_RUNTIME_LOADER: &str = "ld-musl-system-update.so.1";
-const SYSTEM_RAW_RUNTIME_LIBC: &str = "libc.so";
 const RAW_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const RAW_ROOTFS_DEVICE: &str = "/dev/mmcblk0p2";
-
-static SYSTEM_UPDATE_LOCK: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+const RAW_PRIVATE_STAGING: &str = "/etc/kvm/.raw-capture";
+const RAW_CAPSULE_DIR: &str = "/data/.nanokvm-restore";
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +123,14 @@ pub struct SystemLatest {
     pub release_notes_url: String,
     #[serde(default, alias = "security_patch_level")]
     pub security_patch_level: Option<String>,
+    #[serde(default, alias = "required_app_version")]
+    pub required_app_version: Option<String>,
+    #[serde(
+        default,
+        alias = "minimum_system_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub minimum_system_version: Option<String>,
     #[serde(alias = "signature_algorithm")]
     pub signature_algorithm: String,
     #[serde(alias = "signature_key_id")]
@@ -120,6 +149,7 @@ pub struct SystemCheckRsp {
     pub current: SystemVersion,
     pub latest: Option<SystemLatest>,
     pub update_available: bool,
+    pub app_update_required: bool,
     pub error: Option<String>,
 }
 
@@ -137,6 +167,8 @@ pub struct SystemStagedUpdate {
     pub kernel_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_patch_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_app_version: Option<String>,
     pub required_free_bytes: u64,
     pub requires_reboot: bool,
     pub file_count: usize,
@@ -147,6 +179,7 @@ pub struct SystemStagedUpdate {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatusRsp {
+    pub update_operation: OperationSnapshot,
     pub current: SystemVersion,
     pub staged: Option<SystemStagedUpdate>,
     pub pending: Option<SystemPendingUpdate>,
@@ -194,6 +227,10 @@ pub struct SystemPendingUpdate {
     pub installed_at: u64,
     pub requires_reboot: bool,
     pub file_count: usize,
+    /// Kernel boot ID at install. An update that requires a reboot is
+    /// confirmed only in a later boot; older backends recorded none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_boot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +263,8 @@ pub struct SystemRollbackRsp {
 #[serde(rename_all = "camelCase")]
 pub struct SystemBootHealth {
     pub backend_running: bool,
+    #[serde(default)]
+    pub rebooted: bool,
     pub version_matches_pending: bool,
     pub boot_marker_present: bool,
     pub web_root_present: bool,
@@ -260,6 +299,14 @@ struct SystemStageRecord {
     manifest: SystemManifest,
 }
 
+// Constructed only after exact metadata/signature verification. Do not derive
+// Deserialize or build it from the mutable stage receipt.
+struct VerifiedSystemMetadata {
+    latest: SystemLatest,
+    metadata: Vec<u8>,
+    signature: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SystemManifest {
     format: String,
@@ -269,6 +316,10 @@ struct SystemManifest {
     kernel_version: String,
     #[serde(default)]
     security_patch_level: Option<String>,
+    #[serde(default)]
+    required_app_version: Option<String>,
+    #[serde(default)]
+    minimum_system_version: Option<String>,
     source_commit: String,
     created_utc: String,
     required_free_bytes: u64,
@@ -310,6 +361,8 @@ struct SystemInstallRecord {
     installed_at: u64,
     requires_reboot: bool,
     files: Vec<SystemBackupFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_boot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,20 +384,9 @@ struct InstalledSystemVersion {
 }
 
 #[derive(Debug)]
-struct UpdateGuard;
-
-#[derive(Debug)]
 struct FileHashes {
     sha256: String,
     sha512: String,
-}
-
-impl Drop for UpdateGuard {
-    fn drop(&mut self) {
-        if let Ok(mut is_updating) = SYSTEM_UPDATE_LOCK.lock() {
-            *is_updating = false;
-        }
-    }
 }
 
 impl SystemUpdateProgress {
@@ -383,10 +425,22 @@ pub async fn get_raw_enabled() -> Result<impl IntoResponse> {
     })))
 }
 
-pub async fn set_raw_enabled(Json(req): Json<SetRawUpdateEnabledReq>) -> Result<impl IntoResponse> {
-    let mut config = Config::read()?;
-    config.security.allow_raw_system_updates = req.enabled;
-    config.write()?;
+pub async fn set_raw_enabled(
+    State(state): State<AppState>,
+    Json(req): Json<SetRawUpdateEnabledReq>,
+) -> Result<impl IntoResponse> {
+    let permit = state.writers.configuration()?;
+    permit
+        .run(move |writer| async move {
+            writer
+                .blocking(move |permit| {
+                    let mut config = Config::read_for(permit)?;
+                    config.security.allow_raw_system_updates = req.enabled;
+                    config.write(permit)
+                })
+                .await
+        })
+        .await?;
     Ok(Json(ApiResponse::<()>::ok_empty()))
 }
 
@@ -397,18 +451,25 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
             current,
             latest: None,
             update_available: false,
+            app_update_required: false,
             error: Some(system_firewall::paranoid_blocked_message().to_string()),
         })));
     }
 
     match get_latest_system(is_preview_enabled(), &state.config).await {
         Ok(latest) => {
-            let update_available = system_update_is_newer(&current, &latest);
+            let app_requirement_error = application_requirement_error(&latest);
+            let requirement_error = app_requirement_error
+                .clone()
+                .or_else(|| source_system_error(&current.version, &latest));
+            let update_available =
+                requirement_error.is_none() && system_update_is_newer(&current, &latest);
             Ok(Json(ApiResponse::ok(SystemCheckRsp {
                 current,
                 latest: Some(latest),
                 update_available,
-                error: None,
+                app_update_required: app_requirement_error.is_some(),
+                error: requirement_error,
             })))
         }
         Err(err) => {
@@ -417,6 +478,7 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
                 current,
                 latest: None,
                 update_available: false,
+                app_update_required: false,
                 error: Some(err.to_string()),
             })))
         }
@@ -424,13 +486,18 @@ pub async fn check(State(state): State<AppState>) -> Result<impl IntoResponse> {
 }
 
 pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> {
+    let update_operation = state.updates.snapshot()?;
+    let operation_active = update_operation
+        .active
+        .is_some_and(|active| active.kind.is_system());
     let current = read_current_system_version();
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let mut pending = read_pending_update().ok().flatten();
-    let progress = read_normalized_update_progress(&stage_dir, &current, pending.as_ref());
-    if raw_pending_marker_is_stale(&current, pending.as_ref(), progress.as_ref()) {
-        pending = None;
-    }
+    let (pending, pending_error) = read_pending_status(
+        Path::new(SYSTEM_PENDING_FILE),
+        Path::new(SYSTEM_RAW_INSTALL_MARKER),
+    );
+    let progress =
+        read_normalized_update_progress(&stage_dir, &current, pending.as_ref(), operation_active);
     let boot_health = pending
         .as_ref()
         .map(|pending| evaluate_boot_health(&current, pending, &state));
@@ -452,40 +519,58 @@ pub async fn status(State(state): State<AppState>) -> Result<impl IntoResponse> 
             }
 
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
+                update_operation,
                 current,
                 staged,
                 pending,
                 boot_health,
                 rollback,
                 progress,
-                error: None,
+                error: pending_error,
             })))
         }
         Err(err) => {
             tracing::warn!(error = %err, "failed to read staged system update");
             Ok(Json(ApiResponse::ok(SystemStatusRsp {
+                update_operation,
                 current,
                 staged: None,
                 pending,
                 boot_health,
                 rollback,
                 progress,
-                error: Some(err.to_string()),
+                error: Some(match pending_error {
+                    Some(pending_error) => format!("{pending_error}; {err}"),
+                    None => err.to_string(),
+                }),
             })))
         }
     }
 }
 
-pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse> {
+pub async fn download(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SystemDownloadRsp>>> {
     if system_firewall::paranoid_mode_enabled() {
         return Err(AppError::BadRequest(
             system_firewall::paranoid_blocked_message().to_string(),
         ));
     }
 
-    let guard = acquire_update_lock()?;
+    let owner = state.updates.acquire(Kind::SystemDownload)?;
+    owner.run(move |job| download_owned(state, job)).await
+}
+
+async fn download_owned(
+    state: AppState,
+    owner: UpdateOwner,
+) -> Result<Json<ApiResponse<SystemDownloadRsp>>> {
+    ensure_no_pending_system_update()?;
     let current = read_current_system_version();
-    let latest = get_latest_system(is_preview_enabled(), &state.config).await?;
+    let verified = get_verified_latest_system(is_preview_enabled(), &state.config).await?;
+    let latest = verified.latest.clone();
+    enforce_required_application_version(&latest)?;
+    enforce_source_system(&current.version, &latest)?;
 
     if latest.target != current.target {
         return Err(AppError::BadRequest(format!(
@@ -503,12 +588,28 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let cache_stage_dir = stage_dir.clone();
     let cache_latest = latest.clone();
-    if let Some(staged) =
-        run_blocking_system_update("check cached system update staging", move || {
+    if let Some(staged) = owner
+        .blocking("check cached system update staging", move || {
             read_cached_staged_update(&cache_stage_dir, &cache_latest)
         })
         .await?
     {
+        let receipt_stage_dir = stage_dir.clone();
+        owner
+            .blocking("commit cached system metadata", move || {
+                ensure_no_pending_system_update()?;
+                let mut archive = StageDirectory::open(&receipt_stage_dir)?
+                    .open_archive(&verified.latest.name)?;
+                let mut snapshot =
+                    freeze_system_archive(&mut archive, &receipt_stage_dir, &verified.latest)?;
+                let _checked = bundle::capture(
+                    &mut snapshot,
+                    &StageDirectory::open(&receipt_stage_dir)?,
+                    &verified.latest,
+                )?;
+                persist_verified_system_metadata(&verified)
+            })
+            .await?;
         remove_update_progress(&stage_dir)?;
         return Ok(Json(ApiResponse::ok(SystemDownloadRsp {
             current,
@@ -518,10 +619,11 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     }
 
     let prepare_dir = stage_dir.clone();
-    run_blocking_system_update("prepare system update staging", move || {
-        prepare_stage_dir(&prepare_dir)
-    })
-    .await?;
+    owner
+        .blocking("prepare system update staging", move || {
+            prepare_stage_dir(&prepare_dir)
+        })
+        .await?;
 
     write_update_progress(
         &stage_dir,
@@ -533,19 +635,21 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
         ),
     )?;
 
-    let archive = stage_dir.join(&latest.name);
-    if let Err(err) = download_system_asset(&latest, &archive).await {
-        let _ = write_update_progress(
-            &stage_dir,
-            SystemUpdateProgress::new(
-                "download",
-                "failed",
-                Some(latest.version.clone()),
-                Some("download failed".to_string()),
-            ),
-        );
-        return Err(err);
-    }
+    let mut downloaded = match download_system_asset(&latest, &stage_dir).await {
+        Ok(downloaded) => downloaded,
+        Err(err) => {
+            let _ = write_update_progress(
+                &stage_dir,
+                SystemUpdateProgress::new(
+                    "download",
+                    "failed",
+                    Some(latest.version.clone()),
+                    Some("download failed".to_string()),
+                ),
+            );
+            return Err(err);
+        }
+    };
 
     write_update_progress(
         &stage_dir,
@@ -553,29 +657,33 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     )?;
 
     let stage_dir_for_verify = stage_dir.clone();
-    let latest_for_verify = latest.clone();
-    let staged = match run_blocking_system_update_with_guard(
-        "verify and stage system update",
-        guard,
-        move || {
-            let archive = stage_dir_for_verify.join(&latest_for_verify.name);
-            verify_system_archive(&archive, &latest_for_verify)?;
-
-            let manifest = extract_and_verify_system_bundle(
-                &archive,
+    let staged = match owner
+        .blocking("verify and stage system update", move || {
+            ensure_no_pending_system_update()?;
+            let mut snapshot = freeze_system_archive(
+                downloaded.file_mut(),
                 &stage_dir_for_verify,
-                &latest_for_verify,
+                &verified.latest,
+            )?;
+            downloaded.publish(&verified.latest.name)?;
+
+            let (manifest, _raw_images) = extract_and_verify_system_bundle(
+                &mut snapshot,
+                &stage_dir_for_verify,
+                &verified.latest,
             )?;
             let record = SystemStageRecord {
                 staged_at: now_unix_seconds(),
-                latest: latest_for_verify,
+                latest: verified.latest.clone(),
                 manifest,
             };
             write_stage_record(&stage_dir_for_verify, &record)?;
+            // Publish authority last, after archive/manifest checks. A crash
+            // with mismatched generations fails closed and requires re-download.
+            persist_verified_system_metadata(&verified)?;
             Ok(staged_summary(&record))
-        },
-    )
-    .await
+        })
+        .await
     {
         Ok(staged) => staged,
         Err(err) => {
@@ -601,18 +709,38 @@ pub async fn download(State(state): State<AppState>) -> Result<impl IntoResponse
     })))
 }
 
-pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let guard = acquire_update_lock()?;
+pub async fn install(State(state): State<AppState>) -> Result<Json<ApiResponse<SystemInstallRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemInstall)?;
+    owner.run(move |job| install_owned(state, job)).await
+}
+
+async fn install_owned(
+    state: AppState,
+    owner: UpdateOwner,
+) -> Result<Json<ApiResponse<SystemInstallRsp>>> {
+    ensure_no_pending_system_update()?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
     let progress_stage_dir = stage_dir.clone();
     let staged_version = read_staged_update(&stage_dir)
         .ok()
         .flatten()
         .map(|staged| staged.version);
-    let config = Config::read().unwrap_or_else(|err| {
-        tracing::warn!(error = %err, "failed to refresh config before system update install");
-        (*state.config).clone()
-    });
+    // Use the running identity, not a fresh YAML read: Config::read() does not
+    // materialize a session secret from session_secret_file. Raw capture
+    // compares the running secret with the on-disk identity and otherwise
+    // refuses an update on a valid installation whose YAML secret is empty.
+    let config = state.config.clone();
+    let receipt = {
+        let store =
+            MetadataStore::open().map_err(|error| AppError::BadRequest(error.to_string()))?;
+        required_system_metadata_receipt(&store)?
+    };
+    let verified = authenticate_stored_system_metadata(receipt, &config).await?;
+    if verified.latest.target != read_current_system_version().target {
+        return Err(AppError::BadRequest(
+            "system update target no longer matches the device".to_string(),
+        ));
+    }
     write_update_progress(
         &stage_dir,
         SystemUpdateProgress::new(
@@ -623,26 +751,36 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
         ),
     )?;
     let install_error_version = staged_version.clone();
-    let installed = match run_blocking_system_update_with_guard(
-        "install staged system update",
-        guard,
-        move || match install_staged_update(&stage_dir, &config) {
-            Ok(installed) => Ok(installed),
-            Err(err) => {
-                let _ = write_update_progress(
-                    &stage_dir,
-                    SystemUpdateProgress::new(
-                        "install",
-                        "failed",
-                        install_error_version,
-                        Some(err.to_string()),
-                    ),
-                );
-                Err(err)
-            }
-        },
-    )
-    .await
+    let staged = read_stage_record(&stage_dir)?
+        .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
+    let raw = if staged.manifest.raw_images.is_empty() {
+        None
+    } else {
+        Some((
+            owner.clone_for_work(),
+            state.drain_writers(WRITER_DRAIN_TIMEOUT).await?,
+        ))
+    };
+    let installed = match owner
+        .blocking(
+            "install staged system update",
+            move || match install_staged_update(&stage_dir, &config, verified, raw) {
+                Ok(installed) => Ok(installed),
+                Err(err) => {
+                    let _ = write_update_progress(
+                        &stage_dir,
+                        SystemUpdateProgress::new(
+                            "install",
+                            "failed",
+                            install_error_version,
+                            Some(err.to_string()),
+                        ),
+                    );
+                    Err(err)
+                }
+            },
+        )
+        .await
     {
         Ok(installed) => installed,
         Err(err) => {
@@ -666,46 +804,71 @@ pub async fn install(State(state): State<AppState>) -> Result<impl IntoResponse>
     })))
 }
 
-pub async fn rollback(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let guard = acquire_update_lock()?;
+pub async fn rollback(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<SystemRollbackRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemRollback)?;
     let stage_dir = system_stage_dir(&state.config.paths.update_cache_dir);
-    let restored =
-        run_blocking_system_update_with_guard("rollback system update", guard, move || {
-            rollback_last_system_update(&stage_dir)
+    owner
+        .run(move |job| async move {
+            let restored = job
+                .blocking("rollback system update", move || {
+                    rollback_last_system_update(&stage_dir)
+                })
+                .await?;
+            Ok(Json(ApiResponse::ok(SystemRollbackRsp {
+                reboot_required: restored.requires_reboot,
+                restored,
+            })))
         })
-        .await?;
-
-    Ok(Json(ApiResponse::ok(SystemRollbackRsp {
-        reboot_required: restored.requires_reboot,
-        restored,
-    })))
+        .await
 }
 
-pub async fn confirm(State(state): State<AppState>) -> Result<impl IntoResponse> {
-    let _guard = acquire_update_lock()?;
-    let current = read_current_system_version();
-    let pending = read_pending_update()?
-        .ok_or_else(|| AppError::NotFound("no pending system update found".to_string()))?;
-    let health = evaluate_boot_health(&current, &pending, &state);
+pub async fn confirm(State(state): State<AppState>) -> Result<Json<ApiResponse<SystemConfirmRsp>>> {
+    let owner = state.updates.acquire(Kind::SystemConfirm)?;
+    owner
+        .run(move |job| async move {
+            job.blocking("confirm system update", move || {
+                let current = read_current_system_version();
+                let pending =
+                    read_pending_update(Path::new(SYSTEM_PENDING_FILE))?.ok_or_else(|| {
+                        AppError::NotFound("no pending system update found".to_string())
+                    })?;
+                let health = evaluate_boot_health(&current, &pending, &state);
 
-    if !health.healthy {
-        return Err(AppError::BadRequest(
-            "system update boot health check failed".to_string(),
-        ));
-    }
+                if !health.healthy {
+                    return Err(AppError::BadRequest(
+                        if pending.requires_reboot && !health.rebooted {
+                            "reboot the device before confirming the system update"
+                        } else {
+                            "system update boot health check failed"
+                        }
+                        .to_string(),
+                    ));
+                }
 
-    write_boot_good(&pending, &health)?;
-    remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
-    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
-    remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
+                write_boot_good(&pending, &health)?;
+                remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
+                remove_update_progress(&system_stage_dir(&state.config.paths.update_cache_dir))?;
 
-    Ok(Json(ApiResponse::ok(SystemConfirmRsp {
-        confirmed: pending,
-        health,
-    })))
+                Ok(Json(ApiResponse::ok(SystemConfirmRsp {
+                    confirmed: pending,
+                    health,
+                })))
+            })
+            .await
+        })
+        .await
 }
 
 async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLatest> {
+    Ok(get_verified_latest_system(preview, config).await?.latest)
+}
+
+async fn get_verified_latest_system(
+    preview: bool,
+    config: &Config,
+) -> Result<VerifiedSystemMetadata> {
     if preview {
         match fetch_latest_system(GITHUB_SYSTEM_PREVIEW_JSON, config).await {
             Ok(preview_latest) => {
@@ -734,22 +897,71 @@ async fn get_latest_system(preview: bool, config: &Config) -> Result<SystemLates
     fetch_latest_system(GITHUB_SYSTEM_LATEST_JSON, config).await
 }
 
-fn newer_system_release(left: SystemLatest, right: SystemLatest) -> SystemLatest {
-    match compare_system_versions(&left.version, &right.version) {
+fn newer_system_release(
+    left: VerifiedSystemMetadata,
+    right: VerifiedSystemMetadata,
+) -> VerifiedSystemMetadata {
+    match compare_system_versions(&left.latest.version, &right.latest.version) {
         Some(Ordering::Less) => right,
         _ => left,
     }
 }
 
-async fn fetch_latest_system(url: &str, config: &Config) -> Result<SystemLatest> {
+async fn fetch_latest_system(url: &str, config: &Config) -> Result<VerifiedSystemMetadata> {
     validate_metadata_url(url)?;
     let metadata = fetch_system_metadata(url).await?;
 
-    let latest: SystemLatest = serde_json::from_slice(&metadata)
-        .map_err(|err| AppError::Internal(format!("invalid system-latest.json: {err}")))?;
+    let latest = parse_exact_system_metadata(&metadata)?;
+    let signature = enforce_system_metadata_signature(url, &metadata, &latest, config).await?;
+    Ok(VerifiedSystemMetadata {
+        latest,
+        metadata,
+        signature,
+    })
+}
+
+fn parse_exact_system_metadata(metadata: &[u8]) -> Result<SystemLatest> {
+    if metadata.is_empty() || metadata.len() > MAX_METADATA {
+        return Err(AppError::BadRequest(
+            "invalid system update metadata size".to_string(),
+        ));
+    }
+    let latest = serde_json::from_slice(metadata)
+        .map_err(|_| AppError::BadRequest("invalid system update metadata".to_string()))?;
     validate_latest_system(&latest)?;
-    enforce_system_metadata_signature(url, &metadata, &latest, config).await?;
     Ok(latest)
+}
+
+fn persist_verified_system_metadata(verified: &VerifiedSystemMetadata) -> Result<()> {
+    let store = MetadataStore::open().map_err(|error| AppError::BadRequest(error.to_string()))?;
+    store
+        .replace(&verified.metadata, &verified.signature)
+        .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn required_system_metadata_receipt(store: &MetadataStore) -> Result<MetadataReceipt> {
+    store
+        .read()
+        .map_err(|error| AppError::BadRequest(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "no protected system update metadata; run Download and Verify again".to_string(),
+            )
+        })
+}
+
+async fn authenticate_stored_system_metadata(
+    receipt: MetadataReceipt,
+    config: &Config,
+) -> Result<VerifiedSystemMetadata> {
+    let latest = parse_exact_system_metadata(&receipt.metadata)?;
+    verify_system_metadata_with_policy(&receipt.metadata, &receipt.signature, &latest, config)
+        .await?;
+    Ok(VerifiedSystemMetadata {
+        latest,
+        metadata: receipt.metadata,
+        signature: receipt.signature,
+    })
 }
 
 async fn fetch_system_metadata(url: &str) -> Result<Vec<u8>> {
@@ -777,8 +989,29 @@ async fn enforce_system_metadata_signature(
     metadata: &[u8],
     latest: &SystemLatest,
     config: &Config,
+) -> Result<Vec<u8>> {
+    let signature = if system_metadata_is_unsigned(latest) {
+        Vec::new()
+    } else {
+        let signature_url = metadata_signature_url(metadata_url)?;
+        fetch_system_metadata_signature(&signature_url).await?
+    };
+    verify_system_metadata_with_policy(metadata, &signature, latest, config).await?;
+    Ok(signature)
+}
+
+async fn verify_system_metadata_with_policy(
+    metadata: &[u8],
+    signature: &[u8],
+    latest: &SystemLatest,
+    config: &Config,
 ) -> Result<()> {
     if system_metadata_is_unsigned(latest) {
+        if !signature.is_empty() {
+            return Err(AppError::BadRequest(
+                "unsigned system metadata cannot carry a signature receipt".to_string(),
+            ));
+        }
         if config.security.allow_unsigned_updates {
             tracing::warn!(
                 version = %latest.version,
@@ -797,17 +1030,19 @@ async fn enforce_system_metadata_signature(
             "unsupported system update metadata signature algorithm".to_string(),
         ));
     }
-    if !config.paths.system_update_public_key.is_file() {
-        return Err(AppError::Config(format!(
-            "system update public key is not configured: {}",
-            config.paths.system_update_public_key.display()
-        )));
+    if signature.is_empty() || signature.len() > MAX_SIGNATURE {
+        return Err(AppError::BadRequest(
+            "invalid system update metadata signature size".to_string(),
+        ));
     }
-
-    let signature_url = metadata_signature_url(metadata_url)?;
-    let signature = fetch_system_metadata_signature(&signature_url).await?;
-    verify_system_metadata_signature(metadata, &signature, &config.paths.system_update_public_key)
-        .await
+    verify_metadata_signature(
+        metadata,
+        signature,
+        &config.paths.system_update_public_key,
+        &latest.signature_key_id,
+        METADATA_TIMEOUT,
+    )
+    .await
 }
 
 async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
@@ -826,50 +1061,6 @@ async fn fetch_system_metadata_signature(url: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-async fn verify_system_metadata_signature(
-    metadata: &[u8],
-    signature: &[u8],
-    public_key: &Path,
-) -> Result<()> {
-    let metadata_path = temp_verify_path("metadata")?;
-    let signature_path = temp_verify_path("signature")?;
-
-    let result = async {
-        write_verify_temp_file(&metadata_path, metadata)?;
-        write_verify_temp_file(&signature_path, signature)?;
-
-        let output = run_allowed(
-            AllowedCommand::OpenSsl,
-            [
-                "dgst",
-                "-sha256",
-                "-verify",
-                path_arg(public_key)?,
-                "-signature",
-                path_arg(&signature_path)?,
-                path_arg(&metadata_path)?,
-            ],
-            METADATA_TIMEOUT,
-        )
-        .await?;
-
-        if output.status == 0 {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(error = %stderr, "system update metadata signature verification failed");
-            Err(AppError::BadRequest(
-                "system update metadata signature verification failed".to_string(),
-            ))
-        }
-    }
-    .await;
-
-    let _ = remove_file_if_exists(&metadata_path);
-    let _ = remove_file_if_exists(&signature_path);
-    result
-}
-
 fn metadata_signature_url(metadata_url: &str) -> Result<String> {
     validate_metadata_url(metadata_url)?;
     Ok(format!("{metadata_url}.sig"))
@@ -880,43 +1071,108 @@ fn system_metadata_is_unsigned(latest: &SystemLatest) -> bool {
         && latest.signature_key_id == SYSTEM_UPDATE_UNSIGNED_ALGORITHM
 }
 
-async fn download_system_asset(latest: &SystemLatest, target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let output = run_allowed(
-        AllowedCommand::Curl,
-        [
-            "-fL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "600",
-            "--output",
-            path_arg(target)?,
-            latest.url.as_str(),
-        ],
-        DOWNLOAD_TIMEOUT,
-    )
-    .await?;
-    ensure_success(&output, "download system update archive")?;
-
-    let size = fs::metadata(target)?.len();
-    if size == 0 || size > MAX_SYSTEM_UPDATE_BYTES {
+async fn download_system_asset(latest: &SystemLatest, stage: &Path) -> Result<StagedDownload> {
+    if latest.size == 0 || latest.size > MAX_SYSTEM_UPDATE_BYTES {
         return Err(AppError::BadRequest(
             "invalid system update archive size".to_string(),
         ));
     }
-    if size != latest.size {
-        return Err(AppError::BadRequest(format!(
-            "system update archive size mismatch: got {size}, expected {}",
-            latest.size
-        )));
-    }
+    let downloaded = StageDirectory::open(stage)?.create_download()?;
+    // No output pathname, curlrc, shell or inherited stdin. Curl cannot follow
+    // an archive-name symlink. Retries require a fresh descriptor/empty file;
+    // never let a stdout retry append a second response to the same archive.
+    let mut command = tokio::process::Command::new("/usr/bin/curl");
+    command.args([
+        "--disable",
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "600",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--",
+        latest.url.as_str(),
+    ]);
+    receive_system_archive(&mut command, latest.size, &downloaded, DOWNLOAD_TIMEOUT).await?;
+    Ok(downloaded)
+}
 
+async fn receive_system_archive(
+    command: &mut tokio::process::Command,
+    size: u64,
+    downloaded: &StagedDownload,
+    deadline: Duration,
+) -> Result<()> {
+    let mut destination = tokio::fs::File::from_std(downloaded.writer()?);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut source = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal("missing archive stream".into()))?;
+    let result = tokio::time::timeout(deadline, async {
+        let (_, status) = tokio::try_join!(
+            copy_system_archive(&mut source, &mut destination, size),
+            async { child.wait().await.map_err(AppError::from) },
+        )?;
+        if !status.success() {
+            return Err(AppError::BadRequest(
+                "download system update archive failed".into(),
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::Internal(
+            "system archive download timed out".into(),
+        ))
+    });
+    if result.is_err() {
+        // Stop/reap the one fixed direct child, including size-limit failures.
+        // Cancellation also drops kill_on_drop. No detached transfer task or
+        // external child owns the destination; Tokio may finish one in-flight
+        // bounded filesystem write to the now-unlinked owned temporary inode.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    result
+}
+
+async fn copy_system_archive(
+    source: &mut (impl tokio::io::AsyncRead + Unpin),
+    destination: &mut (impl tokio::io::AsyncWrite + Unpin),
+    size: u64,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut remaining = size;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = source.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        if count as u64 > remaining {
+            return Err(AppError::BadRequest(
+                "system update archive exceeds signed size".into(),
+            ));
+        }
+        destination.write_all(&buffer[..count]).await?;
+        remaining -= count as u64;
+    }
+    if remaining != 0 {
+        return Err(AppError::BadRequest(
+            "system update archive is shorter than signed size".into(),
+        ));
+    }
+    destination.flush().await?;
     Ok(())
 }
 
@@ -993,8 +1249,15 @@ fn read_cached_staged_update(
     stage_dir: &Path,
     latest: &SystemLatest,
 ) -> Result<Option<SystemStagedUpdate>> {
-    let Some(record) = read_stage_record(stage_dir)? else {
-        return Ok(None);
+    let record = match read_stage_record(stage_dir) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(None),
+        Err(_) => {
+            // A legacy/malformed p3 receipt is not authority and cannot prevent
+            // a fresh authenticated download. Do not delete its recovery data.
+            tracing::warn!("invalid cached system staging cannot be reused");
+            return Ok(None);
+        }
     };
     if record.latest != *latest {
         return Ok(None);
@@ -1003,7 +1266,12 @@ fn read_cached_staged_update(
         return Ok(None);
     };
 
-    match validate_cached_system_extract(stage_dir, &record) {
+    let reusable = (|| {
+        let mut archive = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
+        verify_system_archive(&mut archive, latest)?;
+        validate_cached_system_extract(stage_dir, &record)
+    })();
+    match reusable {
         Ok(()) => Ok(Some(staged)),
         Err(err) => {
             tracing::warn!(error = %err, "cached staged system update is not reusable");
@@ -1068,11 +1336,36 @@ fn validate_latest_system(latest: &SystemLatest) -> Result<()> {
             "invalid system update kind".to_string(),
         ));
     }
-    if latest.format != 1 {
-        return Err(AppError::BadRequest(format!(
-            "unsupported system update format: {}",
-            latest.format
-        )));
+    match latest.format {
+        SYSTEM_UPDATE_METADATA_FORMAT_V1 => {
+            if latest.required_app_version.is_some() {
+                return Err(AppError::BadRequest(
+                    "system update metadata v1 cannot require an application version".to_string(),
+                ));
+            }
+        }
+        SYSTEM_UPDATE_METADATA_FORMAT_V2 => {
+            let required = latest.required_app_version.as_deref().ok_or_else(|| {
+                AppError::BadRequest(
+                    "system update metadata v2 requires required_app_version".to_string(),
+                )
+            })?;
+            validate_application_version("required_app_version", required)?;
+            if let Some(minimum) = latest.minimum_system_version.as_deref() {
+                validate_token("minimum_system_version", minimum)?;
+                if ParsedSystemVersion::parse(minimum).is_none() {
+                    return Err(AppError::BadRequest(
+                        "invalid minimum_system_version".to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported system update format: {}",
+                latest.format
+            )));
+        }
     }
     validate_token("version", &latest.version)?;
     validate_token("target", &latest.target)?;
@@ -1113,6 +1406,62 @@ fn validate_latest_system(latest: &SystemLatest) -> Result<()> {
     Ok(())
 }
 
+fn validate_application_version(name: &str, version: &str) -> Result<()> {
+    validate_token(name, version)?;
+    if compare_application_versions(version, version).is_none() {
+        return Err(AppError::BadRequest(format!("{name} must be semver x.y.z")));
+    }
+    Ok(())
+}
+
+fn application_requirement_error(latest: &SystemLatest) -> Option<String> {
+    let current = current_app_version();
+    application_requirement_error_for(&current, latest)
+}
+
+fn application_requirement_error_for(current: &str, latest: &SystemLatest) -> Option<String> {
+    let required = latest.required_app_version.as_deref()?;
+    match compare_application_versions(current, required) {
+        Some(Ordering::Less) => Some(format!(
+            "application update required: current {current}, required {required}"
+        )),
+        Some(_) => None,
+        None => Some(format!(
+            "cannot compare application versions: current {current}, required {required}"
+        )),
+    }
+}
+
+/// Why this device cannot take the release directly: the release names the
+/// oldest system it can restore from, and older ones go through it first.
+fn source_system_error(current: &str, latest: &SystemLatest) -> Option<String> {
+    let minimum = latest.minimum_system_version.as_deref()?;
+    match compare_system_versions(current, minimum) {
+        Some(Ordering::Less) => Some(format!(
+            "install system {minimum} first: current {current}, release {}",
+            latest.version
+        )),
+        Some(_) => None,
+        None => Some(format!(
+            "cannot compare system versions: current {current}, minimum {minimum}"
+        )),
+    }
+}
+
+fn enforce_required_application_version(latest: &SystemLatest) -> Result<()> {
+    if let Some(error) = application_requirement_error(latest) {
+        return Err(AppError::BadRequest(error));
+    }
+    Ok(())
+}
+
+fn enforce_source_system(current: &str, latest: &SystemLatest) -> Result<()> {
+    match source_system_error(current, latest) {
+        Some(error) => Err(AppError::BadRequest(error)),
+        None => Ok(()),
+    }
+}
+
 fn validate_system_metadata_signature_fields(latest: &SystemLatest) -> Result<()> {
     if system_metadata_is_unsigned(latest) {
         return Ok(());
@@ -1133,8 +1482,17 @@ fn validate_system_metadata_signature_fields(latest: &SystemLatest) -> Result<()
     Ok(())
 }
 
-fn verify_system_archive(path: &Path, latest: &SystemLatest) -> Result<()> {
-    let hashes = hash_file(path)?;
+fn verify_system_archive(file: &mut fs::File, latest: &SystemLatest) -> Result<()> {
+    if file.metadata()?.len() != latest.size
+        || latest.size == 0
+        || latest.size > MAX_SYSTEM_UPDATE_BYTES
+    {
+        return Err(AppError::BadRequest(
+            "system update archive size mismatch".into(),
+        ));
+    }
+    file.rewind()?;
+    let hashes = hash_reader(&mut (&mut *file).take(latest.size + 1))?;
     if !hashes.sha256.eq_ignore_ascii_case(&latest.sha256) {
         return Err(AppError::BadRequest(
             "system update sha256 mismatch".to_string(),
@@ -1145,41 +1503,91 @@ fn verify_system_archive(path: &Path, latest: &SystemLatest) -> Result<()> {
             "system update sha512 mismatch".to_string(),
         ));
     }
+    file.rewind()?;
     Ok(())
 }
 
-fn extract_and_verify_system_bundle(
-    archive: &Path,
+fn freeze_system_archive(
+    source: &mut fs::File,
     stage_dir: &Path,
     latest: &SystemLatest,
-) -> Result<SystemManifest> {
+) -> Result<PublicSnapshot> {
+    if source.metadata()?.len() != latest.size {
+        return Err(AppError::BadRequest(
+            "system update archive size mismatch".into(),
+        ));
+    }
+    validate_sha256_hex(&latest.sha256)?;
+    let mut sha256 = [0_u8; 32];
+    for (byte, hex) in sha256
+        .iter_mut()
+        .zip(latest.sha256.as_bytes().as_chunks::<2>().0)
+    {
+        let hex = std::str::from_utf8(hex)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+        *byte = u8::from_str_radix(hex, 16)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+    }
+    let sha512: [u8; 64] = STANDARD
+        .decode(&latest.sha512)
+        .map_err(|_| AppError::BadRequest("invalid system update sha512".into()))?
+        .try_into()
+        .map_err(|_| AppError::BadRequest("invalid system update sha512".into()))?;
+    source.rewind()?;
+    PublicSnapshot::capture(
+        &StageDirectory::open(stage_dir)?,
+        source,
+        latest.size,
+        &sha256,
+        &sha512,
+    )
+    .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn extract_and_verify_system_bundle(
+    archive: &mut PublicSnapshot,
+    stage_dir: &Path,
+    latest: &SystemLatest,
+) -> Result<(SystemManifest, Option<[PublicSnapshot; 2]>)> {
+    let bundle::BundlePreflight {
+        manifest,
+        raw_images,
+    } = bundle::capture(archive, &StageDirectory::open(stage_dir)?, latest)?;
+    // Raw images stay as the authenticated anonymous descriptors the writer
+    // consumes. File updates do not retain the unused snapshots.
+    archive.rewind()?;
     let extract_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME);
     remove_dir_if_exists(&extract_dir)?;
     fs::create_dir_all(&extract_dir)?;
-    extract_tar_gz_safe(archive, &extract_dir)?;
+    extract_tar_gz_reader(archive, &extract_dir)?;
 
     validate_system_extract_root(&extract_dir)?;
 
-    let manifest_path = extract_dir.join("manifest.json");
-    let manifest: SystemManifest = serde_json::from_slice(&fs::read(&manifest_path)?)
-        .map_err(|err| AppError::BadRequest(format!("invalid system update manifest: {err}")))?;
+    // The extracted manifest is not input: the only manifest parsed above
+    // came directly from the authenticated, bounded anonymous snapshot.
     let payload_dir = extract_dir.join("payload");
     validate_system_manifest(&manifest, latest, &payload_dir)?;
 
-    Ok(manifest)
+    Ok((manifest, raw_images))
 }
 
-fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPendingUpdate> {
+fn install_staged_update(
+    stage_dir: &Path,
+    config: &Config,
+    verified: VerifiedSystemMetadata,
+    raw: Option<(UpdateOwner, crate::update::state_writers::WriterDrain)>,
+) -> Result<SystemPendingUpdate> {
     let record = read_stage_record(stage_dir)?
         .ok_or_else(|| AppError::BadRequest("no staged system update".to_string()))?;
-    validate_latest_system(&record.latest)?;
-
-    let archive = stage_dir.join(&record.latest.name);
-    if !archive.is_file() {
-        return Err(AppError::BadRequest(
-            "staged system update archive is missing".to_string(),
-        ));
+    if record.latest != verified.latest {
+        return Err(AppError::BadRequest("staged system update differs from authenticated metadata; run Download and Verify again".to_string()));
     }
+    ensure_no_pending_system_update()?;
+    let latest = verified.latest;
+    enforce_required_application_version(&latest)?;
+    enforce_source_system(&read_current_system_version().version, &latest)?;
+
+    let mut source = StageDirectory::open(stage_dir)?.open_archive(&latest.name)?;
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(
@@ -1189,7 +1597,8 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
             Some("verifying staged system update archive".to_string()),
         ),
     )?;
-    verify_system_archive(&archive, &record.latest)?;
+    let mut archive = freeze_system_archive(&mut source, stage_dir, &latest)?;
+    drop(source);
     write_update_progress(
         stage_dir,
         SystemUpdateProgress::new(
@@ -1199,7 +1608,8 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
             Some("extracting staged system update payload".to_string()),
         ),
     )?;
-    let manifest = extract_and_verify_system_bundle(&archive, stage_dir, &record.latest)?;
+    let (manifest, raw_images) =
+        extract_and_verify_system_bundle(&mut archive, stage_dir, &latest)?;
     let payload_dir = stage_dir.join(SYSTEM_EXTRACT_DIR_NAME).join("payload");
 
     write_update_progress(
@@ -1208,9 +1618,25 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
     )?;
 
     if !manifest.raw_images.is_empty() {
-        return install_raw_image_update(stage_dir, &manifest, &payload_dir, config);
+        let images = raw_images.ok_or_else(|| {
+            AppError::Internal("authenticated raw images were not retained".into())
+        })?;
+        let (owner, writers) = raw.ok_or_else(|| {
+            AppError::Internal("raw install requires retained owner and writer drain".into())
+        })?;
+        check_raw_policy(&writers, &latest, &manifest)?;
+        return install_raw_image_update(
+            stage_dir,
+            &manifest,
+            &payload_dir,
+            config,
+            images,
+            owner,
+            writers,
+        );
     }
 
+    let install_boot_id = current_boot_id()?;
     let backup_id = format!("{}-{}", manifest.version, now_unix_seconds());
     validate_filename(&backup_id)?;
     let backup_dir = backup_dir_for(stage_dir, &backup_id);
@@ -1224,6 +1650,7 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
         installed_at: now_unix_seconds(),
         requires_reboot: manifest.requires_reboot,
         files: Vec::new(),
+        install_boot_id: Some(install_boot_id),
     };
 
     let mut backed_up = BTreeSet::new();
@@ -1280,14 +1707,136 @@ fn install_staged_update(stage_dir: &Path, config: &Config) -> Result<SystemPend
 }
 
 fn install_raw_image_update(
-    stage_dir: &Path,
+    _stage_dir: &Path,
     manifest: &SystemManifest,
-    payload_dir: &Path,
+    _payload_dir: &Path,
     config: &Config,
+    images: [PublicSnapshot; 2],
+    owner: UpdateOwner,
+    writers: crate::update::state_writers::WriterDrain,
 ) -> Result<SystemPendingUpdate> {
-    if !config.security.allow_raw_system_updates {
+    let staging = Path::new(RAW_PRIVATE_STAGING);
+    let mountpoint = staging.join("mount");
+    let ssh_roots = staging.join("ssh");
+    ensure_private_directory(staging, true)?;
+    ensure_private_directory(&mountpoint, true)?;
+    ensure_private_directory(&ssh_roots, true)?;
+    if fs::read_dir(&mountpoint)?.next().is_some() || fs::read_dir(&ssh_roots)?.next().is_some() {
+        return Err(AppError::Conflict(
+            "raw capture staging is not empty; recovery evidence was retained".into(),
+        ));
+    }
+    let capsules = ensure_private_directory(Path::new(RAW_CAPSULE_DIR), false)?;
+
+    let boot = raw_image(manifest, "BOOT")?;
+    let rootfs = raw_image(manifest, "ROOTFS")?;
+    let sizes = [boot.size, rootfs.size];
+    let sha256 = [decode_sha256(&boot.sha256)?, decode_sha256(&rootfs.sha256)?];
+    let image_files = [images[0].file().try_clone()?, images[1].file().try_clone()?];
+    let raw_images = RawImages {
+        files: [images[0].file().try_clone()?, images[1].file().try_clone()?],
+        sizes,
+        sha256,
+    };
+
+    let helper = PinnedSshHelper::embedded(staging)
+        .map_err(|error| AppError::Internal(format!("pinned SSH helper unavailable: {error}")))?;
+    let mut seed = [0_u8; 16];
+    OsRng.fill_bytes(&mut seed);
+    if seed == [0; 16] {
+        seed[0] = 1;
+    }
+    let transfer = TransferContext::new(seed, &manifest.version, sizes)
+        .map_err(|error| AppError::Internal(format!("raw transfer context invalid: {error}")))?;
+    let hostname = fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "nanokvm".to_string());
+    let mut image = raw_capture::SandboxImage {
+        helper: &helper,
+        images: &image_files,
+        transfer: &transfer,
+        mountpoint: &mountpoint,
+        ssh_roots: &ssh_roots,
+        hostname: &hostname,
+    };
+    let request = CaptureRequest {
+        source_root: Path::new("/"),
+        private_staging: staging,
+        capsule_directory: &capsules,
+        config,
+        working_dir: Path::new("/etc/kvm"),
+        config_path: Path::new("/etc/kvm/server.yaml"),
+        target_version: &manifest.version,
+        target: &manifest.target,
+        boot_image_sha256: sha256[0],
+        rootfs_image_sha256: sha256[1],
+        source_boot: BootId::parse(&current_boot_id()?)
+            .map_err(|_| AppError::Internal("invalid kernel boot ID".into()))?,
+        device_id: crate::update::restore_capsule::ticket::device_id()
+            .map_err(|error| AppError::Internal(format!("device identity unavailable: {error}")))?,
+    };
+    let publish = |ticket: &RestoreTicket| -> Result<()> {
+        let mut store = Store::open_boot().map_err(|error| {
+            discard_capsule(Path::new(RAW_CAPSULE_DIR), ticket);
+            AppError::Internal(format!("raw ticket store unavailable: {error}"))
+        })?;
+        publish_outgoing_ticket(
+            Path::new("/"),
+            &mut store,
+            Path::new(RAW_CAPSULE_DIR),
+            ticket,
+        )
+    };
+    let send = move |transaction: [u8; 16], images: RawImages| -> Result<()> {
+        let handoff = owner.prepare_raw_handoff(transaction, images, writers)?;
+        RawSender::connect_broker()
+            .map_err(|error| AppError::Conflict(format!("raw installer is not available: {error}")))?
+            .send(handoff)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "the raw installer did not take update {:032x} ({error}); check its state, do not resubmit",
+                    u128::from_be_bytes(transaction)
+                ))
+            })
+    };
+    let ticket = submit_raw_capture(&request, &mut image, raw_images, publish, send)?;
+    Ok(SystemPendingUpdate {
+        version: ticket.target_version().to_string(),
+        target: manifest.target.clone(),
+        backup_id: format!("raw-{:032x}", u128::from_be_bytes(ticket.transaction_id())),
+        installed_at: now_unix_seconds(),
+        requires_reboot: true,
+        file_count: 0,
+        install_boot_id: Some(current_boot_id()?),
+    })
+}
+
+/// The switch as the disk has it now, not as this process read it at start.
+fn check_raw_policy(
+    writers: &crate::update::state_writers::WriterDrain,
+    latest: &SystemLatest,
+    manifest: &SystemManifest,
+) -> Result<()> {
+    validate_raw_install(&Config::read_frozen(writers)?, latest, manifest)
+}
+
+fn validate_raw_install(
+    policy: &Config,
+    latest: &SystemLatest,
+    manifest: &SystemManifest,
+) -> Result<()> {
+    if !policy.security.allow_raw_system_updates {
         return Err(AppError::Forbidden(
             "raw partition system updates are disabled".to_string(),
+        ));
+    }
+    // A raw image replaces everything that could check a later update, so the
+    // lab setting for unsigned metadata stops at file updates.
+    if system_metadata_is_unsigned(latest) {
+        return Err(AppError::Forbidden(
+            "a raw system update must carry a release signature".to_string(),
         ));
     }
     if !manifest.files.is_empty() {
@@ -1295,52 +1844,109 @@ fn install_raw_image_update(
             "raw partition system updates cannot mix file installs".to_string(),
         ));
     }
-
-    let installed_at = now_unix_seconds();
-    let pending = SystemPendingUpdate {
-        version: manifest.version.clone(),
-        target: manifest.target.clone(),
-        backup_id: format!("raw-{}", installed_at),
-        installed_at,
-        requires_reboot: true,
-        file_count: manifest.raw_images.len(),
-    };
-
-    for image in &manifest.raw_images {
-        validate_raw_image_payload(payload_dir, image)?;
-    }
-    ensure_raw_payloads_are_not_on_rootfs(payload_dir)?;
-    write_raw_install_marker(manifest, &pending)?;
-    write_update_progress(
-        stage_dir,
-        SystemUpdateProgress::new(
-            "install",
-            "launching",
-            Some(manifest.version.clone()),
-            Some("raw image writer is starting".to_string()),
-        ),
-    )?;
-    launch_raw_image_updater(stage_dir, manifest, payload_dir, &pending)?;
-    sync_filesystems();
-
-    Ok(pending)
+    Ok(())
 }
 
-fn ensure_raw_payloads_are_not_on_rootfs(payload_dir: &Path) -> Result<()> {
-    let root_dev = fs::metadata("/")
-        .map_err(|err| AppError::Internal(format!("stat root filesystem: {err}")))?
-        .dev();
-    let payload_dev = fs::metadata(payload_dir)
-        .map_err(|err| AppError::Internal(format!("stat system update payload directory: {err}")))?
-        .dev();
-    if root_dev == payload_dev {
-        return Err(AppError::BadRequest(
-            "raw system update staging is on rootfs; mount the /data partition first".to_string(),
-        ));
+/// The last local step before the handoff, reached only after every capture
+/// refusal. The running system first stops needing the boot ticket, so an
+/// attempt that never reaches the writer cannot keep it from booting; only then
+/// is an older attempt retired and this one published in its place.
+fn publish_outgoing_ticket(
+    root: &Path,
+    store: &mut Store,
+    capsule_directory: &Path,
+    ticket: &RestoreTicket,
+) -> Result<()> {
+    let published = (|| {
+        raw_restore::retire_required(root).map_err(|error| {
+            AppError::Internal(format!("raw restore requirement was not retired: {error}"))
+        })?;
+        retire_prepared_ticket(store, capsule_directory)?;
+        store.publish_prepared(ticket).map_err(|error| {
+            AppError::Internal(format!("prepared ticket was not published: {error}"))
+        })
+    })();
+    if published.is_err() {
+        discard_capsule(capsule_directory, ticket);
+    }
+    published
+}
+
+/// No later attempt would find the capsule of a ticket that was never published.
+fn discard_capsule(capsule_directory: &Path, ticket: &RestoreTicket) {
+    if let Err(error) = raw_restore::remove_capsule(capsule_directory, ticket) {
+        tracing::warn!(%error, "an unpublished restore capsule stays on the data partition");
+    }
+}
+
+fn retire_prepared_ticket(store: &mut Store, capsule_directory: &Path) -> Result<()> {
+    let Some(ticket) = store
+        .load()
+        .map_err(|error| AppError::Internal(format!("raw ticket state is unreadable: {error}")))?
+    else {
+        return Ok(());
+    };
+    if ticket.phase() != Phase::Prepared {
+        return Ok(());
+    }
+    store.abandon_prepared(&ticket).map_err(|error| {
+        AppError::Internal(format!("stale raw ticket was not retired: {error}"))
+    })?;
+    let capsule = capsule_directory.join(format!(
+        "{:032x}.capsule",
+        u128::from_be_bytes(ticket.transaction_id())
+    ));
+    match fs::remove_file(&capsule) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path = %capsule.display(), %error, "stale raw capsule was not removed");
+        }
     }
     Ok(())
 }
 
+fn submit_raw_capture(
+    request: &CaptureRequest<'_>,
+    image: &mut impl TargetImage,
+    raw_images: RawImages,
+    publish: impl FnOnce(&RestoreTicket) -> Result<()>,
+    send: impl FnOnce([u8; 16], RawImages) -> Result<()>,
+) -> Result<RestoreTicket> {
+    let cancel = AtomicBool::new(false);
+    let captured = raw_capture::capture(request, image, &cancel)
+        .map_err(|error| AppError::Internal(format!("raw capture failed: {error}")))?;
+    let ticket = captured.into_ticket();
+    publish(&ticket)?;
+    send(ticket.transaction_id(), raw_images)?;
+    Ok(ticket)
+}
+
+fn raw_image<'a>(manifest: &'a SystemManifest, label: &str) -> Result<&'a SystemManifestRawImage> {
+    manifest
+        .raw_images
+        .iter()
+        .find(|image| image.label == label)
+        .ok_or_else(|| AppError::BadRequest("raw manifest is missing an image label".into()))
+}
+
+fn ensure_private_directory(path: &Path, on_root: bool) -> Result<fs::File> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o777 != 0o700
+        || (on_root && metadata.dev() != fs::metadata("/")?.dev())
+    {
+        return Err(AppError::Internal(
+            "raw capture directory is not private protected storage".into(),
+        ));
+    }
+    Ok(fs::File::open(path)?)
+}
+
+#[cfg(test)]
 fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemManifestRawImage> {
     let mut ordered: Vec<_> = images.iter().collect();
     ordered.sort_by_key(|image| match image.device.as_str() {
@@ -1351,128 +1957,9 @@ fn raw_images_install_order(images: &[SystemManifestRawImage]) -> Vec<&SystemMan
     ordered
 }
 
-fn launch_raw_image_updater(
-    stage_dir: &Path,
-    manifest: &SystemManifest,
-    payload_dir: &Path,
-    pending: &SystemPendingUpdate,
-) -> Result<()> {
-    let run_dir = Path::new(SYSTEM_RAW_INSTALL_RUN_DIR);
-    remove_dir_if_exists(run_dir)?;
-    fs::create_dir_all(run_dir)?;
-    fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700))?;
-
-    let busybox_src = find_busybox_binary()?;
-    let busybox_dst = run_dir.join("busybox");
-    fs::copy(&busybox_src, &busybox_dst)?;
-    fs::set_permissions(&busybox_dst, fs::Permissions::from_mode(0o755))?;
-
-    let loader_src = find_musl_loader()?;
-    let loader_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LOADER);
-    fs::copy(&loader_src, &loader_dst)?;
-    fs::set_permissions(&loader_dst, fs::Permissions::from_mode(0o755))?;
-
-    let libc_src = Path::new("/lib/libc.so");
-    if libc_src.is_file() {
-        let libc_dst = run_dir.join(SYSTEM_RAW_RUNTIME_LIBC);
-        fs::copy(libc_src, &libc_dst)?;
-        fs::set_permissions(&libc_dst, fs::Permissions::from_mode(0o755))?;
-    }
-
-    let script_path = run_dir.join("run.sh");
-    let script = raw_image_updater_script(stage_dir, manifest, payload_dir, pending)?;
-    fs::write(&script_path, script)?;
-    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700))?;
-
-    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_LOG).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(SYSTEM_RAW_INSTALL_LOG)?;
-    let stderr = stdout.try_clone()?;
-
-    let mut command = Command::new(&loader_dst);
-    command
-        .arg("--library-path")
-        .arg(run_dir)
-        .arg(&busybox_dst)
-        .arg("sh")
-        .arg(&script_path)
-        .current_dir(run_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-
-    // libkvm/CVI file descriptors are not guaranteed to be CLOEXEC. If the
-    // raw updater inherits them, it can keep device files and sockets open
-    // after NanoKVM is stopped and make the read-only remount unreliable.
-    unsafe {
-        command.pre_exec(|| {
-            for fd in 3..1024 {
-                nix::libc::close(fd);
-            }
-            Ok(())
-        });
-    }
-
-    command
-        .spawn()
-        .map_err(|err| AppError::Internal(format!("failed to launch raw image updater: {err}")))?;
-
-    tracing::warn!(
-        version = %manifest.version,
-        images = manifest.raw_images.len(),
-        log = SYSTEM_RAW_INSTALL_LOG,
-        "launched raw system image updater"
-    );
-    Ok(())
-}
-
-fn find_busybox_binary() -> Result<PathBuf> {
-    for candidate in ["/bin/busybox", "/usr/bin/busybox", "/sbin/busybox"] {
-        let path = Path::new(candidate);
-        if path.is_file() {
-            return Ok(path.to_path_buf());
-        }
-    }
-
-    Err(AppError::Internal(
-        "busybox binary is required for raw system updates".to_string(),
-    ))
-}
-
-fn find_musl_loader() -> Result<PathBuf> {
-    for candidate in [
-        "/lib/ld-musl-riscv64v0p7_xthead.so.1",
-        "/lib/ld-musl-riscv64xthead.so.1",
-        "/lib/ld-musl-riscv64.so.1",
-    ] {
-        let path = Path::new(candidate);
-        if path.is_file() {
-            return Ok(path.to_path_buf());
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir("/lib") {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.starts_with("ld-musl-riscv64") && name.ends_with(".so.1") && path.is_file() {
-                return Ok(path);
-            }
-        }
-    }
-
-    Err(AppError::Internal(
-        "musl loader is required for raw system updates".to_string(),
-    ))
-}
-
+// Historical generator retained only to document/test the removed unsafe
+// engine. No launcher exists and this code is absent from production builds.
+#[cfg(test)]
 fn raw_image_updater_script(
     stage_dir: &Path,
     manifest: &SystemManifest,
@@ -1514,6 +2001,7 @@ RAW_PRESERVE_DIR=\"$PROGRESS_DIR/preserve\"\n\
 BOOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/boot\"\n\
 BOOT_TMP_MOUNT=/tmp/hardened-boot-preserve-mount\n\
 ROOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/root\"\n\
+ROOT_RESTORE_DONE=\"$PROGRESS_DIR/root-restore-done\"\n\
 ROOT_TMP_MOUNT=/tmp/hardened-root-preserve-mount\n\
 kmsg() {{\n\
   [ -w /dev/kmsg ] && $BB printf 'hardened-system-update: %s\\n' \"$1\" > /dev/kmsg || true\n\
@@ -1590,7 +2078,7 @@ stop_update_runtime() {{\n\
   done\n\
   /etc/init.d/S95nanokvm stop >> \"$LOG\" 2>&1 || true\n\
   for PID_FILE in /tmp/nanokvm-watchdog.pid /tmp/system-update-watchdog.pid; do\n\
-    if [ -f \"$PID_FILE\" ]; then\n\
+    if [ -f \"$PID_FILE\" ] && [ ! -L \"$PID_FILE\" ] && [ -O \"$PID_FILE\" ]; then\n\
       PID=$($BB cat \"$PID_FILE\" 2>/dev/null || true)\n\
       [ -n \"$PID\" ] && $BB kill \"$PID\" >/dev/null 2>&1 || true\n\
       $BB rm -f \"$PID_FILE\" >/dev/null 2>&1 || true\n\
@@ -1702,9 +2190,12 @@ drop_unsafe_preserved_kvm_state() {{\n\
 preserve_root_config() {{\n\
   progress writing 'preserving rootfs configuration'\n\
   log 'preserving rootfs configuration files'\n\
+  $BB rm -f \"$ROOT_RESTORE_DONE\" >/dev/null 2>&1 || true\n\
   $BB rm -rf \"$ROOT_PRESERVE_DIR\" \"$ROOT_TMP_MOUNT\" >/dev/null 2>&1 || true\n\
   for PATH_NAME in \\\n\
     /etc/kvm \\\n\
+    /etc/default/syslogd \\\n\
+    /etc/default/klogd \\\n\
     /etc/ssh \\\n\
     /etc/dropbear \\\n\
     /etc/passwd \\\n\
@@ -1740,6 +2231,8 @@ restore_root_config() {{\n\
   if $BB mount -t ext4 \"$ROOT_DEVICE\" \"$ROOT_TMP_MOUNT\" >> \"$LOG\" 2>&1; then\n\
     for REL in \\\n\
       etc/kvm \\\n\
+      etc/default/syslogd \\\n\
+      etc/default/klogd \\\n\
       etc/ssh \\\n\
       etc/dropbear \\\n\
       etc/passwd \\\n\
@@ -1868,78 +2361,6 @@ force_reboot_now\n",
     Ok(script)
 }
 
-fn validate_raw_image_payload(payload_dir: &Path, image: &SystemManifestRawImage) -> Result<()> {
-    validate_raw_image_manifest(image)?;
-    let payload = safe_payload_join(payload_dir, &image.payload)?;
-    let metadata = fs::metadata(&payload)?;
-    let expected_size = raw_image_payload_stored_size(image)?;
-    if metadata.len() != expected_size {
-        return Err(AppError::BadRequest(format!(
-            "system update raw image size mismatch: {}",
-            image.payload
-        )));
-    }
-
-    let device = Path::new(&image.device);
-    let device_metadata = fs::metadata(device)?;
-    if !device_metadata.file_type().is_block_device() {
-        return Err(AppError::BadRequest(format!(
-            "raw system update target is not a block device: {}",
-            image.device
-        )));
-    }
-    if let Some(device_size) = block_device_size(device) {
-        if image.size > device_size {
-            return Err(AppError::BadRequest(format!(
-                "raw system update image {} is larger than {}",
-                image.payload, image.device
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn block_device_size(device: &Path) -> Option<u64> {
-    let name = device.file_name()?.to_str()?;
-    let sectors = read_trimmed(&format!("/sys/class/block/{name}/size"))?;
-    sectors.parse::<u64>().ok()?.checked_mul(512)
-}
-
-fn write_raw_install_marker(
-    manifest: &SystemManifest,
-    pending: &SystemPendingUpdate,
-) -> Result<()> {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RawInstallMarker<'a> {
-        pending: &'a SystemPendingUpdate,
-        source_commit: &'a str,
-        raw_images: &'a [SystemManifestRawImage],
-        warning: &'a str,
-    }
-
-    let marker = RawInstallMarker {
-        pending,
-        source_commit: &manifest.source_commit,
-        raw_images: &manifest.raw_images,
-        warning: "raw partition update has no automatic rollback",
-    };
-    let data = serde_json::to_vec_pretty(&marker)
-        .map_err(|err| AppError::Internal(format!("encode raw system update marker: {err}")))?;
-    if let Some(parent) = Path::new(SYSTEM_RAW_INSTALL_MARKER).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(SYSTEM_RAW_INSTALL_MARKER, data)?;
-    Ok(())
-}
-
-fn sync_filesystems() {
-    unsafe {
-        nix::libc::sync();
-    }
-}
-
 fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
     write_update_progress(
         stage_dir,
@@ -1960,7 +2381,6 @@ fn rollback_last_system_update(stage_dir: &Path) -> Result<SystemRollbackInfo> {
         return Err(err);
     }
     remove_file_if_exists(Path::new(SYSTEM_PENDING_FILE))?;
-    remove_file_if_exists(Path::new(SYSTEM_RAW_INSTALL_MARKER))?;
     remove_file_if_exists(Path::new(SYSTEM_BOOT_GOOD_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_SCRIPT_FILE))?;
     remove_file_if_exists(Path::new(SYSTEM_ROLLBACK_ATTEMPT_FILE))?;
@@ -2235,7 +2655,16 @@ fn validate_system_manifest(
 }
 
 fn validate_manifest_shape(manifest: &SystemManifest, latest: &SystemLatest) -> Result<()> {
-    if manifest.format != "hardened-nanokvm-system-update-v1" {
+    let expected_format = match latest.format {
+        SYSTEM_UPDATE_METADATA_FORMAT_V1 => SYSTEM_UPDATE_MANIFEST_FORMAT_V1,
+        SYSTEM_UPDATE_METADATA_FORMAT_V2 => SYSTEM_UPDATE_MANIFEST_FORMAT_V2,
+        _ => {
+            return Err(AppError::BadRequest(
+                "unsupported system update metadata format".to_string(),
+            ));
+        }
+    };
+    if manifest.format != expected_format {
         return Err(AppError::BadRequest(
             "unsupported system update manifest format".to_string(),
         ));
@@ -2248,6 +2677,16 @@ fn validate_manifest_shape(manifest: &SystemManifest, latest: &SystemLatest) -> 
     if manifest.target != latest.target {
         return Err(AppError::BadRequest(
             "system update manifest target mismatch".to_string(),
+        ));
+    }
+    if manifest.required_app_version != latest.required_app_version {
+        return Err(AppError::BadRequest(
+            "system update manifest required application version mismatch".to_string(),
+        ));
+    }
+    if manifest.minimum_system_version != latest.minimum_system_version {
+        return Err(AppError::BadRequest(
+            "system update manifest minimum system version mismatch".to_string(),
         ));
     }
     validate_token("manifest version", &manifest.version)?;
@@ -2394,54 +2833,34 @@ fn prepare_stage_dir(stage_dir: &Path) -> Result<()> {
             "invalid system update staging directory".to_string(),
         ));
     }
-    remove_dir_if_exists(stage_dir)?;
-    fs::create_dir_all(stage_dir)?;
+    // Old backups/preserve/unknown recovery material are not disposable cache.
+    // New verified extraction replaces only its exact generated extract member.
+    StageDirectory::prepare(stage_dir)?;
     Ok(())
 }
 
-fn acquire_update_lock() -> Result<UpdateGuard> {
-    let mut is_updating = SYSTEM_UPDATE_LOCK
-        .lock()
-        .map_err(|_| AppError::Internal("system update lock poisoned".to_string()))?;
-    if *is_updating {
-        return Err(AppError::Conflict(
-            "system update already in progress".to_string(),
-        ));
+fn ensure_no_pending_system_update() -> Result<()> {
+    reject_pending_system_paths(&[
+        Path::new(SYSTEM_PENDING_FILE),
+        Path::new(SYSTEM_RAW_INSTALL_MARKER),
+    ])
+}
+
+fn reject_pending_system_paths(paths: &[&Path]) -> Result<()> {
+    for path in paths {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(AppError::Conflict("unfinished system update or legacy raw state exists; inspect recovery status before another download/install".to_string())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
     }
-    *is_updating = true;
-    Ok(UpdateGuard)
-}
-
-async fn run_blocking_system_update<T, F>(operation: &'static str, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    task::spawn_blocking(f)
-        .await
-        .map_err(|err| AppError::Internal(format!("{operation} task failed: {err}")))?
-}
-
-async fn run_blocking_system_update_with_guard<T, F>(
-    operation: &'static str,
-    guard: UpdateGuard,
-    f: F,
-) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    run_blocking_system_update(operation, move || {
-        let _guard = guard;
-        f()
-    })
-    .await
+    Ok(())
 }
 
 fn write_stage_record(stage_dir: &Path, record: &SystemStageRecord) -> Result<()> {
     let data = serde_json::to_vec_pretty(record)
         .map_err(|err| AppError::Internal(format!("encode staged system update: {err}")))?;
-    fs::write(stage_dir.join(SYSTEM_STAGE_RECORD), data)?;
+    StageDirectory::prepare(stage_dir)?.replace_generated(SYSTEM_STAGE_RECORD, &data)?;
     Ok(())
 }
 
@@ -2458,6 +2877,7 @@ fn staged_summary(record: &SystemStageRecord) -> SystemStagedUpdate {
         base_version: record.manifest.base_version.clone(),
         kernel_version: record.manifest.kernel_version.clone(),
         security_patch_level: non_empty(record.manifest.security_patch_level.clone()),
+        required_app_version: record.latest.required_app_version.clone(),
         required_free_bytes: record.manifest.required_free_bytes,
         requires_reboot: record.manifest.requires_reboot,
         file_count: record.manifest.files.len() + image_count,
@@ -2575,6 +2995,7 @@ fn raw_image_payload_stored_size(image: &SystemManifestRawImage) -> Result<u64> 
     }
 }
 
+#[cfg(test)]
 fn raw_image_is_gzip(image: &SystemManifestRawImage) -> bool {
     image.compression.as_deref() == Some("gzip")
 }
@@ -2657,6 +3078,18 @@ fn validate_sha256_hex(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn decode_sha256(value: &str) -> Result<[u8; 32]> {
+    validate_sha256_hex(value)?;
+    let mut result = [0_u8; 32];
+    for (byte, pair) in result.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| AppError::BadRequest("invalid system update sha256".into()))?;
+    }
+    Ok(result)
+}
+
 fn validate_text_field(name: &str, value: &str, max_len: usize) -> Result<()> {
     if value.is_empty()
         || value.len() > max_len
@@ -2673,6 +3106,10 @@ fn validate_text_field(name: &str, value: &str, max_len: usize) -> Result<()> {
 
 fn hash_file(path: &Path) -> Result<FileHashes> {
     let mut file = fs::File::open(path)?;
+    hash_reader(&mut file)
+}
+
+fn hash_reader(file: &mut impl Read) -> Result<FileHashes> {
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     let mut buf = [0_u8; 64 * 1024];
@@ -2692,29 +3129,10 @@ fn hash_file(path: &Path) -> Result<FileHashes> {
     })
 }
 
+#[cfg(test)]
 fn path_arg(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".to_string()))
-}
-
-fn temp_verify_path(kind: &str) -> Result<PathBuf> {
-    validate_token("temporary file kind", kind)?;
-    Ok(PathBuf::from(format!(
-        "/tmp/hardened-system-update-{}-{}-{kind}.tmp",
-        std::process::id(),
-        now_unix_nanos()
-    )))
-}
-
-fn write_verify_temp_file(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 fn remove_dir_if_exists(path: &Path) -> Result<()> {
@@ -2729,13 +3147,6 @@ fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-fn now_unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
         .unwrap_or_default()
 }
 
@@ -2756,6 +3167,7 @@ fn read_normalized_update_progress(
     stage_dir: &Path,
     current: &SystemVersion,
     pending: Option<&SystemPendingUpdate>,
+    operation_active: bool,
 ) -> Option<SystemUpdateProgress> {
     let mut progress = match read_update_progress(stage_dir) {
         Ok(progress) => progress?,
@@ -2774,16 +3186,25 @@ fn read_normalized_update_progress(
             .map(|pending| current.version == pending.version && current.target == pending.target)
             .unwrap_or(false)
     {
-        let _ = remove_update_progress(stage_dir);
         return None;
     }
 
     if progress.operation == "install" && progress.phase == "failed" && progress.version.is_none() {
-        let _ = remove_update_progress(stage_dir);
         return None;
     }
 
-    let lock_active = update_lock_active();
+    // The running system is the version this record was installing, so the
+    // install finished at whatever phase its record stopped. An older raw
+    // writer left "preparing" behind, and a backend that started as an
+    // application trial does not settle the record until its next full start.
+    if progress.operation == "install"
+        && progress.is_active()
+        && !operation_active
+        && progress.version.as_deref() == Some(current.version.as_str())
+    {
+        return None;
+    }
+
     let now = now_unix_seconds();
     let raw_install_stopped = progress.operation == "install"
         && progress.is_active()
@@ -2794,11 +3215,10 @@ fn read_normalized_update_progress(
             })
             .unwrap_or(false)
         && !raw_writer_active();
-    if raw_install_stopped {
+    if raw_install_stopped && !operation_active {
         progress.phase = "failed".to_string();
         progress.updated_at = now;
         progress.message = Some("raw system update writer stopped before reboot".to_string());
-        let _ = write_update_progress(stage_dir, progress.clone());
         return Some(progress);
     }
 
@@ -2807,14 +3227,51 @@ fn read_normalized_update_progress(
         .checked_add(60 * 60)
         .map(|expires| expires < now)
         .unwrap_or(false);
-    if progress.is_active() && (stale || (progress.operation != "install" && !lock_active)) {
+    if progress.is_active() && !operation_active && (stale || progress.operation != "install") {
         progress.phase = "failed".to_string();
         progress.updated_at = now;
         progress.message = Some("system update operation did not complete".to_string());
-        let _ = write_update_progress(stage_dir, progress.clone());
     }
 
     Some(progress)
+}
+
+/// The raw writer's last word is "rebooting", and nothing in the system that
+/// boots next writes over it, so the receipt of that boot closes the record.
+pub fn settle_raw_progress(config: &Config) {
+    let stage_dir = system_stage_dir(&config.paths.update_cache_dir);
+    let version = read_current_system_version().version;
+    if let Err(error) = settle_raw_progress_in(&stage_dir, &version, || {
+        Store::open_boot()
+            .map_err(|error| AppError::Internal(format!("raw ticket store unavailable: {error}")))
+    }) {
+        tracing::warn!(%error, "raw update progress was not settled");
+    }
+}
+
+pub(crate) fn settle_raw_progress_in(
+    stage_dir: &Path,
+    version: &str,
+    open_store: impl FnOnce() -> Result<Store>,
+) -> Result<()> {
+    let Some(progress) = read_update_progress(stage_dir)? else {
+        return Ok(());
+    };
+    if progress.operation != "install"
+        || !progress.is_active()
+        || progress.version.as_deref() != Some(version)
+    {
+        return Ok(());
+    }
+    let ticket = open_store()?
+        .load()
+        .map_err(|error| AppError::Internal(format!("raw ticket unreadable: {error}")))?;
+    if ticket.is_some_and(|ticket| {
+        ticket.phase() == Phase::Committed && ticket.target_version() == version
+    }) {
+        remove_update_progress(stage_dir)?;
+    }
+    Ok(())
 }
 
 fn read_update_progress(stage_dir: &Path) -> Result<Option<SystemUpdateProgress>> {
@@ -2831,15 +3288,18 @@ fn read_update_progress(stage_dir: &Path) -> Result<Option<SystemUpdateProgress>
 
 fn write_update_progress(stage_dir: &Path, progress: SystemUpdateProgress) -> Result<()> {
     validate_update_progress(&progress)?;
-    fs::create_dir_all(stage_dir)?;
     let data = serde_json::to_vec_pretty(&progress)
         .map_err(|err| AppError::Internal(format!("encode system update progress: {err}")))?;
-    fs::write(stage_dir.join(SYSTEM_PROGRESS_RECORD), data)?;
+    StageDirectory::prepare(stage_dir)?.replace_generated(SYSTEM_PROGRESS_RECORD, &data)?;
     Ok(())
 }
 
 fn remove_update_progress(stage_dir: &Path) -> Result<()> {
-    remove_file_if_exists(&stage_dir.join(SYSTEM_PROGRESS_RECORD))
+    match StageDirectory::open(stage_dir) {
+        Ok(stage) => Ok(stage.remove_generated(SYSTEM_PROGRESS_RECORD)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn validate_update_progress(progress: &SystemUpdateProgress) -> Result<()> {
@@ -2852,13 +3312,6 @@ fn validate_update_progress(progress: &SystemUpdateProgress) -> Result<()> {
         validate_text_field("system update progress message", message, 256)?;
     }
     Ok(())
-}
-
-fn update_lock_active() -> bool {
-    SYSTEM_UPDATE_LOCK
-        .lock()
-        .map(|is_updating| *is_updating)
-        .unwrap_or(false)
 }
 
 fn raw_writer_active() -> bool {
@@ -2890,55 +3343,53 @@ fn raw_writer_active() -> bool {
     false
 }
 
-fn raw_pending_marker_is_stale(
-    current: &SystemVersion,
-    pending: Option<&SystemPendingUpdate>,
-    progress: Option<&SystemUpdateProgress>,
-) -> bool {
-    let Some(pending) = pending else {
-        return false;
+fn read_pending_status(
+    pending_path: &Path,
+    legacy_marker: &Path,
+) -> (Option<SystemPendingUpdate>, Option<String>) {
+    let (pending, pending_error) = match read_pending_update(pending_path) {
+        Ok(pending) => (pending, None),
+        Err(error) => (None, Some(error.to_string())),
     };
-    if Path::new(SYSTEM_PENDING_FILE).exists() || !pending.backup_id.starts_with("raw-") {
-        return false;
-    }
-    if current.version == pending.version && current.target == pending.target {
-        return false;
-    }
-    matches!(
-        progress.map(|progress| (progress.operation.as_str(), progress.phase.as_str())),
-        None | Some(("install", "failed")) | Some(("install", "done"))
-    )
+    // Any legacy p3 object is evidence to inspect, never pending/boot-good
+    // authority. Do not open its contents, follow its target, or remove it.
+    let legacy_error = reject_pending_system_paths(&[legacy_marker])
+        .err()
+        .map(|error| error.to_string());
+    (pending, pending_error.or(legacy_error))
 }
 
-fn read_pending_update() -> Result<Option<SystemPendingUpdate>> {
-    let path = Path::new(SYSTEM_PENDING_FILE);
-    if path.exists() {
-        let raw = fs::read(path)?;
-        let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
-            .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
-        validate_pending_update(&pending)?;
-        return Ok(Some(pending));
+fn read_pending_update(path: &Path) -> Result<Option<SystemPendingUpdate>> {
+    // Production callers pass only SYSTEM_PENDING_FILE on rootfs. There is no
+    // p3 fallback. This bounded legacy file reader is NOT the future raw ticket
+    // or app journal protocol, nor proof of provenance after a compromised boot.
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_PENDING_UPDATE_BYTES {
+        return Err(AppError::BadRequest(
+            "pending system update is not a bounded regular record".into(),
+        ));
     }
-
-    read_raw_pending_update()
-}
-
-fn read_raw_pending_update() -> Result<Option<SystemPendingUpdate>> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RawInstallMarker {
-        pending: SystemPendingUpdate,
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PENDING_UPDATE_BYTES + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > MAX_PENDING_UPDATE_BYTES {
+        return Err(AppError::BadRequest(
+            "pending system update exceeds its size limit".into(),
+        ));
     }
-
-    let path = Path::new(SYSTEM_RAW_INSTALL_MARKER);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read(path)?;
-    let marker: RawInstallMarker = serde_json::from_slice(&raw)
-        .map_err(|err| AppError::Internal(format!("invalid raw pending system update: {err}")))?;
-    validate_pending_update(&marker.pending)?;
-    Ok(Some(marker.pending))
+    let pending: SystemPendingUpdate = serde_json::from_slice(&raw)
+        .map_err(|err| AppError::Internal(format!("invalid pending system update: {err}")))?;
+    validate_pending_update(&pending)?;
+    Ok(Some(pending))
 }
 
 fn validate_pending_update(pending: &SystemPendingUpdate) -> Result<()> {
@@ -3012,21 +3463,84 @@ fn evaluate_boot_health(
     pending: &SystemPendingUpdate,
     state: &AppState,
 ) -> SystemBootHealth {
+    boot_health(
+        current,
+        pending,
+        &CurrentBoot::read(),
+        Path::new(BOOT_VERSION_FILE).is_file(),
+        state.config.paths.web_root.join("index.html").is_file(),
+    )
+}
+
+fn boot_health(
+    current: &SystemVersion,
+    pending: &SystemPendingUpdate,
+    boot: &CurrentBoot,
+    boot_marker_present: bool,
+    web_root_present: bool,
+) -> SystemBootHealth {
+    // The install writes the new version file, so the version matches before
+    // the reboot too. Only a later boot shows that the update came up.
     let version_matches_pending =
         current.version == pending.version && current.target == pending.target;
-    let boot_marker_present = Path::new(BOOT_VERSION_FILE).is_file();
-    let web_root_present = state.config.paths.web_root.join("index.html").is_file();
+    let rebooted = booted_since_install(pending, boot);
+    // This runs in the backend that serves the request.
     let backend_running = true;
-    let healthy =
-        backend_running && version_matches_pending && boot_marker_present && web_root_present;
+    let healthy = backend_running
+        && (rebooted || !pending.requires_reboot)
+        && version_matches_pending
+        && boot_marker_present
+        && web_root_present;
 
     SystemBootHealth {
         backend_running,
+        rebooted,
         version_matches_pending,
         boot_marker_present,
         web_root_present,
         healthy,
     }
+}
+
+/// The current boot, as needed to tell whether an install was followed by one.
+struct CurrentBoot {
+    id: Option<String>,
+    started_at: Option<u64>,
+}
+
+impl CurrentBoot {
+    fn read() -> Self {
+        Self {
+            id: current_boot_id().ok(),
+            started_at: boot_started_at(),
+        }
+    }
+}
+
+fn booted_since_install(pending: &SystemPendingUpdate, boot: &CurrentBoot) -> bool {
+    match (&pending.install_boot_id, &boot.id) {
+        (Some(installed), Some(current)) => installed != current,
+        (Some(_), None) => false,
+        // Older backends recorded no boot ID: compare the install time with
+        // the start of this boot instead.
+        (None, _) => boot
+            .started_at
+            .is_some_and(|started| started > pending.installed_at),
+    }
+}
+
+fn current_boot_id() -> Result<String> {
+    let raw = fs::read_to_string(BOOT_ID_FILE)?;
+    let id = raw.strip_suffix('\n').unwrap_or(&raw);
+    BootId::parse(id).map_err(|_| AppError::Internal("invalid kernel boot ID".into()))?;
+    Ok(id.to_ascii_lowercase())
+}
+
+fn boot_started_at() -> Option<u64> {
+    fs::read_to_string(PROC_STAT_FILE)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
 }
 
 fn write_last_backup_record(record: &SystemInstallRecord) -> Result<()> {
@@ -3050,7 +3564,14 @@ fn rollback_script_for_record(stage_dir: &Path, record: &SystemInstallRecord) ->
     let mut script = String::from(
         "#!/bin/sh\n\
 set -eu\n\
-LOG=/tmp/system-update-watchdog.log\n\
+LOG=/run/system-update-watchdog.log\n\
+umask 077\n\
+[ ! -L \"$LOG\" ] || exit 1\n\
+if [ -e \"$LOG\" ]; then\n\
+  [ -f \"$LOG\" ] && [ -O \"$LOG\" ] && [ \"$(stat -c %h \"$LOG\")\" = 1 ] || exit 1\n\
+fi\n\
+: >> \"$LOG\"\n\
+chmod 0600 \"$LOG\"\n\
 echo \"$(date '+%Y-%m-%d %H:%M:%S') automatic system-update rollback started\" >> \"$LOG\"\n",
     );
 
@@ -3116,6 +3637,7 @@ fn pending_update(record: &SystemInstallRecord) -> SystemPendingUpdate {
         installed_at: record.installed_at,
         requires_reboot: record.requires_reboot,
         file_count: record.files.len(),
+        install_boot_id: record.install_boot_id.clone(),
     }
 }
 
@@ -3358,10 +3880,74 @@ fn non_empty(value: Option<String>) -> Option<String> {
 }
 
 #[cfg(test)]
+#[path = "system_update_trust_tests.rs"]
+mod trust_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn valid_latest() -> SystemLatest {
+    #[test]
+    fn status_normalization_never_mutates_live_or_stale_progress() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let mut progress =
+            SystemUpdateProgress::new("download", "verifying", Some("0.1.0".into()), None);
+        progress.updated_at = 0; // a clock jump never fails registered live work
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+        let current = read_current_system_version();
+        let active = read_normalized_update_progress(&stage, &current, None, true).unwrap();
+        assert_eq!(active.phase, "verifying");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let stale = read_normalized_update_progress(&stage, &current, None, false).unwrap();
+        assert_eq!(stale.phase, "failed");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn status_normalization_does_not_delete_completed_progress() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let progress = SystemUpdateProgress::new("install", "failed", None, None);
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+        assert!(
+            read_normalized_update_progress(&stage, &read_current_system_version(), None, false)
+                .is_none()
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn status_normalization_hides_an_install_the_running_system_carries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let mut current = read_current_system_version();
+        current.version = "0.3.0-raw.13".to_string();
+        let mut progress =
+            SystemUpdateProgress::new("install", "preparing", Some("0.3.0-raw.13".into()), None);
+        progress.updated_at = 0;
+        write_update_progress(&stage, progress).unwrap();
+        let path = stage.join(SYSTEM_PROGRESS_RECORD);
+        let before = fs::read(&path).unwrap();
+
+        assert!(read_normalized_update_progress(&stage, &current, None, false).is_none());
+        let live = read_normalized_update_progress(&stage, &current, None, true).unwrap();
+        assert_eq!(live.phase, "preparing");
+        current.version = "0.3.0-raw.12".to_string();
+        let other = read_normalized_update_progress(&stage, &current, None, false).unwrap();
+        assert_eq!(other.phase, "failed");
+        assert_eq!(
+            other.message.as_deref(),
+            Some("system update operation did not complete")
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    pub(super) fn valid_latest() -> SystemLatest {
         SystemLatest {
             kind: "hardened-nanokvm-system-update".to_string(),
             format: 1,
@@ -3375,12 +3961,14 @@ mod tests {
             url: "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-0.1.0/hardened-nanokvm-system-0.1.0.tar.gz".to_string(),
             release_notes_url: "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
             signature_key_id: "hardened-system-test".to_string(),
         }
     }
 
-    fn valid_manifest(file: SystemManifestFile) -> SystemManifest {
+    pub(super) fn valid_manifest(file: SystemManifestFile) -> SystemManifest {
         SystemManifest {
             format: "hardened-nanokvm-system-update-v1".to_string(),
             version: "0.1.0".to_string(),
@@ -3388,6 +3976,8 @@ mod tests {
             base_version: "2025-02-17-19-08-3649fe.img".to_string(),
             kernel_version: "5.10.4-tag-".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 67_108_864,
@@ -3402,7 +3992,7 @@ mod tests {
         }
     }
 
-    fn valid_raw_manifest() -> SystemManifest {
+    pub(super) fn valid_raw_manifest() -> SystemManifest {
         SystemManifest {
             format: "hardened-nanokvm-system-update-v1".to_string(),
             version: "0.1.0-raw.1".to_string(),
@@ -3410,6 +4000,8 @@ mod tests {
             base_version: "2025-02-17-19-08-3649fe.img".to_string(),
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,
@@ -3453,6 +4045,83 @@ mod tests {
     }
 
     #[test]
+    fn validates_system_metadata_v2_with_required_application_version() {
+        let mut latest = valid_latest();
+        latest.format = SYSTEM_UPDATE_METADATA_FORMAT_V2;
+        latest.required_app_version = Some("2.0.41".to_string());
+        let mut manifest = valid_raw_manifest();
+        latest.version = manifest.version.clone();
+        latest.name = format!("hardened-nanokvm-system-{}.tar.gz", latest.version);
+        latest.url = format!(
+            "https://github.com/woffko/Hardened_NanoKVM/releases/download/hardened-system-{0}/hardened-nanokvm-system-{0}.tar.gz",
+            latest.version
+        );
+        latest.release_notes_url = format!(
+            "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-{}",
+            latest.version
+        );
+        manifest.format = SYSTEM_UPDATE_MANIFEST_FORMAT_V2.to_string();
+        manifest.required_app_version = latest.required_app_version.clone();
+
+        validate_latest_system(&latest).unwrap();
+        validate_manifest_shape(&manifest, &latest).unwrap();
+        assert!(application_requirement_error_for("2.0.40", &latest).is_some());
+        assert!(application_requirement_error_for("2.0.41", &latest).is_none());
+        assert!(application_requirement_error_for("2.1.0", &latest).is_none());
+
+        // The oldest system the release restores from is optional and signed.
+        assert_eq!(source_system_error("0.1.0-raw.1", &latest), None);
+        latest.minimum_system_version = Some("0.3.0-raw.12".to_string());
+        manifest.minimum_system_version = latest.minimum_system_version.clone();
+        validate_latest_system(&latest).unwrap();
+        validate_manifest_shape(&manifest, &latest).unwrap();
+        for older in ["0.3.0-raw.10", "0.3.0-raw.11", "0.2.23-raw.1"] {
+            let error = source_system_error(older, &latest).unwrap();
+            assert!(
+                error.contains("install system 0.3.0-raw.12 first"),
+                "{error}"
+            );
+            assert!(enforce_source_system(older, &latest).is_err());
+        }
+        for accepted in ["0.3.0-raw.12", "0.3.0-raw.13", "0.4.0-raw.1"] {
+            assert_eq!(source_system_error(accepted, &latest), None);
+            assert!(enforce_source_system(accepted, &latest).is_ok());
+        }
+        assert!(source_system_error("unknown", &latest).is_some());
+        manifest.minimum_system_version = None;
+        assert!(validate_manifest_shape(&manifest, &latest).is_err());
+        latest.minimum_system_version = Some("not a version".to_string());
+        assert!(validate_latest_system(&latest).is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_invalid_required_application_versions() {
+        let mut latest = valid_latest();
+        latest.format = SYSTEM_UPDATE_METADATA_FORMAT_V2;
+        assert!(validate_latest_system(&latest).is_err());
+
+        latest.required_app_version = Some("2.0".to_string());
+        assert!(validate_latest_system(&latest).is_err());
+
+        latest.format = SYSTEM_UPDATE_METADATA_FORMAT_V1;
+        latest.required_app_version = Some("2.0.41".to_string());
+        assert!(validate_latest_system(&latest).is_err());
+    }
+
+    #[test]
+    fn rejects_manifest_required_application_version_mismatch() {
+        let mut latest = valid_latest();
+        latest.format = SYSTEM_UPDATE_METADATA_FORMAT_V2;
+        latest.required_app_version = Some("2.0.41".to_string());
+        let mut manifest = valid_raw_manifest();
+        latest.version = manifest.version.clone();
+        manifest.format = SYSTEM_UPDATE_MANIFEST_FORMAT_V2.to_string();
+        manifest.required_app_version = Some("2.0.42".to_string());
+
+        assert!(validate_manifest_shape(&manifest, &latest).is_err());
+    }
+
+    #[test]
     fn rejects_untrusted_system_update_url() {
         let latest = SystemLatest {
             kind: "hardened-nanokvm-system-update".to_string(),
@@ -3469,6 +4138,8 @@ mod tests {
                 "https://github.com/woffko/Hardened_NanoKVM/releases/tag/hardened-system-0.1.0"
                     .to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             signature_algorithm: SYSTEM_UPDATE_SIGNATURE_ALGORITHM.to_string(),
             signature_key_id: "hardened-system-test".to_string(),
         };
@@ -3635,11 +4306,412 @@ mod tests {
         let mut stable = valid_latest();
         stable.version = "0.2.0-raw.1".to_string();
 
-        assert_eq!(newer_system_release(preview, stable).version, "0.2.0-raw.1");
+        // Selection must retain each candidate's exact signed bytes, not
+        // serialize a new JSON representation after choosing its version.
+        let selected = newer_system_release(
+            VerifiedSystemMetadata {
+                latest: preview,
+                metadata: b"preview exact".to_vec(),
+                signature: b"preview signature".to_vec(),
+            },
+            VerifiedSystemMetadata {
+                latest: stable,
+                metadata: b"stable exact".to_vec(),
+                signature: b"stable signature".to_vec(),
+            },
+        );
+        assert_eq!(selected.latest.version, "0.2.0-raw.1");
+        assert_eq!(selected.metadata, b"stable exact");
+        assert_eq!(selected.signature, b"stable signature");
     }
 
     #[test]
-    fn raw_image_updater_preserves_user_configuration() {
+    fn raw_install_barrier_keeps_existing_configuration_permission_gate() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = false;
+        assert!(matches!(
+            validate_raw_install(&config, &valid_latest(), &valid_raw_manifest()),
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn the_lab_setting_for_unsigned_metadata_does_not_reach_a_raw_update() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = true;
+        config.security.allow_unsigned_updates = true;
+        validate_raw_install(&config, &valid_latest(), &valid_raw_manifest()).unwrap();
+        let mut latest = valid_latest();
+        latest.signature_algorithm = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        latest.signature_key_id = SYSTEM_UPDATE_UNSIGNED_ALGORITHM.to_string();
+        assert!(matches!(
+            validate_raw_install(&config, &latest, &valid_raw_manifest()),
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_raw_switch_is_the_one_on_disk_under_the_freeze() {
+        use crate::update::state_writers::StateWriters;
+        let stored = tempfile::tempdir().unwrap();
+        for (enabled, allowed) in [(false, false), (true, true)] {
+            let writers = StateWriters::for_test_config(
+                std::fs::File::open(stored.path()).unwrap(),
+                stored.path().join("server.yaml"),
+            );
+            let mut config = Config::default();
+            config.security.allow_raw_system_updates = enabled;
+            config.write(&writers.configuration().unwrap()).unwrap();
+            let freeze = writers.drain(Duration::from_secs(5)).await.unwrap();
+            let result = check_raw_policy(&freeze, &valid_latest(), &valid_raw_manifest());
+            assert_eq!(result.is_ok(), allowed);
+        }
+    }
+
+    #[test]
+    fn raw_install_barrier_still_rejects_mixed_file_and_raw_operations() {
+        let mut config = Config::default();
+        config.security.allow_raw_system_updates = true;
+        let mut manifest = valid_raw_manifest();
+        manifest.files.push(SystemManifestFile {
+            payload: "images/file".into(),
+            install: "/etc/hostname".into(),
+            size: 1,
+            sha256: "a".repeat(64),
+        });
+        assert!(matches!(
+            validate_raw_install(&config, &valid_latest(), &manifest),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+    #[test]
+    fn a_stale_prepared_ticket_is_abandoned_and_its_exact_capsule_removed() {
+        use crate::update::restore_capsule::{
+            prepare_capsule,
+            ticket::{Binding, BootId, Phase, RestoreTicket, Store},
+        };
+        use std::io::Cursor;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let capsules = tempfile::tempdir().unwrap();
+        let mut store = Store::open_fixture(root.path()).unwrap();
+        let plaintext = b"fixture".repeat(128);
+        let mut encrypted = Vec::new();
+        let secret = prepare_capsule(
+            "0.3.0-raw.13",
+            plaintext.len() as u64,
+            &mut Cursor::new(&plaintext),
+            &mut encrypted,
+        )
+        .unwrap();
+        let ticket = RestoreTicket::prepared(
+            secret,
+            Binding {
+                source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                device_id: [1; 32],
+                capsule_sha256: Sha256::digest(&encrypted).into(),
+                boot_image_sha256: [2; 32],
+                rootfs_image_sha256: [3; 32],
+                target_app_version: "2.0.43".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        )
+        .unwrap();
+        store.publish_prepared(&ticket).unwrap();
+        let capsule = capsules.path().join(format!(
+            "{:032x}.capsule",
+            u128::from_be_bytes(ticket.transaction_id())
+        ));
+        std::fs::write(&capsule, b"stale ciphertext").unwrap();
+        retire_prepared_ticket(&mut store, capsules.path()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Abandoned);
+        assert!(!capsule.exists());
+    }
+
+    fn outgoing_ticket(version: &str) -> crate::update::restore_capsule::ticket::RestoreTicket {
+        use crate::update::restore_capsule::{
+            prepare_capsule,
+            ticket::{Binding, BootId, RestoreTicket},
+        };
+        use std::io::Cursor;
+
+        let plaintext = b"fixture".repeat(128);
+        let mut encrypted = Vec::new();
+        let secret = prepare_capsule(
+            version,
+            plaintext.len() as u64,
+            &mut Cursor::new(&plaintext),
+            &mut encrypted,
+        )
+        .unwrap();
+        RestoreTicket::prepared(
+            secret,
+            Binding {
+                source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                device_id: [1; 32],
+                capsule_sha256: Sha256::digest(&encrypted).into(),
+                boot_image_sha256: [2; 32],
+                rootfs_image_sha256: [3; 32],
+                target_app_version: "2.1.0".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn private_directory() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    fn restored_system_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("etc/kvm")).unwrap();
+        let requirement = root.path().join(raw_restore::REQUIRED_PATH);
+        std::fs::write(&requirement, raw_restore::REQUIRED_BYTES).unwrap();
+        std::fs::set_permissions(&requirement, std::fs::Permissions::from_mode(0o644)).unwrap();
+        root
+    }
+
+    fn source_boot_outcome(
+        root: &Path,
+        store: &mut crate::update::restore_capsule::ticket::Store,
+        capsules: &Path,
+    ) -> (
+        std::result::Result<raw_restore::Outcome, raw_restore::Error>,
+        bool,
+    ) {
+        use crate::update::restore_capsule::ticket::BootId;
+
+        let staging = private_directory();
+        let marker_directory = tempfile::tempdir().unwrap();
+        let marker = marker_directory.path().join("blocked");
+        let outcome = raw_restore::run_observed(
+            root,
+            store,
+            capsules,
+            staging.path(),
+            &marker,
+            &raw_restore::Observation {
+                boot_id: BootId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                device_id: [1; 32],
+                system_version: "0.3.0-raw.13".into(),
+                app_version: "2.0.45".into(),
+                target: "sg2002-licheervnano-sd".into(),
+            },
+        );
+        (outcome, marker.exists())
+    }
+
+    #[test]
+    fn an_attempt_that_never_reaches_the_writer_leaves_the_source_system_bootable() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let ticket = outgoing_ticket("0.4.0-raw.1");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &ticket).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Prepared);
+        let (outcome, blocked) = source_boot_outcome(root.path(), &mut store, capsules.path());
+        assert!(matches!(outcome, Ok(raw_restore::Outcome::NotRequired)));
+        assert!(!blocked, "the source system must keep its network and SSH");
+    }
+
+    #[test]
+    fn a_retired_attempt_leaves_the_source_system_bootable_too() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let first = outgoing_ticket("0.4.0-raw.1");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &first).unwrap();
+        retire_prepared_ticket(&mut store, capsules.path()).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().phase(), Phase::Abandoned);
+        let (outcome, blocked) = source_boot_outcome(root.path(), &mut store, capsules.path());
+        assert!(matches!(outcome, Ok(raw_restore::Outcome::NotRequired)));
+        assert!(!blocked);
+    }
+
+    #[test]
+    fn a_ticket_that_was_not_published_takes_its_capsule_with_it() {
+        use crate::update::restore_capsule::ticket::Store;
+
+        let root = restored_system_root();
+        // A requirement that cannot be retired stops the publication.
+        let requirement = root.path().join(raw_restore::REQUIRED_PATH);
+        std::fs::remove_file(&requirement).unwrap();
+        std::fs::create_dir(&requirement).unwrap();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let ticket = outgoing_ticket("0.4.0-raw.2");
+        let capsule = raw_restore::capsule_path(capsules.path(), &ticket);
+        std::fs::write(&capsule, b"sealed").unwrap();
+        assert!(
+            publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &ticket).is_err()
+        );
+        assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn publishing_replaces_a_stale_attempt_and_its_capsule() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = restored_system_root();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let stale = outgoing_ticket("0.4.0-raw.1");
+        store.publish_prepared(&stale).unwrap();
+        let capsule = capsules.path().join(format!(
+            "{:032x}.capsule",
+            u128::from_be_bytes(stale.transaction_id())
+        ));
+        std::fs::write(&capsule, b"stale ciphertext").unwrap();
+        let next = outgoing_ticket("0.4.0-raw.2");
+        publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &next).unwrap();
+        let current = store.load().unwrap().unwrap();
+        assert_eq!(current.phase(), Phase::Prepared);
+        assert_eq!(current.transaction_id(), next.transaction_id());
+        assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn a_requirement_that_cannot_be_retired_stops_before_any_ticket_changes() {
+        use crate::update::restore_capsule::ticket::{Phase, Store};
+
+        let root = tempfile::tempdir().unwrap();
+        // A directory at the marker path cannot be removed as a file.
+        std::fs::create_dir_all(root.path().join(raw_restore::REQUIRED_PATH).join("x")).unwrap();
+        let store_root = private_directory();
+        let capsules = private_directory();
+        let mut store = Store::open_fixture(store_root.path()).unwrap();
+        let stale = outgoing_ticket("0.4.0-raw.1");
+        store.publish_prepared(&stale).unwrap();
+        let next = outgoing_ticket("0.4.0-raw.2");
+        assert!(publish_outgoing_ticket(root.path(), &mut store, capsules.path(), &next).is_err());
+        let current = store.load().unwrap().unwrap();
+        assert_eq!(current.phase(), Phase::Prepared);
+        assert_eq!(current.transaction_id(), stale.transaction_id());
+    }
+
+    #[test]
+    fn raw_capture_publishes_one_prepared_ticket_then_sends_the_same_transaction_and_images() {
+        use crate::update::{
+            raw_capture::{self, CaptureRequest, TargetImage},
+            raw_install_lease::RawImages,
+            restore_accounts,
+            restore_capsule::ticket::{BootId, Phase},
+            restore_identity::{
+                IdentityCheckedRestore,
+                tests::{CONFIG_PATH, CWD, fixture, signed_accounts},
+            },
+        };
+        use std::{
+            cell::RefCell, fs::File, io::Write, os::unix::fs::PermissionsExt, path::Path,
+            sync::atomic::AtomicBool,
+        };
+
+        #[derive(Default)]
+        struct Image;
+        impl TargetImage for Image {
+            fn signed_accounts(
+                &mut self,
+                _: &AtomicBool,
+            ) -> std::result::Result<restore_accounts::SignedAccounts, raw_capture::CaptureError>
+            {
+                let encoded = restore_accounts::encode(
+                    &signed_accounts(),
+                    &restore_accounts::ImageFacts {
+                        app_version: "2.0.43".into(),
+                        restorable: true,
+                    },
+                )
+                .unwrap();
+                Ok(restore_accounts::decode(&encoded).unwrap())
+            }
+            fn check_ssh(
+                &mut self,
+                _: &mut IdentityCheckedRestore,
+                _: &AtomicBool,
+            ) -> std::result::Result<(), raw_capture::CaptureError> {
+                Ok(())
+            }
+        }
+
+        let (source, config) = fixture();
+        let private = tempfile::tempdir().unwrap();
+        let capsules = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(capsules.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = File::open(capsules.path()).unwrap();
+        let mut first = tempfile::tempfile().unwrap();
+        first.write_all(b"boot image").unwrap();
+        let mut second = tempfile::tempfile().unwrap();
+        second.write_all(b"rootfs image").unwrap();
+        let raw_images = RawImages {
+            files: [first, second],
+            sizes: [10, 12],
+            sha256: [[1; 32], [2; 32]],
+        };
+        let published = RefCell::new(None);
+        let sent = RefCell::new(None);
+        let request = CaptureRequest {
+            source_root: source.path(),
+            private_staging: private.path(),
+            capsule_directory: &directory,
+            config: &config,
+            working_dir: Path::new(CWD),
+            config_path: Path::new(CONFIG_PATH),
+            target_version: "0.3.0-raw.13",
+            target: "sg2002-licheervnano-sd",
+            boot_image_sha256: [2; 32],
+            rootfs_image_sha256: [3; 32],
+            source_boot: BootId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+            device_id: [1; 32],
+        };
+        let ticket = submit_raw_capture(
+            &request,
+            &mut Image,
+            raw_images,
+            |ticket| {
+                *published.borrow_mut() = Some((
+                    ticket.transaction_id(),
+                    ticket.target_version().to_string(),
+                    ticket.phase(),
+                ));
+                Ok(())
+            },
+            |transaction, images| {
+                *sent.borrow_mut() = Some((transaction, images.sizes, images.sha256));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let (transaction, version, phase) = published.borrow().clone().unwrap();
+        assert_eq!(transaction, ticket.transaction_id());
+        assert_eq!(version, "0.3.0-raw.13");
+        assert_eq!(phase, Phase::Prepared);
+        let (sent_transaction, sizes, sha256) = (*sent.borrow()).unwrap();
+        assert_eq!(sent_transaction, transaction);
+        assert_eq!(sizes, [10, 12]);
+        assert_eq!(sha256, [[1; 32], [2; 32]]);
+        assert_eq!(
+            std::fs::read_dir(capsules.path()).unwrap().count(),
+            1,
+            "the sealed capsule stays on the data partition"
+        );
+        assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn historical_only_raw_generator_documents_removed_unsafe_preserve() {
         let temp = tempfile::tempdir().unwrap();
         let stage_dir = temp.path().join("system-update");
         let payload_dir = temp.path().join("payload");
@@ -3651,6 +4723,7 @@ mod tests {
             installed_at: 123,
             requires_reboot: true,
             file_count: manifest.raw_images.len(),
+            install_boot_id: None,
         };
 
         let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
@@ -3660,6 +4733,8 @@ mod tests {
         assert!(script.contains("RAW_PRESERVE_DIR=\"$PROGRESS_DIR/preserve\""));
         assert!(script.contains("BOOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/boot\""));
         assert!(script.contains("ROOT_PRESERVE_DIR=\"$RAW_PRESERVE_DIR/root\""));
+        assert!(script.contains("ROOT_RESTORE_DONE=\"$PROGRESS_DIR/root-restore-done\""));
+        assert!(script.contains("$BB rm -f \"$ROOT_RESTORE_DONE\""));
         assert!(!script.contains("BOOT_PRESERVE_DIR=/tmp/hardened-boot-preserve"));
         assert!(!script.contains("ROOT_PRESERVE_DIR=/tmp/hardened-root-preserve"));
         assert!(
@@ -3672,6 +4747,10 @@ mod tests {
         assert!(script.contains("eth.nodhcp"));
         assert!(script.contains("eth.ipv6.mode"));
         assert!(script.contains("/etc/kvm"));
+        assert!(script.contains("/etc/default/syslogd"));
+        assert!(script.contains("/etc/default/klogd"));
+        assert!(script.contains("etc/default/syslogd"));
+        assert!(script.contains("etc/default/klogd"));
         assert!(script.contains("/etc/passwd"));
         assert!(script.contains("/etc/shadow"));
         assert!(script.contains("/etc/ssh"));
@@ -3713,7 +4792,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_image_updater_streams_compressed_images() {
+    fn historical_only_raw_generator_documents_removed_mutable_gzip_inputs() {
         let temp = tempfile::tempdir().unwrap();
         let stage_dir = temp.path().join("system-update");
         let payload_dir = temp.path().join("payload");
@@ -3733,6 +4812,7 @@ mod tests {
             installed_at: 123,
             requires_reboot: true,
             file_count: manifest.raw_images.len(),
+            install_boot_id: None,
         };
 
         let script = raw_image_updater_script(&stage_dir, &manifest, &payload_dir, &pending)
@@ -3841,6 +4921,8 @@ mod tests {
             base_version: "2025-02-17-19-08-3649fe.img".to_string(),
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,
@@ -3885,6 +4967,8 @@ mod tests {
             base_version: "2025-02-17-19-08-3649fe.img".to_string(),
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 805_306_368,
@@ -3926,6 +5010,8 @@ mod tests {
             base_version: "2025-02-17-19-08-3649fe.img".to_string(),
             kernel_version: "5.10.4-tag-hardened.1".to_string(),
             security_patch_level: None,
+            required_app_version: None,
+            minimum_system_version: None,
             source_commit: "abcdef1".to_string(),
             created_utc: "2026-06-28T00:00:00Z".to_string(),
             required_free_bytes: 2_147_483_648,
@@ -3977,6 +5063,7 @@ mod tests {
                     existed: false,
                 },
             ],
+            install_boot_id: None,
         };
 
         let script = rollback_script_for_record(&stage_dir, &record).unwrap();
@@ -3986,6 +5073,53 @@ mod tests {
         assert!(remove_new < restore_config);
         assert!(script.contains("'/etc/kvm/system-update-pending.json'"));
         assert!(script.contains("'/etc/kvm/system-update-rollback.sh'"));
+
+        // Execute only the generated log admission prefix, never restoration
+        // commands or host /etc cleanup. A marker stands for admitted work.
+        let prefix = script.split_once("mkdir -p ").unwrap().0;
+        let log = temp.path().join("rollback.log");
+        let admitted = temp.path().join("admitted");
+        let prefix = prefix.replace(
+            "LOG=/run/system-update-watchdog.log",
+            &format!("LOG={}", shell_quote_path(&log).unwrap()),
+        );
+        let probe = format!(
+            "{prefix}\nprintf admitted > {}\n",
+            shell_quote_path(&admitted).unwrap()
+        );
+        let run = || {
+            std::process::Command::new("timeout")
+                .args(["3", "sh", "-c", &probe])
+                .status()
+                .unwrap()
+        };
+        let victim = temp.path().join("victim");
+        fs::write(&victim, b"sentinel").unwrap();
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        assert!(!run().success());
+        assert!(!admitted.exists());
+        assert_eq!(fs::read(&victim).unwrap(), b"sentinel");
+        fs::remove_file(&log).unwrap();
+        fs::hard_link(&victim, &log).unwrap();
+        assert!(!run().success());
+        assert!(!admitted.exists());
+        fs::remove_file(&log).unwrap();
+        nix::unistd::mkfifo(&log, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let status = run();
+        assert!(!status.success());
+        assert_ne!(
+            status.code(),
+            Some(124),
+            "log FIFO blocked rollback admission"
+        );
+        fs::remove_file(&log).unwrap();
+        assert!(run().success());
+        assert!(admitted.is_file());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -4002,8 +5136,150 @@ mod tests {
                 backup: "etc/config".to_string(),
                 existed: true,
             }],
+            install_boot_id: None,
         };
 
         assert!(rollback_script_for_record(temp.path(), &record).is_err());
+    }
+
+    const INSTALL_BOOT: &str = "0f8c6f4e-6b9b-4f0e-9a51-6c1f0d6f7a10";
+    const LATER_BOOT: &str = "6e1b5b9d-1a2c-4c7e-8d3f-2a9b0c4d5e6f";
+
+    fn pending_installed(boot_id: Option<&str>, requires_reboot: bool) -> SystemPendingUpdate {
+        SystemPendingUpdate {
+            version: "0.1.0".into(),
+            target: DEFAULT_SYSTEM_TARGET.into(),
+            backup_id: "0.1.0-100".into(),
+            installed_at: 100,
+            requires_reboot,
+            file_count: 1,
+            install_boot_id: boot_id.map(str::to_string),
+        }
+    }
+
+    fn running(version: &str) -> SystemVersion {
+        SystemVersion {
+            version: version.into(),
+            target: DEFAULT_SYSTEM_TARGET.into(),
+            base_version: String::new(),
+            kernel_version: String::new(),
+            rootfs_version: String::new(),
+            security_patch_level: None,
+            model: String::new(),
+            hardware_version: String::new(),
+            source: "test".into(),
+        }
+    }
+
+    fn boot(id: Option<&str>, started_at: Option<u64>) -> CurrentBoot {
+        CurrentBoot {
+            id: id.map(str::to_string),
+            started_at,
+        }
+    }
+
+    #[test]
+    fn an_update_that_needs_a_reboot_is_healthy_only_in_a_later_boot() {
+        let pending = pending_installed(Some(INSTALL_BOOT), true);
+        let current = running("0.1.0");
+        let same = boot_health(
+            &current,
+            &pending,
+            &boot(Some(INSTALL_BOOT), Some(200)),
+            true,
+            true,
+        );
+        assert!(
+            !same.rebooted && !same.healthy,
+            "confirmed before the reboot"
+        );
+        let later = boot_health(
+            &current,
+            &pending,
+            &boot(Some(LATER_BOOT), Some(200)),
+            true,
+            true,
+        );
+        assert!(later.rebooted && later.healthy);
+        // A later boot does not excuse a failed check.
+        let later_boot = boot(Some(LATER_BOOT), Some(200));
+        assert!(!boot_health(&running("0.0.9"), &pending, &later_boot, true, true).healthy);
+        assert!(!boot_health(&current, &pending, &later_boot, false, true).healthy);
+        assert!(!boot_health(&current, &pending, &later_boot, true, false).healthy);
+        // An unreadable boot ID never counts as a new boot.
+        assert!(!boot_health(&current, &pending, &boot(None, Some(200)), true, true).healthy);
+    }
+
+    #[test]
+    fn an_update_without_a_reboot_is_healthy_in_the_install_boot() {
+        let pending = pending_installed(Some(INSTALL_BOOT), false);
+        let health = boot_health(
+            &running("0.1.0"),
+            &pending,
+            &boot(Some(INSTALL_BOOT), Some(50)),
+            true,
+            true,
+        );
+        assert!(!health.rebooted && health.healthy);
+    }
+
+    #[test]
+    fn records_without_a_boot_id_compare_the_install_time_with_the_boot_start() {
+        let pending = pending_installed(None, true);
+        assert!(!booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(99))
+        ));
+        assert!(!booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(100))
+        ));
+        assert!(booted_since_install(
+            &pending,
+            &boot(Some(LATER_BOOT), Some(101))
+        ));
+        assert!(!booted_since_install(&pending, &boot(None, None)));
+    }
+
+    #[test]
+    fn pending_records_carry_the_install_boot_id_and_old_ones_still_parse() {
+        let old = br#"{"version":"0.1.0","target":"t","backupId":"b","installedAt":1,"requiresReboot":true,"fileCount":1}"#;
+        let parsed: SystemPendingUpdate = serde_json::from_slice(old).unwrap();
+        assert_eq!(parsed.install_boot_id, None);
+        let json = serde_json::to_string(&pending_installed(Some(INSTALL_BOOT), true)).unwrap();
+        assert!(
+            json.contains(&format!("\"installBootId\":\"{INSTALL_BOOT}\"")),
+            "{json}"
+        );
+        let record = SystemInstallRecord {
+            version: "0.1.0".to_string(),
+            target: DEFAULT_SYSTEM_TARGET.to_string(),
+            backup_id: "0.1.0-123".to_string(),
+            installed_at: 123,
+            requires_reboot: true,
+            files: Vec::new(),
+            install_boot_id: Some(INSTALL_BOOT.to_string()),
+        };
+        assert_eq!(
+            pending_update(&record).install_boot_id.as_deref(),
+            Some(INSTALL_BOOT)
+        );
+        let health: SystemBootHealth = serde_json::from_slice(
+            br#"{"backendRunning":true,"versionMatchesPending":true,"bootMarkerPresent":true,"webRootPresent":true,"healthy":true}"#,
+        )
+        .unwrap();
+        assert!(!health.rebooted);
+    }
+
+    #[test]
+    fn this_hosts_boot_id_and_boot_start_are_read() {
+        let id = current_boot_id().unwrap();
+        assert!(BootId::parse(&id).is_ok());
+        assert_eq!(current_boot_id().unwrap(), id);
+        assert!(boot_started_at().is_some_and(|started| started > 0));
+        assert!(!booted_since_install(
+            &pending_installed(Some(&id), true),
+            &CurrentBoot::read()
+        ));
     }
 }

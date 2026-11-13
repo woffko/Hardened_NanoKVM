@@ -15,6 +15,7 @@ SYSTEM_KERNEL_VERSION="${HARDENED_SYSTEM_KERNEL_VERSION:-}"
 SYSTEM_SECURITY_PATCH_LEVEL="${HARDENED_SYSTEM_SECURITY_PATCH_LEVEL:-}"
 OUTPUT_BASENAME="${OUTPUT_BASENAME:-Hardened_NanoKVM_${VERSION//[^A-Za-z0-9]/_}_Rev1_4_2_rust}"
 BOOT_INIT_SCRIPTS=(
+  S02apprecover
   S00kmod
   S01fs
   S03usbdev
@@ -33,6 +34,7 @@ STATE_FILE="$OUT_DIR/$OUTPUT_BASENAME.backend-state"
 SYSTEM_VERSION_FILE="$OUT_DIR/$OUTPUT_BASENAME.system-version.json"
 DEBUGFS_CMDS="$OUT_DIR/$OUTPUT_BASENAME.debugfs.cmd"
 FSTAB_FILE="$OUT_DIR/$OUTPUT_BASENAME.fstab"
+NATIVE_BOOT_SEED="$OUT_DIR/$OUTPUT_BASENAME.native-boot/state"
 
 require_file() {
   if [ ! -f "$1" ]; then
@@ -51,8 +53,20 @@ require_dir() {
 require_file "$BASE_IMAGE"
 require_dir "$KVMAPP_DIR"
 require_file "$KVMAPP_DIR/server/NanoKVM-Server"
+require_file "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+python3 "$ROOT/scripts/app-recovery-binding.py" verify \
+  --backend "$KVMAPP_DIR/server/NanoKVM-Server" \
+  --helper "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+for role in owner broker ctl recovery; do
+  python3 -B "$ROOT/scripts/native-runtime-binding.py" "$role" verify \
+    --backend "$KVMAPP_DIR/server/NanoKVM-Server" \
+    --helper "$KVMAPP_DIR/system/bin/nanokvm-native-$role"
+done
 
 mkdir -p "$OUT_DIR"
+python3 -B "$ROOT/scripts/native-boot-record.py" "$NATIVE_BOOT_SEED"
+PICO_ENROLLMENT_SEED="$OUT_DIR/$OUTPUT_BASENAME.pico-factory/picoclaw-enrollment"
+python3 -B "$ROOT/scripts/picoclaw-enrollment-record.py" "$PICO_ENROLLMENT_SEED"
 
 read -r ROOTFS_START ROOTFS_SECTORS <<EOF
 $(partx -g -o NR,START,SECTORS "$BASE_IMAGE" | awk '$1 == 2 { print $2, $3; exit }')
@@ -172,6 +186,54 @@ fi
       printf 'sif /mnt/data/sensor_cfg.ini gid 0\n'
     fi
   fi
+
+  # Recovery bytes must survive an absent /kvmapp; this installs support only,
+  # before the installed S02/consumer gates; it never authorizes legacy p3 state.
+  printf 'mkdir /usr/libexec\n'
+  printf 'sif /usr/libexec mode 040755\n'
+  printf 'sif /usr/libexec uid 0\n'
+  printf 'sif /usr/libexec gid 0\n'
+  printf 'rm /usr/libexec/nanokvm-app-recovery\n'
+  printf 'write %s /usr/libexec/nanokvm-app-recovery\n' "$KVMAPP_DIR/system/bin/nanokvm-app-recovery"
+  printf 'sif /usr/libexec/nanokvm-app-recovery mode 0100755\n'
+  printf 'sif /usr/libexec/nanokvm-app-recovery uid 0\n'
+  printf 'sif /usr/libexec/nanokvm-app-recovery gid 0\n'
+
+  # Compile-bound native programs live outside the mutable app slot. Protect
+  # their bundled copies and backend authority too (the vendor image used UID1000).
+  for directory in / /etc /etc/kvm /etc/init.d /usr /usr/libexec /kvmapp /kvmapp/server /kvmapp/system /kvmapp/system/bin; do
+    printf 'sif %s mode 040755\n' "$directory"
+    printf 'sif %s uid 0\n' "$directory"
+    printf 'sif %s gid 0\n' "$directory"
+  done
+  printf 'sif /kvmapp/server/NanoKVM-Server uid 0\n'
+  printf 'sif /kvmapp/server/NanoKVM-Server gid 0\n'
+  for role in owner broker ctl recovery; do
+    name="nanokvm-native-$role"
+    printf 'rm /usr/libexec/%s\n' "$name"
+    printf 'write %s /usr/libexec/%s\n' "$KVMAPP_DIR/system/bin/$name" "$name"
+    for parent in /usr/libexec /kvmapp/system/bin; do
+      printf 'sif %s/%s mode 0100755\n' "$parent" "$name"
+      printf 'sif %s/%s uid 0\n' "$parent" "$name"
+      printf 'sif %s/%s gid 0\n' "$parent" "$name"
+    done
+  done
+
+  printf 'mkdir /etc/kvm/native-runtime-boot\n'
+  printf 'sif /etc/kvm/native-runtime-boot mode 040700\n'
+  printf 'sif /etc/kvm/native-runtime-boot uid 0\n'
+  printf 'sif /etc/kvm/native-runtime-boot gid 0\n'
+  printf 'rm /etc/kvm/native-runtime-boot/state\n'
+  printf 'write %s /etc/kvm/native-runtime-boot/state\n' "$NATIVE_BOOT_SEED"
+  printf 'sif /etc/kvm/native-runtime-boot/state mode 0100600\n'
+  printf 'sif /etc/kvm/native-runtime-boot/state uid 0\n'
+  printf 'sif /etc/kvm/native-runtime-boot/state gid 0\n'
+
+  printf 'rm /etc/kvm/picoclaw-enrollment\n'
+  printf 'write %s /etc/kvm/picoclaw-enrollment\n' "$PICO_ENROLLMENT_SEED"
+  printf 'sif /etc/kvm/picoclaw-enrollment mode 0100600\n'
+  printf 'sif /etc/kvm/picoclaw-enrollment uid 0\n'
+  printf 'sif /etc/kvm/picoclaw-enrollment gid 0\n'
 
   for script in "${BOOT_INIT_SCRIPTS[@]}"; do
     script_path="$KVMAPP_DIR/system/init.d/$script"

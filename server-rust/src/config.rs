@@ -11,9 +11,14 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{AppError, Result};
+use crate::{
+    AppError, Result,
+    system::media::MEDIA_ROOT,
+    update::state_writers::{ConfigPermit, StateWriters, WriterDrain},
+};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/kvm/server.yaml";
+const CONFIG_DIRECTORY: &str = "/etc/kvm";
 const DEFAULT_SECRET_PATH: &str = "/etc/kvm/session_secret";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +101,21 @@ pub struct Security {
     pub allow_auth_disable: bool,
     pub allow_default_admin: bool,
     pub allowed_origins: Vec<String>,
+    pub webrtc_max_peers: usize,
+    pub webrtc_max_message_bytes: usize,
+    pub webrtc_signals_per_second: u32,
+    pub webrtc_max_ice_candidates: usize,
+}
+
+pub(crate) const WEBRTC_PEER_CEILING: usize = 8;
+
+/// Validated once at the configuration/admission boundary, never clamped.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WebRtcLimits {
+    pub peers: usize,
+    pub message_bytes: usize,
+    pub signals_per_second: u32,
+    pub ice_candidates: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +213,10 @@ impl Default for Security {
             allow_auth_disable: false,
             allow_default_admin: false,
             allowed_origins: Vec::new(),
+            webrtc_max_peers: 2,
+            webrtc_max_message_bytes: 64 * 1024,
+            webrtc_signals_per_second: 32,
+            webrtc_max_ice_candidates: 128,
         }
     }
 }
@@ -203,7 +227,7 @@ impl Default for Paths {
             account_file: PathBuf::from("/etc/kvm/pwd"),
             session_secret_file: PathBuf::from(DEFAULT_SECRET_PATH),
             web_root: PathBuf::from("/kvmapp/server/web"),
-            image_directory: PathBuf::from("/data"),
+            image_directory: PathBuf::from(MEDIA_ROOT),
             update_cache_dir: PathBuf::from("/data/.hardened-kvmcache"),
             system_update_public_key: PathBuf::from("/etc/kvm/system-update-signing.pub.pem"),
         }
@@ -211,32 +235,101 @@ impl Default for Paths {
 }
 
 impl Config {
+    pub(crate) fn read_trial(startup: &crate::update::app_trial::Startup) -> Result<Self> {
+        let mut config = match startup.read_state(Path::new(DEFAULT_CONFIG_PATH), 128 * 1024)? {
+            Some(bytes) => serde_yaml::from_slice::<Self>(&bytes)
+                .map_err(|_| AppError::Config("invalid trial configuration".into()))?,
+            None => Self::default(),
+        };
+        config.settle()?;
+        if config.jwt.secret_key.is_empty() {
+            let bytes = startup
+                .read_state(&config.paths.session_secret_file, 4096)?
+                .ok_or_else(|| AppError::Config("trial session identity is absent".into()))?;
+            config.jwt.secret_key = std::str::from_utf8(&bytes)
+                .map_err(|_| AppError::Config("invalid trial session identity".into()))?
+                .trim()
+                .to_owned();
+            if config.jwt.secret_key.is_empty() {
+                return Err(AppError::Config("trial session identity is empty".into()));
+            }
+        }
+        Ok(config)
+    }
+
     pub fn load() -> Result<Self> {
-        let mut config = Self::read()?;
-        config.ensure_session_secret()?;
+        let writers = StateWriters::default();
+        let permit = writers.configuration()?;
+        Self::load_for(&permit)
+    }
+
+    pub(crate) fn load_for(permit: &ConfigPermit) -> Result<Self> {
+        // Startup may generate persistent identity; use the same serialized
+        // domain as runtime YAML changes, including across backend processes.
+        let mut config = Self::read_for(permit)?;
+        config.ensure_session_secret(permit)?;
         Ok(config)
     }
 
     pub fn read() -> Result<Self> {
-        let path = std::env::var("NANOKVM_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
+        Self::read_path(&config_path())
+    }
+
+    /// Read without enrolling a writer while the caller already owns the
+    /// exclusive drain. Acquiring a ConfigPermit here would self-conflict.
+    pub(crate) fn read_frozen(_writers: &WriterDrain) -> Result<Self> {
+        #[cfg(test)]
+        if let Some(path) = _writers.fixture_config_path() {
+            return Self::read_path(path);
+        }
+        Self::read_path(&config_path())
+    }
+
+    pub(crate) fn read_for(permit: &ConfigPermit) -> Result<Self> {
+        Self::read_path(&writer_config_path(permit))
+    }
+
+    /// A device without the file stays on HTTP. Only the image says HTTPS, in the
+    /// file it ships for a new installation.
+    fn read_path(path: &Path) -> Result<Self> {
         let mut config = if path.exists() {
-            let data = fs::read_to_string(&path)?;
+            let data = fs::read_to_string(path)?;
             serde_yaml::from_str::<Config>(&data).map_err(|err| {
                 AppError::Config(format!("failed to parse {}: {err}", path.display()))
             })?
         } else {
             Config::default()
         };
-        config.normalize_legacy_fields();
+        config.settle()?;
         Ok(config)
     }
 
-    pub fn write(&self) -> Result<()> {
-        let path = std::env::var("NANOKVM_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH));
+    fn settle(&mut self) -> Result<()> {
+        self.normalize_legacy_fields();
+        self.anchor_tls_pair();
+        self.validate_media_directory()?;
+        self.webrtc_limits().map(|_| ())
+    }
+
+    pub(crate) fn webrtc_limits(&self) -> Result<WebRtcLimits> {
+        let security = &self.security;
+        if !(1..=WEBRTC_PEER_CEILING).contains(&security.webrtc_max_peers)
+            || !(1024..=256 * 1024).contains(&security.webrtc_max_message_bytes)
+            || !(1..=128).contains(&security.webrtc_signals_per_second)
+            || !(1..=1024).contains(&security.webrtc_max_ice_candidates)
+        {
+            return Err(AppError::Config("invalid WebRTC resource limits".into()));
+        }
+        Ok(WebRtcLimits {
+            peers: security.webrtc_max_peers,
+            message_bytes: security.webrtc_max_message_bytes,
+            signals_per_second: security.webrtc_signals_per_second,
+            ice_candidates: security.webrtc_max_ice_candidates,
+        })
+    }
+
+    pub(crate) fn write(&self, permit: &ConfigPermit) -> Result<()> {
+        let path = writer_config_path(permit);
         let data = serde_yaml::to_string(self)
             .map_err(|err| AppError::Config(format!("failed to serialize config: {err}")))?;
         write_yaml_0600_atomic(&path, data.as_bytes())?;
@@ -309,16 +402,38 @@ impl Config {
         }
     }
 
-    fn normalize_legacy_fields(&mut self) {
+    pub(crate) fn normalize_legacy_fields(&mut self) {
         if self.jwt.secret_key.is_empty() && !self.jwt.secret_key_legacy.is_empty() {
             self.jwt.secret_key = self.jwt.secret_key_legacy.clone();
         }
         if self.paths.update_cache_dir == PathBuf::from("/root/.kvmcache") {
             self.paths.update_cache_dir = PathBuf::from("/data/.hardened-kvmcache");
         }
+        if self.paths.image_directory == Path::new("/data") {
+            self.paths.image_directory = PathBuf::from(MEDIA_ROOT);
+        }
     }
 
-    fn ensure_session_secret(&mut self) -> Result<()> {
+    /// A raw capture reads a relative pair beside the configuration, so that is
+    /// where it is, whatever directory the server started in.
+    fn anchor_tls_pair(&mut self) {
+        for path in [&mut self.cert.crt, &mut self.cert.key] {
+            if !path.is_empty() && Path::new(path.as_str()).is_relative() {
+                *path = format!("{CONFIG_DIRECTORY}/{path}");
+            }
+        }
+    }
+
+    fn validate_media_directory(&self) -> Result<()> {
+        if self.paths.image_directory != Path::new(MEDIA_ROOT) {
+            return Err(AppError::Config(format!(
+                "image_directory must be {MEDIA_ROOT}; private trees and block devices cannot be media storage"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_session_secret(&mut self, permit: &ConfigPermit) -> Result<()> {
         if !self.jwt.secret_key.is_empty() {
             return Ok(());
         }
@@ -332,10 +447,24 @@ impl Config {
         }
 
         let secret = generate_secret();
-        write_secret_0600(&self.paths.session_secret_file, &secret)?;
+        write_secret_0600(permit, &self.paths.session_secret_file, &secret)?;
         self.jwt.secret_key = secret;
         Ok(())
     }
+}
+
+fn config_path() -> PathBuf {
+    std::env::var("NANOKVM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH))
+}
+
+fn writer_config_path(_permit: &ConfigPermit) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = _permit.fixture_config_path() {
+        return path.to_owned();
+    }
+    config_path()
 }
 
 fn generate_secret() -> String {
@@ -344,7 +473,7 @@ fn generate_secret() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn write_secret_0600(path: &Path, secret: &str) -> Result<()> {
+fn write_secret_0600(_permit: &ConfigPermit, path: &Path, secret: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -453,8 +582,131 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn legacy_config_gets_bounded_webrtc_defaults_and_invalid_limits_are_not_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        fs::write(&path, "proto: http\n").unwrap();
+        let limits = Config::read_path(&path).unwrap().webrtc_limits().unwrap();
+        assert_eq!(limits.peers, 2);
+        assert_eq!(limits.message_bytes, 64 * 1024);
+        for (field, value) in [
+            ("webrtc_max_peers", 0),
+            ("webrtc_max_peers", 9),
+            ("webrtc_max_message_bytes", 1023),
+            ("webrtc_max_message_bytes", 262145),
+            ("webrtc_signals_per_second", 0),
+            ("webrtc_signals_per_second", 129),
+            ("webrtc_max_ice_candidates", 0),
+            ("webrtc_max_ice_candidates", 1025),
+        ] {
+            fs::write(&path, format!("security:\n  {field}: {value}\n")).unwrap();
+            let err = Config::read_path(&path).unwrap_err();
+            assert_eq!(err.to_string(), "config: invalid WebRTC resource limits");
+        }
+    }
+
+    #[test]
+    fn media_namespace_cannot_be_broadened_by_runtime_config() {
+        let mut config = Config::default();
+        assert!(config.validate_media_directory().is_ok());
+        config.paths.image_directory = PathBuf::from("/data");
+        config.normalize_legacy_fields();
+        assert_eq!(config.paths.image_directory, Path::new(MEDIA_ROOT));
+        for path in [
+            "/",
+            "/dev",
+            "/data/.hardened-kvmcache",
+            "/data/media/../.hardened-kvmcache",
+        ] {
+            config.paths.image_directory = PathBuf::from(path);
+            assert!(config.validate_media_directory().is_err(), "{path}");
+        }
+    }
+
+    #[test]
     fn default_disables_legacy_admin_bootstrap() {
         assert!(!Config::default().security.allow_default_admin);
+    }
+
+    const IMAGE_CONFIG: &str = include_str!(
+        "../../buildroot-external/hardened-sg2002/board/sg2002/overlay/etc/kvm/server.yaml"
+    );
+
+    #[test]
+    fn a_missing_file_is_http_and_an_explicit_choice_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        assert_eq!(Config::read_path(&path).unwrap().proto, "http");
+        for proto in ["http", "https"] {
+            fs::write(&path, format!("proto: {proto}\n")).unwrap();
+            assert_eq!(Config::read_path(&path).unwrap().proto, proto);
+        }
+    }
+
+    #[test]
+    fn the_image_says_https_and_nothing_else_differs_from_the_defaults() {
+        let config: Config = serde_yaml::from_str(IMAGE_CONFIG).unwrap();
+        assert_eq!(config.proto, "https");
+        let expected = Config {
+            proto: "https".to_string(),
+            cert: Cert {
+                crt: "/etc/kvm/server.crt".to_string(),
+                key: "/etc/kvm/server.key".to_string(),
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            serde_yaml::to_string(&config).unwrap(),
+            serde_yaml::to_string(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_relative_tls_pair_means_the_configuration_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.yaml");
+        fs::write(
+            &path,
+            "proto: https\ncert:\n  crt: server.crt\n  key: tls/server.key\n",
+        )
+        .unwrap();
+        let config = Config::read_path(&path).unwrap();
+        assert_eq!(config.cert.crt, "/etc/kvm/server.crt");
+        assert_eq!(config.cert.key, "/etc/kvm/tls/server.key");
+        fs::write(&path, "cert:\n  crt: /data/own.crt\n  key: /data/own.key\n").unwrap();
+        let config = Config::read_path(&path).unwrap();
+        assert_eq!(config.cert.crt, "/data/own.crt");
+        assert_eq!(config.cert.key, "/data/own.key");
+        let missing = Config::read_path(&dir.path().join("missing.yaml")).unwrap();
+        assert_eq!(missing.cert.crt, "/etc/kvm/server.crt");
+    }
+
+    #[test]
+    fn a_new_installation_can_create_and_reload_its_tls_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_yaml::from_str(IMAGE_CONFIG).unwrap();
+        // Mirror the factory paths beneath a private root, without changing cwd
+        // or touching the host's /etc. Bare legacy defaults must fail this gate.
+        let cert = dir
+            .path()
+            .join(Path::new(&config.cert.crt).strip_prefix("/").unwrap());
+        let key = dir
+            .path()
+            .join(Path::new(&config.cert.key).strip_prefix("/").unwrap());
+        crate::http::tls::install_crypto_provider();
+        assert!(
+            crate::http::tls::ensure_server_cert(&cert, &key, vec!["localhost".to_string()])
+                .unwrap()
+        );
+        assert!(crate::http::tls::load_server_config(&cert, &key).is_ok());
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !crate::http::tls::ensure_server_cert(&cert, &key, vec!["localhost".to_string()])
+                .unwrap()
+        );
     }
 
     #[test]

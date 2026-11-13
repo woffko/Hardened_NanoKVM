@@ -1580,6 +1580,17 @@ int mmf_enc_jpg_init(int ch, int w, int h, int format, int quality)
 	// }
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
+	/* What this call has created so far. A failure after the channel exists
+	 * undoes all of it (see fail below); the old code returned with the
+	 * channel, VPSS binding or pools still allocated, after which every later
+	 * init failed at CVI_VENC_CreateChn. */
+	int venc_created = 0;
+	int vpss_inited = 0;
+	int vpss_bound = 0;
+	int in_pool = -1;
+	int out_pool = -1;
+	VENC_JPEG_PARAM_S stJpegParam;
+	VENC_RECV_PIC_PARAM_S stRecvParam;
 
 	VENC_CHN_ATTR_S stVencChnAttr;
 	memset(&stVencChnAttr, 0, sizeof(VENC_CHN_ATTR_S));
@@ -1615,21 +1626,19 @@ int mmf_enc_jpg_init(int ch, int w, int h, int format, int quality)
 		printf("CVI_VENC_CreateChn [%d] failed with %#x\n", ch, s32Ret);
 		return s32Ret;
 	}
+	venc_created = 1;
 
-	VENC_JPEG_PARAM_S stJpegParam;
 	memset(&stJpegParam, 0, sizeof(VENC_JPEG_PARAM_S));
 	s32Ret = CVI_VENC_GetJpegParam(ch, &stJpegParam);
 	if (s32Ret != CVI_SUCCESS) {
 		printf("CVI_VENC_GetJpegParam failed with %#x\n", s32Ret);
-		CVI_VENC_DestroyChn(ch);
-		return s32Ret;
+		goto fail;
 	}
 	stJpegParam.u32Qfactor = quality;
 	s32Ret = CVI_VENC_SetJpegParam(ch, &stJpegParam);
 	if (s32Ret != CVI_SUCCESS) {
 		printf("CVI_VENC_SetJpegParam failed with %#x\n", s32Ret);
-		CVI_VENC_DestroyChn(ch);
-		return s32Ret;
+		goto fail;
 	}
 
 	switch (format) {
@@ -1638,71 +1647,66 @@ int mmf_enc_jpg_init(int ch, int w, int h, int format, int quality)
 			s32Ret = _mmf_vpss_init(2, ch, (SIZE_S){(CVI_U32)w, (CVI_U32)h}, (SIZE_S){(CVI_U32)w, (CVI_U32)h}, PIXEL_FORMAT_RGB_888, PIXEL_FORMAT_YUV_PLANAR_420, 30, 0, CVI_FALSE, CVI_FALSE, 0);
 			if (s32Ret != CVI_SUCCESS) {
 				printf("VPSS init failed with %#x\n", s32Ret);
-				CVI_VENC_StopRecvFrame(ch);
-				CVI_VENC_DestroyChn(ch);
-				return s32Ret;
+				goto fail;
 			}
+			vpss_inited = 1;
 
 			s32Ret = SAMPLE_COMM_VPSS_Bind_VENC(2, ch, ch);
 			if (s32Ret != CVI_SUCCESS) {
 				printf("VPSS bind VENC failed with %#x\n", s32Ret);
-				_mmf_vpss_deinit(2, ch);
-				CVI_VENC_StopRecvFrame(ch);
-				CVI_VENC_DestroyChn(ch);
-				return s32Ret;
+				goto fail;
 			}
+			vpss_bound = 1;
 
 			uint32_t input_size = 0, output_size = 0;
 			input_size = COMMON_GetPicBufferSize(w, h, (PIXEL_FORMAT_E)format, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
 			output_size = COMMON_GetPicBufferSize(w, h, (PIXEL_FORMAT_E)PIXEL_FORMAT_YUV_PLANAR_420, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
-			int pool_id = _create_vb_pool((char *)"enc_jpeg_in", MMF_MOD_VENC, input_size, 1);
-			if (pool_id < 0) {
-				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, pool_id);
-				return -1;
+			in_pool = _create_vb_pool((char *)"enc_jpeg_in", MMF_MOD_VENC, input_size, 1);
+			if (in_pool < 0) {
+				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, in_pool);
+				s32Ret = CVI_FAILURE;
+				goto fail;
 			}
-			priv.enc_jpg_input_pool_id = pool_id;
 
-			pool_id = _create_vb_pool((char *)"enc_jpeg_out", MMF_MOD_VENC, output_size, 1);
-			if (pool_id < 0) {
-				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, pool_id);
-				return -1;
+			out_pool = _create_vb_pool((char *)"enc_jpeg_out", MMF_MOD_VENC, output_size, 1);
+			if (out_pool < 0) {
+				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, out_pool);
+				s32Ret = CVI_FAILURE;
+				goto fail;
 			}
-			priv.enc_jpg_output_pool_id = pool_id;
 
-			s32Ret = CVI_VPSS_AttachVbPool(2, ch, priv.enc_jpg_output_pool_id);
+			s32Ret = CVI_VPSS_AttachVbPool(2, ch, out_pool);
 			if (s32Ret != CVI_SUCCESS) {
 				SAMPLE_PRT("CVI_VPSS_AttachVbPool failed. s32Ret: 0x%x !\n", s32Ret);
-				_destroy_vb_pool(priv.enc_jpg_output_pool_id);
-				_destroy_vb_pool(priv.enc_jpg_input_pool_id);
-				return CVI_FAILURE;
+				goto fail;
 			}
 		}
 		break;
 	case PIXEL_FORMAT_NV21:
 		{
 			uint32_t size = COMMON_GetPicBufferSize(w, h, (PIXEL_FORMAT_E)format, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
-			int pool_id = _create_vb_pool((char *)"enc_jpeg_in", MMF_MOD_VENC, size, 1);
-			if (pool_id < 0) {
-				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, pool_id);
-				return -1;
+			in_pool = _create_vb_pool((char *)"enc_jpeg_in", MMF_MOD_VENC, size, 1);
+			if (in_pool < 0) {
+				printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, in_pool);
+				s32Ret = CVI_FAILURE;
+				goto fail;
 			}
-			priv.enc_jpg_input_pool_id = pool_id;
 		}
 		break;
 	default:
 		printf("unknown format!\n");
-		CVI_VENC_StopRecvFrame(ch);
-		CVI_VENC_DestroyChn(ch);
-		return -1;
+		s32Ret = CVI_FAILURE;
+		goto fail;
 	}
 
-	VENC_RECV_PIC_PARAM_S stRecvParam;
 	stRecvParam.s32RecvPicNum = -1;
 	s32Ret = CVI_VENC_StartRecvFrame(ch, &stRecvParam);
 	if (s32Ret != CVI_SUCCESS) {
 		printf("CVI_VENC_StartRecvPic failed with %#x\n", s32Ret);
-		return CVI_FAILURE;
+		goto fail;
 	}
+	priv.enc_jpg_input_pool_id = in_pool;
+	priv.enc_jpg_output_pool_id = out_pool;
 
 	if (priv.enc_jpg_frame) {
 		_mmf_free_frame(priv.enc_jpg_frame);
@@ -1718,6 +1722,27 @@ int mmf_enc_jpg_init(int ch, int w, int h, int format, int quality)
 	priv.enc_jpg_stream_acquired = 0;
 
 	return s32Ret;
+
+fail:
+	/* Reverse order of creation, as in mmf_enc_jpg_deinit. */
+	if (vpss_bound) {
+		SAMPLE_COMM_VPSS_UnBind_VENC(2, ch, ch);
+	}
+	if (vpss_inited) {
+		_mmf_vpss_deinit(2, ch);
+	}
+	if (out_pool >= 0) {
+		_destroy_vb_pool(out_pool);
+	}
+	if (in_pool >= 0) {
+		_destroy_vb_pool(in_pool);
+	}
+	priv.enc_jpg_input_pool_id = -1;
+	priv.enc_jpg_output_pool_id = -1;
+	if (venc_created) {
+		CVI_VENC_DestroyChn(ch);
+	}
+	return s32Ret == CVI_SUCCESS ? CVI_FAILURE : s32Ret;
 }
 
 int mmf_enc_jpg_deinit(int ch)
@@ -1775,11 +1800,11 @@ int mmf_enc_jpg_deinit(int ch)
 		_destroy_vb_pool(priv.enc_jpg_output_pool_id);
 		priv.enc_jpg_output_pool_id = -1;
 		_destroy_vb_pool(priv.enc_jpg_input_pool_id);
-		priv.enc_jpg_output_pool_id = -1;
+		priv.enc_jpg_input_pool_id = -1;
 		break;
 	case PIXEL_FORMAT_NV21:
 		_destroy_vb_pool(priv.enc_jpg_input_pool_id);
-		priv.enc_jpg_output_pool_id = -1;
+		priv.enc_jpg_input_pool_id = -1;
 		break;
 	default:
 		break;

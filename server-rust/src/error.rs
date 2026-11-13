@@ -31,6 +31,11 @@ pub enum AppError {
     Internal(String),
 }
 
+/// The text of an I/O, configuration or internal error, kept on its response
+/// so that routes open to unauthenticated callers can withhold it.
+#[derive(Debug, Clone)]
+pub struct InternalErrorDetail(pub String);
+
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
     pub code: i32,
@@ -67,6 +72,10 @@ impl<T: Serialize> ApiResponse<T> {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        let internal = matches!(
+            self,
+            AppError::Io(_) | AppError::Config(_) | AppError::Internal(_)
+        );
         let (status, code, msg) = match self {
             AppError::BadRequest(msg) => (StatusCode::OK, -1, msg),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, -401, "unauthorized".into()),
@@ -85,7 +94,12 @@ impl IntoResponse for AppError {
             AppError::Config(msg) => (StatusCode::OK, -500, msg),
             AppError::Internal(msg) => (StatusCode::OK, -500, msg),
         };
-        (status, Json(ApiResponse::<()>::err(code, msg))).into_response()
+        let detail = internal.then(|| InternalErrorDetail(msg.clone()));
+        let mut response = (status, Json(ApiResponse::<()>::err(code, msg))).into_response();
+        if let Some(detail) = detail {
+            response.extensions_mut().insert(detail);
+        }
+        response
     }
 }
 

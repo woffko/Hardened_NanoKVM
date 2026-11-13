@@ -1,0 +1,10 @@
+config BR2_PACKAGE_HARDENED_SG2002_CODEC_FIRMWARE
+	bool "SG2002 codec firmware (vendor port input)"
+	depends on BR2_riscv
+	help
+	  Install the immutable vendor codec firmware input under
+	  /usr/share/fw_vcodec. This does not provide the CVI MMF/VENC userspace
+	  stack and must not be treated as a functional video implementation.
+
+	  The archive has no reviewed license declaration. It is restricted to
+	  port-lab use until legal redistribution approval is recorded.

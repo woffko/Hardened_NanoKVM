@@ -1,0 +1,549 @@
+use super::*;
+use sha2::{Digest, Sha256, Sha512};
+use std::{os::unix::fs::PermissionsExt, process::Command};
+use tempfile::{TempDir, tempdir};
+
+struct SigningFixture {
+    directory: TempDir,
+    private: PathBuf,
+    public: PathBuf,
+    config: Config,
+}
+
+impl SigningFixture {
+    fn new() -> Self {
+        let directory = tempdir().unwrap();
+        let private = directory.path().join("synthetic-only.pem");
+        let public = directory.path().join("synthetic-only.pub.pem");
+        let output = Command::new("/usr/bin/openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+            ])
+            .arg(&private)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "synthetic fixture key generation failed"
+        );
+        let output = Command::new("/usr/bin/openssl")
+            .args(["pkey", "-in"])
+            .arg(&private)
+            .args(["-pubout", "-out"])
+            .arg(&public)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "synthetic public fixture extraction failed"
+        );
+        fs::set_permissions(&public, fs::Permissions::from_mode(0o644)).unwrap();
+        // The bridge trust set; a test that needs another policy replaces it.
+        let policy = directory.path().join("update-key-policy");
+        fs::write(&policy, "hardened-system-dev\nhardened-system-test\n").unwrap();
+        fs::set_permissions(&policy, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut config = Config::default();
+        config.paths.system_update_public_key = public.clone();
+        Self {
+            directory,
+            private,
+            public,
+            config,
+        }
+    }
+
+    fn sign(&self, metadata: &[u8]) -> Vec<u8> {
+        let source = self.directory.path().join("synthetic-metadata.json");
+        let signature = self.directory.path().join("synthetic-metadata.sig");
+        fs::write(&source, metadata).unwrap();
+        let output = Command::new("/usr/bin/openssl")
+            .args(["dgst", "-sha256", "-sign"])
+            .arg(&self.private)
+            .arg("-out")
+            .arg(&signature)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "synthetic signing failed");
+        fs::read(signature).unwrap()
+    }
+
+    fn policy(&self, allowed: &str) {
+        let path = self.directory.path().join("update-key-policy");
+        fs::write(&path, allowed).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+fn latest_for(bytes: &[u8]) -> LatestRelease {
+    LatestRelease {
+        version: "2.0.43".into(),
+        name: "hardened-nanokvm-kvmapp-2.0.43.tar.gz".into(),
+        sha512: STANDARD.encode(Sha512::digest(bytes)),
+        size: bytes.len() as u64,
+        url: "https://github.com/woffko/Hardened_NanoKVM/releases/download/synthetic/hardened-nanokvm-kvmapp-2.0.43.tar.gz".into(),
+        signature_algorithm: APP_UPDATE_SIGNATURE_ALGORITHM.into(),
+        signature_key_id: "hardened-system-dev".into(),
+    }
+}
+
+#[tokio::test]
+async fn exact_app_receipt_rejects_reserialization_forgery_and_invalid_budgets() {
+    let fixture = SigningFixture::new();
+    let latest = latest_for(b"synthetic public archive");
+    let mut bytes = serde_json::to_vec_pretty(&latest).unwrap();
+    bytes.push(b'\n');
+    let signature = fixture.sign(&bytes);
+    let verified = authenticate_app_metadata(bytes.clone(), signature.clone(), &fixture.config)
+        .await
+        .unwrap();
+    assert_eq!(verified.metadata, bytes);
+    assert_eq!(verified.signature, signature);
+    assert_eq!(verified.latest.sha512, latest.sha512);
+    let mut modified = bytes.clone();
+    modified.push(b'\n');
+    assert!(
+        authenticate_app_metadata(modified, signature.clone(), &fixture.config)
+            .await
+            .is_err()
+    );
+    let mut forged = latest.clone();
+    forged.sha512 = STANDARD.encode([0; 64]);
+    assert!(
+        authenticate_app_metadata(
+            serde_json::to_vec(&forged).unwrap(),
+            signature.clone(),
+            &fixture.config
+        )
+        .await
+        .is_err()
+    );
+    for bad in [Vec::new(), vec![0; 256], vec![0; MAX_SIGNATURE + 1]] {
+        assert!(
+            authenticate_app_metadata(bytes.clone(), bad, &fixture.config)
+                .await
+                .is_err()
+        );
+    }
+    for bad in [
+        Vec::new(),
+        vec![b' '; MAX_METADATA + 1],
+        b"{\"version\":\"wrong\"}".to_vec(),
+    ] {
+        assert!(
+            authenticate_app_metadata(bad, signature.clone(), &fixture.config)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn app_install_rechecks_revoked_key_policy_and_replaced_public_key() {
+    let fixture = SigningFixture::new();
+    fixture.policy("hardened-system-dev\n");
+    let bytes = serde_json::to_vec(&latest_for(b"archive")).unwrap();
+    let signature = fixture.sign(&bytes);
+    let mut fetched = authenticate_app_metadata(bytes.clone(), signature.clone(), &fixture.config)
+        .await
+        .unwrap();
+    // A cached parsed view is not reauthentication authority.
+    fetched.latest.sha512 = STANDARD.encode([0; 64]);
+    let reparsed = authenticate_app_metadata(fetched.metadata, fetched.signature, &fixture.config)
+        .await
+        .unwrap();
+    assert_eq!(reparsed.latest.sha512, latest_for(b"archive").sha512);
+    fixture.policy("hardened-system-prod-2026q3\n");
+    assert!(
+        authenticate_app_metadata(reparsed.metadata, reparsed.signature, &fixture.config)
+            .await
+            .is_err()
+    );
+    fixture.policy("hardened-system-dev\n");
+    let other = SigningFixture::new();
+    fs::copy(&other.public, &fixture.public).unwrap();
+    assert!(
+        authenticate_app_metadata(bytes, signature, &fixture.config)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn online_unsigned_lab_permission_is_rechecked_and_is_not_manual_import() {
+    use crate::update::state_writers::StateWriters;
+    let mut latest = latest_for(b"archive");
+    latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    let bytes = serde_json::to_vec(&latest).unwrap();
+    let mut old_config = Config::default();
+    assert!(
+        authenticate_app_metadata(bytes.clone(), Vec::new(), &old_config)
+            .await
+            .is_err()
+    );
+    old_config.security.allow_unsigned_updates = true;
+    let stored = tempdir().unwrap();
+    let writers = StateWriters::for_test_config(
+        fs::File::open(stored.path()).unwrap(),
+        stored.path().join("server.yaml"),
+    );
+    let permit = writers.configuration().unwrap();
+    old_config.write(&permit).unwrap();
+    let fetched_config = Config::read_for(&permit).unwrap();
+    let fetched = authenticate_app_metadata(bytes.clone(), Vec::new(), &fetched_config)
+        .await
+        .unwrap();
+    let current_config = Config::default();
+    current_config.write(&permit).unwrap();
+    let current_config = Config::read_for(&permit).unwrap();
+    assert!(
+        authenticate_app_metadata(fetched.metadata, fetched.signature, &current_config)
+            .await
+            .is_err()
+    );
+    assert!(
+        authenticate_app_metadata(bytes, b"not an unsigned receipt".to_vec(), &old_config)
+            .await
+            .is_err()
+    );
+    assert!(old_config.security.allow_unsigned_updates);
+}
+
+#[tokio::test]
+async fn frozen_app_policy_read_uses_current_disk_config_and_excludes_enrolled_mutation() {
+    use crate::update::{operation::UpdateCoordinator, state_writers::StateWriters};
+    use std::sync::Arc;
+    let fixture = SigningFixture::new();
+    fixture.policy("hardened-system-dev\n");
+    let stored = tempdir().unwrap();
+    let writers = StateWriters::for_test_config(
+        fs::File::open(stored.path()).unwrap(),
+        stored.path().join("server.yaml"),
+    );
+    let mut stale = fixture.config.clone();
+    stale.security.allow_unsigned_updates = true;
+    let permit = writers.configuration().unwrap();
+    stale.write(&permit).unwrap();
+    // A setting changed while the download was in progress. The final read
+    // must not reuse `stale` or acquire a conflicting ConfigPermit.
+    fixture.config.write(&permit).unwrap();
+    drop(permit);
+    let freeze = writers.drain(Duration::from_secs(5)).await.unwrap();
+    let coordinator = Arc::new(UpdateCoordinator::in_process_fixture());
+    let owner = coordinator.acquire(Kind::ApplicationOnline).unwrap();
+    let (current, freeze) = freeze
+        .blocking(&owner, "fixture frozen app policy", Config::read_frozen)
+        .await
+        .unwrap();
+    assert!(!current.security.allow_unsigned_updates);
+    assert_eq!(current.paths.system_update_public_key, fixture.public);
+    assert!(matches!(
+        writers.configuration(),
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(writers.account(), Err(AppError::Conflict(_))));
+    let latest = latest_for(b"synthetic public archive");
+    let metadata = serde_json::to_vec(&latest).unwrap();
+    let signature = fixture.sign(&metadata);
+    authenticate_app_metadata(metadata, signature, &current)
+        .await
+        .unwrap();
+    let mut unsigned = latest;
+    unsigned.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    unsigned.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    assert!(
+        authenticate_app_metadata(serde_json::to_vec(&unsigned).unwrap(), Vec::new(), &current)
+            .await
+            .is_err()
+    );
+    assert!(writers.configuration().is_err());
+    drop(freeze);
+    let _next = writers.configuration().unwrap();
+}
+
+fn package(version: &[u8], damaged_helper: Option<crate::update::helper_family::Role>) -> Vec<u8> {
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut builder = tar::Builder::new(encoder);
+    let mut files = crate::update::helper_family::candidate_files_fixture();
+    if let Some(role) = damaged_helper {
+        let name = format!("kvmapp/system/bin/{}", role.filename());
+        let (_, bytes) = files.iter_mut().find(|(path, _)| path == &name).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+    }
+    files.push(("kvmapp/version".into(), version.to_vec()));
+    files.push((
+        "kvmapp/system/init.d/S95nanokvm".into(),
+        b"synthetic init".to_vec(),
+    ));
+    for (path, bytes) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, bytes.as_slice())
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+#[tokio::test]
+async fn online_candidate_version_is_bound_to_verified_metadata_before_live_mutation() {
+    let fixture = SigningFixture::new();
+    for version in [b"2.0.43\n".as_slice(), b"2.0.42\n"] {
+        let bytes = package(version, None);
+        let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
+        let signature = fixture.sign(&metadata);
+        let metadata_sha256: [u8; 32] = Sha256::digest(&metadata).into();
+        let signature_sha256: [u8; 32] = Sha256::digest(&signature).into();
+        let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
+            .await
+            .unwrap();
+        let root = tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let mut download = stage.create_archive().unwrap();
+        download.append(&bytes).unwrap();
+        let source = download
+            .finish_online(
+                verified.latest.size,
+                &decode_sha512(&verified.latest.sha512).unwrap(),
+            )
+            .unwrap();
+        let result =
+            prepare_app_candidate(source, stage, &InstallAuthority::SignedMetadata(verified));
+        assert_eq!(result.is_ok(), version == b"2.0.43\n");
+        match result {
+            Err(error) => assert!(error.to_string().contains("version differs")),
+            Ok(candidate) => {
+                let input = candidate.into_slot();
+                assert_eq!(input.import, crate::update::app_slot::Import::Signed);
+                assert_eq!(
+                    input.archive_sha512,
+                    <[u8; 64]>::from(Sha512::digest(&bytes))
+                );
+                assert_eq!(input.metadata_sha256, metadata_sha256);
+                assert_eq!(input.signature_sha256, signature_sha256);
+            }
+        }
+    }
+    // Administrative import does not invent online metadata/signature authority.
+    let bytes = package(b"2.0.42\n", None);
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut download = stage.create_archive().unwrap();
+    download.append(&bytes).unwrap();
+    assert!(
+        prepare_app_candidate(
+            download.finish_manual_import().unwrap(),
+            stage,
+            &InstallAuthority::ManualImport
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn online_candidate_rejects_each_mismatched_helper_even_with_valid_signed_archive_metadata() {
+    let fixture = SigningFixture::new();
+    for role in crate::update::helper_family::ROLES {
+        let bytes = package(b"2.0.43\n", Some(role));
+        let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
+        let signature = fixture.sign(&metadata);
+        let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
+            .await
+            .unwrap();
+        let root = tempdir().unwrap();
+        let stage = AppStage::fixture(root.path()).unwrap();
+        let mut download = stage.create_archive().unwrap();
+        download.append(&bytes).unwrap();
+        let archive = download
+            .finish_online(
+                verified.latest.size,
+                &decode_sha512(&verified.latest.sha512).unwrap(),
+            )
+            .unwrap();
+        // Archive/signature/version checks succeed. It is the independently
+        // inconsistent helper payload that must prevent candidate issuance.
+        let error =
+            prepare_app_candidate(archive, stage, &InstallAuthority::SignedMetadata(verified))
+                .err()
+                .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "bad request: app candidate helper family is incomplete or inconsistent"
+        );
+        assert!(!root.path().join("kvmapp").exists());
+        assert!(!root.path().join("application-slot").exists());
+        assert!(!root.path().join("usr/libexec").exists());
+    }
+}
+
+#[test]
+fn candidate_version_is_bounded_regular_utf8_and_semver() {
+    for bytes in [
+        b"2.0.43\n".as_slice(),
+        b"not-version",
+        b"",
+        &[0xff],
+        &[b'1'; 129],
+    ] {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("version"), bytes).unwrap();
+        assert_eq!(
+            read_candidate_version(root.path()).is_ok(),
+            bytes == b"2.0.43\n"
+        );
+    }
+    let root = tempdir().unwrap();
+    assert!(read_candidate_version(root.path()).is_err());
+    let outside = tempdir().unwrap();
+    fs::write(outside.path().join("version"), b"2.0.43").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("version"), root.path().join("version"))
+        .unwrap();
+    assert!(read_candidate_version(root.path()).is_err());
+    fs::remove_file(root.path().join("version")).unwrap();
+    fs::create_dir(root.path().join("version")).unwrap();
+    assert!(read_candidate_version(root.path()).is_err());
+    fs::remove_dir(root.path().join("version")).unwrap();
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        root.path().join("version"),
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    assert!(read_candidate_version(root.path()).is_err());
+}
+
+#[tokio::test]
+async fn opaque_candidate_cannot_relabel_other_archive_bytes_as_signed() {
+    let fixture = SigningFixture::new();
+    let bytes = package(b"2.0.43\n", None);
+    let metadata = serde_json::to_vec(&latest_for(&bytes)).unwrap();
+    let signature = fixture.sign(&metadata);
+    let verified = authenticate_app_metadata(metadata, signature, &fixture.config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut changed = bytes;
+    // A gzip mtime change preserves the extracted payload, but is not the
+    // archive authorized by this exact signed metadata.
+    changed[4] ^= 1;
+    let mut download = stage.create_archive().unwrap();
+    download.append(&changed).unwrap();
+    let source = download.finish_manual_import().unwrap();
+    let error = prepare_app_candidate(source, stage, &InstallAuthority::SignedMetadata(verified))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("differs from authenticated archive metadata")
+    );
+    assert!(!root.path().join("kvmapp").exists());
+}
+
+#[tokio::test]
+async fn lab_candidate_retains_exact_metadata_context_without_a_signature_claim() {
+    let mut config = Config::default();
+    config.security.allow_unsigned_updates = true;
+    let bytes = package(b"2.0.43\n", None);
+    let mut latest = latest_for(&bytes);
+    latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    let metadata = serde_json::to_vec_pretty(&latest).unwrap();
+    let expected: [u8; 32] = Sha256::digest(&metadata).into();
+    let verified = authenticate_app_metadata(metadata, Vec::new(), &config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    let mut download = stage.create_archive().unwrap();
+    download.append(&bytes).unwrap();
+    let candidate = prepare_app_candidate(
+        download.finish_manual_import().unwrap(),
+        stage,
+        &InstallAuthority::SignedMetadata(verified),
+    )
+    .unwrap()
+    .into_slot();
+    assert_eq!(
+        candidate.import,
+        crate::update::app_slot::Import::UnsignedLab
+    );
+    assert_eq!(candidate.metadata_sha256, expected);
+    assert_eq!(candidate.signature_sha256, [0; 32]);
+    assert_eq!(
+        candidate.archive_sha512,
+        <[u8; 64]>::from(Sha512::digest(&bytes))
+    );
+}
+
+#[tokio::test]
+async fn an_offline_package_passes_only_with_a_signature_of_the_trust_set() {
+    let fixture = SigningFixture::new();
+    let metadata = serde_json::to_vec_pretty(&latest_for(b"synthetic archive")).unwrap();
+    let signature = fixture.sign(&metadata);
+    authenticate_offline_metadata(metadata.clone(), signature, &fixture.config)
+        .await
+        .unwrap();
+    let foreign = SigningFixture::new().sign(&metadata);
+    assert!(
+        authenticate_offline_metadata(metadata.clone(), foreign, &fixture.config)
+            .await
+            .is_err()
+    );
+    assert!(
+        authenticate_offline_metadata(metadata, Vec::new(), &fixture.config)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn the_lab_setting_for_unsigned_downloads_does_not_reach_an_upload() {
+    let mut config = Config::default();
+    config.security.allow_unsigned_updates = true;
+    let mut latest = latest_for(b"synthetic archive");
+    latest.signature_algorithm = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    latest.signature_key_id = APP_UPDATE_UNSIGNED_ALGORITHM.into();
+    let metadata = serde_json::to_vec_pretty(&latest).unwrap();
+    authenticate_app_metadata(metadata.clone(), Vec::new(), &config)
+        .await
+        .unwrap();
+    let error = authenticate_offline_metadata(metadata, Vec::new(), &config)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("release signature"), "{error}");
+}
+
+#[tokio::test]
+async fn only_the_archive_the_signature_names_is_sealed() {
+    let fixture = SigningFixture::new();
+    let bytes = b"synthetic archive";
+    let metadata = serde_json::to_vec_pretty(&latest_for(bytes)).unwrap();
+    let signature = fixture.sign(&metadata);
+    let verified = authenticate_offline_metadata(metadata, signature, &fixture.config)
+        .await
+        .unwrap();
+    let root = tempdir().unwrap();
+    let stage = AppStage::fixture(root.path()).unwrap();
+    for changed in [&b"synthetic archivE"[..], b"synthetic"] {
+        let mut download = stage.create_archive().unwrap();
+        download.append(changed).unwrap();
+        let error = seal_signed(download, &verified).err().unwrap();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    }
+    let mut download = stage.create_archive().unwrap();
+    download.append(bytes).unwrap();
+    assert!(seal_signed(download, &verified).is_ok());
+}

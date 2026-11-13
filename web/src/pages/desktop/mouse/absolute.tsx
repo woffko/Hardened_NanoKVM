@@ -4,6 +4,7 @@ import { useAtom, useAtomValue } from 'jotai';
 import { MouseReportAbsolute } from '@/lib/mouse.ts';
 import * as storage from '@/lib/localstorage.ts';
 import { client, MessageEvent } from '@/lib/websocket.ts';
+import { wheelStep } from '@/lib/wheel.ts';
 import { scrollDirectionAtom, scrollIntervalAtom } from '@/jotai/mouse.ts';
 import { resolutionAtom, videoScaleAtom } from '@/jotai/screen.ts';
 import { useIsTouchLayout } from '@/hooks/useResponsiveLayout.ts';
@@ -130,6 +131,29 @@ export const Absolute = () => {
     touchTarget.addEventListener('touchmove', handleTouchMove, touchOptions);
     touchTarget.addEventListener('touchend', handleTouchEnd, touchOptions);
     touchTarget.addEventListener('touchcancel', handleTouchCancel, touchOptions);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('blur', releaseHeldButtons);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // A release outside the screen never reaches the target's own listener,
+    // which stops propagation: send it from here, or it stays held.
+    function handleWindowMouseUp(e: MouseEvent) {
+      if (!mouseRef.current.hasButtons()) return;
+      handleMouseEvent({ type: 'mouseup', button: e.button });
+    }
+
+    // Losing focus or visibility can swallow a release: release them all.
+    function releaseHeldButtons() {
+      const mouse = mouseRef.current;
+      pressedButtonRef.current = null;
+      if (!mouse.hasButtons()) return;
+      mouse.releaseButtons();
+      sendReport(mouse.buildButtonReport(lastPosRef.current.x, lastPosRef.current.y));
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') releaseHeldButtons();
+    }
 
     // Mouse down event
     function handleMouseDown(e: MouseEvent) {
@@ -154,7 +178,8 @@ export const Absolute = () => {
     function handleWheel(e: WheelEvent) {
       disableEvent(e);
 
-      if (Math.floor(e.deltaY) === 0) {
+      const deltaY = wheelStep(e.deltaY, scrollDirection);
+      if (deltaY === 0) {
         return;
       }
 
@@ -163,7 +188,6 @@ export const Absolute = () => {
         return;
       }
 
-      const deltaY = (e.deltaY > 0 ? 1 : -1) * scrollDirection;
       handleMouseEvent({ type: 'wheel', deltaY });
       lastScrollTimeRef.current = currentTime;
     }
@@ -517,6 +541,9 @@ export const Absolute = () => {
       touchTarget.removeEventListener('touchmove', handleTouchMove);
       touchTarget.removeEventListener('touchend', handleTouchEnd);
       touchTarget.removeEventListener('touchcancel', handleTouchCancel);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', releaseHeldButtons);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       for (const style of previousGestureStyles) {
         style.element.style.touchAction = style.touchAction;
         style.element.style.overscrollBehavior = style.overscrollBehavior;

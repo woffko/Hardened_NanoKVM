@@ -58,7 +58,7 @@ namespace maix::peripheral::i2c
                 throw err::Exception(err::Err::ERR_NOT_IMPL, "addr_size " + std::to_string(addr_size) + " not support");
             }
 
-            int fd = ::open(buf, O_RDWR);
+            int fd = ::open(buf, O_RDWR | O_CLOEXEC);
             if (fd < 0)
             {
                 throw err::Exception(err::Err::ERR_IO, "open " + std::string(buf) + " failed");

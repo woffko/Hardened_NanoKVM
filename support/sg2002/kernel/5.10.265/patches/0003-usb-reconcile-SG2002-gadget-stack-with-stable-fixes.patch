@@ -1,0 +1,2707 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hardened NanoKVM kernel port <noreply@local>
+Date: Sun, 23 Aug 2026 22:40:27 +0300
+Subject: [PATCH 3/9] usb: reconcile SG2002 gadget stack with stable fixes
+
+Retain CVITEK role switching, DMA, legacy OTG, xHCI and HID remote-wakeup behavior while incorporating the 5.10.265 DWC2, UDC, HID and xHCI fixes. Keep both HID configfs modes and hold a synchronized gadget device reference for wake-on-write instead of dereferencing an unbound function configuration.
+---
+ drivers/usb/dwc2/core_intr.c        |  69 +++--
+ drivers/usb/dwc2/gadget.c           | 252 +++++++++++-------
+ drivers/usb/dwc2/hcd.c              |  80 ++++--
+ drivers/usb/dwc2/hcd_queue.c        |   2 +-
+ drivers/usb/dwc2/platform.c         |  69 ++---
+ drivers/usb/gadget/function/f_hid.c | 384 +++++++++++++++++++++-------
+ drivers/usb/gadget/function/u_hid.h |   1 +
+ drivers/usb/gadget/udc/core.c       |  70 +++--
+ drivers/usb/host/xhci.c             | 315 ++++++++++++++++-------
+ 9 files changed, 863 insertions(+), 379 deletions(-)
+
+diff --git a/drivers/usb/dwc2/core_intr.c b/drivers/usb/dwc2/core_intr.c
+index c606e4aef0..e2ed8c5b67 100644
+--- a/drivers/usb/dwc2/core_intr.c
++++ b/drivers/usb/dwc2/core_intr.c
+@@ -352,10 +352,11 @@ static void dwc2_handle_session_req_intr(struct dwc2_hsotg *hsotg)
+  * @hsotg: Programming view of DWC_otg controller
+  *
+  */
+-static void dwc2_wakeup_from_lpm_l1(struct dwc2_hsotg *hsotg)
++void dwc2_wakeup_from_lpm_l1(struct dwc2_hsotg *hsotg, bool remotewakeup)
+ {
+ 	u32 glpmcfg;
+-	u32 i = 0;
++	u32 pcgctl;
++	u32 dctl;
+ 
+ 	if (hsotg->lx_state != DWC2_L1) {
+ 		dev_err(hsotg->dev, "Core isn't in DWC2_L1 state\n");
+@@ -364,37 +365,57 @@ static void dwc2_wakeup_from_lpm_l1(struct dwc2_hsotg *hsotg)
+ 
+ 	glpmcfg = dwc2_readl(hsotg, GLPMCFG);
+ 	if (dwc2_is_device_mode(hsotg)) {
+-		dev_dbg(hsotg->dev, "Exit from L1 state\n");
++		dev_dbg(hsotg->dev, "Exit from L1 state, remotewakeup=%d\n", remotewakeup);
+ 		glpmcfg &= ~GLPMCFG_ENBLSLPM;
+-		glpmcfg &= ~GLPMCFG_HIRD_THRES_EN;
++		glpmcfg &= ~GLPMCFG_HIRD_THRES_MASK;
+ 		dwc2_writel(hsotg, glpmcfg, GLPMCFG);
+ 
+-		do {
+-			glpmcfg = dwc2_readl(hsotg, GLPMCFG);
++		pcgctl = dwc2_readl(hsotg, PCGCTL);
++		pcgctl &= ~PCGCTL_ENBL_SLEEP_GATING;
++		dwc2_writel(hsotg, pcgctl, PCGCTL);
+ 
+-			if (!(glpmcfg & (GLPMCFG_COREL1RES_MASK |
+-					 GLPMCFG_L1RESUMEOK | GLPMCFG_SLPSTS)))
+-				break;
++		glpmcfg = dwc2_readl(hsotg, GLPMCFG);
++		if (glpmcfg & GLPMCFG_ENBESL) {
++			glpmcfg |= GLPMCFG_RSTRSLPSTS;
++			dwc2_writel(hsotg, glpmcfg, GLPMCFG);
++		}
+ 
+-			udelay(1);
+-		} while (++i < 200);
++		if (remotewakeup) {
++			if (dwc2_hsotg_wait_bit_set(hsotg, GLPMCFG, GLPMCFG_L1RESUMEOK, 1000)) {
++				dev_warn(hsotg->dev, "%s: timeout GLPMCFG_L1RESUMEOK\n", __func__);
++				goto fail;
++				return;
++			}
+ 
+-		if (i == 200) {
+-			dev_err(hsotg->dev, "Failed to exit L1 sleep state in 200us.\n");
++			dctl = dwc2_readl(hsotg, DCTL);
++			dctl |= DCTL_RMTWKUPSIG;
++			dwc2_writel(hsotg, dctl, DCTL);
++
++			if (dwc2_hsotg_wait_bit_set(hsotg, GINTSTS, GINTSTS_WKUPINT, 1000)) {
++				dev_warn(hsotg->dev, "%s: timeout GINTSTS_WKUPINT\n", __func__);
++				goto fail;
++				return;
++			}
++		}
++
++		glpmcfg = dwc2_readl(hsotg, GLPMCFG);
++		if (glpmcfg & GLPMCFG_COREL1RES_MASK || glpmcfg & GLPMCFG_SLPSTS ||
++		    glpmcfg & GLPMCFG_L1RESUMEOK) {
++			goto fail;
+ 			return;
+ 		}
+-		dwc2_gadget_init_lpm(hsotg);
++
++		/* Inform gadget to exit from L1 */
++		call_gadget(hsotg, resume);
++		/* Change to L0 state */
++		hsotg->lx_state = DWC2_L0;
++		hsotg->bus_suspended = false;
++fail:		dwc2_gadget_init_lpm(hsotg);
+ 	} else {
+ 		/* TODO */
+ 		dev_err(hsotg->dev, "Host side LPM is not supported.\n");
+ 		return;
+ 	}
+-
+-	/* Change to L0 state */
+-	hsotg->lx_state = DWC2_L0;
+-
+-	/* Inform gadget to exit from L1 */
+-	call_gadget(hsotg, resume);
+ }
+ 
+ /*
+@@ -415,7 +436,7 @@ static void dwc2_handle_wakeup_detected_intr(struct dwc2_hsotg *hsotg)
+ 	dev_dbg(hsotg->dev, "%s lxstate = %d\n", __func__, hsotg->lx_state);
+ 
+ 	if (hsotg->lx_state == DWC2_L1) {
+-		dwc2_wakeup_from_lpm_l1(hsotg);
++		dwc2_wakeup_from_lpm_l1(hsotg, false);
+ 		return;
+ 	}
+ 
+@@ -726,7 +747,11 @@ static inline void dwc_handle_gpwrdn_disc_det(struct dwc2_hsotg *hsotg,
+ 	dwc2_writel(hsotg, gpwrdn_tmp, GPWRDN);
+ 
+ 	hsotg->hibernated = 0;
++
++#if IS_ENABLED(CONFIG_USB_DWC2_HOST) ||	\
++	IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
+ 	hsotg->bus_suspended = 0;
++#endif
+ 
+ 	if (gpwrdn & GPWRDN_IDSTS) {
+ 		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
+@@ -793,7 +818,7 @@ static int dwc2_handle_gpwrdn_intr(struct dwc2_hsotg *hsotg)
+ 	} else if ((gpwrdn & GPWRDN_RST_DET) &&
+ 		   (gpwrdn & GPWRDN_RST_DET_MSK)) {
+ 		dev_dbg(hsotg->dev, "%s: GPWRDN_RST_DET\n", __func__);
+-		if (!linestate) {
++		if (!linestate && (gpwrdn & GPWRDN_BSESSVLD)) {
+ 			ret = dwc2_exit_hibernation(hsotg, 0, 1, 0);
+ 			if (ret)
+ 				dev_err(hsotg->dev,
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index f62b1c1fb5..37615cb90b 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -115,10 +115,16 @@ static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
+  */
+ static inline void dwc2_gadget_incr_frame_num(struct dwc2_hsotg_ep *hs_ep)
+ {
++	struct dwc2_hsotg *hsotg = hs_ep->parent;
++	u16 limit = DSTS_SOFFN_LIMIT;
++
++	if (hsotg->gadget.speed != USB_SPEED_HIGH)
++		limit >>= 3;
++
+ 	hs_ep->target_frame += hs_ep->interval;
+-	if (hs_ep->target_frame > DSTS_SOFFN_LIMIT) {
++	if (hs_ep->target_frame > limit) {
+ 		hs_ep->frame_overrun = true;
+-		hs_ep->target_frame &= DSTS_SOFFN_LIMIT;
++		hs_ep->target_frame &= limit;
+ 	} else {
+ 		hs_ep->frame_overrun = false;
+ 	}
+@@ -136,10 +142,16 @@ static inline void dwc2_gadget_incr_frame_num(struct dwc2_hsotg_ep *hs_ep)
+  */
+ static inline void dwc2_gadget_dec_frame_num_by_one(struct dwc2_hsotg_ep *hs_ep)
+ {
++	struct dwc2_hsotg *hsotg = hs_ep->parent;
++	u16 limit = DSTS_SOFFN_LIMIT;
++
++	if (hsotg->gadget.speed != USB_SPEED_HIGH)
++		limit >>= 3;
++
+ 	if (hs_ep->target_frame)
+ 		hs_ep->target_frame -= 1;
+ 	else
+-		hs_ep->target_frame = DSTS_SOFFN_LIMIT;
++		hs_ep->target_frame = limit;
+ }
+ 
+ /**
+@@ -882,10 +894,10 @@ static void dwc2_gadget_config_nonisoc_xfer_ddma(struct dwc2_hsotg_ep *hs_ep,
+ 	}
+ 
+ 	/* DMA sg buffer */
+-	for_each_sg(ureq->sg, sg, ureq->num_sgs, i) {
++	for_each_sg(ureq->sg, sg, ureq->num_mapped_sgs, i) {
+ 		dwc2_gadget_fill_nonisoc_xfer_ddma_one(hs_ep, &desc,
+ 			sg_dma_address(sg) + sg->offset, sg_dma_len(sg),
+-			sg_is_last(sg));
++			(i == (ureq->num_mapped_sgs - 1)));
+ 		desc_count += hs_ep->desc_count;
+ 	}
+ 
+@@ -1026,6 +1038,12 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
+ 	dwc2_writel(hsotg, ctrl, depctl);
+ }
+ 
++static bool dwc2_gadget_target_frame_elapsed(struct dwc2_hsotg_ep *hs_ep);
++static void dwc2_hsotg_complete_request(struct dwc2_hsotg *hsotg,
++					struct dwc2_hsotg_ep *hs_ep,
++				       struct dwc2_hsotg_req *hs_req,
++				       int result);
++
+ /**
+  * dwc2_hsotg_start_req - start a USB request from an endpoint's queue
+  * @hsotg: The controller state.
+@@ -1178,14 +1196,21 @@ static void dwc2_hsotg_start_req(struct dwc2_hsotg *hsotg,
+ 		}
+ 	}
+ 
+-	if (hs_ep->isochronous && hs_ep->interval == 1) {
+-		hs_ep->target_frame = dwc2_hsotg_read_frameno(hsotg);
+-		dwc2_gadget_incr_frame_num(hs_ep);
+-
+-		if (hs_ep->target_frame & 0x1)
+-			ctrl |= DXEPCTL_SETODDFR;
+-		else
+-			ctrl |= DXEPCTL_SETEVENFR;
++	if (hs_ep->isochronous) {
++		if (!dwc2_gadget_target_frame_elapsed(hs_ep)) {
++			if (hs_ep->interval == 1) {
++				if (hs_ep->target_frame & 0x1)
++					ctrl |= DXEPCTL_SETODDFR;
++				else
++					ctrl |= DXEPCTL_SETEVENFR;
++			}
++			ctrl |= DXEPCTL_CNAK;
++		} else {
++			hs_req->req.frame_number = hs_ep->target_frame;
++			hs_req->req.actual = 0;
++			dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, -ENODATA);
++			return;
++		}
+ 	}
+ 
+ 	ctrl |= DXEPCTL_EPENA;	/* ensure ep enabled */
+@@ -1337,12 +1362,16 @@ static bool dwc2_gadget_target_frame_elapsed(struct dwc2_hsotg_ep *hs_ep)
+ 	u32 target_frame = hs_ep->target_frame;
+ 	u32 current_frame = hsotg->frame_number;
+ 	bool frame_overrun = hs_ep->frame_overrun;
++	u16 limit = DSTS_SOFFN_LIMIT;
++
++	if (hsotg->gadget.speed != USB_SPEED_HIGH)
++		limit >>= 3;
+ 
+ 	if (!frame_overrun && current_frame >= target_frame)
+ 		return true;
+ 
+ 	if (frame_overrun && current_frame >= target_frame &&
+-	    ((current_frame - target_frame) < DSTS_SOFFN_LIMIT / 2))
++	    ((current_frame - target_frame) < limit / 2))
+ 		return true;
+ 
+ 	return false;
+@@ -1399,6 +1428,10 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
+ 		ep->name, req, req->length, req->buf, req->no_interrupt,
+ 		req->zero, req->short_not_ok);
+ 
++	if (hs->lx_state == DWC2_L1) {
++		dwc2_wakeup_from_lpm_l1(hs, true);
++	}
++
+ 	/* Prevent new request submission when controller is suspended */
+ 	if (hs->lx_state != DWC2_L0) {
+ 		dev_dbg(hs->dev, "%s: submit request only in active state\n",
+@@ -1725,11 +1758,9 @@ static struct dwc2_hsotg_req *get_ep_head(struct dwc2_hsotg_ep *hs_ep)
+  */
+ static void dwc2_gadget_start_next_request(struct dwc2_hsotg_ep *hs_ep)
+ {
+-	u32 mask;
+ 	struct dwc2_hsotg *hsotg = hs_ep->parent;
+ 	int dir_in = hs_ep->dir_in;
+ 	struct dwc2_hsotg_req *hs_req;
+-	u32 epmsk_reg = dir_in ? DIEPMSK : DOEPMSK;
+ 
+ 	if (!list_empty(&hs_ep->queue)) {
+ 		hs_req = get_ep_head(hs_ep);
+@@ -1745,9 +1776,6 @@ static void dwc2_gadget_start_next_request(struct dwc2_hsotg_ep *hs_ep)
+ 	} else {
+ 		dev_dbg(hsotg->dev, "%s: No more ISOC-OUT requests\n",
+ 			__func__);
+-		mask = dwc2_readl(hsotg, epmsk_reg);
+-		mask |= DOEPMSK_OUTTKNEPDISMSK;
+-		dwc2_writel(hsotg, mask, epmsk_reg);
+ 	}
+ }
+ 
+@@ -2325,19 +2353,6 @@ static void dwc2_hsotg_ep0_zlp(struct dwc2_hsotg *hsotg, bool dir_in)
+ 	dwc2_hsotg_program_zlp(hsotg, hsotg->eps_out[0]);
+ }
+ 
+-static void dwc2_hsotg_change_ep_iso_parity(struct dwc2_hsotg *hsotg,
+-					    u32 epctl_reg)
+-{
+-	u32 ctrl;
+-
+-	ctrl = dwc2_readl(hsotg, epctl_reg);
+-	if (ctrl & DXEPCTL_EOFRNUM)
+-		ctrl |= DXEPCTL_SETEVENFR;
+-	else
+-		ctrl |= DXEPCTL_SETODDFR;
+-	dwc2_writel(hsotg, ctrl, epctl_reg);
+-}
+-
+ /*
+  * dwc2_gadget_get_xfersize_ddma - get transferred bytes amount from desc
+  * @hs_ep - The endpoint on which transfer went
+@@ -2458,20 +2473,11 @@ static void dwc2_hsotg_handle_outdone(struct dwc2_hsotg *hsotg, int epnum)
+ 			dwc2_hsotg_ep0_zlp(hsotg, true);
+ 	}
+ 
+-	/*
+-	 * Slave mode OUT transfers do not go through XferComplete so
+-	 * adjust the ISOC parity here.
+-	 */
+-	if (!using_dma(hsotg)) {
+-		if (hs_ep->isochronous && hs_ep->interval == 1)
+-			dwc2_hsotg_change_ep_iso_parity(hsotg, DOEPCTL(epnum));
+-		else if (hs_ep->isochronous && hs_ep->interval > 1)
+-			dwc2_gadget_incr_frame_num(hs_ep);
+-	}
+-
+ 	/* Set actual frame number for completed transfers */
+-	if (!using_desc_dma(hsotg) && hs_ep->isochronous)
+-		req->frame_number = hsotg->frame_number;
++	if (!using_desc_dma(hsotg) && hs_ep->isochronous) {
++		req->frame_number = hs_ep->target_frame;
++		dwc2_gadget_incr_frame_num(hs_ep);
++	}
+ 
+ 	dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, result);
+ }
+@@ -2769,12 +2775,14 @@ static void dwc2_hsotg_complete_in(struct dwc2_hsotg *hsotg,
+ 		return;
+ 	}
+ 
+-	/* Zlp for all endpoints, for ep0 only in DATA IN stage */
++	/* Zlp for all endpoints in non DDMA, for ep0 only in DATA IN stage */
+ 	if (hs_ep->send_zlp) {
+-		dwc2_hsotg_program_zlp(hsotg, hs_ep);
+ 		hs_ep->send_zlp = 0;
+-		/* transfer will be completed on next complete interrupt */
+-		return;
++		if (!using_desc_dma(hsotg)) {
++			dwc2_hsotg_program_zlp(hsotg, hs_ep);
++			/* transfer will be completed on next complete interrupt */
++			return;
++		}
+ 	}
+ 
+ 	if (hs_ep->index == 0 && hsotg->ep0_state == DWC2_EP0_DATA_IN) {
+@@ -2783,6 +2791,12 @@ static void dwc2_hsotg_complete_in(struct dwc2_hsotg *hsotg,
+ 		return;
+ 	}
+ 
++	/* Set actual frame number for completed transfers */
++	if (!using_desc_dma(hsotg) && hs_ep->isochronous) {
++		hs_req->req.frame_number = hs_ep->target_frame;
++		dwc2_gadget_incr_frame_num(hs_ep);
++	}
++
+ 	dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, 0);
+ }
+ 
+@@ -2843,23 +2857,18 @@ static void dwc2_gadget_handle_ep_disabled(struct dwc2_hsotg_ep *hs_ep)
+ 
+ 		dwc2_hsotg_txfifo_flush(hsotg, hs_ep->fifo_index);
+ 
+-		if (hs_ep->isochronous) {
+-			dwc2_hsotg_complete_in(hsotg, hs_ep);
+-			return;
+-		}
+-
+ 		if ((epctl & DXEPCTL_STALL) && (epctl & DXEPCTL_EPTYPE_BULK)) {
+ 			int dctl = dwc2_readl(hsotg, DCTL);
+ 
+ 			dctl |= DCTL_CGNPINNAK;
+ 			dwc2_writel(hsotg, dctl, DCTL);
+ 		}
+-		return;
+-	}
++	} else {
+ 
+-	if (dctl & DCTL_GOUTNAKSTS) {
+-		dctl |= DCTL_CGOUTNAK;
+-		dwc2_writel(hsotg, dctl, DCTL);
++		if (dctl & DCTL_GOUTNAKSTS) {
++			dctl |= DCTL_CGOUTNAK;
++			dwc2_writel(hsotg, dctl, DCTL);
++		}
+ 	}
+ 
+ 	if (!hs_ep->isochronous)
+@@ -2873,15 +2882,16 @@ static void dwc2_gadget_handle_ep_disabled(struct dwc2_hsotg_ep *hs_ep)
+ 
+ 	do {
+ 		hs_req = get_ep_head(hs_ep);
+-		if (hs_req)
++		if (hs_req) {
++			hs_req->req.frame_number = hs_ep->target_frame;
++			hs_req->req.actual = 0;
+ 			dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req,
+ 						    -ENODATA);
++		}
+ 		dwc2_gadget_incr_frame_num(hs_ep);
+ 		/* Update current frame number value. */
+ 		hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
+ 	} while (dwc2_gadget_target_frame_elapsed(hs_ep));
+-
+-	dwc2_gadget_start_next_request(hs_ep);
+ }
+ 
+ /**
+@@ -2898,8 +2908,8 @@ static void dwc2_gadget_handle_ep_disabled(struct dwc2_hsotg_ep *hs_ep)
+ static void dwc2_gadget_handle_out_token_ep_disabled(struct dwc2_hsotg_ep *ep)
+ {
+ 	struct dwc2_hsotg *hsotg = ep->parent;
++	struct dwc2_hsotg_req *hs_req;
+ 	int dir_in = ep->dir_in;
+-	u32 doepmsk;
+ 
+ 	if (dir_in || !ep->isochronous)
+ 		return;
+@@ -2913,28 +2923,42 @@ static void dwc2_gadget_handle_out_token_ep_disabled(struct dwc2_hsotg_ep *ep)
+ 		return;
+ 	}
+ 
+-	if (ep->interval > 1 &&
+-	    ep->target_frame == TARGET_FRAME_INITIAL) {
++	if (ep->target_frame == TARGET_FRAME_INITIAL) {
+ 		u32 ctrl;
+ 
+ 		ep->target_frame = hsotg->frame_number;
+-		dwc2_gadget_incr_frame_num(ep);
++		if (ep->interval > 1) {
++			ctrl = dwc2_readl(hsotg, DOEPCTL(ep->index));
++			if (ep->target_frame & 0x1)
++				ctrl |= DXEPCTL_SETODDFR;
++			else
++				ctrl |= DXEPCTL_SETEVENFR;
+ 
+-		ctrl = dwc2_readl(hsotg, DOEPCTL(ep->index));
+-		if (ep->target_frame & 0x1)
+-			ctrl |= DXEPCTL_SETODDFR;
+-		else
+-			ctrl |= DXEPCTL_SETEVENFR;
++			dwc2_writel(hsotg, ctrl, DOEPCTL(ep->index));
++		}
++	}
+ 
+-		dwc2_writel(hsotg, ctrl, DOEPCTL(ep->index));
++	while (dwc2_gadget_target_frame_elapsed(ep)) {
++		hs_req = get_ep_head(ep);
++		if (hs_req) {
++			hs_req->req.frame_number = ep->target_frame;
++			hs_req->req.actual = 0;
++			dwc2_hsotg_complete_request(hsotg, ep, hs_req, -ENODATA);
++		}
++
++		dwc2_gadget_incr_frame_num(ep);
++		/* Update current frame number value. */
++		hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
+ 	}
+ 
+-	dwc2_gadget_start_next_request(ep);
+-	doepmsk = dwc2_readl(hsotg, DOEPMSK);
+-	doepmsk &= ~DOEPMSK_OUTTKNEPDISMSK;
+-	dwc2_writel(hsotg, doepmsk, DOEPMSK);
++	if (!ep->req)
++		dwc2_gadget_start_next_request(ep);
++
+ }
+ 
++static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
++				   struct dwc2_hsotg_ep *hs_ep);
++
+ /**
+  * dwc2_gadget_handle_nak - handle NAK interrupt
+  * @hs_ep: The endpoint on which interrupt is asserted.
+@@ -2952,7 +2976,9 @@ static void dwc2_gadget_handle_out_token_ep_disabled(struct dwc2_hsotg_ep *ep)
+ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
+ {
+ 	struct dwc2_hsotg *hsotg = hs_ep->parent;
++	struct dwc2_hsotg_req *hs_req;
+ 	int dir_in = hs_ep->dir_in;
++	u32 ctrl;
+ 
+ 	if (!dir_in || !hs_ep->isochronous)
+ 		return;
+@@ -2994,13 +3020,32 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
+ 
+ 			dwc2_writel(hsotg, ctrl, DIEPCTL(hs_ep->index));
+ 		}
+-
+-		dwc2_hsotg_complete_request(hsotg, hs_ep,
+-					    get_ep_head(hs_ep), 0);
+ 	}
+ 
+-	if (!using_desc_dma(hsotg))
++	if (using_desc_dma(hsotg))
++		return;
++
++	ctrl = dwc2_readl(hsotg, DIEPCTL(hs_ep->index));
++	if (ctrl & DXEPCTL_EPENA)
++		dwc2_hsotg_ep_stop_xfr(hsotg, hs_ep);
++	else
++		dwc2_hsotg_txfifo_flush(hsotg, hs_ep->fifo_index);
++
++	while (dwc2_gadget_target_frame_elapsed(hs_ep)) {
++		hs_req = get_ep_head(hs_ep);
++		if (hs_req) {
++			hs_req->req.frame_number = hs_ep->target_frame;
++			hs_req->req.actual = 0;
++			dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, -ENODATA);
++		}
++
+ 		dwc2_gadget_incr_frame_num(hs_ep);
++		/* Update current frame number value. */
++		hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
++	}
++
++	if (!hs_ep->req)
++		dwc2_gadget_start_next_request(hs_ep);
+ }
+ 
+ /**
+@@ -3056,21 +3101,15 @@ static void dwc2_hsotg_epint(struct dwc2_hsotg *hsotg, unsigned int idx,
+ 
+ 		/* In DDMA handle isochronous requests separately */
+ 		if (using_desc_dma(hsotg) && hs_ep->isochronous) {
+-			/* XferCompl set along with BNA */
+-			if (!(ints & DXEPINT_BNAINTR))
+-				dwc2_gadget_complete_isoc_request_ddma(hs_ep);
++			dwc2_gadget_complete_isoc_request_ddma(hs_ep);
+ 		} else if (dir_in) {
+ 			/*
+ 			 * We get OutDone from the FIFO, so we only
+ 			 * need to look at completing IN requests here
+ 			 * if operating slave mode
+ 			 */
+-			if (hs_ep->isochronous && hs_ep->interval > 1)
+-				dwc2_gadget_incr_frame_num(hs_ep);
+-
+-			dwc2_hsotg_complete_in(hsotg, hs_ep);
+-			if (ints & DXEPINT_NAKINTRPT)
+-				ints &= ~DXEPINT_NAKINTRPT;
++			if (!hs_ep->isochronous || !(ints & DXEPINT_NAKINTRPT))
++				dwc2_hsotg_complete_in(hsotg, hs_ep);
+ 
+ 			if (idx == 0 && !hs_ep->req)
+ 				dwc2_hsotg_enqueue_setup(hsotg);
+@@ -3079,10 +3118,8 @@ static void dwc2_hsotg_epint(struct dwc2_hsotg *hsotg, unsigned int idx,
+ 			 * We're using DMA, we need to fire an OutDone here
+ 			 * as we ignore the RXFIFO.
+ 			 */
+-			if (hs_ep->isochronous && hs_ep->interval > 1)
+-				dwc2_gadget_incr_frame_num(hs_ep);
+-
+-			dwc2_hsotg_handle_outdone(hsotg, idx);
++			if (!hs_ep->isochronous || !(ints & DXEPINT_OUTTKNEPDIS))
++				dwc2_hsotg_handle_outdone(hsotg, idx);
+ 		}
+ 	}
+ 
+@@ -3580,7 +3617,8 @@ void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg)
+ void dwc2_hsotg_core_connect(struct dwc2_hsotg *hsotg)
+ {
+ 	/* remove the soft-disconnect and let's go */
+-	dwc2_clear_bit(hsotg, DCTL, DCTL_SFTDISCON);
++	if (!hsotg->role_sw || (dwc2_readl(hsotg, GOTGCTL) & GOTGCTL_BSESVLD))
++		dwc2_clear_bit(hsotg, DCTL, DCTL_SFTDISCON);
+ }
+ 
+ /**
+@@ -3920,9 +3958,27 @@ static void dwc2_hsotg_ep_stop_xfr(struct dwc2_hsotg *hsotg,
+ 					 __func__);
+ 		}
+ 	} else {
++		/* Mask GINTSTS_GOUTNAKEFF interrupt */
++		dwc2_hsotg_disable_gsint(hsotg, GINTSTS_GOUTNAKEFF);
++
+ 		if (!(dwc2_readl(hsotg, GINTSTS) & GINTSTS_GOUTNAKEFF))
+ 			dwc2_set_bit(hsotg, DCTL, DCTL_SGOUTNAK);
+ 
++		if (!using_dma(hsotg)) {
++			/* Wait for GINTSTS_RXFLVL interrupt */
++			if (dwc2_hsotg_wait_bit_set(hsotg, GINTSTS,
++						    GINTSTS_RXFLVL, 100)) {
++				dev_warn(hsotg->dev, "%s: timeout GINTSTS.RXFLVL\n",
++					 __func__);
++			} else {
++				/*
++				 * Pop GLOBAL OUT NAK status packet from RxFIFO
++				 * to assert GOUTNAKEFF interrupt
++				 */
++				dwc2_readl(hsotg, GRXSTSP);
++			}
++		}
++
+ 		/* Wait for global nak to take effect */
+ 		if (dwc2_hsotg_wait_bit_set(hsotg, GINTSTS,
+ 					    GINTSTS_GOUTNAKEFF, 100))
+@@ -4083,6 +4139,7 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
+ 			mask |= DIEPMSK_NAKMSK;
+ 			dwc2_writel(hsotg, mask, DIEPMSK);
+ 		} else {
++			epctrl |= DXEPCTL_SNAK;
+ 			mask = dwc2_readl(hsotg, DOEPMSK);
+ 			mask |= DOEPMSK_OUTTKNEPDISMSK;
+ 			dwc2_writel(hsotg, mask, DOEPMSK);
+@@ -4440,6 +4497,9 @@ static int dwc2_hsotg_ep_sethalt(struct usb_ep *ep, int value, bool now)
+ 		epctl = dwc2_readl(hs, epreg);
+ 
+ 		if (value) {
++			/* Unmask GOUTNAKEFF interrupt */
++			dwc2_hsotg_en_gsint(hs, GINTSTS_GOUTNAKEFF);
++
+ 			if (!(dwc2_readl(hs, GINTSTS) & GINTSTS_GOUTNAKEFF))
+ 				dwc2_set_bit(hs, DCTL, DCTL_SGOUTNAK);
+ 			// STALL bit will be set in GOUTNAKEFF interrupt handler
+@@ -4555,7 +4615,6 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+ 
+ 	WARN_ON(hsotg->driver);
+ 
+-	driver->driver.bus = NULL;
+ 	hsotg->driver = driver;
+ 	hsotg->gadget.dev.of_node = hsotg->dev->of_node;
+ 	hsotg->gadget.speed = USB_SPEED_UNKNOWN;
+@@ -4614,6 +4673,7 @@ static int dwc2_hsotg_udc_stop(struct usb_gadget *gadget)
+ 	spin_lock_irqsave(&hsotg->lock, flags);
+ 
+ 	hsotg->driver = NULL;
++	hsotg->gadget.dev.of_node = NULL;
+ 	hsotg->gadget.speed = USB_SPEED_UNKNOWN;
+ 	hsotg->enabled = 0;
+ 
+@@ -5078,7 +5138,7 @@ int dwc2_hsotg_suspend(struct dwc2_hsotg *hsotg)
+ 		hsotg->gadget.speed = USB_SPEED_UNKNOWN;
+ 		spin_unlock_irqrestore(&hsotg->lock, flags);
+ 
+-		for (ep = 0; ep < hsotg->num_of_eps; ep++) {
++		for (ep = 1; ep < hsotg->num_of_eps; ep++) {
+ 			if (hsotg->eps_in[ep])
+ 				dwc2_hsotg_ep_disable_lock(&hsotg->eps_in[ep]->ep);
+ 			if (hsotg->eps_out[ep])
+diff --git a/drivers/usb/dwc2/hcd.c b/drivers/usb/dwc2/hcd.c
+index 6a9c959a7f..7eb6792729 100644
+--- a/drivers/usb/dwc2/hcd.c
++++ b/drivers/usb/dwc2/hcd.c
+@@ -2734,8 +2734,11 @@ enum dwc2_transaction_type dwc2_hcd_select_transactions(
+ 			hsotg->available_host_channels--;
+ 		}
+ 		qh = list_entry(qh_ptr, struct dwc2_qh, qh_list_entry);
+-		if (dwc2_assign_and_init_hc(hsotg, qh))
++		if (dwc2_assign_and_init_hc(hsotg, qh)) {
++			if (hsotg->params.uframe_sched)
++				hsotg->available_host_channels++;
+ 			break;
++		}
+ 
+ 		/*
+ 		 * Move the QH from the periodic ready schedule to the
+@@ -2768,8 +2771,11 @@ enum dwc2_transaction_type dwc2_hcd_select_transactions(
+ 			hsotg->available_host_channels--;
+ 		}
+ 
+-		if (dwc2_assign_and_init_hc(hsotg, qh))
++		if (dwc2_assign_and_init_hc(hsotg, qh)) {
++			if (hsotg->params.uframe_sched)
++				hsotg->available_host_channels++;
+ 			break;
++		}
+ 
+ 		/*
+ 		 * Move the QH from the non-periodic inactive schedule to the
+@@ -3572,11 +3578,9 @@ static int dwc2_hcd_hub_control(struct dwc2_hsotg *hsotg, u16 typereq,
+ 			port_status |= USB_PORT_STAT_C_OVERCURRENT << 16;
+ 		}
+ 
+-		if (!hsotg->flags.b.port_connect_status) {
++		if (dwc2_is_device_mode(hsotg)) {
+ 			/*
+-			 * The port is disconnected, which means the core is
+-			 * either in device mode or it soon will be. Just
+-			 * return 0's for the remainder of the port status
++			 * Just return 0's for the remainder of the port status
+ 			 * since the port register can't be read if the core
+ 			 * is in device mode.
+ 			 */
+@@ -3646,13 +3650,11 @@ static int dwc2_hcd_hub_control(struct dwc2_hsotg *hsotg, u16 typereq,
+ 		if (wvalue != USB_PORT_FEAT_TEST && (!windex || windex > 1))
+ 			goto error;
+ 
+-		if (!hsotg->flags.b.port_connect_status) {
++		if (dwc2_is_device_mode(hsotg)) {
+ 			/*
+-			 * The port is disconnected, which means the core is
+-			 * either in device mode or it soon will be. Just
+-			 * return without doing anything since the port
+-			 * register can't be written if the core is in device
+-			 * mode.
++			 * Just return 0's for the remainder of the port status
++			 * since the port register can't be read if the core
++			 * is in device mode.
+ 			 */
+ 			break;
+ 		}
+@@ -4175,6 +4177,8 @@ void dwc2_host_complete(struct dwc2_hsotg *hsotg, struct dwc2_qtd *qtd,
+ 			 urb->actual_length);
+ 
+ 	if (usb_pipetype(urb->pipe) == PIPE_ISOCHRONOUS) {
++		if (!hsotg->params.dma_desc_enable)
++			urb->start_frame = qtd->qh->start_active_frame;
+ 		urb->error_count = dwc2_hcd_urb_get_error_count(qtd->urb);
+ 		for (i = 0; i < urb->number_of_packets; ++i) {
+ 			urb->iso_frame_desc[i].actual_length =
+@@ -4372,10 +4376,9 @@ static int _dwc2_hcd_suspend(struct usb_hcd *hcd)
+ 	if (hsotg->op_state == OTG_STATE_B_PERIPHERAL)
+ 		goto unlock;
+ 
+-	if (hsotg->bus_suspended)
+-		goto skip_power_saving;
+-
+-	if (hsotg->flags.b.port_connect_status == 0)
++	if (hsotg->bus_suspended ||
++	    hsotg->params.power_down != DWC2_POWER_DOWN_PARAM_PARTIAL ||
++	    hsotg->flags.b.port_connect_status == 0)
+ 		goto skip_power_saving;
+ 
+ 	switch (hsotg->params.power_down) {
+@@ -4803,8 +4806,8 @@ static int _dwc2_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
+ 	if (qh_allocated && qh->channel && qh->channel->qh == qh)
+ 		qh->channel->qh = NULL;
+ fail2:
+-	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 	urb->hcpriv = NULL;
++	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 	kfree(qtd);
+ fail1:
+ 	if (qh_allocated) {
+@@ -4833,6 +4836,7 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
+ 	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
+ 	int rc;
+ 	unsigned long flags;
++	int urb_status;
+ 
+ 	dev_dbg(hsotg->dev, "DWC OTG HCD URB Dequeue\n");
+ 	dwc2_dump_urb_info(hcd, urb, "urb_dequeue");
+@@ -4857,11 +4861,12 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
+ 
+ 	/* Higher layer software sets URB status */
+ 	spin_unlock(&hsotg->lock);
++	urb_status = urb->status;
+ 	usb_hcd_giveback_urb(hcd, urb, status);
+ 	spin_lock(&hsotg->lock);
+ 
+ 	dev_dbg(hsotg->dev, "Called usb_hcd_giveback_urb()\n");
+-	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb->status);
++	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb_status);
+ out:
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 
+@@ -5193,6 +5198,10 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
+ 	hcd->has_tt = 1;
+ 
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res) {
++		retval = -EINVAL;
++		goto error2;
++	}
+ 	hcd->rsrc_start = res->start;
+ 	hcd->rsrc_len = resource_size(res);
+ 
+@@ -5434,9 +5443,16 @@ int dwc2_backup_host_registers(struct dwc2_hsotg *hsotg)
+ 	/* Backup Host regs */
+ 	hr = &hsotg->hr_backup;
+ 	hr->hcfg = dwc2_readl(hsotg, HCFG);
++	hr->hflbaddr = dwc2_readl(hsotg, HFLBADDR);
+ 	hr->haintmsk = dwc2_readl(hsotg, HAINTMSK);
+-	for (i = 0; i < hsotg->params.host_channels; ++i)
++	for (i = 0; i < hsotg->params.host_channels; ++i) {
++		hr->hcchar[i] = dwc2_readl(hsotg, HCCHAR(i));
++		hr->hcsplt[i] = dwc2_readl(hsotg, HCSPLT(i));
+ 		hr->hcintmsk[i] = dwc2_readl(hsotg, HCINTMSK(i));
++		hr->hctsiz[i] = dwc2_readl(hsotg, HCTSIZ(i));
++		hr->hcidma[i] = dwc2_readl(hsotg, HCDMA(i));
++		hr->hcidmab[i] = dwc2_readl(hsotg, HCDMAB(i));
++	}
+ 
+ 	hr->hprt0 = dwc2_read_hprt0(hsotg);
+ 	hr->hfir = dwc2_readl(hsotg, HFIR);
+@@ -5470,10 +5486,17 @@ int dwc2_restore_host_registers(struct dwc2_hsotg *hsotg)
+ 	hr->valid = false;
+ 
+ 	dwc2_writel(hsotg, hr->hcfg, HCFG);
++	dwc2_writel(hsotg, hr->hflbaddr, HFLBADDR);
+ 	dwc2_writel(hsotg, hr->haintmsk, HAINTMSK);
+ 
+-	for (i = 0; i < hsotg->params.host_channels; ++i)
++	for (i = 0; i < hsotg->params.host_channels; ++i) {
++		dwc2_writel(hsotg, hr->hcchar[i], HCCHAR(i));
++		dwc2_writel(hsotg, hr->hcsplt[i], HCSPLT(i));
+ 		dwc2_writel(hsotg, hr->hcintmsk[i], HCINTMSK(i));
++		dwc2_writel(hsotg, hr->hctsiz[i], HCTSIZ(i));
++		dwc2_writel(hsotg, hr->hcidma[i], HCDMA(i));
++		dwc2_writel(hsotg, hr->hcidmab[i], HCDMAB(i));
++	}
+ 
+ 	dwc2_writel(hsotg, hr->hprt0, HPRT0);
+ 	dwc2_writel(hsotg, hr->hfir, HFIR);
+@@ -5638,10 +5661,12 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
+ 	dwc2_writel(hsotg, hr->hcfg, HCFG);
+ 
+ 	/* De-assert Wakeup Logic */
+-	gpwrdn = dwc2_readl(hsotg, GPWRDN);
+-	gpwrdn &= ~GPWRDN_PMUACTV;
+-	dwc2_writel(hsotg, gpwrdn, GPWRDN);
+-	udelay(10);
++	if (!(rem_wakeup && hsotg->hw_params.snpsid >= DWC2_CORE_REV_4_30a)) {
++		gpwrdn = dwc2_readl(hsotg, GPWRDN);
++		gpwrdn &= ~GPWRDN_PMUACTV;
++		dwc2_writel(hsotg, gpwrdn, GPWRDN);
++		udelay(10);
++	}
+ 
+ 	hprt0 = hr->hprt0;
+ 	hprt0 |= HPRT0_PWR;
+@@ -5666,6 +5691,13 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
+ 		hprt0 |= HPRT0_RES;
+ 		dwc2_writel(hsotg, hprt0, HPRT0);
+ 
++		/* De-assert Wakeup Logic */
++		if ((rem_wakeup && hsotg->hw_params.snpsid >= DWC2_CORE_REV_4_30a)) {
++			gpwrdn = dwc2_readl(hsotg, GPWRDN);
++			gpwrdn &= ~GPWRDN_PMUACTV;
++			dwc2_writel(hsotg, gpwrdn, GPWRDN);
++			udelay(10);
++		}
+ 		/* Wait for Resume time and then program HPRT again */
+ 		mdelay(100);
+ 		hprt0 &= ~HPRT0_RES;
+diff --git a/drivers/usb/dwc2/hcd_queue.c b/drivers/usb/dwc2/hcd_queue.c
+index 621a4846bd..94af71e985 100644
+--- a/drivers/usb/dwc2/hcd_queue.c
++++ b/drivers/usb/dwc2/hcd_queue.c
+@@ -59,7 +59,7 @@
+ #define DWC2_UNRESERVE_DELAY (msecs_to_jiffies(5))
+ 
+ /* If we get a NAK, wait this long before retrying */
+-#define DWC2_RETRY_WAIT_DELAY (1 * 1E6L)
++#define DWC2_RETRY_WAIT_DELAY (1 * NSEC_PER_MSEC)
+ 
+ /**
+  * dwc2_periodic_channel_available() - Checks that a channel is available for a
+diff --git a/drivers/usb/dwc2/platform.c b/drivers/usb/dwc2/platform.c
+index c0c56777a5..5963f71a2b 100644
+--- a/drivers/usb/dwc2/platform.c
++++ b/drivers/usb/dwc2/platform.c
+@@ -131,13 +131,6 @@ static int dwc2_get_dr_mode(struct dwc2_hsotg *hsotg)
+ 	return 0;
+ }
+ 
+-static void __dwc2_disable_regulators(void *data)
+-{
+-	struct dwc2_hsotg *hsotg = data;
+-
+-	regulator_bulk_disable(ARRAY_SIZE(hsotg->supplies), hsotg->supplies);
+-}
+-
+ #if IS_ENABLED(CONFIG_ARCH_CVITEK)
+ static void dwc2_set_hw_id(struct dwc2_hsotg *hsotg, int is_dev)
+ {
+@@ -166,11 +159,6 @@ static int __dwc2_lowlevel_hw_enable(struct dwc2_hsotg *hsotg)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = devm_add_action_or_reset(&pdev->dev,
+-				       __dwc2_disable_regulators, hsotg);
+-	if (ret)
+-		return ret;
+-
+ 	if (hsotg->clk) {
+ 		ret = clk_prepare_enable(hsotg->clk);
+ 		if (ret)
+@@ -213,9 +201,9 @@ static int __dwc2_lowlevel_hw_enable(struct dwc2_hsotg *hsotg)
+ 	} else if (hsotg->plat && hsotg->plat->phy_init) {
+ 		ret = hsotg->plat->phy_init(pdev, hsotg->plat->phy_type);
+ 	} else {
+-		ret = phy_power_on(hsotg->phy);
++		ret = phy_init(hsotg->phy);
+ 		if (ret == 0)
+-			ret = phy_init(hsotg->phy);
++			ret = phy_power_on(hsotg->phy);
+ 	}
+ 
+ 	return ret;
+@@ -247,9 +235,9 @@ static int __dwc2_lowlevel_hw_disable(struct dwc2_hsotg *hsotg)
+ 	} else if (hsotg->plat && hsotg->plat->phy_exit) {
+ 		ret = hsotg->plat->phy_exit(pdev, hsotg->plat->phy_type);
+ 	} else {
+-		ret = phy_exit(hsotg->phy);
++		ret = phy_power_off(hsotg->phy);
+ 		if (ret == 0)
+-			ret = phy_power_off(hsotg->phy);
++			ret = phy_exit(hsotg->phy);
+ 	}
+ 	if (ret)
+ 		return ret;
+@@ -257,7 +245,7 @@ static int __dwc2_lowlevel_hw_disable(struct dwc2_hsotg *hsotg)
+ 	if (hsotg->clk)
+ 		clk_disable_unprepare(hsotg->clk);
+ 
+-	return 0;
++	return regulator_bulk_disable(ARRAY_SIZE(hsotg->supplies), hsotg->supplies);
+ }
+ 
+ /**
+@@ -893,8 +881,11 @@ static void dwc2_driver_shutdown(struct platform_device *dev)
+ {
+ 	struct dwc2_hsotg *hsotg = platform_get_drvdata(dev);
+ 
+-	dwc2_disable_global_interrupts(hsotg);
+-	synchronize_irq(hsotg->irq);
++	if (hsotg->ll_hw_enabled) {
++		dwc2_disable_global_interrupts(hsotg);
++		synchronize_irq(hsotg->irq);
++		dwc2_lowlevel_hw_disable(hsotg);
++	}
+ }
+ 
+ /**
+@@ -1030,18 +1021,6 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 
+ 	spin_lock_init(&hsotg->lock);
+ 
+-	hsotg->irq = platform_get_irq(dev, 0);
+-	if (hsotg->irq < 0)
+-		return hsotg->irq;
+-
+-	dev_dbg(hsotg->dev, "registering common handler for irq%d\n",
+-		hsotg->irq);
+-	retval = devm_request_irq(hsotg->dev, hsotg->irq,
+-				  dwc2_handle_common_intr, IRQF_SHARED,
+-				  dev_name(hsotg->dev), hsotg);
+-	if (retval)
+-		return retval;
+-
+ 	hsotg->vbus_supply = devm_regulator_get_optional(hsotg->dev, "vbus");
+ 	if (IS_ERR(hsotg->vbus_supply)) {
+ 		retval = PTR_ERR(hsotg->vbus_supply);
+@@ -1089,6 +1068,20 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 	if (retval)
+ 		goto error;
+ 
++	hsotg->irq = platform_get_irq(dev, 0);
++	if (hsotg->irq < 0) {
++		retval = hsotg->irq;
++		goto error;
++	}
++
++	dev_dbg(hsotg->dev, "registering common handler for irq%d\n",
++		hsotg->irq);
++	retval = devm_request_irq(hsotg->dev, hsotg->irq,
++				  dwc2_handle_common_intr, IRQF_SHARED,
++				  dev_name(hsotg->dev), hsotg);
++	if (retval)
++		goto error;
++
+ 	/*
+ 	 * For OTG cores, set the force mode bits to reflect the value
+ 	 * of dr_mode. Force mode bits should not be touched at any
+@@ -1123,6 +1116,9 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 		ggpio |= GGPIO_STM32_OTG_GCCFG_IDEN;
+ 		ggpio |= GGPIO_STM32_OTG_GCCFG_VBDEN;
+ 		dwc2_writel(hsotg, ggpio, GGPIO);
++
++		/* ID/VBUS detection startup time */
++		usleep_range(5000, 7000);
+ 	}
+ 
+ #if IS_ENABLED(CONFIG_USB_ROLE_SWITCH)
+@@ -1264,7 +1260,7 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ 	if (hsotg->params.activate_stm_id_vb_detection)
+ 		regulator_disable(hsotg->usb33d);
+ error:
+-	if (hsotg->dr_mode != USB_DR_MODE_PERIPHERAL)
++	if (hsotg->ll_hw_enabled)
+ 		dwc2_lowlevel_hw_disable(hsotg);
+ 	return retval;
+ }
+@@ -1272,9 +1268,13 @@ static int dwc2_driver_probe(struct platform_device *dev)
+ static int __maybe_unused dwc2_suspend(struct device *dev)
+ {
+ 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
+-	bool is_device_mode = dwc2_is_device_mode(dwc2);
++	bool is_device_mode;
+ 	int ret = 0;
+ 
++	if (!dwc2->ll_hw_enabled)
++		return 0;
++
++	is_device_mode = dwc2_is_device_mode(dwc2);
+ 	if (is_device_mode)
+ 		dwc2_hsotg_suspend(dwc2);
+ 
+@@ -1325,6 +1325,9 @@ static int __maybe_unused dwc2_resume(struct device *dev)
+ 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
+ 	int ret = 0;
+ 
++	if (!dwc2->ll_hw_enabled)
++		return 0;
++
+ 	if (dwc2->phy_off_for_suspend && dwc2->ll_hw_enabled) {
+ 		ret = __dwc2_lowlevel_hw_enable(dwc2);
+ 		if (ret)
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index c21f0e55ee..16c1ecddbd 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -41,17 +41,31 @@ struct f_hidg {
+ 	unsigned char			bInterfaceSubClass;
+ 	unsigned char			bInterfaceProtocol;
+ 	unsigned char			protocol;
++	unsigned char			idle;
+ 	unsigned short			report_desc_length;
+ 	char				*report_desc;
+ 	unsigned short			report_length;
++	/*
++	 * use_out_ep - if true, the OUT Endpoint (interrupt out method)
++	 *              will be used to receive reports from the host
++	 *              using functions with the "intout" suffix.
++	 *              Otherwise, the OUT Endpoint will not be configured
++	 *              and the SETUP/SET_REPORT method ("ssreport" suffix)
++	 *              will be used to receive reports.
++	 */
+ 	bool				use_out_ep;
+ 	bool				wakeup_on_write;
++	struct usb_gadget		*gadget;
+ 
+ 	/* recv report */
+-	struct list_head		completed_out_req;
+ 	spinlock_t			read_spinlock;
+ 	wait_queue_head_t		read_queue;
++	/* recv report - interrupt out only (use_out_ep == 1) */
++	struct list_head		completed_out_req;
+ 	unsigned int			qlen;
++	/* recv report - setup set_report only (use_out_ep == 0) */
++	char				*set_report_buf;
++	unsigned int			set_report_length;
+ 
+ 	/* send report */
+ 	spinlock_t			write_spinlock;
+@@ -59,7 +73,7 @@ struct f_hidg {
+ 	wait_queue_head_t		write_queue;
+ 	struct usb_request		*req;
+ 
+-	int				minor;
++	struct device			dev;
+ 	struct cdev			cdev;
+ 	struct usb_function		func;
+ 
+@@ -72,6 +86,15 @@ static inline struct f_hidg *func_to_hidg(struct usb_function *f)
+ 	return container_of(f, struct f_hidg, func);
+ }
+ 
++static void hidg_release(struct device *dev)
++{
++	struct f_hidg *hidg = container_of(dev, struct f_hidg, dev);
++
++	kfree(hidg->report_desc);
++	kfree(hidg->set_report_buf);
++	kfree(hidg);
++}
++
+ /*-------------------------------------------------------------------------*/
+ /*                           Static descriptors                            */
+ 
+@@ -80,7 +103,7 @@ static struct usb_interface_descriptor hidg_interface_desc = {
+ 	.bDescriptorType	= USB_DT_INTERFACE,
+ 	/* .bInterfaceNumber	= DYNAMIC */
+ 	.bAlternateSetting	= 0,
+-	.bNumEndpoints		= 2,
++	/* .bNumEndpoints	= DYNAMIC (depends on use_out_ep) */
+ 	.bInterfaceClass	= USB_CLASS_HID,
+ 	/* .bInterfaceSubClass	= DYNAMIC */
+ 	/* .bInterfaceProtocol	= DYNAMIC */
+@@ -90,11 +113,11 @@ static struct usb_interface_descriptor hidg_interface_desc = {
+ static struct hid_descriptor hidg_desc = {
+ 	.bLength			= sizeof hidg_desc,
+ 	.bDescriptorType		= HID_DT_HID,
+-	.bcdHID				= 0x0101,
++	.bcdHID				= cpu_to_le16(0x0101),
+ 	.bCountryCode			= 0x00,
+ 	.bNumDescriptors		= 0x1,
+-	/*.desc[0].bDescriptorType	= DYNAMIC */
+-	/*.desc[0].wDescriptorLenght	= DYNAMIC */
++	/*.rpt_desc.bDescriptorType	= DYNAMIC */
++	/*.rpt_desc.wDescriptorLength	= DYNAMIC */
+ };
+ 
+ /* Super-Speed Support */
+@@ -141,7 +164,7 @@ static struct usb_ss_ep_comp_descriptor hidg_ss_out_comp_desc = {
+ 	/* .wBytesPerInterval   = DYNAMIC */
+ };
+ 
+-static struct usb_descriptor_header *hidg_ss_descriptors[] = {
++static struct usb_descriptor_header *hidg_ss_descriptors_intout[] = {
+ 	(struct usb_descriptor_header *)&hidg_interface_desc,
+ 	(struct usb_descriptor_header *)&hidg_desc,
+ 	(struct usb_descriptor_header *)&hidg_ss_in_ep_desc,
+@@ -151,6 +174,14 @@ static struct usb_descriptor_header *hidg_ss_descriptors[] = {
+ 	NULL,
+ };
+ 
++static struct usb_descriptor_header *hidg_ss_descriptors_ssreport[] = {
++	(struct usb_descriptor_header *)&hidg_interface_desc,
++	(struct usb_descriptor_header *)&hidg_desc,
++	(struct usb_descriptor_header *)&hidg_ss_in_ep_desc,
++	(struct usb_descriptor_header *)&hidg_ss_in_comp_desc,
++	NULL,
++};
++
+ /* High-Speed Support */
+ 
+ static struct usb_endpoint_descriptor hidg_hs_in_ep_desc = {
+@@ -177,7 +208,7 @@ static struct usb_endpoint_descriptor hidg_hs_out_ep_desc = {
+ 				      */
+ };
+ 
+-static struct usb_descriptor_header *hidg_hs_descriptors[] = {
++static struct usb_descriptor_header *hidg_hs_descriptors_intout[] = {
+ 	(struct usb_descriptor_header *)&hidg_interface_desc,
+ 	(struct usb_descriptor_header *)&hidg_desc,
+ 	(struct usb_descriptor_header *)&hidg_hs_in_ep_desc,
+@@ -185,6 +216,13 @@ static struct usb_descriptor_header *hidg_hs_descriptors[] = {
+ 	NULL,
+ };
+ 
++static struct usb_descriptor_header *hidg_hs_descriptors_ssreport[] = {
++	(struct usb_descriptor_header *)&hidg_interface_desc,
++	(struct usb_descriptor_header *)&hidg_desc,
++	(struct usb_descriptor_header *)&hidg_hs_in_ep_desc,
++	NULL,
++};
++
+ /* Full-Speed Support */
+ 
+ static struct usb_endpoint_descriptor hidg_fs_in_ep_desc = {
+@@ -211,7 +249,7 @@ static struct usb_endpoint_descriptor hidg_fs_out_ep_desc = {
+ 				       */
+ };
+ 
+-static struct usb_descriptor_header *hidg_fs_descriptors[] = {
++static struct usb_descriptor_header *hidg_fs_descriptors_intout[] = {
+ 	(struct usb_descriptor_header *)&hidg_interface_desc,
+ 	(struct usb_descriptor_header *)&hidg_desc,
+ 	(struct usb_descriptor_header *)&hidg_fs_in_ep_desc,
+@@ -219,6 +257,13 @@ static struct usb_descriptor_header *hidg_fs_descriptors[] = {
+ 	NULL,
+ };
+ 
++static struct usb_descriptor_header *hidg_fs_descriptors_ssreport[] = {
++	(struct usb_descriptor_header *)&hidg_interface_desc,
++	(struct usb_descriptor_header *)&hidg_desc,
++	(struct usb_descriptor_header *)&hidg_fs_in_ep_desc,
++	NULL,
++};
++
+ /*-------------------------------------------------------------------------*/
+ /*                                 Strings                                 */
+ 
+@@ -242,8 +287,8 @@ static struct usb_gadget_strings *ct_func_strings[] = {
+ /*-------------------------------------------------------------------------*/
+ /*                              Char Device                                */
+ 
+-static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+-			size_t count, loff_t *ptr)
++static ssize_t f_hidg_intout_read(struct file *file, char __user *buffer,
++				  size_t count, loff_t *ptr)
+ {
+ 	struct f_hidg *hidg = file->private_data;
+ 	struct f_hidg_req_list *list;
+@@ -256,15 +301,15 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 
+ 	spin_lock_irqsave(&hidg->read_spinlock, flags);
+ 
+-#define READ_COND (!list_empty(&hidg->completed_out_req))
++#define READ_COND_INTOUT (!list_empty(&hidg->completed_out_req))
+ 
+ 	/* wait for at least one buffer to complete */
+-	while (!READ_COND) {
++	while (!READ_COND_INTOUT) {
+ 		spin_unlock_irqrestore(&hidg->read_spinlock, flags);
+ 		if (file->f_flags & O_NONBLOCK)
+ 			return -EAGAIN;
+ 
+-		if (wait_event_interruptible(hidg->read_queue, READ_COND))
++		if (wait_event_interruptible(hidg->read_queue, READ_COND_INTOUT))
+ 			return -ERESTARTSYS;
+ 
+ 		spin_lock_irqsave(&hidg->read_spinlock, flags);
+@@ -314,6 +359,60 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 	return count;
+ }
+ 
++#define READ_COND_SSREPORT (hidg->set_report_buf != NULL)
++
++static ssize_t f_hidg_ssreport_read(struct file *file, char __user *buffer,
++				    size_t count, loff_t *ptr)
++{
++	struct f_hidg *hidg = file->private_data;
++	char *tmp_buf = NULL;
++	unsigned long flags;
++
++	if (!count)
++		return 0;
++
++	spin_lock_irqsave(&hidg->read_spinlock, flags);
++
++	while (!READ_COND_SSREPORT) {
++		spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++
++		if (wait_event_interruptible(hidg->read_queue, READ_COND_SSREPORT))
++			return -ERESTARTSYS;
++
++		spin_lock_irqsave(&hidg->read_spinlock, flags);
++	}
++
++	count = min_t(unsigned int, count, hidg->set_report_length);
++	tmp_buf = hidg->set_report_buf;
++	hidg->set_report_buf = NULL;
++
++	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++
++	if (tmp_buf != NULL) {
++		count -= copy_to_user(buffer, tmp_buf, count);
++		kfree(tmp_buf);
++	} else {
++		count = -ENOMEM;
++	}
++
++	wake_up(&hidg->read_queue);
++
++	return count;
++}
++
++static ssize_t f_hidg_read(struct file *file, char __user *buffer,
++			   size_t count, loff_t *ptr)
++{
++	struct f_hidg *hidg = file->private_data;
++
++	if (hidg->use_out_ep)
++		return f_hidg_intout_read(file, buffer, count, ptr);
++	else
++		return f_hidg_ssreport_read(file, buffer, count, ptr);
++}
++
+ static void f_hidg_req_complete(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	struct f_hidg *hidg = (struct f_hidg *)ep->driver_data;
+@@ -334,25 +433,32 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 			    size_t count, loff_t *offp)
+ {
+ 	struct f_hidg *hidg  = file->private_data;
+-	struct usb_composite_dev *cdev = hidg->func.config->cdev;
++	struct usb_gadget *gadget = NULL;
+ 	struct usb_request *req;
+ 	unsigned long flags;
++	int wake_status;
+ 	ssize_t status = -ENOMEM;
+ 
+-	/*
+-	 * remote wakeup is allowed only when the corresponding bit
+-	 * in config descriptor is set and wakeup_on_write is enabled.
+-     * FIXME: cdev->config can be NULLed on disconnect.
+-	 */
+-	if (hidg->wakeup_on_write /*&& cdev->config->bmAttributes & 0x20*/){
+-		usb_gadget_wakeup(cdev->gadget);
+-		ERROR(hidg->func.config->cdev,
+-			"usb_gadget_wakeup\n");
++	spin_lock_irqsave(&hidg->write_spinlock, flags);
++	if (hidg->wakeup_on_write && hidg->gadget) {
++		gadget = hidg->gadget;
++		get_device(&gadget->dev);
+ 	}
++	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
+ 
+-
++	if (gadget) {
++		wake_status = usb_gadget_wakeup(gadget);
++		dev_dbg(&hidg->dev, "usb_gadget_wakeup returned %d\n",
++			wake_status);
++		put_device(&gadget->dev);
++	}
+ 	spin_lock_irqsave(&hidg->write_spinlock, flags);
+ 
++	if (!hidg->req) {
++		spin_unlock_irqrestore(&hidg->write_spinlock, flags);
++		return -ESHUTDOWN;
++	}
++
+ #define WRITE_COND (!hidg->write_pending)
+ try_again:
+ 	/* write queue */
+@@ -373,11 +479,16 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 	count  = min_t(unsigned, count, hidg->report_length);
+ 
+ 	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
+-	status = copy_from_user(req->buf, buffer, count);
+ 
++	if (!req) {
++		dev_err(&hidg->dev, "hidg->req is NULL\n");
++		status = -ESHUTDOWN;
++		goto release_write_pending;
++	}
++
++	status = copy_from_user(req->buf, buffer, count);
+ 	if (status != 0) {
+-		ERROR(hidg->func.config->cdev,
+-			"copy_from_user error\n");
++		dev_err(&hidg->dev, "copy_from_user error\n");
+ 		status = -EINVAL;
+ 		goto release_write_pending;
+ 	}
+@@ -395,21 +506,24 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 	}
+ 
+ 	req->status   = 0;
+-	req->zero     = 0;
++	req->zero     = 1;
+ 	req->length   = count;
+ 	req->complete = f_hidg_req_complete;
+ 	req->context  = hidg;
+ 
+ 	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
+ 
++	if (!hidg->in_ep->enabled) {
++		dev_err(&hidg->dev, "in_ep is disabled\n");
++		status = -ESHUTDOWN;
++		goto release_write_pending;
++	}
++
+ 	status = usb_ep_queue(hidg->in_ep, req, GFP_ATOMIC);
+-	if (status < 0) {
+-		ERROR(hidg->func.config->cdev,
+-			"usb_ep_queue error on int endpoint %zd\n", status);
++	if (status < 0)
+ 		goto release_write_pending;
+-	} else {
++	else
+ 		status = count;
+-	}
+ 
+ 	return status;
+ release_write_pending:
+@@ -433,14 +547,20 @@ static __poll_t f_hidg_poll(struct file *file, poll_table *wait)
+ 	if (WRITE_COND)
+ 		ret |= EPOLLOUT | EPOLLWRNORM;
+ 
+-	if (READ_COND)
+-		ret |= EPOLLIN | EPOLLRDNORM;
++	if (hidg->use_out_ep) {
++		if (READ_COND_INTOUT)
++			ret |= EPOLLIN | EPOLLRDNORM;
++	} else {
++		if (READ_COND_SSREPORT)
++			ret |= EPOLLIN | EPOLLRDNORM;
++	}
+ 
+ 	return ret;
+ }
+ 
+ #undef WRITE_COND
+-#undef READ_COND
++#undef READ_COND_SSREPORT
++#undef READ_COND_INTOUT
+ 
+ static int f_hidg_release(struct inode *inode, struct file *fd)
+ {
+@@ -467,7 +587,7 @@ static inline struct usb_request *hidg_alloc_ep_req(struct usb_ep *ep,
+ 	return alloc_ep_req(ep, length);
+ }
+ 
+-static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
++static void hidg_intout_complete(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	struct f_hidg *hidg = (struct f_hidg *) req->context;
+ 	struct usb_composite_dev *cdev = hidg->func.config->cdev;
+@@ -502,6 +622,37 @@ static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
+ 	}
+ }
+ 
++static void hidg_ssreport_complete(struct usb_ep *ep, struct usb_request *req)
++{
++	struct f_hidg *hidg = (struct f_hidg *)req->context;
++	struct usb_composite_dev *cdev = hidg->func.config->cdev;
++	char *new_buf = NULL;
++	unsigned long flags;
++
++	if (req->status != 0 || req->buf == NULL || req->actual == 0) {
++		ERROR(cdev,
++		      "%s FAILED: status=%d, buf=%p, actual=%d\n",
++		      __func__, req->status, req->buf, req->actual);
++		return;
++	}
++
++	spin_lock_irqsave(&hidg->read_spinlock, flags);
++
++	new_buf = krealloc(hidg->set_report_buf, req->actual, GFP_ATOMIC);
++	if (new_buf == NULL) {
++		spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++		return;
++	}
++	hidg->set_report_buf = new_buf;
++
++	hidg->set_report_length = req->actual;
++	memcpy(hidg->set_report_buf, req->buf, req->actual);
++
++	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
++
++	wake_up(&hidg->read_queue);
++}
++
+ static int hidg_setup(struct usb_function *f,
+ 		const struct usb_ctrlrequest *ctrl)
+ {
+@@ -538,10 +689,22 @@ static int hidg_setup(struct usb_function *f,
+ 		goto respond;
+ 		break;
+ 
++	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_GET_IDLE):
++		VDBG(cdev, "get_idle\n");
++		length = min_t(unsigned int, length, 1);
++		((u8 *) req->buf)[0] = hidg->idle;
++		goto respond;
++		break;
++
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+ 		  | HID_REQ_SET_REPORT):
+ 		VDBG(cdev, "set_report | wLength=%d\n", ctrl->wLength);
+-		goto stall;
++		if (hidg->use_out_ep)
++			goto stall;
++		req->complete = hidg_ssreport_complete;
++		req->context  = hidg;
++		goto respond;
+ 		break;
+ 
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+@@ -561,6 +724,14 @@ static int hidg_setup(struct usb_function *f,
+ 		goto stall;
+ 		break;
+ 
++	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
++		  | HID_REQ_SET_IDLE):
++		VDBG(cdev, "set_idle\n");
++		length = 0;
++		hidg->idle = value >> 8;
++		goto respond;
++		break;
++
+ 	case ((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8
+ 		  | USB_REQ_GET_DESCRIPTOR):
+ 		switch (value >> 8) {
+@@ -569,8 +740,8 @@ static int hidg_setup(struct usb_function *f,
+ 			struct hid_descriptor hidg_desc_copy = hidg_desc;
+ 
+ 			VDBG(cdev, "USB_REQ_GET_DESCRIPTOR: HID\n");
+-			hidg_desc_copy.desc[0].bDescriptorType = HID_DT_REPORT;
+-			hidg_desc_copy.desc[0].wDescriptorLength =
++			hidg_desc_copy.rpt_desc.bDescriptorType = HID_DT_REPORT;
++			hidg_desc_copy.rpt_desc.wDescriptorLength =
+ 				cpu_to_le16(hidg->report_desc_length);
+ 
+ 			length = min_t(unsigned short, length,
+@@ -606,7 +777,7 @@ static int hidg_setup(struct usb_function *f,
+ 	return -EOPNOTSUPP;
+ 
+ respond:
+-	req->zero = 0;
++	req->zero = 1;
+ 	req->length = length;
+ 	status = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+ 	if (status < 0)
+@@ -621,15 +792,18 @@ static void hidg_disable(struct usb_function *f)
+ 	unsigned long flags;
+ 
+ 	usb_ep_disable(hidg->in_ep);
+-	usb_ep_disable(hidg->out_ep);
+ 
+-	spin_lock_irqsave(&hidg->read_spinlock, flags);
+-	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
+-		free_ep_req(hidg->out_ep, list->req);
+-		list_del(&list->list);
+-		kfree(list);
++	if (hidg->out_ep) {
++		usb_ep_disable(hidg->out_ep);
++
++		spin_lock_irqsave(&hidg->read_spinlock, flags);
++		list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
++			free_ep_req(hidg->out_ep, list->req);
++			list_del(&list->list);
++			kfree(list);
++		}
++		spin_unlock_irqrestore(&hidg->read_spinlock, flags);
+ 	}
+-	spin_unlock_irqrestore(&hidg->read_spinlock, flags);
+ 
+ 	spin_lock_irqsave(&hidg->write_spinlock, flags);
+ 	if (!hidg->write_pending) {
+@@ -675,8 +849,7 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 		}
+ 	}
+ 
+-
+-	if (hidg->out_ep != NULL) {
++	if (hidg->use_out_ep && hidg->out_ep != NULL) {
+ 		/* restart endpoint */
+ 		usb_ep_disable(hidg->out_ep);
+ 
+@@ -701,7 +874,7 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 					hidg_alloc_ep_req(hidg->out_ep,
+ 							  hidg->report_length);
+ 			if (req) {
+-				req->complete = hidg_set_report_complete;
++				req->complete = hidg_intout_complete;
+ 				req->context  = hidg;
+ 				status = usb_ep_queue(hidg->out_ep, req,
+ 						      GFP_ATOMIC);
+@@ -727,7 +900,8 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
+ 	}
+ 	return 0;
+ disable_out_ep:
+-	usb_ep_disable(hidg->out_ep);
++	if (hidg->out_ep)
++		usb_ep_disable(hidg->out_ep);
+ free_req_in:
+ 	if (req_in)
+ 		free_ep_req(hidg->in_ep, req_in);
+@@ -755,9 +929,8 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	struct usb_ep		*ep;
+ 	struct f_hidg		*hidg = func_to_hidg(f);
+ 	struct usb_string	*us;
+-	struct device		*device;
++	unsigned long		flags;
+ 	int			status;
+-	dev_t			dev;
+ 
+ 	/* maybe allocate device-global string IDs, and patch descriptors */
+ 	us = usb_gstrings_attach(c->cdev, ct_func_strings,
+@@ -779,15 +952,23 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 		goto fail;
+ 	hidg->in_ep = ep;
+ 
+-	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_out_ep_desc);
+-	if (!ep)
+-		goto fail;
+-	hidg->out_ep = ep;
++	hidg->out_ep = NULL;
++	if (hidg->use_out_ep) {
++		ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_out_ep_desc);
++		if (!ep)
++			goto fail;
++		hidg->out_ep = ep;
++	}
++
++	/* used only if use_out_ep == 1 */
++	hidg->set_report_buf = NULL;
+ 
+ 	/* set descriptor dynamic values */
+ 	hidg_interface_desc.bInterfaceSubClass = hidg->bInterfaceSubClass;
+ 	hidg_interface_desc.bInterfaceProtocol = hidg->bInterfaceProtocol;
++	hidg_interface_desc.bNumEndpoints = hidg->use_out_ep ? 2 : 1;
+ 	hidg->protocol = HID_REPORT_PROTOCOL;
++	hidg->idle = 1;
+ 	hidg_ss_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+ 	hidg_ss_in_comp_desc.wBytesPerInterval =
+ 				cpu_to_le16(hidg->report_length);
+@@ -802,8 +983,8 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	 * We can use hidg_desc struct here but we should not relay
+ 	 * that its content won't change after returning from this function.
+ 	 */
+-	hidg_desc.desc[0].bDescriptorType = HID_DT_REPORT;
+-	hidg_desc.desc[0].wDescriptorLength =
++	hidg_desc.rpt_desc.bDescriptorType = HID_DT_REPORT;
++	hidg_desc.rpt_desc.wDescriptorLength =
+ 		cpu_to_le16(hidg->report_desc_length);
+ 
+ 	hidg_hs_in_ep_desc.bEndpointAddress =
+@@ -816,36 +997,36 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	hidg_ss_out_ep_desc.bEndpointAddress =
+ 		hidg_fs_out_ep_desc.bEndpointAddress;
+ 
+-	status = usb_assign_descriptors(f, hidg_fs_descriptors,
+-			hidg_hs_descriptors, hidg_ss_descriptors, NULL);
++	if (hidg->use_out_ep)
++		status = usb_assign_descriptors(f,
++			hidg_fs_descriptors_intout,
++			hidg_hs_descriptors_intout,
++			hidg_ss_descriptors_intout,
++			hidg_ss_descriptors_intout);
++	else
++		status = usb_assign_descriptors(f,
++			hidg_fs_descriptors_ssreport,
++			hidg_hs_descriptors_ssreport,
++			hidg_ss_descriptors_ssreport,
++			hidg_ss_descriptors_ssreport);
++
+ 	if (status)
+ 		goto fail;
+ 
+-	spin_lock_init(&hidg->write_spinlock);
+ 	hidg->write_pending = 1;
+ 	hidg->req = NULL;
+-	spin_lock_init(&hidg->read_spinlock);
+-	init_waitqueue_head(&hidg->write_queue);
+-	init_waitqueue_head(&hidg->read_queue);
+-	INIT_LIST_HEAD(&hidg->completed_out_req);
+ 
+ 	/* create char device */
+ 	cdev_init(&hidg->cdev, &f_hidg_fops);
+-	dev = MKDEV(major, hidg->minor);
+-	status = cdev_add(&hidg->cdev, dev, 1);
++	status = cdev_device_add(&hidg->cdev, &hidg->dev);
+ 	if (status)
+ 		goto fail_free_descs;
+-
+-	device = device_create(hidg_class, NULL, dev, NULL,
+-			       "%s%d", "hidg", hidg->minor);
+-	if (IS_ERR(device)) {
+-		status = PTR_ERR(device);
+-		goto del;
+-	}
++	get_device(&c->cdev->gadget->dev);
++	spin_lock_irqsave(&hidg->write_spinlock, flags);
++	hidg->gadget = c->cdev->gadget;
++	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
+ 
+ 	return 0;
+-del:
+-	cdev_del(&hidg->cdev);
+ fail_free_descs:
+ 	usb_free_all_descriptors(f);
+ fail:
+@@ -932,6 +1113,7 @@ CONFIGFS_ATTR(f_hid_opts_, name)
+ 
+ F_HID_OPT(subclass, 8, 255);
+ F_HID_OPT(protocol, 8, 255);
++F_HID_OPT(no_out_endpoint, 8, 1);
+ F_HID_OPT(report_length, 16, 65535);
+ F_HID_OPT(wakeup_on_write, 8, 1);
+ 
+@@ -993,6 +1175,7 @@ static struct configfs_attribute *hid_attrs[] = {
+ 	&f_hid_opts_attr_subclass,
+ 	&f_hid_opts_attr_protocol,
+ 	&f_hid_opts_attr_wakeup_on_write,
++	&f_hid_opts_attr_no_out_endpoint,
+ 	&f_hid_opts_attr_report_length,
+ 	&f_hid_opts_attr_report_desc,
+ 	&f_hid_opts_attr_dev,
+@@ -1076,8 +1259,7 @@ static void hidg_free(struct usb_function *f)
+ 
+ 	hidg = func_to_hidg(f);
+ 	opts = container_of(f->fi, struct f_hid_opts, func_inst);
+-	kfree(hidg->report_desc);
+-	kfree(hidg);
++	put_device(&hidg->dev);
+ 	mutex_lock(&opts->lock);
+ 	--opts->refcnt;
+ 	mutex_unlock(&opts->lock);
+@@ -1086,9 +1268,16 @@ static void hidg_free(struct usb_function *f)
+ static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct f_hidg *hidg = func_to_hidg(f);
++	struct usb_gadget *gadget;
++	unsigned long flags;
+ 
+-	device_destroy(hidg_class, MKDEV(major, hidg->minor));
+-	cdev_del(&hidg->cdev);
++	cdev_device_del(&hidg->cdev, &hidg->dev);
++	spin_lock_irqsave(&hidg->write_spinlock, flags);
++	gadget = hidg->gadget;
++	hidg->gadget = NULL;
++	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
++	if (gadget)
++		put_device(&gadget->dev);
+ 
+ 	usb_free_all_descriptors(f);
+ }
+@@ -1097,6 +1286,7 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ {
+ 	struct f_hidg *hidg;
+ 	struct f_hid_opts *opts;
++	int ret;
+ 
+ 	/* allocate and initialize one new instance */
+ 	hidg = kzalloc(sizeof(*hidg), GFP_KERNEL);
+@@ -1106,9 +1296,21 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ 	opts = container_of(fi, struct f_hid_opts, func_inst);
+ 
+ 	mutex_lock(&opts->lock);
+-	++opts->refcnt;
+ 
+-	hidg->minor = opts->minor;
++	spin_lock_init(&hidg->write_spinlock);
++	spin_lock_init(&hidg->read_spinlock);
++	init_waitqueue_head(&hidg->write_queue);
++	init_waitqueue_head(&hidg->read_queue);
++	INIT_LIST_HEAD(&hidg->completed_out_req);
++
++	device_initialize(&hidg->dev);
++	hidg->dev.release = hidg_release;
++	hidg->dev.class = hidg_class;
++	hidg->dev.devt = MKDEV(major, opts->minor);
++	ret = dev_set_name(&hidg->dev, "hidg%d", opts->minor);
++	if (ret)
++		goto err_put_device;
++
+ 	hidg->bInterfaceSubClass = opts->subclass;
+ 	hidg->bInterfaceProtocol = opts->protocol;
+ 	hidg->report_length = opts->report_length;
+@@ -1118,13 +1320,14 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ 					    opts->report_desc_length,
+ 					    GFP_KERNEL);
+ 		if (!hidg->report_desc) {
+-			kfree(hidg);
+-			mutex_unlock(&opts->lock);
+-			return ERR_PTR(-ENOMEM);
++			ret = -ENOMEM;
++			goto err_put_device;
+ 		}
+ 	}
+ 	hidg->wakeup_on_write = opts->wakeup_on_write;
++	hidg->use_out_ep = !opts->no_out_endpoint;
+ 
++	++opts->refcnt;
+ 	mutex_unlock(&opts->lock);
+ 
+ 	hidg->func.name    = "hid";
+@@ -1139,6 +1342,11 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ 	hidg->qlen	   = 4;
+ 
+ 	return &hidg->func;
++
++err_put_device:
++	put_device(&hidg->dev);
++	mutex_unlock(&opts->lock);
++	return ERR_PTR(ret);
+ }
+ 
+ DECLARE_USB_FUNCTION_INIT(hid, hidg_alloc_inst, hidg_alloc);
+diff --git a/drivers/usb/gadget/function/u_hid.h b/drivers/usb/gadget/function/u_hid.h
+index a3e2f6053d..67d480fd36 100644
+--- a/drivers/usb/gadget/function/u_hid.h
++++ b/drivers/usb/gadget/function/u_hid.h
+@@ -21,6 +21,7 @@ struct f_hid_opts {
+ 	unsigned char			subclass;
+ 	unsigned char			protocol;
+ 	unsigned char			wakeup_on_write;
++	unsigned char			no_out_endpoint;
+ 	unsigned short			report_length;
+ 	unsigned short			report_desc_length;
+ 	unsigned char			*report_desc;
+diff --git a/drivers/usb/gadget/udc/core.c b/drivers/usb/gadget/udc/core.c
+index 44bef2486c..ccaafcc5f3 100644
+--- a/drivers/usb/gadget/udc/core.c
++++ b/drivers/usb/gadget/udc/core.c
+@@ -106,12 +106,10 @@ int usb_ep_enable(struct usb_ep *ep)
+ 		goto out;
+ 
+ 	/* UDC drivers can't handle endpoints with maxpacket size 0 */
+-	if (usb_endpoint_maxp(ep->desc) == 0) {
+-		/*
+-		 * We should log an error message here, but we can't call
+-		 * dev_err() because there's no way to find the gadget
+-		 * given only ep.
+-		 */
++	if (!ep->desc || usb_endpoint_maxp(ep->desc) == 0) {
++		WARN_ONCE(1, "%s: ep%d (%s) has %s\n", __func__, ep->address, ep->name,
++			  (!ep->desc) ? "NULL descriptor" : "maxpacket 0");
++
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+@@ -280,7 +278,9 @@ int usb_ep_queue(struct usb_ep *ep,
+ {
+ 	int ret = 0;
+ 
+-	if (WARN_ON_ONCE(!ep->enabled && ep->address)) {
++	if (!ep->enabled && ep->address) {
++		pr_debug("USB gadget: queue request to disabled ep 0x%x (%s)\n",
++				 ep->address, ep->name);
+ 		ret = -ESHUTDOWN;
+ 		goto out;
+ 	}
+@@ -1013,6 +1013,25 @@ int usb_gadget_ep_match_desc(struct usb_gadget *gadget,
+ }
+ EXPORT_SYMBOL_GPL(usb_gadget_ep_match_desc);
+ 
++/**
++ * usb_gadget_check_config - checks if the UDC can support the binded
++ *	configuration
++ * @gadget: controller to check the USB configuration
++ *
++ * Ensure that a UDC is able to support the requested resources by a
++ * configuration, and that there are no resource limitations, such as
++ * internal memory allocated to all requested endpoints.
++ *
++ * Returns zero on success, else a negative errno.
++ */
++int usb_gadget_check_config(struct usb_gadget *gadget)
++{
++	if (gadget->ops->check_config)
++		return gadget->ops->check_config(gadget);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(usb_gadget_check_config);
++
+ /* ------------------------------------------------------------------------- */
+ 
+ static void usb_gadget_state_work(struct work_struct *work)
+@@ -1027,8 +1046,13 @@ static void usb_gadget_state_work(struct work_struct *work)
+ void usb_gadget_set_state(struct usb_gadget *gadget,
+ 		enum usb_device_state state)
+ {
++	unsigned long flags;
++
++	spin_lock_irqsave(&gadget->state_lock, flags);
+ 	gadget->state = state;
+-	schedule_work(&gadget->work);
++	if (!gadget->teardown)
++		schedule_work(&gadget->work);
++	spin_unlock_irqrestore(&gadget->state_lock, flags);
+ }
+ EXPORT_SYMBOL_GPL(usb_gadget_set_state);
+ 
+@@ -1261,6 +1285,8 @@ void usb_initialize_gadget(struct device *parent, struct usb_gadget *gadget,
+ 		void (*release)(struct device *dev))
+ {
+ 	dev_set_name(&gadget->dev, "gadget");
++	spin_lock_init(&gadget->state_lock);
++	gadget->teardown = false;
+ 	INIT_WORK(&gadget->work, usb_gadget_state_work);
+ 	gadget->dev.parent = parent;
+ 
+@@ -1415,8 +1441,6 @@ static void usb_gadget_remove_driver(struct usb_udc *udc)
+ 	dev_dbg(&udc->dev, "unregistering UDC driver [%s]\n",
+ 			udc->driver->function);
+ 
+-	kobject_uevent(&udc->dev.kobj, KOBJ_CHANGE);
+-
+ #if !defined(CONFIG_CVITEK_USB_LEGACY)
+ 	usb_gadget_disconnect(udc->gadget);
+ 	if (udc->gadget->irq)
+@@ -1439,8 +1463,9 @@ static void usb_gadget_remove_driver(struct usb_udc *udc)
+ #endif
+ 
+ 	udc->driver = NULL;
+-	udc->dev.driver = NULL;
+ 	udc->gadget->dev.driver = NULL;
++
++	kobject_uevent(&udc->dev.kobj, KOBJ_CHANGE);
+ }
+ 
+ /**
+@@ -1454,6 +1479,7 @@ static void usb_gadget_remove_driver(struct usb_udc *udc)
+ void usb_del_gadget(struct usb_gadget *gadget)
+ {
+ 	struct usb_udc *udc = gadget->udc;
++	unsigned long flags;
+ 
+ 	if (!udc)
+ 		return;
+@@ -1472,6 +1498,13 @@ void usb_del_gadget(struct usb_gadget *gadget)
+ 	mutex_unlock(&udc_lock);
+ 
+ 	kobject_uevent(&udc->dev.kobj, KOBJ_REMOVE);
++	/*
++	 * Set the teardown flag before flushing the work to prevent new work
++	 * from being scheduled while we are cleaning up.
++	 */
++	spin_lock_irqsave(&gadget->state_lock, flags);
++	gadget->teardown = true;
++	spin_unlock_irqrestore(&gadget->state_lock, flags);
+ 	flush_work(&gadget->work);
+ 	device_unregister(&udc->dev);
+ 	device_del(&gadget->dev);
+@@ -1508,7 +1541,6 @@ static int udc_bind_to_driver(struct usb_udc *udc, struct usb_gadget_driver *dri
+ 			driver->function);
+ 
+ 	udc->driver = driver;
+-	udc->dev.driver = &driver->driver;
+ 	udc->gadget->dev.driver = &driver->driver;
+ 
+ 	usb_gadget_udc_set_speed(udc, driver->max_speed);
+@@ -1545,7 +1577,6 @@ static int udc_bind_to_driver(struct usb_udc *udc, struct usb_gadget_driver *dri
+ 		dev_err(&udc->dev, "failed to start %s: %d\n",
+ 			udc->driver->function, ret);
+ 	udc->driver = NULL;
+-	udc->dev.driver = NULL;
+ 	udc->gadget->dev.driver = NULL;
+ 	return ret;
+ }
+@@ -1650,10 +1681,13 @@ static ssize_t soft_connect_store(struct device *dev,
+ 		struct device_attribute *attr, const char *buf, size_t n)
+ {
+ 	struct usb_udc		*udc = container_of(dev, struct usb_udc, dev);
++	ssize_t			ret;
+ 
++	mutex_lock(&udc_lock);
+ 	if (!udc->driver) {
+ 		dev_err(dev, "soft-connect without a gadget driver\n");
+-		return -EOPNOTSUPP;
++		ret = -EOPNOTSUPP;
++		goto out;
+ 	}
+ 
+ #if defined(CONFIG_CVITEK_USB_LEGACY)
+@@ -1671,10 +1705,14 @@ static ssize_t soft_connect_store(struct device *dev,
+ 		usb_gadget_udc_stop(udc);
+ 	} else {
+ 		dev_err(dev, "unsupported command '%s'\n", buf);
+-		return -EINVAL;
++		ret = -EINVAL;
++		goto out;
+ 	}
+ 
+-	return n;
++	ret = n;
++out:
++	mutex_unlock(&udc_lock);
++	return ret;
+ }
+ static DEVICE_ATTR_WO(soft_connect);
+ 
+diff --git a/drivers/usb/host/xhci.c b/drivers/usb/host/xhci.c
+index 5bf2d4b807..f848ec6ebd 100644
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include <linux/pci.h>
++#include <linux/iommu.h>
+ #include <linux/iopoll.h>
+ #include <linux/irq.h>
+ #include <linux/log2.h>
+@@ -66,7 +67,7 @@ static bool td_on_ring(struct xhci_td *td, struct xhci_ring *ring)
+  * handshake done).  There are two failure modes:  "usec" have passed (major
+  * hardware flakeout), or the register reads as all-ones (hardware removed).
+  */
+-int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec)
++int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, u64 timeout_us)
+ {
+ 	u32	result;
+ 	int	ret;
+@@ -74,7 +75,7 @@ int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec)
+ 	ret = readl_poll_timeout_atomic(ptr, result,
+ 					(result & mask) == done ||
+ 					result == U32_MAX,
+-					1, usec);
++					1, timeout_us);
+ 	if (result == U32_MAX)		/* card removed */
+ 		return -ENODEV;
+ 
+@@ -117,7 +118,8 @@ int xhci_halt(struct xhci_hcd *xhci)
+ 	ret = xhci_handshake(&xhci->op_regs->status,
+ 			STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
+ 	if (ret) {
+-		xhci_warn(xhci, "Host halt failed, %d\n", ret);
++		if (!(xhci->xhc_state & XHCI_STATE_DYING))
++			xhci_warn(xhci, "Host halt failed, %d\n", ret);
+ 		return ret;
+ 	}
+ 	xhci->xhc_state |= XHCI_STATE_HALTED;
+@@ -149,9 +151,11 @@ int xhci_start(struct xhci_hcd *xhci)
+ 		xhci_err(xhci, "Host took too long to start, "
+ 				"waited %u microseconds.\n",
+ 				XHCI_MAX_HALT_USEC);
+-	if (!ret)
++	if (!ret) {
+ 		/* clear state flags. Including dying, halted or removing */
+ 		xhci->xhc_state = 0;
++		xhci->run_graceperiod = jiffies + msecs_to_jiffies(500);
++	}
+ 
+ 	return ret;
+ }
+@@ -163,7 +167,7 @@ int xhci_start(struct xhci_hcd *xhci)
+  * Transactions will be terminated immediately, and operational registers
+  * will be set to their defaults.
+  */
+-int xhci_reset(struct xhci_hcd *xhci)
++int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us)
+ {
+ 	u32 command;
+ 	u32 state;
+@@ -172,7 +176,8 @@ int xhci_reset(struct xhci_hcd *xhci)
+ 	state = readl(&xhci->op_regs->status);
+ 
+ 	if (state == ~(u32)0) {
+-		xhci_warn(xhci, "Host not accessible, reset failed.\n");
++		if (!(xhci->xhc_state & XHCI_STATE_DYING))
++			xhci_warn(xhci, "Host not accessible, reset failed.\n");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -196,8 +201,7 @@ int xhci_reset(struct xhci_hcd *xhci)
+ 	if (xhci->quirks & XHCI_INTEL_HOST)
+ 		udelay(1000);
+ 
+-	ret = xhci_handshake(&xhci->op_regs->command,
+-			CMD_RESET, 0, 10 * 1000 * 1000);
++	ret = xhci_handshake(&xhci->op_regs->command, CMD_RESET, 0, timeout_us);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -210,8 +214,7 @@ int xhci_reset(struct xhci_hcd *xhci)
+ 	 * xHCI cannot write to any doorbells or operational registers other
+ 	 * than status until the "Controller Not Ready" flag is cleared.
+ 	 */
+-	ret = xhci_handshake(&xhci->op_regs->status,
+-			STS_CNR, 0, 10 * 1000 * 1000);
++	ret = xhci_handshake(&xhci->op_regs->status, STS_CNR, 0, timeout_us);
+ 
+ 	xhci->usb2_rhub.bus_state.port_c_suspend = 0;
+ 	xhci->usb2_rhub.bus_state.suspended_ports = 0;
+@@ -226,8 +229,10 @@ int xhci_reset(struct xhci_hcd *xhci)
+ static void xhci_zero_64b_regs(struct xhci_hcd *xhci)
+ {
+ 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
++	struct iommu_domain *domain;
+ 	int err, i;
+ 	u64 val;
++	u32 intrs;
+ 
+ 	/*
+ 	 * Some Renesas controllers get into a weird state if they are
+@@ -243,7 +248,9 @@ static void xhci_zero_64b_regs(struct xhci_hcd *xhci)
+ 	 * an iommu. Doing anything when there is no iommu is definitely
+ 	 * unsafe...
+ 	 */
+-	if (!(xhci->quirks & XHCI_ZERO_64B_REGS) || !device_iommu_mapped(dev))
++	domain = iommu_get_domain_for_dev(dev);
++	if (!(xhci->quirks & XHCI_ZERO_64B_REGS) || !domain ||
++	    domain->type == IOMMU_DOMAIN_IDENTITY)
+ 		return;
+ 
+ 	xhci_info(xhci, "Zeroing 64bit base registers, expecting fault\n");
+@@ -266,7 +273,10 @@ static void xhci_zero_64b_regs(struct xhci_hcd *xhci)
+ 	if (upper_32_bits(val))
+ 		xhci_write_64(xhci, 0, &xhci->op_regs->cmd_ring);
+ 
+-	for (i = 0; i < HCS_MAX_INTRS(xhci->hcs_params1); i++) {
++	intrs = min_t(u32, HCS_MAX_INTRS(xhci->hcs_params1),
++		      ARRAY_SIZE(xhci->run_regs->ir_set));
++
++	for (i = 0; i < intrs; i++) {
+ 		struct xhci_intr_reg __iomem *ir;
+ 
+ 		ir = &xhci->run_regs->ir_set[i];
+@@ -692,6 +702,8 @@ int xhci_run(struct usb_hcd *hcd)
+ 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
+ 			"Finished xhci_run for USB2 roothub");
+ 
++	set_bit(HCD_FLAG_DEFER_RH_REGISTER, &hcd->flags);
++
+ 	xhci_dbc_init(xhci);
+ 
+ 	xhci_debugfs_init(xhci);
+@@ -728,7 +740,7 @@ static void xhci_stop(struct usb_hcd *hcd)
+ 	xhci->xhc_state |= XHCI_STATE_HALTED;
+ 	xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
+ 	xhci_halt(xhci);
+-	xhci_reset(xhci);
++	xhci_reset(xhci, XHCI_RESET_SHORT_USEC);
+ 	spin_unlock_irq(&xhci->lock);
+ 
+ 	xhci_cleanup_msix(xhci);
+@@ -777,11 +789,28 @@ void xhci_shutdown(struct usb_hcd *hcd)
+ 	if (xhci->quirks & XHCI_SPURIOUS_REBOOT)
+ 		usb_disable_xhci_ports(to_pci_dev(hcd->self.sysdev));
+ 
++	/* Don't poll the roothubs after shutdown. */
++	xhci_dbg(xhci, "%s: stopping usb%d port polling.\n",
++			__func__, hcd->self.busnum);
++	clear_bit(HCD_FLAG_POLL_RH, &hcd->flags);
++	del_timer_sync(&hcd->rh_timer);
++
++	if (xhci->shared_hcd) {
++		clear_bit(HCD_FLAG_POLL_RH, &xhci->shared_hcd->flags);
++		del_timer_sync(&xhci->shared_hcd->rh_timer);
++	}
++
+ 	spin_lock_irq(&xhci->lock);
+ 	xhci_halt(xhci);
+-	/* Workaround for spurious wakeups at shutdown with HSW */
+-	if (xhci->quirks & XHCI_SPURIOUS_WAKEUP)
+-		xhci_reset(xhci);
++
++	/*
++	 * Workaround for spurious wakeps at shutdown with HSW, and for boot
++	 * firmware delay in ADL-P PCH if port are left in U3 at shutdown
++	 */
++	if (xhci->quirks & XHCI_SPURIOUS_WAKEUP ||
++	    xhci->quirks & XHCI_RESET_TO_DEFAULT)
++		xhci_reset(xhci, XHCI_RESET_SHORT_USEC);
++
+ 	spin_unlock_irq(&xhci->lock);
+ 
+ 	xhci_cleanup_msix(xhci);
+@@ -883,44 +912,42 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
+ 	xhci_set_cmd_ring_deq(xhci);
+ }
+ 
+-static void xhci_disable_port_wake_on_bits(struct xhci_hcd *xhci)
++/*
++ * Disable port wake bits if do_wakeup is not set.
++ *
++ * Also clear a possible internal port wake state left hanging for ports that
++ * detected termination but never successfully enumerated (trained to 0U).
++ * Internal wake causes immediate xHCI wake after suspend. PORT_CSC write done
++ * at enumeration clears this wake, force one here as well for unconnected ports
++ */
++
++static void xhci_disable_hub_port_wake(struct xhci_hcd *xhci,
++				       struct xhci_hub *rhub,
++				       bool do_wakeup)
+ {
+-	struct xhci_port **ports;
+-	int port_index;
+ 	unsigned long flags;
+ 	u32 t1, t2, portsc;
++	int i;
+ 
+ 	spin_lock_irqsave(&xhci->lock, flags);
+ 
+-	/* disable usb3 ports Wake bits */
+-	port_index = xhci->usb3_rhub.num_ports;
+-	ports = xhci->usb3_rhub.ports;
+-	while (port_index--) {
+-		t1 = readl(ports[port_index]->addr);
+-		portsc = t1;
+-		t1 = xhci_port_state_to_neutral(t1);
+-		t2 = t1 & ~PORT_WAKE_BITS;
+-		if (t1 != t2) {
+-			writel(t2, ports[port_index]->addr);
+-			xhci_dbg(xhci, "disable wake bits port %d-%d, portsc: 0x%x, write: 0x%x\n",
+-				 xhci->usb3_rhub.hcd->self.busnum,
+-				 port_index + 1, portsc, t2);
+-		}
+-	}
++	for (i = 0; i < rhub->num_ports; i++) {
++		portsc = readl(rhub->ports[i]->addr);
++		t1 = xhci_port_state_to_neutral(portsc);
++		t2 = t1;
++
++		/* clear wake bits if do_wake is not set */
++		if (!do_wakeup)
++			t2 &= ~PORT_WAKE_BITS;
++
++		/* Don't touch csc bit if connected or connect change is set */
++		if (!(portsc & (PORT_CSC | PORT_CONNECT)))
++			t2 |= PORT_CSC;
+ 
+-	/* disable usb2 ports Wake bits */
+-	port_index = xhci->usb2_rhub.num_ports;
+-	ports = xhci->usb2_rhub.ports;
+-	while (port_index--) {
+-		t1 = readl(ports[port_index]->addr);
+-		portsc = t1;
+-		t1 = xhci_port_state_to_neutral(t1);
+-		t2 = t1 & ~PORT_WAKE_BITS;
+ 		if (t1 != t2) {
+-			writel(t2, ports[port_index]->addr);
+-			xhci_dbg(xhci, "disable wake bits port %d-%d, portsc: 0x%x, write: 0x%x\n",
+-				 xhci->usb2_rhub.hcd->self.busnum,
+-				 port_index + 1, portsc, t2);
++			writel(t2, rhub->ports[i]->addr);
++			xhci_dbg(xhci, "config port %d-%d wake bits, portsc: 0x%x, write: 0x%x\n",
++				 rhub->hcd->self.busnum, i + 1, portsc, t2);
+ 		}
+ 	}
+ 	spin_unlock_irqrestore(&xhci->lock, flags);
+@@ -983,8 +1010,8 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
+ 		return -EINVAL;
+ 
+ 	/* Clear root port wake on bits if wakeup not allowed. */
+-	if (!do_wakeup)
+-		xhci_disable_port_wake_on_bits(xhci);
++	xhci_disable_hub_port_wake(xhci, &xhci->usb3_rhub, do_wakeup);
++	xhci_disable_hub_port_wake(xhci, &xhci->usb2_rhub, do_wakeup);
+ 
+ 	if (!HCD_HW_ACCESSIBLE(hcd))
+ 		return 0;
+@@ -1088,6 +1115,8 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
+ 	struct usb_hcd		*secondary_hcd;
+ 	int			retval = 0;
+ 	bool			comp_timer_running = false;
++	bool			pending_portevent = false;
++	bool			reinit_xhc = false;
+ 
+ 	if (!hcd->state)
+ 		return 0;
+@@ -1104,10 +1133,11 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
+ 	set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
+ 
+ 	spin_lock_irq(&xhci->lock);
+-	if ((xhci->quirks & XHCI_RESET_ON_RESUME) || xhci->broken_suspend)
+-		hibernated = true;
+ 
+-	if (!hibernated) {
++	if (hibernated || xhci->quirks & XHCI_RESET_ON_RESUME || xhci->broken_suspend)
++		reinit_xhc = true;
++
++	if (!reinit_xhc) {
+ 		/*
+ 		 * Some controllers might lose power during suspend, so wait
+ 		 * for controller not ready bit to clear, just as in xHC init.
+@@ -1140,12 +1170,18 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
+ 			spin_unlock_irq(&xhci->lock);
+ 			return -ETIMEDOUT;
+ 		}
+-		temp = readl(&xhci->op_regs->status);
+ 	}
+ 
+-	/* If restore operation fails, re-initialize the HC during resume */
+-	if ((temp & STS_SRE) || hibernated) {
++	temp = readl(&xhci->op_regs->status);
++
++	/* re-initialize the HC on Restore Error, or Host Controller Error */
++	if (temp & (STS_SRE | STS_HCE)) {
++		reinit_xhc = true;
++		if (!xhci->broken_suspend)
++			xhci_warn(xhci, "xHC error in resume, USBSTS 0x%x, Reinit\n", temp);
++	}
+ 
++	if (reinit_xhc) {
+ 		if ((xhci->quirks & XHCI_COMP_MODE_QUIRK) &&
+ 				!(xhci_all_ports_seen_u0(xhci))) {
+ 			del_timer_sync(&xhci->comp_mode_recovery_timer);
+@@ -1160,7 +1196,7 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
+ 		xhci_dbg(xhci, "Stop HCD\n");
+ 		xhci_halt(xhci);
+ 		xhci_zero_64b_regs(xhci);
+-		retval = xhci_reset(xhci);
++		retval = xhci_reset(xhci, XHCI_RESET_LONG_USEC);
+ 		spin_unlock_irq(&xhci->lock);
+ 		if (retval)
+ 			return retval;
+@@ -1226,13 +1262,22 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
+ 
+  done:
+ 	if (retval == 0) {
+-		/* Resume root hubs only when have pending events. */
+-		if (xhci_pending_portevent(xhci)) {
++		/*
++		 * Resume roothubs only if there are pending events.
++		 * USB 3 devices resend U3 LFPS wake after a 100ms delay if
++		 * the first wake signalling failed, give it that chance.
++		 */
++		pending_portevent = xhci_pending_portevent(xhci);
++		if (!pending_portevent) {
++			msleep(120);
++			pending_portevent = xhci_pending_portevent(xhci);
++		}
++
++		if (pending_portevent) {
+ 			usb_hcd_resume_root_hub(xhci->shared_hcd);
+ 			usb_hcd_resume_root_hub(hcd);
+ 		}
+ 	}
+-
+ 	/*
+ 	 * If system is subject to the Quirk, Compliance Mode Timer needs to
+ 	 * be re-initialized Always after a system resume. Ports are subject
+@@ -1385,7 +1430,7 @@ static int xhci_configure_endpoint(struct xhci_hcd *xhci,
+  * we need to issue an evaluate context command and wait on it.
+  */
+ static int xhci_check_maxpacket(struct xhci_hcd *xhci, unsigned int slot_id,
+-		unsigned int ep_index, struct urb *urb)
++		unsigned int ep_index, struct urb *urb, gfp_t mem_flags)
+ {
+ 	struct xhci_container_ctx *out_ctx;
+ 	struct xhci_input_control_ctx *ctrl_ctx;
+@@ -1416,7 +1461,7 @@ static int xhci_check_maxpacket(struct xhci_hcd *xhci, unsigned int slot_id,
+ 		 * changes max packet sizes.
+ 		 */
+ 
+-		command = xhci_alloc_command(xhci, true, GFP_KERNEL);
++		command = xhci_alloc_command(xhci, true, mem_flags);
+ 		if (!command)
+ 			return -ENOMEM;
+ 
+@@ -1468,9 +1513,12 @@ static int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
+ 	struct urb_priv	*urb_priv;
+ 	int num_tds;
+ 
+-	if (!urb || xhci_check_args(hcd, urb->dev, urb->ep,
+-					true, true, __func__) <= 0)
++	if (!urb)
+ 		return -EINVAL;
++	ret = xhci_check_args(hcd, urb->dev, urb->ep,
++					true, true, __func__);
++	if (ret <= 0)
++		return ret ? ret : -EINVAL;
+ 
+ 	slot_id = urb->dev->slot_id;
+ 	ep_index = xhci_get_endpoint_index(&urb->ep->desc);
+@@ -1512,7 +1560,7 @@ static int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
+ 		 */
+ 		if (urb->dev->speed == USB_SPEED_FULL) {
+ 			ret = xhci_check_maxpacket(xhci, slot_id,
+-					ep_index, urb);
++					ep_index, urb, mem_flags);
+ 			if (ret < 0) {
+ 				xhci_urb_free_priv(urb_priv);
+ 				urb->hcpriv = NULL;
+@@ -2780,7 +2828,7 @@ static int xhci_configure_endpoint(struct xhci_hcd *xhci,
+ 				xhci->num_active_eps);
+ 		return -ENOMEM;
+ 	}
+-	if ((xhci->quirks & XHCI_SW_BW_CHECKING) &&
++	if ((xhci->quirks & XHCI_SW_BW_CHECKING) && !ctx_change &&
+ 	    xhci_reserve_bandwidth(xhci, virt_dev, command->in_ctx)) {
+ 		if ((xhci->quirks & XHCI_EP_LIMIT_QUIRK))
+ 			xhci_free_host_resources(xhci, ctrl_ctx);
+@@ -2861,7 +2909,7 @@ static void xhci_check_bw_drop_ep_streams(struct xhci_hcd *xhci,
+  * else should be touching the xhci->devs[slot_id] structure, so we
+  * don't need to take the xhci->lock for manipulating that.
+  */
+-static int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
++int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
+ {
+ 	int i;
+ 	int ret = 0;
+@@ -2959,7 +3007,7 @@ static int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
+ 	return ret;
+ }
+ 
+-static void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
++void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
+ {
+ 	struct xhci_hcd *xhci;
+ 	struct xhci_virt_device	*virt_dev;
+@@ -3111,7 +3159,6 @@ static void xhci_endpoint_disable(struct usb_hcd *hcd,
+ 		xhci_dbg(xhci, "endpoint disable with ep_state 0x%x\n",
+ 			 ep->ep_state);
+ done:
+-	host_ep->hcpriv = NULL;
+ 	spin_unlock_irqrestore(&xhci->lock, flags);
+ }
+ 
+@@ -3160,10 +3207,13 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
+ 		return;
+ 
+ 	/* Bail out if toggle is already being cleared by a endpoint reset */
++	spin_lock_irqsave(&xhci->lock, flags);
+ 	if (ep->ep_state & EP_HARD_CLEAR_TOGGLE) {
+ 		ep->ep_state &= ~EP_HARD_CLEAR_TOGGLE;
++		spin_unlock_irqrestore(&xhci->lock, flags);
+ 		return;
+ 	}
++	spin_unlock_irqrestore(&xhci->lock, flags);
+ 	/* Only interrupt and bulk ep's use data toggle, USB2 spec 5.5.4-> */
+ 	if (usb_endpoint_xfer_control(&host_ep->desc) ||
+ 	    usb_endpoint_xfer_isoc(&host_ep->desc))
+@@ -3219,6 +3269,14 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
+ 
+ 	/* config ep command clears toggle if add and drop ep flags are set */
+ 	ctrl_ctx = xhci_get_input_control_ctx(cfg_cmd->in_ctx);
++	if (!ctrl_ctx) {
++		spin_unlock_irqrestore(&xhci->lock, flags);
++		xhci_free_command(xhci, cfg_cmd);
++		xhci_warn(xhci, "%s: Could not get input context, bad type.\n",
++				__func__);
++		goto cleanup;
++	}
++
+ 	xhci_setup_input_ctx_for_config_ep(xhci, cfg_cmd->in_ctx, vdev->out_ctx,
+ 					   ctrl_ctx, ep_flag, ep_flag);
+ 	xhci_endpoint_copy(xhci, cfg_cmd->in_ctx, vdev->out_ctx, ep_index);
+@@ -3241,8 +3299,10 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
+ 	xhci_free_command(xhci, cfg_cmd);
+ cleanup:
+ 	xhci_free_command(xhci, stop_cmd);
++	spin_lock_irqsave(&xhci->lock, flags);
+ 	if (ep->ep_state & EP_SOFT_CLEAR_TOGGLE)
+ 		ep->ep_state &= ~EP_SOFT_CLEAR_TOGGLE;
++	spin_unlock_irqrestore(&xhci->lock, flags);
+ }
+ 
+ static int xhci_check_streams_endpoint(struct xhci_hcd *xhci,
+@@ -3257,7 +3317,7 @@ static int xhci_check_streams_endpoint(struct xhci_hcd *xhci,
+ 		return -EINVAL;
+ 	ret = xhci_check_args(xhci_to_hcd(xhci), udev, ep, 1, true, __func__);
+ 	if (ret <= 0)
+-		return -EINVAL;
++		return ret ? ret : -EINVAL;
+ 	if (usb_ss_max_streams(&ep->ss_ep_comp) == 0) {
+ 		xhci_warn(xhci, "WARN: SuperSpeed Endpoint Companion"
+ 				" descriptor for ep 0x%x does not support streams\n",
+@@ -3576,6 +3636,7 @@ static int xhci_free_streams(struct usb_hcd *hcd, struct usb_device *udev,
+ 	struct xhci_virt_device *vdev;
+ 	struct xhci_command *command;
+ 	struct xhci_input_control_ctx *ctrl_ctx;
++	struct xhci_stream_info *stream_info[EP_CTX_PER_DEV];
+ 	unsigned int ep_index;
+ 	unsigned long flags;
+ 	u32 changed_ep_bitmask;
+@@ -3636,10 +3697,15 @@ static int xhci_free_streams(struct usb_hcd *hcd, struct usb_device *udev,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	/*
++	 * dma_free_coherent() called by xhci_free_stream_info() may sleep,
++	 * so save stream_info pointers and clear references under lock,
++	 * then free the memory outside lock.
++	 */
+ 	spin_lock_irqsave(&xhci->lock, flags);
+ 	for (i = 0; i < num_eps; i++) {
+ 		ep_index = xhci_get_endpoint_index(&eps[i]->desc);
+-		xhci_free_stream_info(xhci, vdev->eps[ep_index].stream_info);
++		stream_info[i] = vdev->eps[ep_index].stream_info;
+ 		vdev->eps[ep_index].stream_info = NULL;
+ 		/* FIXME Unset maxPstreams in endpoint context and
+ 		 * update deq ptr to point to normal string ring.
+@@ -3649,6 +3715,9 @@ static int xhci_free_streams(struct usb_hcd *hcd, struct usb_device *udev,
+ 	}
+ 	spin_unlock_irqrestore(&xhci->lock, flags);
+ 
++	for (i = 0; i < num_eps; i++)
++		xhci_free_stream_info(xhci, stream_info[i]);
++
+ 	return 0;
+ }
+ 
+@@ -3866,9 +3935,9 @@ static void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
+ 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+ 	struct xhci_virt_device *virt_dev;
+ 	struct xhci_slot_ctx *slot_ctx;
++	unsigned long flags;
+ 	int i, ret;
+ 
+-#ifndef CONFIG_USB_DEFAULT_PERSIST
+ 	/*
+ 	 * We called pm_runtime_get_noresume when the device was attached.
+ 	 * Decrement the counter here to allow controller to runtime suspend
+@@ -3876,7 +3945,6 @@ static void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
+ 	 */
+ 	if (xhci->quirks & XHCI_RESET_ON_RESUME)
+ 		pm_runtime_put_noidle(hcd->self.controller);
+-#endif
+ 
+ 	ret = xhci_check_args(hcd, udev, NULL, 0, true, __func__);
+ 	/* If the host is halted due to driver unload, we still need to free the
+@@ -3895,9 +3963,12 @@ static void xhci_free_dev(struct usb_hcd *hcd, struct usb_device *udev)
+ 		del_timer_sync(&virt_dev->eps[i].stop_cmd_timer);
+ 	}
+ 	virt_dev->udev = NULL;
+-	ret = xhci_disable_slot(xhci, udev->slot_id);
+-	if (ret)
+-		xhci_free_virt_device(xhci, udev->slot_id);
++	xhci_disable_slot(xhci, udev->slot_id);
++
++	spin_lock_irqsave(&xhci->lock, flags);
++	xhci_free_virt_device(xhci, virt_dev, udev->slot_id);
++	spin_unlock_irqrestore(&xhci->lock, flags);
++
+ }
+ 
+ int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id)
+@@ -3907,7 +3978,7 @@ int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id)
+ 	u32 state;
+ 	int ret = 0;
+ 
+-	command = xhci_alloc_command(xhci, false, GFP_KERNEL);
++	command = xhci_alloc_command(xhci, true, GFP_KERNEL);
+ 	if (!command)
+ 		return -ENOMEM;
+ 
+@@ -3919,7 +3990,7 @@ int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id)
+ 	if (state == 0xffffffff || (xhci->xhc_state & XHCI_STATE_DYING) ||
+ 			(xhci->xhc_state & XHCI_STATE_HALTED)) {
+ 		spin_unlock_irqrestore(&xhci->lock, flags);
+-		kfree(command);
++		xhci_free_command(xhci, command);
+ 		return -ENODEV;
+ 	}
+ 
+@@ -3927,11 +3998,30 @@ int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id)
+ 				slot_id);
+ 	if (ret) {
+ 		spin_unlock_irqrestore(&xhci->lock, flags);
+-		kfree(command);
++		xhci_free_command(xhci, command);
+ 		return ret;
+ 	}
+ 	xhci_ring_cmd_db(xhci);
+ 	spin_unlock_irqrestore(&xhci->lock, flags);
++
++	wait_for_completion(command->completion);
++
++	if (command->status != COMP_SUCCESS)
++		xhci_warn(xhci, "Unsuccessful disable slot %u command, status %d\n",
++			  slot_id, command->status);
++
++	xhci_free_command(xhci, command);
++
++	return ret;
++}
++
++int xhci_disable_and_free_slot(struct xhci_hcd *xhci, u32 slot_id)
++{
++	struct xhci_virt_device *vdev = xhci->devs[slot_id];
++	int ret;
++
++	ret = xhci_disable_slot(xhci, slot_id);
++	xhci_free_virt_device(xhci, vdev, slot_id);
+ 	return ret;
+ }
+ 
+@@ -4028,33 +4118,35 @@ int xhci_alloc_dev(struct usb_hcd *hcd, struct usb_device *udev)
+ 
+ 	xhci_debugfs_create_slot(xhci, slot_id);
+ 
+-#ifndef CONFIG_USB_DEFAULT_PERSIST
+ 	/*
+ 	 * If resetting upon resume, we can't put the controller into runtime
+ 	 * suspend if there is a device attached.
+ 	 */
+ 	if (xhci->quirks & XHCI_RESET_ON_RESUME)
+ 		pm_runtime_get_noresume(hcd->self.controller);
+-#endif
+ 
+ 	/* Is this a LS or FS device under a HS hub? */
+ 	/* Hub or peripherial? */
+ 	return 1;
+ 
+ disable_slot:
+-	ret = xhci_disable_slot(xhci, udev->slot_id);
+-	if (ret)
+-		xhci_free_virt_device(xhci, udev->slot_id);
++	xhci_disable_and_free_slot(xhci, udev->slot_id);
+ 
+ 	return 0;
+ }
+ 
+-/*
+- * Issue an Address Device command and optionally send a corresponding
+- * SetAddress request to the device.
++/**
++ * xhci_setup_device - issues an Address Device command to assign a unique
++ *			USB bus address.
++ * @hcd: USB host controller data structure.
++ * @udev: USB dev structure representing the connected device.
++ * @setup: Enum specifying setup mode: address only or with context.
++ * @timeout_ms: Max wait time (ms) for the command operation to complete.
++ *
++ * Return: 0 if successful; otherwise, negative error code.
+  */
+ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
+-			     enum xhci_setup_dev setup)
++			     enum xhci_setup_dev setup, unsigned int timeout_ms)
+ {
+ 	const char *act = setup == SETUP_CONTEXT_ONLY ? "context" : "address";
+ 	unsigned long flags;
+@@ -4111,6 +4203,7 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
+ 	}
+ 
+ 	command->in_ctx = virt_dev->in_ctx;
++	command->timeout_ms = timeout_ms;
+ 
+ 	slot_ctx = xhci_get_slot_ctx(xhci, virt_dev->in_ctx);
+ 	ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+@@ -4173,9 +4266,11 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
+ 		dev_warn(&udev->dev, "Device not responding to setup %s.\n", act);
+ 
+ 		mutex_unlock(&xhci->mutex);
+-		ret = xhci_disable_slot(xhci, udev->slot_id);
+-		if (!ret)
+-			xhci_alloc_dev(hcd, udev);
++		ret = xhci_disable_and_free_slot(xhci, udev->slot_id);
++		if (!ret) {
++			if (xhci_alloc_dev(hcd, udev) == 1)
++				xhci_setup_addressable_virt_dev(xhci, udev);
++		}
+ 		kfree(command->completion);
+ 		kfree(command);
+ 		return -EPROTO;
+@@ -4236,14 +4331,16 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
+ 	return ret;
+ }
+ 
+-static int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
++static int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev,
++			       unsigned int timeout_ms)
+ {
+-	return xhci_setup_device(hcd, udev, SETUP_CONTEXT_ADDRESS);
++	return xhci_setup_device(hcd, udev, SETUP_CONTEXT_ADDRESS, timeout_ms);
+ }
+ 
+ static int xhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
+ {
+-	return xhci_setup_device(hcd, udev, SETUP_CONTEXT_ONLY);
++	return xhci_setup_device(hcd, udev, SETUP_CONTEXT_ONLY,
++				 XHCI_CMD_DEFAULT_TIMEOUT);
+ }
+ 
+ /*
+@@ -4947,6 +5044,7 @@ static int xhci_enable_usb3_lpm_timeout(struct usb_hcd *hcd,
+ 			struct usb_device *udev, enum usb3_link_state state)
+ {
+ 	struct xhci_hcd	*xhci;
++	struct xhci_port *port;
+ 	u16 hub_encoded_timeout;
+ 	int mel;
+ 	int ret;
+@@ -4960,6 +5058,13 @@ static int xhci_enable_usb3_lpm_timeout(struct usb_hcd *hcd,
+ 			!xhci->devs[udev->slot_id])
+ 		return USB3_LPM_DISABLED;
+ 
++	/* If connected to root port then check port can handle lpm */
++	if (udev->parent && !udev->parent->parent) {
++		port = xhci->usb3_rhub.ports[udev->portnum - 1];
++		if (port->lpm_incapable)
++			return USB3_LPM_DISABLED;
++	}
++
+ 	hub_encoded_timeout = xhci_calculate_lpm_timeout(hcd, udev, state);
+ 	mel = calculate_max_exit_latency(udev, state, hub_encoded_timeout);
+ 	if (mel < 0) {
+@@ -5019,7 +5124,7 @@ static int xhci_disable_usb3_lpm_timeout(struct usb_hcd *hcd,
+ /* Once a hub descriptor is fetched for a device, we need to update the xHC's
+  * internal data structures for the device.
+  */
+-static int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
++int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
+ 			struct usb_tt *tt, gfp_t mem_flags)
+ {
+ 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+@@ -5119,6 +5224,7 @@ static int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
+ 	xhci_free_command(xhci, config_cmd);
+ 	return ret;
+ }
++EXPORT_SYMBOL_GPL(xhci_update_hub_device);
+ 
+ static int xhci_get_frame(struct usb_hcd *hcd)
+ {
+@@ -5217,6 +5323,7 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
+ 	if (xhci->hci_version > 0x100)
+ 		xhci->hcc_params2 = readl(&xhci->cap_regs->hcc_params2);
+ 
++	xhci->dma_mask_bits = 64;
+ 	xhci->quirks |= quirks;
+ 
+ 	get_quirks(dev, xhci);
+@@ -5237,7 +5344,7 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
+ 
+ 	xhci_dbg(xhci, "Resetting HCD\n");
+ 	/* Reset the internal HC memory state and registers. */
+-	retval = xhci_reset(xhci);
++	retval = xhci_reset(xhci, XHCI_RESET_LONG_USEC);
+ 	if (retval)
+ 		return retval;
+ 	xhci_dbg(xhci, "Reset complete\n");
+@@ -5257,12 +5364,16 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
+ 	xhci->hcc_params |= BIT(0);
+ #endif
+ 
+-	/* Set dma_mask and coherent_dma_mask to 64-bits,
+-	 * if xHC supports 64-bit addressing */
++	/*
++	 * Set dma_mask and coherent_dma_mask to 64-bits if xHC supports
++	 * 64-bit addressing, unless a controller-specific quirk callback
++	 * limits the usable address width.
++	 */
+ 	if (HCC_64BIT_ADDR(xhci->hcc_params) &&
+-			!dma_set_mask(dev, DMA_BIT_MASK(64))) {
+-		xhci_dbg(xhci, "Enabling 64-bit DMA addresses.\n");
+-		dma_set_coherent_mask(dev, DMA_BIT_MASK(64));
++	    !dma_set_mask(dev, DMA_BIT_MASK(xhci->dma_mask_bits))) {
++		xhci_dbg(xhci, "Enabling %u-bit DMA addresses.\n",
++			 xhci->dma_mask_bits);
++		dma_set_coherent_mask(dev, DMA_BIT_MASK(xhci->dma_mask_bits));
+ 	} else {
+ 		/*
+ 		 * This is to avoid error in cases where a 32-bit USB
+@@ -5390,6 +5501,12 @@ void xhci_init_driver(struct hc_driver *drv,
+ 			drv->reset = over->reset;
+ 		if (over->start)
+ 			drv->start = over->start;
++		if (over->check_bandwidth)
++			drv->check_bandwidth = over->check_bandwidth;
++		if (over->reset_bandwidth)
++			drv->reset_bandwidth = over->reset_bandwidth;
++		if (over->update_hub_device)
++			drv->update_hub_device = over->update_hub_device;
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(xhci_init_driver);

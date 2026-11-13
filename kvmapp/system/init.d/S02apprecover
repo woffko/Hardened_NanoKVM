@@ -1,0 +1,21 @@
+#!/bin/sh
+if [ -e /run/nanokvm-restore-blocked ]; then
+    echo "$0: raw restore is blocked" >&2
+    exit 1
+fi
+# Independent fixed-rootfs recovery before the first /kvmapp consumer.
+# rcS may continue after failure; every app consumer also runs this same gate.
+
+case "$1" in
+    start)
+        /usr/libexec/nanokvm-app-recovery gate || exit $?
+        exec /usr/libexec/nanokvm-native-ctl activate-boot
+        ;;
+    stop)
+        exit 0
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}" >&2
+        exit 64
+        ;;
+esac

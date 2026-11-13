@@ -23,6 +23,10 @@ export const Wifi = () => {
   useEffect(() => {
     const pass = searchParams.get('p') || searchParams.get('P');
     if (pass) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('p');
+      url.searchParams.delete('P');
+      window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
       verifyPassword(pass);
     }
   }, []);
@@ -69,16 +73,13 @@ export const Wifi = () => {
         case -4:
           setState('denied');
           return;
-        case -2:
-        case -3:
+        default:
           setState('failed');
           return;
       }
-    } catch (err) {
-      console.log(err);
+    } catch {
+      setState('failed');
     }
-
-    setState('success');
   }
 
   if (!isAuthenticated) {

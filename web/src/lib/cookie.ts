@@ -26,7 +26,8 @@ export function setCsrfToken(token: string, expiresAt?: number) {
   Cookies.set(COOKIE_CSRF_KEY, token, {
     expires: cookieExpires(expiresAt),
     path: '/',
-    sameSite: 'Lax'
+    sameSite: 'Lax',
+    secure: window.location.protocol === 'https:'
   });
 }
 
